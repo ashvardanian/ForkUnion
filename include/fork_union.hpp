@@ -305,9 +305,10 @@ struct standard_yield_t {
  * This implementation does not use the thread index but a user could use
  * this to implement more complex yield behaviours.
  */
-template <typename thread_index_t_ = std::size_t>
+template <typename micro_yield_type, typename thread_index_t_ = std::size_t>
 struct standard_worker_yield_t {
-    inline void operator()(thread_index_t_ idx) const noexcept { std::this_thread::yield(); }
+    micro_yield_type micro_yield;
+    inline void operator()(FU_MAYBE_UNUSED_ thread_index_t_ idx) const noexcept { micro_yield; }
 };
 
 /**
@@ -1018,12 +1019,12 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  @tparam index_type_ Use `std::size_t`, but or a smaller type for debugging.
  *  @tparam alignment_ The alignment of the thread pool. Defaults to `default_alignment_k`.
  */
-template <                                                             //
-    typename allocator_type_ = std::allocator<std::thread>,            //
-    typename micro_yield_type_ = standard_yield_t,                     //
-    typename index_type_ = std::size_t,                                //
-    std::size_t alignment_ = default_alignment_k,                      //
-    typename worker_yield_type = standard_worker_yield_t<index_type_>  //
+template <                                                                               //
+    typename allocator_type_ = std::allocator<std::thread>,                              //
+    typename micro_yield_type_ = standard_yield_t,                                       //
+    typename index_type_ = std::size_t,                                                  //
+    std::size_t alignment_ = default_alignment_k,                                        //
+    typename worker_yield_type = standard_worker_yield_t<micro_yield_type_, index_type_> //
     >
 class basic_pool {
 
