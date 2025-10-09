@@ -300,18 +300,6 @@ struct standard_yield_t {
 };
 
 /**
- * @brief Yield function called by worker threads in between tasks.
- *
- * This implementation does not use the thread index but a user could use
- * this to implement more complex yield behaviours.
- */
-template <typename micro_yield_type, typename thread_index_t_ = std::size_t>
-struct standard_worker_yield_t {
-    micro_yield_type micro_yield;
-    inline void operator()(FU_MAYBE_UNUSED_ thread_index_t_ idx) const noexcept { micro_yield; }
-};
-
-/**
  *  @brief A synchronization point that waits for all threads to finish the last fork.
  *  @note You don't have to explicitly call any of the APIs, it's like `std::jthread` ;)
  *
@@ -1015,16 +1003,16 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  ------------------------------------------------------------------------------------------------
  *
  *  @tparam allocator_type_ The type of the allocator to be used for the thread pool.
- *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
+ *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting. If an overload of
+ *  operator()(index_type_ thread_index) exists, worker threads will call it with their thread index.
  *  @tparam index_type_ Use `std::size_t`, but or a smaller type for debugging.
  *  @tparam alignment_ The alignment of the thread pool. Defaults to `default_alignment_k`.
  */
-template <                                                                               //
-    typename allocator_type_ = std::allocator<std::thread>,                              //
-    typename micro_yield_type_ = standard_yield_t,                                       //
-    typename index_type_ = std::size_t,                                                  //
-    std::size_t alignment_ = default_alignment_k,                                        //
-    typename worker_yield_type = standard_worker_yield_t<micro_yield_type_, index_type_> //
+template <                                                  //
+    typename allocator_type_ = std::allocator<std::thread>, //
+    typename micro_yield_type_ = standard_yield_t,          //
+    typename index_type_ = std::size_t,                     //
+    std::size_t alignment_ = default_alignment_k            //
     >
 class basic_pool {
 
@@ -1038,9 +1026,6 @@ class basic_pool {
 
     using index_t = index_type_;
     static_assert(std::is_unsigned<index_t>::value, "Index type must be an unsigned integer");
-    using worker_yield_t = worker_yield_type;
-    static_assert(std::is_nothrow_invocable_r<void, worker_yield_t, index_t>::value,
-                  "Worker yield must be callable with a index_t argument & return void");
     using epoch_index_t = index_t;      // ? A.k.a. number of previous API calls in [0, UINT_MAX)
     using thread_index_t = index_t;     // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
     using colocation_index_t = index_t; // ? A.k.a. "NUMA node ID" in [0, numa_nodes_count)
@@ -1416,10 +1401,15 @@ class basic_pool {
             // Wait for either: a new ticket or a stop flag
             epoch_index_t new_epoch;       // Will definitely be initialized in the loop
             mood_t mood = mood_t::grind_k; // May not be initialized in the loop
-            worker_yield_t worker_yield;
+            micro_yield_t micro_yield;
             while ((new_epoch = epoch_.load(std::memory_order_acquire)) == last_epoch &&
-                   (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                worker_yield(thread_index);
+                   (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k) {
+                // Call micro_yield with the current thread's index if possible.
+                if constexpr (std::is_nothrow_invocable_r<void, micro_yield_t, index_t>::value)
+                    micro_yield(thread_index);
+                else
+                    micro_yield();
+            }
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
