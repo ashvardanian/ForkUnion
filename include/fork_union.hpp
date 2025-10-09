@@ -83,7 +83,11 @@
 #define FORK_UNION_VERSION_PATCH 0
 
 #if !defined(FU_ALLOW_UNSAFE)
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+#define FU_ALLOW_UNSAFE 1
+#else
 #define FU_ALLOW_UNSAFE 0
+#endif
 #endif
 
 /**
@@ -292,7 +296,7 @@ enum capabilities_t : unsigned int {
 };
 
 inline capabilities_t operator|(capabilities_t a, capabilities_t b) {
-  return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
+    return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
 }
 
 struct standard_yield_t {
@@ -1141,20 +1145,33 @@ class basic_pool {
         // Initializing the thread pool can fail for all kinds of reasons,
         // that the `std::thread` documentation describes as "implementation-defined".
         // https://en.cppreference.com/w/cpp/thread/thread/thread
-        for (thread_index_t i = 0; i < worker_threads; ++i) {
+        auto spawn_worker = [&](thread_index_t i) noexcept -> bool {
+            thread_index_t const i_with_caller = i + use_caller_thread;
+#if FU_ALLOW_UNSAFE
             try {
-                thread_index_t const i_with_caller = i + use_caller_thread;
                 new (&workers[i]) std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+                return true;
             }
             catch (...) {
-                mood_.store(mood_t::die_k, std::memory_order_release);
-                for (thread_index_t j = 0; j < i; ++j) {
-                    workers[j].join(); // ? Wait for the thread to exit
-                    workers[j].~thread();
-                }
-                reset_on_failure();
                 return false;
             }
+#else
+            new (&workers[i]) std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+            return true;
+#endif
+        };
+
+        for (thread_index_t i = 0; i < worker_threads; ++i) {
+            if (spawn_worker(i)) continue;
+
+            // ! Failed to spawn a thread, roll back everything
+            mood_.store(mood_t::die_k, std::memory_order_release);
+            for (thread_index_t j = 0; j < i; ++j) {
+                workers[j].join(); // ? Wait for the thread to exit
+                workers[j].~thread();
+            }
+            reset_on_failure();
+            return false;
         }
 
         return true;
