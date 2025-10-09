@@ -561,15 +561,17 @@ cmake --build build_debug --config Debug
 build_debug/fork_union_test_cpp20
 ```
 
-For Rust, use the following command:
+For Rust, use the following commands:
 
 ```bash
 rustup toolchain install                # for Alloc API
-cargo miri test                         # to catch UBs
 cargo build --features numa             # for NUMA support on Linux
 cargo test --release                    # to run the tests fast
 cargo test --features numa --release    # for NUMA tests on Linux
 ```
+
+Rust provides a lot of tooling for concurrency testing, like Miri and Loom.
+Most of it, however, is not applicable in this case, as the core logic is implemented in C++.
 
 To automatically detect the Minimum Supported Rust Version (MSRV):
 
