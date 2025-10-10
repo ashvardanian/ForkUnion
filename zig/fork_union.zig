@@ -240,12 +240,10 @@ pub const Pool = struct {
         // Convert name to null-terminated string if provided
         // SAFETY: C library copies name into internal buffer immediately
         var name_buf: [16:0]u8 = undefined;
-        const name_z: ?[*:0]const u8 = if (name) |n| blk: {
-            const len = @min(n.len, 15);
-            @memcpy(name_buf[0..len], n[0..len]);
-            name_buf[len] = 0;
-            break :blk &name_buf;
-        } else null;
+        const name_z: ?[*:0]const u8 = if (name) |n|
+            std.fmt.bufPrintZ(&name_buf, "{s}", .{n[0..@min(n.len, 15)]}) catch unreachable
+        else
+            null;
 
         const handle = c.fu_pool_new(name_z) orelse return Error.CreationFailed;
         errdefer c.fu_pool_delete(handle);
@@ -480,7 +478,7 @@ test "pool creation and destruction" {
 }
 
 test "named pool creation" {
-    var pool = try Pool.initNamed("test_pool", 2, .inclusive);
+    var pool = try Pool.initNamed(null, 2, .inclusive);
     defer pool.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), pool.threads());
