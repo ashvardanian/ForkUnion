@@ -1,0 +1,17 @@
+.{
+    .name = "fork_union",
+    .version = "2.3.0",
+    .minimum_zig_version = "0.13.0",
+
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "zig/",
+        "include/",
+        "c/",
+        "README.md",
+        "LICENSE",
+    },
+}

@@ -1,6 +1,6 @@
 # Fork Union 🍴
 
-Fork Union is arguably the lowest-latency OpenMP-style NUMA-aware minimalistic scoped thread-pool designed for 'Fork-Join' parallelism in C++, C, and Rust, avoiding × [mutexes & system calls](#locks-and-mutexes), × [dynamic memory allocations](#memory-allocations), × [CAS-primitives](#atomics-and-cas), and × [false-sharing](#alignment--false-sharing) of CPU cache-lines on the hot path 🍴
+Fork Union is arguably the lowest-latency OpenMP-style NUMA-aware minimalistic scoped thread-pool designed for 'Fork-Join' parallelism in C++, C, Rust, and Zig, avoiding × [mutexes & system calls](#locks-and-mutexes), × [dynamic memory allocations](#memory-allocations), × [CAS-primitives](#atomics-and-cas), and × [false-sharing](#alignment--false-sharing) of CPU cache-lines on the hot path 🍴
 
 ## Motivation
 
@@ -13,7 +13,7 @@ OpenMP, however, is not ideal for fine-grained parallelism and is less portable 
 [![`fork_union` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/fork_union.jpg?raw=true)](https://github.com/ashvardanian/fork_union)
 
 This is where __`fork_union`__ comes in.
-It's a C++ 17 library with C 99 and Rust bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
+It's a C++ 17 library with C 99, Rust, and Zig bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
 It supports pinning threads to specific [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual CPU cores, making it much easier to ensure data locality and halving the latency of individual loads in Big Data applications.
 
 ## Basic Usage
@@ -179,6 +179,49 @@ int main() {
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
 NUMA detection on Linux defaults to AUTO. Override with `-D FORK_UNION_ENABLE_NUMA=ON` or `OFF`.
 
+### Intro in Zig
+
+To integrate into your Zig project, add Fork Union to your `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .fork_union = .{
+        .url = "https://github.com/ashvardanian/fork_union/archive/refs/tags/v2.3.0.tar.gz",
+        .hash = "12200000000000000000000000000000000000000000000000000000000000000000",
+    },
+},
+```
+
+Then import and use in your code:
+
+```zig
+const std = @import("std");
+const fu = @import("fork_union");
+
+pub fn main() !void {
+    var pool = try fu.Pool.init(allocator, 4, .inclusive);
+    defer pool.deinit();
+
+    // Execute work on each thread (OpenMP-style parallel)
+    pool.forThreads(struct {
+        fn work(thread_idx: usize, colocation_idx: usize) void {
+            std.debug.print("Thread {}\n", .{thread_idx});
+        }
+    }.work, {});
+
+    // Distribute 1000 tasks across threads (OpenMP-style parallel for)
+    var results = [_]i32{0} ** 1000;
+    pool.forN(1000, struct {
+        fn process(prong: fu.Prong, ctx: Context) void {
+            ctx.results[prong.task_index] = @intCast(prong.task_index * 2);
+        }
+    }.process, .{ .results = &results });
+}
+```
+
+Unlike `std.Thread.Pool` (task queue for async work), Fork Union is designed for **data parallelism**
+and **tight parallel loops** — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
+
 ## Alternatives & Differences
 
 Many other thread-pool implementations are more feature-rich but have different limitations and design goals.
@@ -186,6 +229,7 @@ Many other thread-pool implementations are more feature-rich but have different 
 - Modern C++: [`taskflow/taskflow`](https://github.com/taskflow/taskflow), [`progschj/ThreadPool`](https://github.com/progschj/ThreadPool), [`bshoshany/thread-pool`](https://github.com/bshoshany/thread-pool)
 - Traditional C++: [`vit-vit/CTPL`](https://github.com/vit-vit/CTPL), [`mtrebi/thread-pool`](https://github.com/mtrebi/thread-pool)
 - Rust: [`tokio-rs/tokio`](https://github.com/tokio-rs/tokio), [`rayon-rs/rayon`](https://github.com/rayon-rs/rayon), [`smol-rs/smol`](https://github.com/smol-rs/smol)
+- Zig: [`std.Thread.Pool`](https://ziglang.org/documentation/master/std/#std.Thread.Pool)
 
 Those are not designed for the same OpenMP-like use cases as __`fork_union`__.
 Instead, they primarily focus on task queuing, which requires significantly more work.
@@ -578,6 +622,20 @@ To automatically detect the Minimum Supported Rust Version (MSRV):
 ```sh
 cargo +stable install cargo-msrv
 cargo msrv find --ignore-lockfile
+```
+
+---
+
+For Zig, use the following commands:
+
+```bash
+zig build test                          # run tests
+zig build nbody -Doptimize=ReleaseFast  # build benchmark
+zig build -Dnuma=true                   # enable NUMA support (Linux)
+
+# Run benchmark
+time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_static \
+    ./zig-out/bin/nbody_zig
 ```
 
 ## License
