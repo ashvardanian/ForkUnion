@@ -222,6 +222,137 @@ pub fn allocate(numa_node_index: usize, bytes: usize) ?[*]u8 {
     return @ptrCast(@alignCast(ptr));
 }
 
+/// NUMA-aware allocator compatible with Zig's allocator interface.
+pub const NumaAllocator = struct {
+    node_index: usize,
+
+    const Self = @This();
+    const Allocator = std.mem.Allocator;
+
+    const Header = packed struct {
+        base_addr: usize,
+        allocated_bytes: usize,
+    };
+
+    const vtable = Allocator.VTable{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    pub fn init(node_index: usize) Self {
+        return .{ .node_index = node_index };
+    }
+
+    pub fn allocator(self: *Self) Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        _ = ret_addr;
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        const effective_len = if (len == 0) 1 else len;
+        const slice = self.allocSlice(effective_len, alignment) orelse return null;
+        return slice.ptr;
+    }
+
+    fn resize(
+        ctx: *anyopaque,
+        buf: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        _ = ret_addr;
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.resizeInPlace(buf, alignment, new_len);
+    }
+
+    fn remap(
+        ctx: *anyopaque,
+        buf: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        _ = ret_addr;
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        const result = self.remapSlice(buf, alignment, new_len) orelse return null;
+        return result.ptr;
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        _ = alignment;
+        _ = ret_addr;
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        self.freeSlice(buf);
+    }
+
+    fn allocSlice(self: *Self, len: usize, alignment: std.mem.Alignment) ?[]u8 {
+        const header_size = @sizeOf(Header);
+        const alignment_bytes = alignment.toByteUnits();
+        const with_header = std.math.add(usize, len, header_size) catch return null;
+        const request_bytes = std.math.add(usize, with_header, alignment_bytes) catch return null;
+
+        var allocated_bytes: usize = undefined;
+        var bytes_per_page: usize = undefined;
+        const raw_ptr = c.fu_allocate_at_least(
+            self.node_index,
+            request_bytes,
+            &allocated_bytes,
+            &bytes_per_page,
+        ) orelse return null;
+
+        const base_addr = @intFromPtr(raw_ptr);
+        const data_addr = alignment.forward(base_addr + header_size);
+        if (data_addr + len > base_addr + allocated_bytes) {
+            c.fu_free(self.node_index, raw_ptr, allocated_bytes);
+            return null;
+        }
+
+        const header_ptr = @as(*Header, @ptrFromInt(data_addr - header_size));
+        header_ptr.* = .{
+            .base_addr = base_addr,
+            .allocated_bytes = allocated_bytes,
+        };
+
+        const data_ptr = @as([*]u8, @ptrFromInt(data_addr));
+        return data_ptr[0..len];
+    }
+
+    fn resizeInPlace(self: *Self, buf: []u8, alignment: std.mem.Alignment, new_len: usize) bool {
+        _ = self;
+        _ = alignment;
+        if (buf.len == 0) return false;
+        if (new_len == 0) return false;
+        if (new_len <= buf.len) return true;
+        return false;
+    }
+
+    fn remapSlice(self: *Self, buf: []u8, alignment: std.mem.Alignment, new_len: usize) ?[]u8 {
+        if (buf.len == 0) return null;
+        if (new_len == 0) {
+            self.freeSlice(buf);
+            return buf[0..0];
+        }
+        if (new_len <= buf.len) return buf[0..new_len];
+
+        const new_slice = self.allocSlice(new_len, alignment) orelse return null;
+        @memcpy(new_slice[0..buf.len], buf);
+        self.freeSlice(buf);
+        return new_slice;
+    }
+
+    fn freeSlice(self: *Self, buf: []u8) void {
+        if (buf.len == 0) return;
+        const header_ptr = @as(*Header, @ptrFromInt(@intFromPtr(buf.ptr) - @sizeOf(Header)));
+        const header = header_ptr.*;
+        const base_ptr = @as(*anyopaque, @ptrFromInt(header.base_addr));
+        c.fu_free(self.node_index, base_ptr, header.allocated_bytes);
+    }
+};
+
 /// Thread pool for fork-join parallelism
 pub const Pool = struct {
     handle: *anyopaque,
@@ -367,7 +498,7 @@ pub const Pool = struct {
                     func(prong, typed_ctx.*);
                 }
             };
-            c.fu_pool_for_n(self.handle, n, Wrapper.callback, @constCast(@ptrCast(&context)));
+            c.fu_pool_for_n(self.handle, n, Wrapper.callback, @ptrCast(@constCast(&context)));
         }
     }
 
@@ -431,7 +562,7 @@ pub const Pool = struct {
                     func(prong, typed_ctx.*);
                 }
             };
-            c.fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, @constCast(@ptrCast(&context)));
+            c.fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, @ptrCast(@constCast(&context)));
         }
     }
 
@@ -499,7 +630,7 @@ pub const Pool = struct {
                     func(prong, count, typed_ctx.*);
                 }
             };
-            c.fu_pool_for_slices(self.handle, n, Wrapper.callback, @constCast(@ptrCast(&context)));
+            c.fu_pool_for_slices(self.handle, n, Wrapper.callback, @ptrCast(@constCast(&context)));
         }
     }
 
@@ -690,4 +821,34 @@ test "NUMA allocation" {
     for (0..@min(1024, slice.len)) |i| {
         slice[i] = @intCast(i & 0xFF);
     }
+}
+
+test "NUMA allocator integrates with std collections" {
+    std.debug.print("Running test: NUMA allocator integrates with std collections\n", .{});
+    if (!numaEnabled()) return error.SkipZigTest;
+
+    var numa_alloc = NumaAllocator.init(0);
+    const allocator = numa_alloc.allocator();
+
+    var list = try std.ArrayList(u64).initCapacity(allocator, 0);
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, &[_]u64{ 1, 2, 3, 4, 5 });
+    try std.testing.expectEqual(@as(usize, 5), list.items.len);
+    try std.testing.expectEqual(@as(u64, 3), list.items[2]);
+
+    var map = std.AutoHashMap(u32, u32).init(allocator);
+    defer map.deinit();
+    try map.put(10, 100);
+    try map.put(20, 200);
+    try map.put(30, 300);
+    try std.testing.expectEqual(@as(usize, 3), map.count());
+    try std.testing.expectEqual(@as(u32, 200), map.get(20).?);
+
+    var buf = try allocator.alloc(u8, 128);
+    defer allocator.free(buf);
+    @memset(buf, 0xAB);
+
+    buf = try allocator.realloc(buf, 512);
+    try std.testing.expectEqual(@as(usize, 512), buf.len);
+    try std.testing.expectEqual(@as(u8, 0xAB), buf[0]);
 }

@@ -40,3 +40,4 @@ Cargo.lock
 target/
 .zig-cache/
 zig-out/
+zig-cache/
