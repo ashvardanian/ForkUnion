@@ -56,31 +56,31 @@ const c = struct {
 
     extern fn fu_pool_for_threads(
         pool: *anyopaque,
-        callback: *const fn (?*anyopaque, usize, usize) callconv(.C) void,
+        callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
         context: ?*anyopaque,
     ) void;
     extern fn fu_pool_for_n(
         pool: *anyopaque,
         n: usize,
-        callback: *const fn (?*anyopaque, usize, usize, usize) callconv(.C) void,
+        callback: *const fn (?*anyopaque, usize, usize, usize) callconv(.c) void,
         context: ?*anyopaque,
     ) void;
     extern fn fu_pool_for_n_dynamic(
         pool: *anyopaque,
         n: usize,
-        callback: *const fn (?*anyopaque, usize, usize, usize) callconv(.C) void,
+        callback: *const fn (?*anyopaque, usize, usize, usize) callconv(.c) void,
         context: ?*anyopaque,
     ) void;
     extern fn fu_pool_for_slices(
         pool: *anyopaque,
         n: usize,
-        callback: *const fn (?*anyopaque, usize, usize, usize, usize) callconv(.C) void,
+        callback: *const fn (?*anyopaque, usize, usize, usize, usize) callconv(.c) void,
         context: ?*anyopaque,
     ) void;
 
     extern fn fu_pool_unsafe_for_threads(
         pool: *anyopaque,
-        callback: *const fn (?*anyopaque, usize, usize) callconv(.C) void,
+        callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
         context: ?*anyopaque,
     ) void;
     extern fn fu_pool_unsafe_join(pool: *anyopaque) void;
@@ -299,7 +299,7 @@ pub const Pool = struct {
     ) void {
         _ = context; // Not used - kept for API consistency with forN/forNDynamic/forSlices
         const Wrapper = struct {
-            fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.C) void {
+            fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
                 func(thread_idx, colocation_idx);
             }
         };
@@ -338,7 +338,7 @@ pub const Pool = struct {
                     task_idx: usize,
                     thread_idx: usize,
                     colocation_idx: usize,
-                ) callconv(.C) void {
+                ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
@@ -356,7 +356,7 @@ pub const Pool = struct {
                     task_idx: usize,
                     thread_idx: usize,
                     colocation_idx: usize,
-                ) callconv(.C) void {
+                ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
@@ -402,7 +402,7 @@ pub const Pool = struct {
                     task_idx: usize,
                     thread_idx: usize,
                     colocation_idx: usize,
-                ) callconv(.C) void {
+                ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
@@ -420,7 +420,7 @@ pub const Pool = struct {
                     task_idx: usize,
                     thread_idx: usize,
                     colocation_idx: usize,
-                ) callconv(.C) void {
+                ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
@@ -469,7 +469,7 @@ pub const Pool = struct {
                     count: usize,
                     thread_idx: usize,
                     colocation_idx: usize,
-                ) callconv(.C) void {
+                ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = first_idx,
                         .thread_index = thread_idx,
@@ -488,7 +488,7 @@ pub const Pool = struct {
                     count: usize,
                     thread_idx: usize,
                     colocation_idx: usize,
-                ) callconv(.C) void {
+                ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = first_idx,
                         .thread_index = thread_idx,
@@ -511,7 +511,7 @@ pub const Pool = struct {
     ) void {
         _ = context; // Not used - kept for API consistency
         const Wrapper = struct {
-            fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.C) void {
+            fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
                 func(thread_idx, colocation_idx);
             }
         };
