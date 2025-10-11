@@ -629,7 +629,7 @@ cargo msrv find --ignore-lockfile
 For Zig, use the following commands:
 
 ```bash
-zig build test                          # run tests
+zig build test --summary all            # run tests
 zig build nbody -Doptimize=ReleaseFast  # build benchmark
 zig build -Dnuma=true                   # enable NUMA support (Linux)
 

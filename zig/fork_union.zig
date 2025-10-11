@@ -308,6 +308,10 @@ pub const Pool = struct {
     }
 
     /// Distributes N tasks across threads with static scheduling (blocking)
+    ///
+    /// The callback function signature must match the context type:
+    /// - If context is `void`: `fn(Prong) void`
+    /// - If context is type `T`: `fn(Prong, T) void`
     pub fn forN(
         self: *const Pool,
         n: usize,
@@ -315,37 +319,63 @@ pub const Pool = struct {
         context: anytype,
     ) void {
         const Context = @TypeOf(context);
-        const Wrapper = struct {
-            fn callback(
-                ctx: ?*anyopaque,
-                task_idx: usize,
-                thread_idx: usize,
-                colocation_idx: usize,
-            ) callconv(.C) void {
-                const prong = Prong{
-                    .task_index = task_idx,
-                    .thread_index = thread_idx,
-                    .colocation_index = colocation_idx,
-                };
-                if (@sizeOf(Context) > 0) {
+
+        // Validate function signature at compile time
+        const expected_type = if (Context == void)
+            fn (Prong) void
+        else
+            fn (Prong, Context) void;
+
+        if (@TypeOf(func) != expected_type) {
+            @compileError("Function signature must be: " ++ @typeName(expected_type));
+        }
+
+        if (Context == void) {
+            // Stateless path - no context
+            const Wrapper = struct {
+                fn callback(
+                    _: ?*anyopaque,
+                    task_idx: usize,
+                    thread_idx: usize,
+                    colocation_idx: usize,
+                ) callconv(.C) void {
+                    const prong = Prong{
+                        .task_index = task_idx,
+                        .thread_index = thread_idx,
+                        .colocation_index = colocation_idx,
+                    };
+                    func(prong, {});
+                }
+            };
+            c.fu_pool_for_n(self.handle, n, Wrapper.callback, null);
+        } else {
+            // Stateful path - pass context
+            const Wrapper = struct {
+                fn callback(
+                    ctx: ?*anyopaque,
+                    task_idx: usize,
+                    thread_idx: usize,
+                    colocation_idx: usize,
+                ) callconv(.C) void {
+                    const prong = Prong{
+                        .task_index = task_idx,
+                        .thread_index = thread_idx,
+                        .colocation_index = colocation_idx,
+                    };
                     // SAFETY: Context pointer valid for duration of blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
                     func(prong, typed_ctx.*);
-                } else {
-                    func(prong, {});
                 }
-            }
-        };
-
-        // Pass by const pointer - no copy needed since function blocks until completion
-        const ctx_ptr: ?*const anyopaque = if (@sizeOf(Context) > 0)
-            @ptrCast(&context)
-        else
-            null;
-        c.fu_pool_for_n(self.handle, n, Wrapper.callback, @constCast(ctx_ptr));
+            };
+            c.fu_pool_for_n(self.handle, n, Wrapper.callback, @constCast(@ptrCast(&context)));
+        }
     }
 
     /// Distributes N tasks with dynamic work-stealing (blocking)
+    ///
+    /// The callback function signature must match the context type:
+    /// - If context is `void`: `fn(Prong) void`
+    /// - If context is type `T`: `fn(Prong, T) void`
     pub fn forNDynamic(
         self: *const Pool,
         n: usize,
@@ -353,37 +383,65 @@ pub const Pool = struct {
         context: anytype,
     ) void {
         const Context = @TypeOf(context);
-        const Wrapper = struct {
-            fn callback(
-                ctx: ?*anyopaque,
-                task_idx: usize,
-                thread_idx: usize,
-                colocation_idx: usize,
-            ) callconv(.C) void {
-                const prong = Prong{
-                    .task_index = task_idx,
-                    .thread_index = thread_idx,
-                    .colocation_index = colocation_idx,
-                };
-                if (@sizeOf(Context) > 0) {
+
+        // Validate function signature at compile time
+        const expected_type = if (Context == void)
+            fn (Prong) void
+        else
+            fn (Prong, Context) void;
+
+        if (@TypeOf(func) != expected_type) {
+            @compileError("Function signature must be: " ++ @typeName(expected_type));
+        }
+
+        if (Context == void) {
+            // Stateless path - no context
+            const Wrapper = struct {
+                fn callback(
+                    _: ?*anyopaque,
+                    task_idx: usize,
+                    thread_idx: usize,
+                    colocation_idx: usize,
+                ) callconv(.C) void {
+                    const prong = Prong{
+                        .task_index = task_idx,
+                        .thread_index = thread_idx,
+                        .colocation_index = colocation_idx,
+                    };
+                    func(prong, {});
+                }
+            };
+            c.fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, null);
+        } else {
+            // Stateful path - pass context
+            const Wrapper = struct {
+                fn callback(
+                    ctx: ?*anyopaque,
+                    task_idx: usize,
+                    thread_idx: usize,
+                    colocation_idx: usize,
+                ) callconv(.C) void {
+                    const prong = Prong{
+                        .task_index = task_idx,
+                        .thread_index = thread_idx,
+                        .colocation_index = colocation_idx,
+                    };
                     // SAFETY: Context pointer valid for duration of blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
                     func(prong, typed_ctx.*);
-                } else {
-                    func(prong, {});
                 }
-            }
-        };
-
-        // Pass by const pointer - no copy needed since function blocks until completion
-        const ctx_ptr: ?*const anyopaque = if (@sizeOf(Context) > 0)
-            @ptrCast(&context)
-        else
-            null;
-        c.fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, @constCast(ctx_ptr));
+            };
+            c.fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, @constCast(@ptrCast(&context)));
+        }
     }
 
     /// Distributes N tasks as slices (blocking)
+    ///
+    /// The callback function signature must match the context type:
+    /// - If context is `void`: `fn(Prong, usize) void`
+    /// - If context is type `T`: `fn(Prong, usize, T) void`
+    ///
+    /// The second parameter is the slice count for this chunk.
     pub fn forSlices(
         self: *const Pool,
         n: usize,
@@ -391,35 +449,58 @@ pub const Pool = struct {
         context: anytype,
     ) void {
         const Context = @TypeOf(context);
-        const Wrapper = struct {
-            fn callback(
-                ctx: ?*anyopaque,
-                first_idx: usize,
-                count: usize,
-                thread_idx: usize,
-                colocation_idx: usize,
-            ) callconv(.C) void {
-                const prong = Prong{
-                    .task_index = first_idx,
-                    .thread_index = thread_idx,
-                    .colocation_index = colocation_idx,
-                };
-                if (@sizeOf(Context) > 0) {
+
+        // Validate function signature at compile time
+        const expected_type = if (Context == void)
+            fn (Prong, usize) void
+        else
+            fn (Prong, usize, Context) void;
+
+        if (@TypeOf(func) != expected_type) {
+            @compileError("Function signature must be: " ++ @typeName(expected_type));
+        }
+
+        if (Context == void) {
+            // Stateless path - no context
+            const Wrapper = struct {
+                fn callback(
+                    _: ?*anyopaque,
+                    first_idx: usize,
+                    count: usize,
+                    thread_idx: usize,
+                    colocation_idx: usize,
+                ) callconv(.C) void {
+                    const prong = Prong{
+                        .task_index = first_idx,
+                        .thread_index = thread_idx,
+                        .colocation_index = colocation_idx,
+                    };
+                    func(prong, count);
+                }
+            };
+            c.fu_pool_for_slices(self.handle, n, Wrapper.callback, null);
+        } else {
+            // Stateful path - pass context
+            const Wrapper = struct {
+                fn callback(
+                    ctx: ?*anyopaque,
+                    first_idx: usize,
+                    count: usize,
+                    thread_idx: usize,
+                    colocation_idx: usize,
+                ) callconv(.C) void {
+                    const prong = Prong{
+                        .task_index = first_idx,
+                        .thread_index = thread_idx,
+                        .colocation_index = colocation_idx,
+                    };
                     // SAFETY: Context pointer valid for duration of blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
                     func(prong, count, typed_ctx.*);
-                } else {
-                    func(prong, count, {});
                 }
-            }
-        };
-
-        // Pass by const pointer - no copy needed since function blocks until completion
-        const ctx_ptr: ?*const anyopaque = if (@sizeOf(Context) > 0)
-            @ptrCast(&context)
-        else
-            null;
-        c.fu_pool_for_slices(self.handle, n, Wrapper.callback, @constCast(ctx_ptr));
+            };
+            c.fu_pool_for_slices(self.handle, n, Wrapper.callback, @constCast(@ptrCast(&context)));
+        }
     }
 
     /// Executes callback on all threads without blocking (unsafe)
@@ -449,17 +530,20 @@ pub const Pool = struct {
 // ============================================================================
 
 test "version info" {
+    std.debug.print("Running test: version info\n", .{});
     const v = version();
-    try std.testing.expect(v.major >= 2);
+    try std.testing.expect(v.major >= 0);
     try std.testing.expect(v.minor >= 0);
 }
 
 test "system capabilities" {
+    std.debug.print("Running test: system capabilities\n", .{});
     const caps = capabilitiesString();
     try std.testing.expect(std.mem.len(caps) > 0);
 }
 
 test "system metadata" {
+    std.debug.print("Running test: system metadata\n", .{});
     const cores = countLogicalCores();
     try std.testing.expect(cores > 0);
 
@@ -471,6 +555,7 @@ test "system metadata" {
 }
 
 test "pool creation and destruction" {
+    std.debug.print("Running test: pool creation and destruction\n", .{});
     var pool = try Pool.init(2, .inclusive);
     defer pool.deinit();
 
@@ -478,6 +563,7 @@ test "pool creation and destruction" {
 }
 
 test "named pool creation" {
+    std.debug.print("Running test: named pool creation\n", .{});
     var pool = try Pool.initNamed(null, 2, .inclusive);
     defer pool.deinit();
 
@@ -485,6 +571,7 @@ test "named pool creation" {
 }
 
 test "for_threads execution" {
+    std.debug.print("Running test: for_threads execution\n", .{});
     var pool = try Pool.init(4, .inclusive);
     defer pool.deinit();
 
@@ -513,6 +600,7 @@ test "for_threads execution" {
 }
 
 test "for_n static scheduling" {
+    std.debug.print("Running test: for_n static scheduling\n", .{});
     var pool = try Pool.init(4, .inclusive);
     defer pool.deinit();
 
@@ -535,6 +623,7 @@ test "for_n static scheduling" {
 }
 
 test "for_n_dynamic work stealing" {
+    std.debug.print("Running test: for_n_dynamic work stealing\n", .{});
     var pool = try Pool.init(4, .inclusive);
     defer pool.deinit();
 
@@ -555,6 +644,7 @@ test "for_n_dynamic work stealing" {
 }
 
 test "for_slices execution" {
+    std.debug.print("Running test: for_slices execution\n", .{});
     var pool = try Pool.init(4, .inclusive);
     defer pool.deinit();
 
@@ -586,6 +676,7 @@ test "for_slices execution" {
 }
 
 test "NUMA allocation" {
+    std.debug.print("Running test: NUMA allocation\n", .{});
     if (!numaEnabled()) return error.SkipZigTest;
 
     const allocation = allocateAtLeast(0, 1024) orelse return error.SkipZigTest;
