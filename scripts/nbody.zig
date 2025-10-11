@@ -4,29 +4,26 @@
 //! - fork_union_static: Static work division (N tasks pre-divided into thread slices)
 //! - fork_union_dynamic: Dynamic work-stealing (Fork Union's work-stealing scheduler)
 //! - std: Static work division (std.Thread.Pool with manual slicing)
-//! - spice: Dynamic work-stealing (Spice's fork/join work-stealing)
 //! - libxev: Dynamic lock-free queue (Mitchell Hashimoto's lock-free thread pool)
 //!
 //! Environment variables:
 //! - NBODY_COUNT: number of bodies (default: number of threads)
 //! - NBODY_ITERATIONS: number of iterations (default: 1000)
-//! - NBODY_BACKEND: fork_union_static, fork_union_dynamic, std, spice, libxev
+//! - NBODY_BACKEND: fork_union_static, fork_union_dynamic, std, libxev
 //! - NBODY_THREADS: number of threads (default: CPU count)
 //!
 //! Build and run from scripts/ directory:
 //! ```sh
 //! cd scripts
 //! zig build -Doptimize=ReleaseFast
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_static ./zig-out/bin/nbody_zig
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_dynamic ./zig-out/bin/nbody_zig
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=spice ./zig-out/bin/nbody_zig
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=libxev ./zig-out/bin/nbody_zig
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=std ./zig-out/bin/nbody_zig
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_static ./zig-out/bin/nbody
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_dynamic ./zig-out/bin/nbody
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=libxev ./zig-out/bin/nbody
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=std ./zig-out/bin/nbody
 //! ```
 
 const std = @import("std");
 const fu = @import("fork_union");
-const spice = @import("spice");
 const xev = @import("xev");
 
 // Physical constants
@@ -231,95 +228,6 @@ fn iterationStdPool(pool: *std.Thread.Pool, bodies: []Body, forces: []Vector3, n
 }
 
 // ============================================================================
-// Spice Backend (Work-Stealing - Dynamic)
-// Uses Spice's fork/join work-stealing scheduler. Creates N futures and
-// relies on the framework to dynamically distribute them across workers.
-// ============================================================================
-
-fn iterationSpice(pool: *spice.ThreadPool, bodies: []Body, forces: []Vector3, allocator: std.mem.Allocator) !void {
-    const n = bodies.len;
-
-    // First pass: calculate forces for all bodies
-    const CalcArgs = struct {
-        bodies: []const Body,
-        forces: []Vector3,
-        idx: usize,
-    };
-
-    const calc_futures = try allocator.alloc(spice.Future(CalcArgs, void), n);
-    defer allocator.free(calc_futures);
-
-    const CalcRunArgs = struct {
-        bodies: []const Body,
-        forces: []Vector3,
-        futures: []spice.Future(CalcArgs, void),
-    };
-
-    const calc_run_args = CalcRunArgs{ .bodies = bodies, .forces = forces, .futures = calc_futures };
-
-    _ = pool.call(void, struct {
-        fn run(task: *spice.Task, args: CalcRunArgs) void {
-            for (args.futures, 0..) |*fut, i| {
-                fut.* = spice.Future(CalcArgs, void).init();
-                fut.fork(task, struct {
-                    fn calc(t: *spice.Task, calc_args: CalcArgs) void {
-                        _ = t;
-                        const bi = &calc_args.bodies[calc_args.idx];
-                        var acc = Vector3{};
-                        for (calc_args.bodies) |*bj| {
-                            acc.addAssign(gravitationalForce(bi, bj));
-                        }
-                        calc_args.forces[calc_args.idx] = acc;
-                    }
-                }.calc, CalcArgs{ .bodies = args.bodies, .forces = args.forces, .idx = i });
-            }
-
-            // Join all futures
-            for (args.futures) |*fut| {
-                _ = fut.join(task);
-            }
-        }
-    }.run, calc_run_args);
-
-    // Second pass: apply forces to all bodies
-    const ApplyArgs = struct {
-        bodies: []Body,
-        forces: []const Vector3,
-        idx: usize,
-    };
-
-    const apply_futures = try allocator.alloc(spice.Future(ApplyArgs, void), n);
-    defer allocator.free(apply_futures);
-
-    const ApplyRunArgs = struct {
-        bodies: []Body,
-        forces: []const Vector3,
-        futures: []spice.Future(ApplyArgs, void),
-    };
-
-    const apply_run_args = ApplyRunArgs{ .bodies = bodies, .forces = forces, .futures = apply_futures };
-
-    _ = pool.call(void, struct {
-        fn run(task: *spice.Task, args: ApplyRunArgs) void {
-            for (args.futures, 0..) |*fut, i| {
-                fut.* = spice.Future(ApplyArgs, void).init();
-                fut.fork(task, struct {
-                    fn apply(t: *spice.Task, apply_args: ApplyArgs) void {
-                        _ = t;
-                        applyForce(&apply_args.bodies[apply_args.idx], &apply_args.forces[apply_args.idx]);
-                    }
-                }.apply, ApplyArgs{ .bodies = args.bodies, .forces = args.forces, .idx = i });
-            }
-
-            // Join all futures
-            for (args.futures) |*fut| {
-                _ = fut.join(task);
-            }
-        }
-    }.run, apply_run_args);
-}
-
-// ============================================================================
 // libxev ThreadPool Backend (Lock-Free Queue - Dynamic)
 // Uses libxev's lock-free thread pool with batch task scheduling. Creates N
 // tasks, batches them, and relies on the framework's lock-free queue for
@@ -505,14 +413,6 @@ pub fn main() !void {
         for (0..n_iters) |_| {
             try iterationStdPool(&pool, bodies, forces, n_threads);
         }
-    } else if (std.mem.eql(u8, backend, "spice")) {
-        var pool = spice.ThreadPool.init(allocator);
-        pool.start(.{ .background_worker_count = n_threads - 1 });
-        defer pool.deinit();
-
-        for (0..n_iters) |_| {
-            try iterationSpice(&pool, bodies, forces, allocator);
-        }
     } else if (std.mem.eql(u8, backend, "libxev")) {
         var pool = xev.ThreadPool.init(.{ .max_threads = @intCast(n_threads) });
         defer {
@@ -525,7 +425,7 @@ pub fn main() !void {
         }
     } else {
         std.debug.print("Unknown backend: {s}\n", .{backend});
-        std.debug.print("Available backends: fork_union_static, fork_union_dynamic, std, spice, libxev\n", .{});
+        std.debug.print("Available backends: fork_union_static, fork_union_dynamic, std, libxev\n", .{});
         return error.UnknownBackend;
     }
 }

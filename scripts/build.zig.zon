@@ -2,20 +2,15 @@
     .name = .nbody,
     .version = "0.1.0",
     .fingerprint = 0x1accea9f530b9d5f,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.15.0",
 
     .dependencies = .{
         .fork_union = .{
             .path = "..",
         },
-        .spice = .{
-            .url = "git+https://github.com/judofyr/spice#407c7f660eb1fe4e23cce0fced585a176b7af814",
-            .hash = "spice-0.0.0-3FtxfM67AADgcc5i5rJfewMfbutQY7DMTyNlZblzW-6p",
-            .lazy = true,
-        },
         .libxev = .{
-            .url = "git+https://github.com/mitchellh/libxev#34fa50878aec6e5fa8f532867001ab3c36fae23e",
-            .hash = "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs",
+            .url = "git+https://github.com/mitchellh/libxev#96a08cd8ae3bbf291f07b7cc3de8b401cb60df5e",
+            .hash = "12209dc002b8a58b69cd8e55034a00b4124b5d9abc8b1c1eaecbd31a39282caae267",
             .lazy = true,
         },
     },

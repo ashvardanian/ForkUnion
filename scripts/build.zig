@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
 
     // N-body benchmark executable
     const nbody = b.addExecutable(.{
-        .name = "nbody_zig",
+        .name = "nbody",
         .root_module = b.createModule(.{
             .root_source_file = b.path("nbody.zig"),
             .target = target,
@@ -36,14 +36,7 @@ pub fn build(b: *std.Build) void {
     }
     nbody.root_module.addImport("fork_union", fork_union_module);
 
-    // Add optional benchmark dependencies
-    if (b.lazyDependency("spice", .{
-        .target = target,
-        .optimize = optimize,
-    })) |spice_dep| {
-        nbody.root_module.addImport("spice", spice_dep.module("spice"));
-    }
-
+    // Add benchmark dependencies
     if (b.lazyDependency("libxev", .{
         .target = target,
         .optimize = optimize,

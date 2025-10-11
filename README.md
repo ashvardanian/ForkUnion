@@ -652,7 +652,7 @@ Zig benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 | Machine        | Standard (S) | Fork Union (D) | Fork Union (S) |
 | :------------- | -----------: | -------------: | -------------: |
 | 16x Intel SPR  |      2m52.0s |          18.2s |          12.8s |
-| 12x Apple M2   |            - |              - |              - |
+| 12x Apple M2   |      1m44.8s |          33.2s |          12.2s |
 | 96x Graviton 4 |            - |              - |              - |
 
 > Benchmarking suite also includes [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev), two popular Zig libraries for async processing, but those don't provide comparable bulk-synchronous APIs.
