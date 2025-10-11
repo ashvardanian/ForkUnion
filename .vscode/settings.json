@@ -39,6 +39,7 @@
         "HugeTLBfs",
         "inclusivity",
         "libnuma",
+        "MSVC",
         "nbody",
         "noexcept",
         "NUMA",

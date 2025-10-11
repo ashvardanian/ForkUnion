@@ -68,25 +68,27 @@ foreach (STD IN LISTS CXX_STANDARDS)
 
 endforeach ()
 
-# C API test targets
 enable_language(C)
 
 # Standard C11 test
-add_executable(fork_union_test_c11 test.c)
-set_target_properties(
-    fork_union_test_c11
-    PROPERTIES C_STANDARD 11
-               C_STANDARD_REQUIRED ON
-               C_EXTENSIONS OFF
-               RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-target_link_libraries(fork_union_test_c11 PRIVATE fork_union_static)
-add_test(NAME fork_union_test_c11 COMMAND fork_union_test_c11)
+if (CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    message(STATUS "Skipping C11 C API tests on MSVC due to missing <stdatomic.h> support")
+else ()
+    add_executable(fork_union_test_c11 test.c)
+    set_target_properties(
+        fork_union_test_c11
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS OFF
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(fork_union_test_c11 PRIVATE fork_union_static)
+    add_test(NAME fork_union_test_c11 COMMAND fork_union_test_c11)
 
-# Link against `libatomic` for Linux toolchains that might need it
-if (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    if (UNIX AND NOT APPLE)
-        target_link_libraries(fork_union_test_c11 PRIVATE -latomic)
+    if (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        if (UNIX AND NOT APPLE)
+            target_link_libraries(fork_union_test_c11 PRIVATE -latomic)
+        endif ()
     endif ()
 endif ()
 
