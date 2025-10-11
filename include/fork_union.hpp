@@ -292,7 +292,7 @@ enum capabilities_t : unsigned int {
 };
 
 inline capabilities_t operator|(capabilities_t a, capabilities_t b) {
-  return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
+    return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
 }
 
 struct standard_yield_t {
@@ -584,6 +584,19 @@ class unique_padded_buffer {
  */
 struct dummy_lambda_t {};
 
+template <typename yield_type_, typename thread_index_type_>
+struct yield_traits {
+    static constexpr bool supports_no_arg = std::is_nothrow_invocable_r_v<void, yield_type_>;
+    static constexpr bool supports_thread_index = std::is_nothrow_invocable_r_v<void, yield_type_, thread_index_type_>;
+    static constexpr bool valid = supports_no_arg || supports_thread_index;
+};
+
+template <typename yield_type_, typename thread_index_type_>
+inline void call_yield_(yield_type_ &yield, thread_index_type_ thread_index) noexcept {
+    if constexpr (yield_traits<yield_type_, thread_index_type_>::supports_thread_index) { yield(thread_index); }
+    else { yield(); }
+}
+
 /**
  *  @brief A trivial minimalistic lock-free "mutex" implementation using `std::atomic_flag`.
  *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
@@ -606,7 +619,7 @@ class spin_mutex {
   public:
     void lock() noexcept {
         micro_yield_t micro_yield;
-        while (flag_.test_and_set(std::memory_order_acquire)) micro_yield();
+        while (flag_.test_and_set(std::memory_order_acquire)) call_yield_(micro_yield);
     }
     bool try_lock() noexcept { return !flag_.test_and_set(std::memory_order_acquire); }
     void unlock() noexcept { flag_.clear(std::memory_order_release); }
@@ -630,7 +643,7 @@ class spin_mutex {
   public:
     void lock() noexcept {
         micro_yield_t micro_yield;
-        while (flag_.exchange(true, std::memory_order_acquire)) micro_yield();
+        while (flag_.exchange(true, std::memory_order_acquire)) call_yield_(micro_yield);
     }
     bool try_lock() noexcept { return !flag_.exchange(true, std::memory_order_acquire); }
     void unlock() noexcept { flag_.store(false, std::memory_order_release); }
@@ -1003,8 +1016,7 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  ------------------------------------------------------------------------------------------------
  *
  *  @tparam allocator_type_ The type of the allocator to be used for the thread pool.
- *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting. If an overload of
- *  operator()(index_type_ thread_index) exists, worker threads will call it with their thread index.
+ *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
  *  @tparam index_type_ Use `std::size_t`, but or a smaller type for debugging.
  *  @tparam alignment_ The alignment of the thread pool. Defaults to `default_alignment_k`.
  */
@@ -1019,8 +1031,6 @@ class basic_pool {
   public:
     using allocator_t = allocator_type_;
     using micro_yield_t = micro_yield_type_;
-    static_assert(std::is_nothrow_invocable_r<void, micro_yield_t>::value,
-                  "Yield must be callable w/out arguments & return void");
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(is_power_of_two(alignment_k), "Alignment must be a power of 2");
 
@@ -1035,6 +1045,9 @@ class basic_pool {
 
     using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, thread_index_t); // ? Wraps lambda's `operator()`
+
+    using micro_yield_traits_t = yield_traits<micro_yield_t, thread_index_t>;
+    static_assert(micro_yield_traits_t::valid, "Yield must be invocable w/out args or with a thread index");
 
   private:
     // Thread-pool-specific variables:
@@ -1218,7 +1231,8 @@ class basic_pool {
 
         // Actually wait for everyone to finish
         micro_yield_t micro_yield;
-        while (threads_to_sync_.load(std::memory_order_acquire)) micro_yield();
+        while (threads_to_sync_.load(std::memory_order_acquire))
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
     }
 
 #pragma endregion Core API
@@ -1403,13 +1417,8 @@ class basic_pool {
             mood_t mood = mood_t::grind_k; // May not be initialized in the loop
             micro_yield_t micro_yield;
             while ((new_epoch = epoch_.load(std::memory_order_acquire)) == last_epoch &&
-                   (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k) {
-                // Call micro_yield with the current thread's index if possible.
-                if constexpr (std::is_nothrow_invocable_r<void, micro_yield_t, index_t>::value)
-                    micro_yield(thread_index);
-                else
-                    micro_yield();
-            }
+                   (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
+                call_yield_(micro_yield, thread_index);
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
@@ -2523,8 +2532,6 @@ struct linux_colocated_pool {
   public:
     using allocator_t = linux_numa_allocator_t;
     using micro_yield_t = micro_yield_type_;
-    static_assert(std::is_nothrow_invocable_r<void, micro_yield_t>::value,
-                  "Yield must be callable w/out arguments & return void");
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(alignment_k > 0 && (alignment_k & (alignment_k - 1)) == 0, "Alignment must be a power of 2");
 
@@ -2537,6 +2544,9 @@ struct linux_colocated_pool {
 
     using punned_fork_context_t = void *;                                     // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, colocated_thread_t); // ? Wraps lambda's `operator()`
+
+    using micro_yield_traits_t = yield_traits<micro_yield_t, thread_index_t>;
+    static_assert(micro_yield_traits_t::valid, "Yield must be invocable w/out args or with a thread index");
 
   private:
     using allocator_traits_t = std::allocator_traits<allocator_t>;
@@ -2867,7 +2877,8 @@ struct linux_colocated_pool {
 
         // Actually wait for everyone to finish
         micro_yield_t micro_yield;
-        while (threads_to_sync_.load(std::memory_order_acquire)) micro_yield();
+        while (threads_to_sync_.load(std::memory_order_acquire))
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
     }
 
 #pragma endregion Core API
@@ -3077,7 +3088,9 @@ struct linux_colocated_pool {
         // so spin-loop for a bit until the pool is ready.
         mood_t mood;
         micro_yield_t micro_yield;
-        while ((mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::chill_k) micro_yield();
+        while ((mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::chill_k)
+            // Technically, we are not on the zero thread index, but we don't know our index yet.
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
 
         // If we are ready to start grinding, export this threads metadata to make it externally
         // observable and controllable.
@@ -3112,7 +3125,7 @@ struct linux_colocated_pool {
             // Wait for either: a new ticket or a stop flag
             while ((new_epoch = pool->epoch_.load(std::memory_order_acquire)) == last_epoch &&
                    (mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                micro_yield();
+                call_yield_(micro_yield, global_thread_index);
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
