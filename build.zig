@@ -45,13 +45,6 @@ pub fn build(b: *std.Build) void {
         .flags = cpp_flags,
     });
 
-    if (enable_numa and target.result.os.tag == .linux) {
-        lib.linkSystemLibrary("numa");
-        lib.linkSystemLibrary("pthread");
-    } else if (target.result.os.tag == .linux) {
-        lib.linkSystemLibrary("pthread");
-    }
-
     lib.addIncludePath(b.path("include"));
     lib.linkLibCpp(); // Use Zig's bundled `libc++` instead of system `libstdc++`
 
@@ -75,6 +68,12 @@ pub fn build(b: *std.Build) void {
 
     lib_tests.addIncludePath(b.path("include"));
     lib_tests.linkLibrary(lib);
+    if (target.result.os.tag == .linux) {
+        lib_tests.root_module.linkSystemLibrary("pthread", .{});
+        if (enable_numa) {
+            lib_tests.root_module.linkSystemLibrary("numa", .{});
+        }
+    }
 
     const run_tests = b.addRunArtifact(lib_tests);
     test_step.dependOn(&run_tests.step);

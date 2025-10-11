@@ -3,9 +3,9 @@
 //! Compares synchronization overhead of different thread pool implementations:
 //! - fork_union_static: Static work division (N tasks pre-divided into thread slices)
 //! - fork_union_dynamic: Dynamic work-stealing (Fork Union's work-stealing scheduler)
+//! - std: Static work division (std.Thread.Pool with manual slicing)
 //! - spice: Dynamic work-stealing (Spice's fork/join work-stealing)
 //! - libxev: Dynamic lock-free queue (Mitchell Hashimoto's lock-free thread pool)
-//! - std: Dynamic with high overhead (std.Thread.Pool's task spawning)
 //!
 //! Environment variables:
 //! - NBODY_COUNT: number of bodies (default: number of threads)
@@ -175,28 +175,35 @@ fn iterationForkUnionDynamic(pool: *fu.Pool, bodies: []Body, forces: []Vector3) 
 }
 
 // ============================================================================
-// std.Thread.Pool Backend (Dynamic - High Overhead)
-// Spawns N individual tasks with WaitGroup synchronization. Shows the overhead
-// of standard library's approach compared to specialized thread pools.
+// std.Thread.Pool Backend (Static Work Division)
+// Divides N tasks into equal slices per thread for static work distribution.
 // ============================================================================
 
-fn iterationStdPool(pool: *std.Thread.Pool, bodies: []Body, forces: []Vector3) !void {
+fn iterationStdPool(pool: *std.Thread.Pool, bodies: []Body, forces: []Vector3, n_threads: usize) !void {
     const n = bodies.len;
 
     // First pass: calculate forces
     {
         var wg: std.Thread.WaitGroup = .{};
-        for (0..n) |i| {
+        const chunk_size = (n + n_threads - 1) / n_threads;
+
+        for (0..n_threads) |thread_id| {
+            const start = thread_id * chunk_size;
+            if (start >= n) break;
+            const end = @min(start + chunk_size, n);
+
             pool.spawnWg(&wg, struct {
-                fn calc(bodies_slice: []const Body, forces_slice: []Vector3, idx: usize) void {
-                    const bi = &bodies_slice[idx];
-                    var acc = Vector3{};
-                    for (bodies_slice) |*bj| {
-                        acc.addAssign(gravitationalForce(bi, bj));
+                fn calc(bodies_slice: []const Body, forces_slice: []Vector3, range_start: usize, range_end: usize) void {
+                    for (range_start..range_end) |i| {
+                        const bi = &bodies_slice[i];
+                        var acc = Vector3{};
+                        for (bodies_slice) |*bj| {
+                            acc.addAssign(gravitationalForce(bi, bj));
+                        }
+                        forces_slice[i] = acc;
                     }
-                    forces_slice[idx] = acc;
                 }
-            }.calc, .{ bodies, forces, i });
+            }.calc, .{ bodies, forces, start, end });
         }
         pool.waitAndWork(&wg);
     }
@@ -204,12 +211,20 @@ fn iterationStdPool(pool: *std.Thread.Pool, bodies: []Body, forces: []Vector3) !
     // Second pass: apply forces
     {
         var wg: std.Thread.WaitGroup = .{};
-        for (0..n) |i| {
+        const chunk_size = (n + n_threads - 1) / n_threads;
+
+        for (0..n_threads) |thread_id| {
+            const start = thread_id * chunk_size;
+            if (start >= n) break;
+            const end = @min(start + chunk_size, n);
+
             pool.spawnWg(&wg, struct {
-                fn apply(bodies_slice: []Body, forces_slice: []const Vector3, idx: usize) void {
-                    applyForce(&bodies_slice[idx], &forces_slice[idx]);
+                fn apply(bodies_slice: []Body, forces_slice: []const Vector3, range_start: usize, range_end: usize) void {
+                    for (range_start..range_end) |i| {
+                        applyForce(&bodies_slice[i], &forces_slice[i]);
+                    }
                 }
-            }.apply, .{ bodies, forces, i });
+            }.apply, .{ bodies, forces, start, end });
         }
         pool.waitAndWork(&wg);
     }
@@ -488,7 +503,7 @@ pub fn main() !void {
         defer pool.deinit();
 
         for (0..n_iters) |_| {
-            try iterationStdPool(&pool, bodies, forces);
+            try iterationStdPool(&pool, bodies, forces, n_threads);
         }
     } else if (std.mem.eql(u8, backend, "spice")) {
         var pool = spice.ThreadPool.init(allocator);

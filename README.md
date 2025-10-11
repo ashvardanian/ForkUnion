@@ -219,8 +219,150 @@ pub fn main() !void {
 }
 ```
 
-Unlike `std.Thread.Pool` (task queue for async work), Fork Union is designed for **data parallelism**
-and **tight parallel loops** — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
+Unlike `std.Thread.Pool` task queue for async work, Fork Union is designed for __data parallelism__
+and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
+
+### Intro in C
+
+Fork Union provides a pure C99 API via `fork_union.h`, wrapping the C++ implementation in pre-compiled libraries: `fork_union_static.a` or `fork_union_dynamic.so`.
+The C API uses opaque `fu_pool_t` handles and function pointers for callbacks, making it compatible with any C99+ compiler.
+
+To integrate using CMake:
+
+```cmake
+FetchContent_Declare(
+    fork_union
+    GIT_REPOSITORY https://github.com/ashvardanian/fork_union
+    GIT_TAG v2.3.0
+)
+FetchContent_MakeAvailable(fork_union)
+target_link_libraries(your_target PRIVATE fork_union::fork_union_static)
+```
+
+A minimal C example:
+
+```c
+#include <stdio.h>      // printf
+#include <fork_union.h> // fu_pool_t, fu_pool_new, fu_pool_spawn
+
+void hello_callback(void *context, size_t thread, size_t colocation) {
+    (void)context;
+    printf("Hello from thread %zu (colocation %zu)\n", thread, colocation);
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("my_pool");
+    if (!pool || !fu_pool_spawn(pool, fu_count_logical_cores(), fu_caller_inclusive_k))
+        return 1;
+
+    fu_pool_for_threads(pool, hello_callback, NULL);
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+For parallel tasks with context:
+
+```c
+struct task_context {
+    int *data;
+    size_t size;
+};
+
+void process_task(void *ctx, size_t task, size_t thread, size_t colocation) {
+    (void)thread; (void)colocation;
+    struct task_context *context = (struct task_context *)ctx;
+    context->data[task] = task * 2;
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("tasks");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    int data[100] = {0};
+    struct task_context ctx = { .data = data, .size = 100 };
+    fu_pool_for_n(pool, 100, process_task, &ctx);        // static scheduling
+    fu_pool_for_n_dynamic(pool, 100, process_task, &ctx); // dynamic scheduling
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+#### GCC Nested Functions Extension
+
+GCC supports [nested functions](https://gcc.gnu.org/onlinedocs/gcc/Nested-Functions.html) that can capture variables from the enclosing scope:
+
+```c
+#include <stdio.h>
+#include <stdatomic.h>
+#include <fork_union.h>
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("gcc_nested");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    atomic_size_t counter = 0;
+
+    // GCC nested function - captures 'counter' from enclosing scope
+    void nested_callback(void *ctx, size_t task, size_t thread, size_t colocation) {
+        (void)ctx; (void)thread; (void)colocation;
+        atomic_fetch_add(&counter, 1);
+    }
+
+    fu_pool_for_n(pool, 100, nested_callback, NULL);
+    printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+Compile: `gcc -std=c11 test.c -lfork_union_static -lpthread -lnuma`
+
+#### Clang Blocks Extension
+
+Clang provides [blocks](https://clang.llvm.org/docs/BlockLanguageSpec.html) with `^{}` syntax:
+
+```c
+#include <stdio.h>
+#include <stdatomic.h>
+#include <Block.h>
+#include <fork_union.h>
+
+typedef void (^task_block_t)(void *, size_t, size_t, size_t);
+
+struct block_wrapper { task_block_t block; };
+
+void block_wrapper_fn(void *ctx, size_t task, size_t thread, size_t colocation) {
+    ((struct block_wrapper *)ctx)->block(NULL, task, thread, colocation);
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("clang_blocks");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    __block atomic_size_t counter = 0;
+
+    task_block_t my_block = ^(void *c, size_t task, size_t t, size_t col) {
+        (void)c; (void)t; (void)col;
+        atomic_fetch_add(&counter, 1);
+    };
+
+    task_block_t heap_block = Block_copy(my_block);
+    struct block_wrapper wrapper = { .block = heap_block };
+
+    fu_pool_for_n(pool, 100, block_wrapper_fn, &wrapper);
+
+    Block_release(heap_block);
+    printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+Compile: `clang -std=c11 -fblocks test.c -lfork_union_static -lpthread -lnuma -lBlocksRuntime`
 
 ## Alternatives & Differences
 
@@ -504,6 +646,17 @@ Rust benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 > ¹ Another common workload is "Parallel Reductions" covered in a separate [repository](https://github.com/ashvardanian/ParallelReductionsBenchmark).
 > ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing. It's also fair to say, that OpenMP is not optimized for AppleClang.
 > 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for Fork Union.
+
+Zig benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
+
+| Machine        | Standard (S) | Fork Union (D) | Fork Union (S) |
+| :------------- | -----------: | -------------: | -------------: |
+| 16x Intel SPR  |      2m52.0s |          18.2s |          12.8s |
+| 12x Apple M2   |            - |              - |              - |
+| 96x Graviton 4 |            - |              - |              - |
+
+> Benchmarking suite also includes [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev), two popular Zig libraries for async processing, but those don't provide comparable bulk-synchronous APIs.
+> Thus, typically, all of the submitted tasks are executed on a single thread, making results not comparable.
 
 You can rerun those benchmarks with the following commands:
 
