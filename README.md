@@ -1,6 +1,6 @@
 # Fork Union 🍴
 
-Fork Union is arguably the lowest-latency OpenMP-style NUMA-aware minimalistic scoped thread-pool designed for 'Fork-Join' parallelism in C++, C, and Rust, avoiding × [mutexes & system calls](#locks-and-mutexes), × [dynamic memory allocations](#memory-allocations), × [CAS-primitives](#atomics-and-cas), and × [false-sharing](#alignment--false-sharing) of CPU cache-lines on the hot path 🍴
+Fork Union is arguably the lowest-latency OpenMP-style NUMA-aware minimalistic scoped thread-pool designed for 'Fork-Join' parallelism in C++, C, Rust, and Zig, avoiding × [mutexes & system calls](#locks-and-mutexes), × [dynamic memory allocations](#memory-allocations), × [CAS-primitives](#atomics-and-cas), and × [false-sharing](#alignment--false-sharing) of CPU cache-lines on the hot path 🍴
 
 ## Motivation
 
@@ -13,7 +13,7 @@ OpenMP, however, is not ideal for fine-grained parallelism and is less portable 
 [![`fork_union` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/fork_union.jpg?raw=true)](https://github.com/ashvardanian/fork_union)
 
 This is where __`fork_union`__ comes in.
-It's a C++ 17 library with C 99 and Rust bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
+It's a C++ 17 library with C 99, Rust, and Zig bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
 It supports pinning threads to specific [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual CPU cores, making it much easier to ensure data locality and halving the latency of individual loads in Big Data applications.
 
 ## Basic Usage
@@ -179,6 +179,191 @@ int main() {
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
 NUMA detection on Linux defaults to AUTO. Override with `-D FORK_UNION_ENABLE_NUMA=ON` or `OFF`.
 
+### Intro in Zig
+
+To integrate into your Zig project, add Fork Union to your `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .fork_union = .{
+        .url = "https://github.com/ashvardanian/fork_union/archive/refs/tags/v2.3.0.tar.gz",
+        .hash = "12200000000000000000000000000000000000000000000000000000000000000000",
+    },
+},
+```
+
+Then import and use in your code:
+
+```zig
+const std = @import("std");
+const fu = @import("fork_union");
+
+pub fn main() !void {
+    var pool = try fu.Pool.init(allocator, 4, .inclusive);
+    defer pool.deinit();
+
+    // Execute work on each thread (OpenMP-style parallel)
+    pool.forThreads(struct {
+        fn work(thread_idx: usize, colocation_idx: usize) void {
+            std.debug.print("Thread {}\n", .{thread_idx});
+        }
+    }.work, {});
+
+    // Distribute 1000 tasks across threads (OpenMP-style parallel for)
+    var results = [_]i32{0} ** 1000;
+    pool.forN(1000, struct {
+        fn process(prong: fu.Prong, ctx: Context) void {
+            ctx.results[prong.task_index] = @intCast(prong.task_index * 2);
+        }
+    }.process, .{ .results = &results });
+}
+```
+
+Unlike `std.Thread.Pool` task queue for async work, Fork Union is designed for __data parallelism__
+and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
+
+### Intro in C
+
+Fork Union provides a pure C99 API via `fork_union.h`, wrapping the C++ implementation in pre-compiled libraries: `fork_union_static.a` or `fork_union_dynamic.so`.
+The C API uses opaque `fu_pool_t` handles and function pointers for callbacks, making it compatible with any C99+ compiler.
+
+To integrate using CMake:
+
+```cmake
+FetchContent_Declare(
+    fork_union
+    GIT_REPOSITORY https://github.com/ashvardanian/fork_union
+    GIT_TAG v2.3.0
+)
+FetchContent_MakeAvailable(fork_union)
+target_link_libraries(your_target PRIVATE fork_union::fork_union_static)
+```
+
+A minimal C example:
+
+```c
+#include <stdio.h>      // printf
+#include <fork_union.h> // fu_pool_t, fu_pool_new, fu_pool_spawn
+
+void hello_callback(void *context, size_t thread, size_t colocation) {
+    (void)context;
+    printf("Hello from thread %zu (colocation %zu)\n", thread, colocation);
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("my_pool");
+    if (!pool || !fu_pool_spawn(pool, fu_count_logical_cores(), fu_caller_inclusive_k))
+        return 1;
+
+    fu_pool_for_threads(pool, hello_callback, NULL);
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+For parallel tasks with context:
+
+```c
+struct task_context {
+    int *data;
+    size_t size;
+};
+
+void process_task(void *ctx, size_t task, size_t thread, size_t colocation) {
+    (void)thread; (void)colocation;
+    struct task_context *context = (struct task_context *)ctx;
+    context->data[task] = task * 2;
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("tasks");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    int data[100] = {0};
+    struct task_context ctx = { .data = data, .size = 100 };
+    fu_pool_for_n(pool, 100, process_task, &ctx);        // static scheduling
+    fu_pool_for_n_dynamic(pool, 100, process_task, &ctx); // dynamic scheduling
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+#### GCC Nested Functions Extension
+
+GCC supports [nested functions](https://gcc.gnu.org/onlinedocs/gcc/Nested-Functions.html) that can capture variables from the enclosing scope:
+
+```c
+#include <stdio.h>
+#include <stdatomic.h>
+#include <fork_union.h>
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("gcc_nested");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    atomic_size_t counter = 0;
+
+    // GCC nested function - captures 'counter' from enclosing scope
+    void nested_callback(void *ctx, size_t task, size_t thread, size_t colocation) {
+        (void)ctx; (void)thread; (void)colocation;
+        atomic_fetch_add(&counter, 1);
+    }
+
+    fu_pool_for_n(pool, 100, nested_callback, NULL);
+    printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+Compile: `gcc -std=c11 test.c -lfork_union_static -lpthread -lnuma`
+
+#### Clang Blocks Extension
+
+Clang provides [blocks](https://clang.llvm.org/docs/BlockLanguageSpec.html) with `^{}` syntax:
+
+```c
+#include <stdio.h>
+#include <stdatomic.h>
+#include <Block.h>
+#include <fork_union.h>
+
+typedef void (^task_block_t)(void *, size_t, size_t, size_t);
+
+struct block_wrapper { task_block_t block; };
+
+void block_wrapper_fn(void *ctx, size_t task, size_t thread, size_t colocation) {
+    ((struct block_wrapper *)ctx)->block(NULL, task, thread, colocation);
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("clang_blocks");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    __block atomic_size_t counter = 0;
+
+    task_block_t my_block = ^(void *c, size_t task, size_t t, size_t col) {
+        (void)c; (void)t; (void)col;
+        atomic_fetch_add(&counter, 1);
+    };
+
+    task_block_t heap_block = Block_copy(my_block);
+    struct block_wrapper wrapper = { .block = heap_block };
+
+    fu_pool_for_n(pool, 100, block_wrapper_fn, &wrapper);
+
+    Block_release(heap_block);
+    printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+Compile: `clang -std=c11 -fblocks test.c -lfork_union_static -lpthread -lnuma -lBlocksRuntime`
+
 ## Alternatives & Differences
 
 Many other thread-pool implementations are more feature-rich but have different limitations and design goals.
@@ -186,6 +371,7 @@ Many other thread-pool implementations are more feature-rich but have different 
 - Modern C++: [`taskflow/taskflow`](https://github.com/taskflow/taskflow), [`progschj/ThreadPool`](https://github.com/progschj/ThreadPool), [`bshoshany/thread-pool`](https://github.com/bshoshany/thread-pool)
 - Traditional C++: [`vit-vit/CTPL`](https://github.com/vit-vit/CTPL), [`mtrebi/thread-pool`](https://github.com/mtrebi/thread-pool)
 - Rust: [`tokio-rs/tokio`](https://github.com/tokio-rs/tokio), [`rayon-rs/rayon`](https://github.com/rayon-rs/rayon), [`smol-rs/smol`](https://github.com/smol-rs/smol)
+- Zig: [`std.Thread.Pool`](https://ziglang.org/documentation/master/std/#std.Thread.Pool)
 
 Those are not designed for the same OpenMP-like use cases as __`fork_union`__.
 Instead, they primarily focus on task queuing, which requires significantly more work.
@@ -461,6 +647,17 @@ Rust benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 > ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing. It's also fair to say, that OpenMP is not optimized for AppleClang.
 > 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for Fork Union.
 
+Zig benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
+
+| Machine        | Standard (S) | Fork Union (D) | Fork Union (S) |
+| :------------- | -----------: | -------------: | -------------: |
+| 16x Intel SPR  |      2m52.0s |          18.2s |          12.8s |
+| 12x Apple M2   |            - |              - |              - |
+| 96x Graviton 4 |            - |              - |              - |
+
+> Benchmarking suite also includes [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev), two popular Zig libraries for async processing, but those don't provide comparable bulk-synchronous APIs.
+> Thus, typically, all of the submitted tasks are executed on a single thread, making results not comparable.
+
 You can rerun those benchmarks with the following commands:
 
 ```bash
@@ -578,6 +775,20 @@ To automatically detect the Minimum Supported Rust Version (MSRV):
 ```sh
 cargo +stable install cargo-msrv
 cargo msrv find --ignore-lockfile
+```
+
+---
+
+For Zig, use the following commands:
+
+```bash
+zig build test --summary all            # run tests
+zig build nbody -Doptimize=ReleaseFast  # build benchmark
+zig build -Dnuma=true                   # enable NUMA support (Linux)
+
+# Run benchmark
+time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_static \
+    ./zig-out/bin/nbody_zig
 ```
 
 ## License
