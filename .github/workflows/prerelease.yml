@@ -66,6 +66,12 @@ jobs:
           build_artifacts/fork_union_test_cpp20
           build_artifacts/fork_union_test_cpp23
 
+      - name: Test C
+        run: |
+          set -euxo pipefail
+          build_artifacts/fork_union_test_c11
+          build_artifacts/fork_union_test_c_gcc_nested
+
       - name: Set up Rust
         run: |
           rustup update stable
@@ -91,7 +97,7 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential clang
+          sudo apt install -y cmake build-essential clang libblocksruntime-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
@@ -100,6 +106,12 @@ jobs:
           build_artifacts/fork_union_test_cpp17
           build_artifacts/fork_union_test_cpp20
           build_artifacts/fork_union_test_cpp23
+
+      - name: Test C
+        run: |
+          set -euxo pipefail
+          build_artifacts/fork_union_test_c11
+          build_artifacts/fork_union_test_c_clang_blocks
 
       - name: Set up Rust
         run: |
@@ -131,6 +143,11 @@ jobs:
           build_artifacts/fork_union_test_cpp17
           build_artifacts/fork_union_test_cpp20
           build_artifacts/fork_union_test_cpp23
+
+      - name: Test C
+        run: |
+          set -euxo pipefail
+          build_artifacts/fork_union_test_c11
 
       - name: Set up Rust
         run: |
@@ -173,6 +190,11 @@ jobs:
           build_artifacts/fork_union_test_cpp20
           build_artifacts/fork_union_test_cpp23
 
+      - name: Run C API tests
+        run: |
+          set -euxo pipefail
+          build_artifacts/fork_union_test_c11
+
   test_windows:
     name: Windows
     runs-on: windows-2022
@@ -193,6 +215,11 @@ jobs:
           .\build_artifacts\fork_union_test_cpp17.exe
           .\build_artifacts\fork_union_test_cpp20.exe
           .\build_artifacts\fork_union_test_cpp23.exe
+
+      - name: Test C
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\build_artifacts\fork_union_test_c11.exe
 
       - name: Set up Rust
         run: |
@@ -230,6 +257,11 @@ jobs:
           .\build_artifacts\fork_union_test_cpp20.exe
           .\build_artifacts\fork_union_test_cpp23.exe
 
+      - name: Test C
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\build_artifacts\fork_union_test_c11.exe
+
   test_i386:
     name: Cross-compilation (i386)
     runs-on: ubuntu-24.04
@@ -245,12 +277,16 @@ jobs:
       - name: Build C++
         run: |
           cmake -B build_i386 -D CMAKE_C_FLAGS=-m32 -D CMAKE_CXX_FLAGS=-m32 -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_i386 --target fork_union_test_cpp17 fork_union_test_cpp20
+          cmake --build build_i386 --target fork_union_test_cpp17 fork_union_test_cpp20 fork_union_test_c11
 
       - name: Test C++
         run: |
           build_i386/fork_union_test_cpp17
           build_i386/fork_union_test_cpp20
+
+      - name: Test C
+        run: |
+          build_i386/fork_union_test_c11
 
   test_armhf:
     name: Cross-compilation (armhf)
@@ -266,13 +302,17 @@ jobs:
 
       - name: Build C++
         run: |
-          cmake -B build_armhf -D CMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_armhf --target fork_union_test_cpp17 fork_union_test_cpp20
+          cmake -B build_armhf -D CMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -D CMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build_armhf --target fork_union_test_cpp17 fork_union_test_cpp20 fork_union_test_c11
 
       - name: Test C++
         run: |
           qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/fork_union_test_cpp17
           qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/fork_union_test_cpp20
+
+      - name: Test C
+        run: |
+          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/fork_union_test_c11
 
   test_s390x:
     name: Cross-compilation (s390x)
@@ -288,10 +328,14 @@ jobs:
 
       - name: Build C++
         run: |
-          cmake -B build_s390x -D CMAKE_CXX_COMPILER=s390x-linux-gnu-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_s390x --target fork_union_test_cpp17 fork_union_test_cpp20
+          cmake -B build_s390x -D CMAKE_C_COMPILER=s390x-linux-gnu-gcc -D CMAKE_CXX_COMPILER=s390x-linux-gnu-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build_s390x --target fork_union_test_cpp17 fork_union_test_cpp20 fork_union_test_c11
 
       - name: Test C++
         run: |
           qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/fork_union_test_cpp17
           qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/fork_union_test_cpp20
+
+      - name: Test C
+        run: |
+          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/fork_union_test_c11

@@ -68,6 +68,67 @@ foreach (STD IN LISTS CXX_STANDARDS)
 
 endforeach ()
 
+# C API test targets
+enable_language(C)
+
+# Standard C11 test
+add_executable(fork_union_test_c11 test.c)
+set_target_properties(
+    fork_union_test_c11
+    PROPERTIES C_STANDARD 11
+               C_STANDARD_REQUIRED ON
+               C_EXTENSIONS OFF
+               RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+target_link_libraries(fork_union_test_c11 PRIVATE fork_union_static)
+add_test(NAME fork_union_test_c11 COMMAND fork_union_test_c11)
+
+# Link against `libatomic` for Linux toolchains that might need it
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(fork_union_test_c11 PRIVATE -latomic)
+    endif ()
+endif ()
+
+# GCC nested functions extension test
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_executable(fork_union_test_c_gcc_nested test.c)
+    set_target_properties(
+        fork_union_test_c_gcc_nested
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS ON
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(fork_union_test_c_gcc_nested PRIVATE fork_union_static)
+    add_test(NAME fork_union_test_c_gcc_nested COMMAND fork_union_test_c_gcc_nested)
+
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(fork_union_test_c_gcc_nested PRIVATE -latomic)
+    endif ()
+endif ()
+
+# Clang blocks extension test
+if (CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    add_executable(fork_union_test_c_clang_blocks test.c)
+    set_target_properties(
+        fork_union_test_c_clang_blocks
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS ON
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_compile_options(fork_union_test_c_clang_blocks PRIVATE -fblocks)
+    target_link_libraries(fork_union_test_c_clang_blocks PRIVATE fork_union_static)
+    add_test(NAME fork_union_test_c_clang_blocks COMMAND fork_union_test_c_clang_blocks)
+
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(fork_union_test_c_clang_blocks PRIVATE -latomic -lBlocksRuntime)
+    else ()
+        target_link_libraries(fork_union_test_c_clang_blocks PRIVATE -lBlocksRuntime)
+    endif ()
+endif ()
+
 # Include the N-body benchmark
 add_executable(fork_union_nbody nbody.cpp)
 target_link_libraries(fork_union_nbody PRIVATE fork_union)
