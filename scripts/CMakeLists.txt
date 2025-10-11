@@ -12,9 +12,8 @@ function (set_target_properties_for_fork_union_script target_name)
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         message(STATUS "Enabling optimizations for ${target_name}")
         target_compile_options(
-            ${target_name}
-            PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
-                    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
+            ${target_name} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+                                   $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
         )
     endif ()
 
@@ -111,7 +110,7 @@ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif ()
 
 # Clang blocks extension test
-if (CMAKE_C_COMPILER_ID STREQUAL "Clang")
+if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
     add_executable(fork_union_test_c_clang_blocks test.c)
     set_target_properties(
         fork_union_test_c_clang_blocks
@@ -124,10 +123,10 @@ if (CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_link_libraries(fork_union_test_c_clang_blocks PRIVATE fork_union_static)
     add_test(NAME fork_union_test_c_clang_blocks COMMAND fork_union_test_c_clang_blocks)
 
-    if (UNIX AND NOT APPLE)
+    if (APPLE)
+        # Apple's `libSystem` already ships the Blocks runtime, so no extra linkage is required
+    elseif (UNIX)
         target_link_libraries(fork_union_test_c_clang_blocks PRIVATE -latomic -lBlocksRuntime)
-    else ()
-        target_link_libraries(fork_union_test_c_clang_blocks PRIVATE -lBlocksRuntime)
     endif ()
 endif ()
 
@@ -150,8 +149,7 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STR
         execute_process(
             COMMAND ${BREW_EXECUTABLE} --prefix libomp
             OUTPUT_VARIABLE LIBOMP_PREFIX
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
         )
         if (LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}/include/omp.h")
             message(STATUS "Enabling OpenMP for fork_union_nbody on Clang with Homebrew libomp")

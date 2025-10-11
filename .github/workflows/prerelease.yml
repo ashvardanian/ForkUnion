@@ -176,24 +176,23 @@ jobs:
           brew update
           brew reinstall cmake llvm@${{ matrix.llvm }}
 
-      - name: Configure (CMake)
+      - name: Build C/C++
         run: |
           cmake -S . -B build_artifacts -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D CMAKE_CXX_COMPILER=$(brew --prefix llvm@${{ matrix.llvm }})/bin/clang++
+          cmake --build build_artifacts --config ${{ matrix.config }} --parallel
 
-      - name: Build
-        run: cmake --build build_artifacts --config ${{ matrix.config }} --parallel
-
-      - name: Run C++ tests
+      - name: Test C++
         run: |
           set -euxo pipefail
           build_artifacts/fork_union_test_cpp17
           build_artifacts/fork_union_test_cpp20
           build_artifacts/fork_union_test_cpp23
 
-      - name: Run C API tests
+      - name: Test C
         run: |
           set -euxo pipefail
           build_artifacts/fork_union_test_c11
+          build_artifacts/fork_union_test_c_clang_blocks
 
   test_windows:
     name: Windows
