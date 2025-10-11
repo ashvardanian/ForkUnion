@@ -2,9 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    // Check Zig version compatibility (requires 0.16.0 or later)
-    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
-        @panic("Fork Union requires Zig 0.16.0 or later. Please upgrade your Zig toolchain.");
+    // Check Zig version compatibility (requires 0.15.0 or later)
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 15) {
+        @panic("Fork Union requires Zig 0.15.0 or later. Please upgrade your Zig toolchain.");
     }
 
     const target = b.standardTargetOptions(.{});

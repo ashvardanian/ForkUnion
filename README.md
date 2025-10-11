@@ -783,13 +783,16 @@ For Zig, use the following commands:
 
 ```bash
 zig build test --summary all            # run tests
-zig build nbody -Doptimize=ReleaseFast  # build benchmark
 zig build -Dnuma=true                   # enable NUMA support (Linux)
 
-# Run benchmark
+# Run benchmark from the `scripts` directory
+cd scripts
+zig build -Doptimize=ReleaseFast
 time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_static \
     ./zig-out/bin/nbody_zig
 ```
+
+Check the `scripts/nbody.zig` header for additional benchmarking options.
 
 ## License
 

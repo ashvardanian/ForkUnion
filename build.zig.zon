@@ -2,7 +2,7 @@
     .name = .fork_union,
     .version = "2.3.0",
     .fingerprint = 0xc31742f3e89a27c7,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.15.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
