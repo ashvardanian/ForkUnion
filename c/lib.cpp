@@ -388,17 +388,47 @@ void fu_free(FU_MAYBE_UNUSED_ size_t numa_node_index, void *pointer, FU_MAYBE_UN
 
 #pragma region - Lifetime
 
+/**
+ *  @brief Cross-platform aligned memory allocation.
+ *  @note Returns nullptr on failure, never throws exceptions.
+ */
+inline void *fu_aligned_malloc(std::size_t size, std::size_t alignment) noexcept {
+#if defined(_MSC_VER)
+    return _aligned_malloc(size, alignment);
+#elif defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
+    void *ptr = nullptr;
+    return (posix_memalign(&ptr, alignment, size) == 0) ? ptr : nullptr;
+#else
+    return ::operator new(size, std::align_val_t {alignment}, std::nothrow);
+#endif
+}
+
+/**
+ *  @brief Cross-platform aligned memory deallocation.
+ *  @note Matches fu_aligned_malloc - must use same alignment value.
+ */
+inline void fu_aligned_free(void *ptr, std::size_t alignment) noexcept {
+#if defined(_MSC_VER)
+    _aligned_free(ptr);
+#elif defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
+    std::free(ptr);
+#else
+    ::operator delete(ptr, std::align_val_t {alignment}, std::nothrow);
+#endif
+}
+
 fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
     if (!globals_initialize()) return nullptr;
 
-    opaque_pool_t *opaque = static_cast<opaque_pool_t *>(std::malloc(sizeof(opaque_pool_t)));
+    opaque_pool_t *opaque =
+        static_cast<opaque_pool_t *>(fu_aligned_malloc(sizeof(opaque_pool_t), alignof(opaque_pool_t)));
     if (!opaque) return nullptr;
 
     // Best case, use the NUMA-aware distributed pool
 #if FU_ENABLE_NUMA
     fu::numa_topology_t copied_topology;
     if (!copied_topology.try_assign(global_numa_topology)) {
-        std::free(opaque);
+        fu_aligned_free(opaque, alignof(opaque_pool_t));
         return nullptr;
     }
 
@@ -485,7 +515,7 @@ void fu_pool_delete(fu_pool_t *pool) {
 
     // Call the object's destructor and deallocate the memory
     opaque->~opaque_pool_t();
-    std::free(opaque);
+    fu_aligned_free(opaque, alignof(opaque_pool_t));
 }
 
 fu_bool_t fu_pool_spawn(fu_pool_t *pool, size_t threads, fu_caller_exclusivity_t c_exclusivity) {
