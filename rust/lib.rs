@@ -2290,21 +2290,22 @@ impl<T> RoundRobinVec<T> {
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
         pool.for_threads(move |thread_index, colocation_index| {
-            if colocation_index < colocations_count {
-                // Get the specific pinned vector for this NUMA node
-                let node_vec = safe_ptr.get_mut_at(colocation_index);
-                let pool = pool_ptr.get_mut();
+            if colocation_index >= colocations_count {
+                return;
+            }
 
-                let threads_in_colocation = pool.count_threads_in(colocation_index);
-                let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
-                let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
-                let range = split.get(thread_local_index);
+            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let pool = pool_ptr.get_mut();
 
-                // Fill the assigned range of this thread
-                for idx in range {
-                    if let Some(element) = node_vec.get_mut(idx) {
-                        *element = value.clone();
-                    }
+            let threads_in_colocation = pool.count_threads_in(colocation_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
+            let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
+            let range = split.get(thread_local_index);
+
+            // Fill the assigned range of this thread
+            for idx in range {
+                if let Some(element) = node_vec.get_mut(idx) {
+                    *element = value.clone();
                 }
             }
         });
@@ -2346,22 +2347,23 @@ impl<T> RoundRobinVec<T> {
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
         pool.for_threads(move |thread_index, colocation_index| {
-            if colocation_index < colocations_count {
-                // Get the specific pinned vector for this NUMA node
-                let node_vec = safe_ptr.get_mut_at(colocation_index);
-                let f_ref = f_ptr.get_mut();
-                let pool = pool_ptr.get_mut();
+            if colocation_index >= colocations_count {
+                return;
+            }
 
-                let threads_in_colocation = pool.count_threads_in(colocation_index);
-                let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
-                let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
-                let range = split.get(thread_local_index);
+            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let f_ref = f_ptr.get_mut();
+            let pool = pool_ptr.get_mut();
 
-                // Fill the assigned range of this thread
-                for idx in range {
-                    if let Some(element) = node_vec.get_mut(idx) {
-                        *element = f_ref();
-                    }
+            let threads_in_colocation = pool.count_threads_in(colocation_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
+            let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
+            let range = split.get(thread_local_index);
+
+            // Fill the assigned range of this thread
+            for idx in range {
+                if let Some(element) = node_vec.get_mut(idx) {
+                    *element = f_ref();
                 }
             }
         });
@@ -2378,22 +2380,23 @@ impl<T> RoundRobinVec<T> {
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
         pool.for_threads(move |thread_index, colocation_index| {
-            if colocation_index < colocations_count {
-                // Get the specific pinned vector for this NUMA node
-                let node_vec = safe_ptr.get_mut_at(colocation_index);
-                let pool = pool_ptr.get_mut();
+            if colocation_index >= colocations_count {
+                return;
+            }
 
-                let threads_in_colocation = pool.count_threads_in(colocation_index);
-                let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
-                let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
-                let range = split.get(thread_local_index);
+            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let pool = pool_ptr.get_mut();
 
-                // Drop elements in the assigned range
-                unsafe {
-                    let ptr = node_vec.as_mut_ptr();
-                    for idx in range {
-                        core::ptr::drop_in_place(ptr.add(idx));
-                    }
+            let threads_in_colocation = pool.count_threads_in(colocation_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
+            let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
+            let range = split.get(thread_local_index);
+
+            // Drop elements in the assigned range
+            unsafe {
+                let ptr = node_vec.as_mut_ptr();
+                for idx in range {
+                    core::ptr::drop_in_place(ptr.add(idx));
                 }
             }
         });
@@ -2435,18 +2438,21 @@ impl<T> RoundRobinVec<T> {
         let elements_per_node = new_len / colocations_count;
         let extra_elements = new_len % colocations_count;
 
-        // Step 1: Centrally handle reallocation for each NUMA node
-        for i in 0..colocations_count {
-            let node_len = if i < extra_elements {
+        // Helper to calculate target length for a colocation
+        let node_len = |col_idx: usize| -> usize {
+            if col_idx < extra_elements {
                 elements_per_node + 1
             } else {
                 elements_per_node
-            };
+            }
+        };
 
+        // Step 1: Centrally handle reallocation for each NUMA node
+        for i in 0..colocations_count {
+            let target_len = node_len(i);
             let current_len = self.colocations[i].len();
-            if node_len > current_len {
-                // Need to reserve more capacity
-                self.colocations[i].reserve(node_len - current_len)?;
+            if target_len > current_len {
+                self.colocations[i].reserve(target_len - current_len)?;
             }
         }
 
@@ -2455,52 +2461,43 @@ impl<T> RoundRobinVec<T> {
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
         pool.for_threads(move |thread_index, colocation_index| {
-            if colocation_index < colocations_count {
-                // Get the specific pinned vector for this NUMA node
-                let node_vec = safe_ptr.get_mut_at(colocation_index);
-                let pool = pool_ptr.get_mut();
+            if colocation_index >= colocations_count {
+                return;
+            }
 
-                let node_len = if colocation_index < extra_elements {
-                    elements_per_node + 1
-                } else {
-                    elements_per_node
-                };
+            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let pool = pool_ptr.get_mut();
+            let target_len = node_len(colocation_index);
+            let current_len = node_vec.len();
+            if target_len == current_len {
+                return;
+            }
 
-                let current_len = node_vec.len();
-                let threads_in_colocation = pool.count_threads_in(colocation_index);
-                let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
+            let threads_in_colocation = pool.count_threads_in(colocation_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
 
-                match node_len.cmp(&current_len) {
-                    std::cmp::Ordering::Greater => {
-                        // Growing: construct new elements in parallel
-                        let new_elements = node_len - current_len;
-                        let split = IndexedSplit::new(new_elements, threads_in_colocation);
-                        let range = split.get(thread_local_index);
+            if target_len > current_len {
+                // Growing: construct new elements in parallel
+                let new_elements = target_len - current_len;
+                let split = IndexedSplit::new(new_elements, threads_in_colocation);
+                let range = split.get(thread_local_index);
 
-                        unsafe {
-                            let ptr = node_vec.as_mut_ptr();
-                            for i in range {
-                                let idx = current_len + i;
-                                core::ptr::write(ptr.add(idx), value.clone());
-                            }
-                        }
+                unsafe {
+                    let ptr = node_vec.as_mut_ptr();
+                    for i in range {
+                        core::ptr::write(ptr.add(current_len + i), value.clone());
                     }
-                    std::cmp::Ordering::Less => {
-                        // Shrinking: drop elements in parallel
-                        let elements_to_drop = current_len - node_len;
-                        let split = IndexedSplit::new(elements_to_drop, threads_in_colocation);
-                        let range = split.get(thread_local_index);
+                }
+            } else {
+                // Shrinking: drop elements in parallel
+                let elements_to_drop = current_len - target_len;
+                let split = IndexedSplit::new(elements_to_drop, threads_in_colocation);
+                let range = split.get(thread_local_index);
 
-                        unsafe {
-                            let ptr = node_vec.as_mut_ptr();
-                            for i in range {
-                                let idx = node_len + i;
-                                core::ptr::drop_in_place(ptr.add(idx));
-                            }
-                        }
-                    }
-                    std::cmp::Ordering::Equal => {
-                        // No change needed
+                unsafe {
+                    let ptr = node_vec.as_mut_ptr();
+                    for i in range {
+                        core::ptr::drop_in_place(ptr.add(target_len + i));
                     }
                 }
             }
@@ -2508,16 +2505,11 @@ impl<T> RoundRobinVec<T> {
 
         // Step 3: Update lengths after parallel operations
         for i in 0..colocations_count {
-            let node_len = if i < extra_elements {
-                elements_per_node + 1
-            } else {
-                elements_per_node
-            };
-            self.colocations[i].len = node_len;
+            self.colocations[i].len = node_len(i);
         }
 
         self.total_length = new_len;
-        self.total_capacity = self.capacity(); // Recalculate total capacity
+        self.total_capacity = self.capacity();
         Ok(())
     }
 }
