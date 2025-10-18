@@ -66,6 +66,12 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CacheAligned<T>(pub T);
 
+// Compile-time assertion that alignment matches DEFAULT_ALIGNMENT
+const _: () = assert!(
+    core::mem::align_of::<CacheAligned<u8>>() == DEFAULT_ALIGNMENT,
+    "CacheAligned alignment must match DEFAULT_ALIGNMENT"
+);
+
 /// A generic spin mutex that uses CPU-specific pause instructions for efficient busy-waiting.
 ///
 /// This is a low-level synchronization primitive that spins on a busy loop rather than
