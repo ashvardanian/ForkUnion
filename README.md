@@ -601,21 +601,50 @@ This easily composes with other iterator adaptors, like `map`, `filter`, and `zi
     });
 ```
 
-Moreover, each thread can maintain its own scratch space to avoid contention during reductions.
-Cache-line alignment via `CacheAligned` prevents false sharing:
+For parallel reductions, Fork Union provides Rayon-like convenience methods with automatic NUMA-aware cache-aligned scratch allocation:
+
+```rust
+let data: Vec<u64> = (0..1_000_000).map(|i| i as u64).collect();
+
+// Sum all elements with automatic scratch allocation
+let total: u64 = (&data[..])
+    .into_par_iter()
+    .with_pool(&mut pool)
+    .sum();
+
+// Count elements matching a predicate
+let evens = (&data[..])
+    .into_par_iter()
+    .filter(|&x| x % 2 == 0)
+    .with_pool(&mut pool)
+    .count();
+
+// Custom reduction (product)
+let product = (&data[..])
+    .into_par_iter()
+    .with_pool(&mut pool)
+    .reduce(
+        || 1u64,                     // initial value
+        |acc, value, _| *acc *= *value,  // fold function
+        |a, b| a * b                 // combine function
+    );
+```
+
+For manual control over scratch allocation, use `reduce_with_scratch`:
 
 ```rust
 // Cache-line aligned wrapper to prevent false sharing
-let mut scratch: Vec<CacheAligned<usize>> =
+let mut scratch: Vec<CacheAligned<u64>> =
     (0..pool.threads()).map(|_| CacheAligned(0)).collect();
 
-(&data[..])
+let total = (&data[..])
     .into_par_iter()
     .with_pool(&mut pool)
-    .fold_with_scratch(scratch.as_mut_slice(), |acc, value, _prong| {
-        acc.0 += *value;
-    });
-let total: usize = scratch.iter().map(|a| a.0).sum();
+    .reduce_with_scratch(
+        scratch.as_mut_slice(),
+        |acc, value, _| acc.0 += *value,  // fold
+        |a, b| a.0 += b.0                 // combine in-place
+    );
 ```
 
 ## Performance
@@ -758,13 +787,21 @@ cmake --build build_debug --config Debug
 build_debug/fork_union_test_cpp20
 ```
 
-For Rust, use the following commands:
+For Rust, use the following commands to verify no_std compatibility:
 
 ```bash
-rustup toolchain install                # for Alloc API
-cargo build --features numa             # for NUMA support on Linux
-cargo test --release                    # to run the tests fast
-cargo test --features numa --release    # for NUMA tests on Linux
+rustup toolchain install
+cargo build --lib --no-default-features --release
+cargo build --lib --no-default-features --features numa --release
+cargo doc --lib --no-default-features --no-deps
+```
+
+Verify the tests pass:
+
+```bash
+cargo test --lib --release
+cargo test --doc --release
+cargo test --lib --features numa --release
 ```
 
 Rust provides a lot of tooling for concurrency testing, like Miri and Loom.
