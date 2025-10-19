@@ -32,14 +32,14 @@ jobs:
             CMakeLists.txt:^\s*VERSION (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
             README.md:^\s*GIT_TAG v(\d+\.\d+\.\d+)
-            README.md:^\s*fork_union\s*=\s*"(\d+\.\d+\.\d+)"
-            README.md:^\s*fork_union\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
+            README.md:^\s*forkunion\s*=\s*"(\d+\.\d+\.\d+)"
+            README.md:^\s*forkunion\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
           update-major-version-in: |
-            include/fork_union.hpp:^#define FORK_UNION_VERSION_MAJOR (\d+)
+            include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
           update-minor-version-in: |
-            include/fork_union.hpp:^#define FORK_UNION_VERSION_MINOR (\d+)
+            include/forkunion.hpp:^#define FORKUNION_VERSION_MINOR (\d+)
           update-patch-version-in: |
-            include/fork_union.hpp:^#define FORK_UNION_VERSION_PATCH (\d+)
+            include/forkunion.hpp:^#define FORKUNION_VERSION_PATCH (\d+)
           dry-run: "true"
 
   test_ubuntu_gcc:
@@ -62,15 +62,15 @@ jobs:
       - name: Test C++
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_cpp17
-          build_artifacts/fork_union_test_cpp20
-          build_artifacts/fork_union_test_cpp23
+          build_artifacts/forkunion_test_cpp17
+          build_artifacts/forkunion_test_cpp20
+          build_artifacts/forkunion_test_cpp23
 
       - name: Test C
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_c11
-          build_artifacts/fork_union_test_c_gcc_nested
+          build_artifacts/forkunion_test_c11
+          build_artifacts/forkunion_test_c_gcc_nested
 
       - name: Set up Rust
         run: |
@@ -103,15 +103,15 @@ jobs:
       - name: Test C++
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_cpp17
-          build_artifacts/fork_union_test_cpp20
-          build_artifacts/fork_union_test_cpp23
+          build_artifacts/forkunion_test_cpp17
+          build_artifacts/forkunion_test_cpp20
+          build_artifacts/forkunion_test_cpp23
 
       - name: Test C
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_c11
-          build_artifacts/fork_union_test_c_clang_blocks
+          build_artifacts/forkunion_test_c11
+          build_artifacts/forkunion_test_c_clang_blocks
 
       - name: Set up Rust
         run: |
@@ -140,14 +140,14 @@ jobs:
       - name: Test C++
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_cpp17
-          build_artifacts/fork_union_test_cpp20
-          build_artifacts/fork_union_test_cpp23
+          build_artifacts/forkunion_test_cpp17
+          build_artifacts/forkunion_test_cpp20
+          build_artifacts/forkunion_test_cpp23
 
       - name: Test C
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_c11
+          build_artifacts/forkunion_test_c11
 
       - name: Set up Rust
         run: |
@@ -184,15 +184,15 @@ jobs:
       - name: Test C++
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_cpp17
-          build_artifacts/fork_union_test_cpp20
-          build_artifacts/fork_union_test_cpp23
+          build_artifacts/forkunion_test_cpp17
+          build_artifacts/forkunion_test_cpp20
+          build_artifacts/forkunion_test_cpp23
 
       - name: Test C
         run: |
           set -euxo pipefail
-          build_artifacts/fork_union_test_c11
-          build_artifacts/fork_union_test_c_clang_blocks
+          build_artifacts/forkunion_test_c11
+          build_artifacts/forkunion_test_c_clang_blocks
 
   test_windows:
     name: Windows
@@ -211,9 +211,9 @@ jobs:
       - name: Test C++
         run: |
           $ErrorActionPreference = "Stop"
-          .\build_artifacts\fork_union_test_cpp17.exe
-          .\build_artifacts\fork_union_test_cpp20.exe
-          .\build_artifacts\fork_union_test_cpp23.exe
+          .\build_artifacts\forkunion_test_cpp17.exe
+          .\build_artifacts\forkunion_test_cpp20.exe
+          .\build_artifacts\forkunion_test_cpp23.exe
 
       - name: Test C
         run: |
@@ -251,9 +251,9 @@ jobs:
       - name: Test C++
         run: |
           $ErrorActionPreference = "Stop"
-          .\build_artifacts\fork_union_test_cpp17.exe
-          .\build_artifacts\fork_union_test_cpp20.exe
-          .\build_artifacts\fork_union_test_cpp23.exe
+          .\build_artifacts\forkunion_test_cpp17.exe
+          .\build_artifacts\forkunion_test_cpp20.exe
+          .\build_artifacts\forkunion_test_cpp23.exe
 
       - name: Test C
         run: |
@@ -274,16 +274,16 @@ jobs:
       - name: Build C++
         run: |
           cmake -B build_i386 -D CMAKE_C_FLAGS=-m32 -D CMAKE_CXX_FLAGS=-m32 -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_i386 --target fork_union_test_cpp17 fork_union_test_cpp20 fork_union_test_c11
+          cmake --build build_i386 --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
 
       - name: Test C++
         run: |
-          build_i386/fork_union_test_cpp17
-          build_i386/fork_union_test_cpp20
+          build_i386/forkunion_test_cpp17
+          build_i386/forkunion_test_cpp20
 
       - name: Test C
         run: |
-          build_i386/fork_union_test_c11
+          build_i386/forkunion_test_c11
 
   test_armhf:
     name: Cross-compilation (armhf)
@@ -300,16 +300,16 @@ jobs:
       - name: Build C++
         run: |
           cmake -B build_armhf -D CMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -D CMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_armhf --target fork_union_test_cpp17 fork_union_test_cpp20 fork_union_test_c11
+          cmake --build build_armhf --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
 
       - name: Test C++
         run: |
-          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/fork_union_test_cpp17
-          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/fork_union_test_cpp20
+          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/forkunion_test_cpp17
+          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/forkunion_test_cpp20
 
       - name: Test C
         run: |
-          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/fork_union_test_c11
+          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/forkunion_test_c11
 
   test_s390x:
     name: Cross-compilation (s390x)
@@ -326,13 +326,13 @@ jobs:
       - name: Build C++
         run: |
           cmake -B build_s390x -D CMAKE_C_COMPILER=s390x-linux-gnu-gcc -D CMAKE_CXX_COMPILER=s390x-linux-gnu-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_s390x --target fork_union_test_cpp17 fork_union_test_cpp20 fork_union_test_c11
+          cmake --build build_s390x --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
 
       - name: Test C++
         run: |
-          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/fork_union_test_cpp17
-          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/fork_union_test_cpp20
+          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/forkunion_test_cpp17
+          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/forkunion_test_cpp20
 
       - name: Test C
         run: |
-          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/fork_union_test_c11
+          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/forkunion_test_c11

@@ -1,10 +1,10 @@
 /**
  *  @brief  Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file   fork_union.hpp
+ *  @file   forkunion.hpp
  *  @author Ash Vardanian
  *  @date   May 2, 2025
  *
- *  Fork Union provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
+ *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
  *  avoiding dynamic memory allocations, exceptions, system calls, and heavy Compare-And-Swap instructions.
  *  The library leverages the "weak memory model" to allow Arm and IBM Power CPUs to aggressively optimize
  *  execution at runtime. It also aggressively tests against overflows on smaller index types, and is safe
@@ -13,9 +13,9 @@
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <fork_union.hpp> // `fu::basic_pool_t`
+ *  #include <forkunion.hpp> // `fu::basic_pool_t`
  *
- *  using fu = ashvardanian::fork_union;
+ *  using fu = ashvardanian::forkunion;
  *  int main(int argc, char *argv[]) {
  *
  *      fu::basic_pool_t pool;
@@ -78,9 +78,9 @@
 #include <new>     // `std::hardware_destructive_interference_size`
 #include <array>   // `std::array`
 
-#define FORK_UNION_VERSION_MAJOR 2
-#define FORK_UNION_VERSION_MINOR 3
-#define FORK_UNION_VERSION_PATCH 0
+#define FORKUNION_VERSION_MAJOR 2
+#define FORKUNION_VERSION_MINOR 3
+#define FORKUNION_VERSION_PATCH 0
 
 #if !defined(FU_ALLOW_UNSAFE)
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
@@ -206,7 +206,7 @@
 #endif
 
 namespace ashvardanian {
-namespace fork_union {
+namespace forkunion {
 
 #pragma region - Helpers and Constants
 
@@ -986,9 +986,9 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <fork_union.hpp> // `basic_pool_t`
+ *  #include <forkunion.hpp> // `basic_pool_t`
  *
- *  using fu = ashvardanian::fork_union;
+ *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::basic_pool_t pool; // ? Alias to `fu::basic_pool<>` template
  *      if (!pool.try_spawn(std::thread::hardware_concurrency())) return EXIT_FAILURE;
@@ -1004,9 +1004,9 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <fork_union.hpp> // `basic_pool_t`
+ *  #include <forkunion.hpp> // `basic_pool_t`
  *
- *  using fu = ashvardanian::fork_union;
+ *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::basic_pool_t first_pool, second_pool;
  *      if (!first_pool.try_spawn(2) || !second_pool.try_spawn(2, fu::caller_exclusive_k)) return EXIT_FAILURE;
@@ -2605,9 +2605,9 @@ struct linux_colocated_pool {
     linux_colocated_pool &operator=(linux_colocated_pool &&) = delete;
     linux_colocated_pool &operator=(linux_colocated_pool const &) = delete;
 
-    explicit linux_colocated_pool(char const *name = "fork_union") noexcept {
+    explicit linux_colocated_pool(char const *name = "forkunion") noexcept {
         // Accept NULL or empty names by falling back to a sensible default
-        char const *effective_name = (name && name[0] != '\0') ? name : "fork_union";
+        char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::strncpy(name_, effective_name, sizeof(name_) - 1);
         name_[sizeof(name_) - 1] = '\0';
     }
@@ -3386,12 +3386,11 @@ struct linux_distributed_pool {
     linux_distributed_pool &operator=(linux_distributed_pool &&) = delete;
     linux_distributed_pool &operator=(linux_distributed_pool const &) = delete;
 
-    linux_distributed_pool(numa_topology_t topo = {}) noexcept
-        : linux_distributed_pool("fork_union", std::move(topo)) {}
+    linux_distributed_pool(numa_topology_t topo = {}) noexcept : linux_distributed_pool("forkunion", std::move(topo)) {}
 
     explicit linux_distributed_pool(char const *name, numa_topology_t topo = {}) noexcept : topology_(std::move(topo)) {
         // Accept null or empty names by falling back to a sensible default
-        char const *effective_name = (name && name[0] != '\0') ? name : "fork_union";
+        char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::strncpy(name_, effective_name, sizeof(name_) - 1);
         name_[sizeof(name_) - 1] = '\0';
     }
@@ -4105,5 +4104,5 @@ struct log_capabilities_t {
 };
 #pragma endregion - Logging
 
-} // namespace fork_union
+} // namespace forkunion
 } // namespace ashvardanian

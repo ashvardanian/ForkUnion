@@ -35,14 +35,14 @@ jobs:
             CMakeLists.txt:^\s*VERSION (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
             README.md:^\s*GIT_TAG v(\d+\.\d+\.\d+)
-            README.md:^\s*fork_union\s*=\s*"(\d+\.\d+\.\d+)"
-            README.md:^\s*fork_union\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
+            README.md:^\s*forkunion\s*=\s*"(\d+\.\d+\.\d+)"
+            README.md:^\s*forkunion\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
           update-major-version-in: |
-            include/fork_union.hpp:^#define FORK_UNION_VERSION_MAJOR (\d+)
+            include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
           update-minor-version-in: |
-            include/fork_union.hpp:^#define FORK_UNION_VERSION_MINOR (\d+)
+            include/forkunion.hpp:^#define FORKUNION_VERSION_MINOR (\d+)
           update-patch-version-in: |
-            include/fork_union.hpp:^#define FORK_UNION_VERSION_PATCH (\d+)
+            include/forkunion.hpp:^#define FORKUNION_VERSION_PATCH (\d+)
           dry-run: "false"
           push: "true"
           create-release: "true"

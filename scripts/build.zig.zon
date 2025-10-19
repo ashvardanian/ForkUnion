@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.15.0",
 
     .dependencies = .{
-        .fork_union = .{
+        .forkunion = .{
             .path = "..",
         },
         .libxev = .{

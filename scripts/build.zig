@@ -6,14 +6,14 @@ pub fn build(b: *std.Build) void {
     const enable_numa = b.option(bool, "numa", "Enable NUMA support (Linux only)") orelse
         (target.result.os.tag == .linux);
 
-    // Get the fork_union module and artifact from parent
-    const fork_union_dep = b.dependency("fork_union", .{
+    // Get the forkunion module and artifact from parent
+    const forkunion_dep = b.dependency("forkunion", .{
         .target = target,
         .optimize = optimize,
         .numa = enable_numa,
     });
-    const fork_union_module = fork_union_dep.module("fork_union");
-    const fork_union_artifact = fork_union_dep.artifact("fork_union");
+    const forkunion_module = forkunion_dep.module("forkunion");
+    const forkunion_artifact = forkunion_dep.artifact("forkunion");
 
     // N-body benchmark executable
     const nbody = b.addExecutable(.{
@@ -27,14 +27,14 @@ pub fn build(b: *std.Build) void {
 
     nbody.linkLibC();
     nbody.linkLibCpp();
-    nbody.linkLibrary(fork_union_artifact);
+    nbody.linkLibrary(forkunion_artifact);
     if (target.result.os.tag == .linux) {
         nbody.root_module.linkSystemLibrary("pthread", .{});
         if (enable_numa) {
             nbody.root_module.linkSystemLibrary("numa", .{});
         }
     }
-    nbody.root_module.addImport("fork_union", fork_union_module);
+    nbody.root_module.addImport("forkunion", forkunion_module);
 
     // Add benchmark dependencies
     if (b.lazyDependency("libxev", .{

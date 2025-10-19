@@ -1,29 +1,29 @@
 //! N-Body simulation benchmark comparing different parallelism libraries
 //!
 //! Compares synchronization overhead of different thread pool implementations:
-//! - fork_union_static: Static work division (N tasks pre-divided into thread slices)
-//! - fork_union_dynamic: Dynamic work-stealing (Fork Union's work-stealing scheduler)
+//! - forkunion_static: Static work division (N tasks pre-divided into thread slices)
+//! - forkunion_dynamic: Dynamic work-stealing (ForkUnion's work-stealing scheduler)
 //! - std: Static work division (std.Thread.Pool with manual slicing)
 //! - libxev: Dynamic lock-free queue (Mitchell Hashimoto's lock-free thread pool)
 //!
 //! Environment variables:
 //! - NBODY_COUNT: number of bodies (default: number of threads)
 //! - NBODY_ITERATIONS: number of iterations (default: 1000)
-//! - NBODY_BACKEND: fork_union_static, fork_union_dynamic, std, libxev
+//! - NBODY_BACKEND: forkunion_static, forkunion_dynamic, std, libxev
 //! - NBODY_THREADS: number of threads (default: CPU count)
 //!
 //! Build and run from scripts/ directory:
 //! ```sh
 //! cd scripts
 //! zig build -Doptimize=ReleaseFast
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_static ./zig-out/bin/nbody
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_dynamic ./zig-out/bin/nbody
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static ./zig-out/bin/nbody
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_dynamic ./zig-out/bin/nbody
 //! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=libxev ./zig-out/bin/nbody
 //! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=std ./zig-out/bin/nbody
 //! ```
 
 const std = @import("std");
-const fu = @import("fork_union");
+const fu = @import("forkunion");
 const xev = @import("xev");
 
 // Physical constants
@@ -84,7 +84,7 @@ inline fn applyForce(b: *Body, f: *const Vector3) void {
 }
 
 // ============================================================================
-// Fork Union Kernels
+// ForkUnion Kernels
 // ============================================================================
 
 fn iterationForkUnionStatic(pool: *fu.Pool, bodies: []Body, forces: []Vector3) void {
@@ -337,35 +337,26 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Parse environment variables
-    const n_threads = if (std.process.getEnvVarOwned(allocator, "NBODY_THREADS")) |str|
-        blk: {
-            defer allocator.free(str);
-            break :blk try std.fmt.parseInt(usize, str, 10);
-        }
-    else |_|
-        fu.countLogicalCores();
+    const n_threads = if (std.process.getEnvVarOwned(allocator, "NBODY_THREADS")) |str| blk: {
+        defer allocator.free(str);
+        break :blk try std.fmt.parseInt(usize, str, 10);
+    } else |_| fu.countLogicalCores();
 
-    const n_iters = if (std.process.getEnvVarOwned(allocator, "NBODY_ITERATIONS")) |str|
-        blk: {
-            defer allocator.free(str);
-            break :blk try std.fmt.parseInt(usize, str, 10);
-        }
-    else |_|
-        1000;
+    const n_iters = if (std.process.getEnvVarOwned(allocator, "NBODY_ITERATIONS")) |str| blk: {
+        defer allocator.free(str);
+        break :blk try std.fmt.parseInt(usize, str, 10);
+    } else |_| 1000;
 
-    const n_bodies = if (std.process.getEnvVarOwned(allocator, "NBODY_COUNT")) |str|
-        blk: {
-            defer allocator.free(str);
-            break :blk try std.fmt.parseInt(usize, str, 10);
-        }
-    else |_|
-        n_threads;
+    const n_bodies = if (std.process.getEnvVarOwned(allocator, "NBODY_COUNT")) |str| blk: {
+        defer allocator.free(str);
+        break :blk try std.fmt.parseInt(usize, str, 10);
+    } else |_| n_threads;
 
     const backend = if (std.process.getEnvVarOwned(allocator, "NBODY_BACKEND")) |str|
         str
     else |_|
-        "fork_union_static";
-    defer if (!std.mem.eql(u8, backend, "fork_union_static")) allocator.free(backend);
+        "forkunion_static";
+    defer if (!std.mem.eql(u8, backend, "forkunion_static")) allocator.free(backend);
 
     // Allocate bodies and forces
     const bodies = try allocator.alloc(Body, n_bodies);
@@ -391,14 +382,14 @@ pub fn main() !void {
     }
 
     // Run the chosen backend
-    if (std.mem.eql(u8, backend, "fork_union_static")) {
+    if (std.mem.eql(u8, backend, "forkunion_static")) {
         var pool = try fu.Pool.init(n_threads, .inclusive);
         defer pool.deinit();
 
         for (0..n_iters) |_| {
             iterationForkUnionStatic(&pool, bodies, forces);
         }
-    } else if (std.mem.eql(u8, backend, "fork_union_dynamic")) {
+    } else if (std.mem.eql(u8, backend, "forkunion_dynamic")) {
         var pool = try fu.Pool.init(n_threads, .inclusive);
         defer pool.deinit();
 
@@ -425,7 +416,7 @@ pub fn main() !void {
         }
     } else {
         std.debug.print("Unknown backend: {s}\n", .{backend});
-        std.debug.print("Available backends: fork_union_static, fork_union_dynamic, std, libxev\n", .{});
+        std.debug.print("Available backends: forkunion_static, forkunion_dynamic, std, libxev\n", .{});
         return error.UnknownBackend;
     }
 }

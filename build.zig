@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 pub fn build(b: *std.Build) void {
     // Check Zig version compatibility (requires 0.15.0 or later)
     if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 15) {
-        @panic("Fork Union requires Zig 0.15.0 or later. Please upgrade your Zig toolchain.");
+        @panic("ForkUnion requires Zig 0.15.0 or later. Please upgrade your Zig toolchain.");
     }
 
     const target = b.standardTargetOptions(.{});
@@ -14,9 +14,9 @@ pub fn build(b: *std.Build) void {
     const enable_numa = b.option(bool, "numa", "Enable NUMA support (Linux only)") orelse
         (target.result.os.tag == .linux);
 
-    // Compile the C++ library from c/lib.cpp (like Rust's build.rs does)
+    // Compile the C++ library from c/forkunion.cpp (like Rust's build.rs does)
     const lib = b.addLibrary(.{
-        .name = "fork_union",
+        .name = "forkunion",
         .linkage = .static,
         .root_module = b.createModule(.{
             .target = target,
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
         };
 
     lib.addCSourceFile(.{
-        .file = b.path("c/lib.cpp"),
+        .file = b.path("c/forkunion.cpp"),
         .flags = cpp_flags,
     });
 
@@ -50,9 +50,9 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(lib);
 
-    // Create fork_union module for use as a dependency
-    _ = b.addModule("fork_union", .{
-        .root_source_file = b.path("zig/fork_union.zig"),
+    // Create forkunion module for use as a dependency
+    _ = b.addModule("forkunion", .{
+        .root_source_file = b.path("zig/forkunion.zig"),
         .target = target,
     });
 
@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run library tests");
     const lib_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zig/fork_union.zig"),
+            .root_source_file = b.path("zig/forkunion.zig"),
             .target = target,
             .optimize = optimize,
         }),

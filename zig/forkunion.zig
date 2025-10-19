@@ -1,15 +1,15 @@
 //! Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
 //!
-//! Fork Union provides a minimalistic cross-platform thread-pool implementation for fork-join
+//! ForkUnion provides a minimalistic cross-platform thread-pool implementation for fork-join
 //! parallelism, avoiding dynamic memory allocations, exceptions, system calls, and heavy
 //! Compare-And-Swap instructions on the hot path.
 //!
-//! Unlike std.Thread.Pool (which is a task queue for async work), Fork Union is designed for
+//! Unlike std.Thread.Pool (which is a task queue for async work), ForkUnion is designed for
 //! data parallelism and tight parallel loops - think OpenMP's `#pragma omp parallel for`.
 //!
 //! Basic usage:
 //! ```zig
-//! const fu = @import("fork_union");
+//! const fu = @import("forkunion");
 //!
 //! var pool = try fu.Pool.init(4, .inclusive);
 //! defer pool.deinit();

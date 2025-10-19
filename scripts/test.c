@@ -4,7 +4,7 @@
 #include <stdbool.h>   // `bool`, `true`, `false`
 #include <string.h>    // `memset`
 
-#include <fork_union.h>
+#include <forkunion.h>
 
 /* Constants */
 static const size_t default_parallel_tasks_k = 10000; // 10K
@@ -350,7 +350,7 @@ static bool test_clang_blocks(void) {
 #endif // defined(__clang__) && defined(__BLOCKS__)
 
 int main(void) {
-    printf("Welcome to the Fork Union library test suite (C API)!\n");
+    printf("Welcome to the ForkUnion library test suite (C API)!\n");
 
     char const *caps = fu_capabilities_string();
     if (!caps) {

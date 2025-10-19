@@ -12,21 +12,21 @@ if (POLICY CMP0091)
 endif ()
 
 project(
-    fork_union
+    forkunion
     VERSION 2.3.0
     DESCRIPTION "Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library"
     LANGUAGES CXX
 )
 
 # Control strict interface warnings for consumers
-option(FORK_UNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
+option(FORKUNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
 
 # Control NUMA enablement: AUTO, ON, OFF
-set(FORK_UNION_ENABLE_NUMA
+set(FORKUNION_ENABLE_NUMA
     "AUTO"
     CACHE STRING "NUMA support mode: AUTO, ON, or OFF"
 )
-set_property(CACHE FORK_UNION_ENABLE_NUMA PROPERTY STRINGS "AUTO;ON;OFF")
+set_property(CACHE FORKUNION_ENABLE_NUMA PROPERTY STRINGS "AUTO;ON;OFF")
 
 # Enforce C++17 as the minimum standard for the project.
 set(PROJECT_CXX_STANDARD 17)
@@ -34,24 +34,24 @@ set(PROJECT_CXX_EXTENSIONS OFF)
 set(PROJECT_CXX_STANDARD_REQUIRED ON)
 
 # Header-only interface library
-add_library(fork_union INTERFACE)
+add_library(forkunion INTERFACE)
 target_include_directories(
-    fork_union INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
+    forkunion INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 
 # Set C++17 requirement and features properly for library consumers
-target_compile_features(fork_union INTERFACE cxx_std_17)
+target_compile_features(forkunion INTERFACE cxx_std_17)
 set_target_properties(
-    fork_union
+    forkunion
     PROPERTIES CXX_STANDARD 17
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
 )
 
 # Strictest possible compilation flags with fatal warnings
-if (FORK_UNION_STRICT)
+if (FORKUNION_STRICT)
     target_compile_options(
-        fork_union
+        forkunion
         INTERFACE # GCC/Clang: Maximum warnings + treat warnings as errors + security hardening
                   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall
                   -Wextra
@@ -111,21 +111,21 @@ if (FORK_UNION_STRICT)
     )
 endif ()
 
-# Pre-compiled libraries built from `c/lib.cpp`
-add_library(fork_union_dynamic SHARED c/lib.cpp)
-add_library(fork_union_static STATIC c/lib.cpp)
+# Pre-compiled libraries built from `c/forkunion.cpp`
+add_library(forkunion_dynamic SHARED c/forkunion.cpp)
+add_library(forkunion_static STATIC c/forkunion.cpp)
 
 # Prefer C++20 for library builds
 set_target_properties(
-    fork_union_dynamic fork_union_static
+    forkunion_dynamic forkunion_static
     PROPERTIES CXX_STANDARD 20
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
 )
 
 # Re-use the public interface of the header-only target
-target_link_libraries(fork_union_dynamic PUBLIC fork_union)
-target_link_libraries(fork_union_static PUBLIC fork_union)
+target_link_libraries(forkunion_dynamic PUBLIC forkunion)
+target_link_libraries(forkunion_static PUBLIC forkunion)
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
@@ -134,7 +134,7 @@ check_cxx_compiler_flag("-fcf-protection=full" HAS_CFP)
 
 # Security hardening flags for compiled libraries
 target_compile_options(
-    fork_union_dynamic
+    forkunion_dynamic
     PRIVATE # Stack protection and buffer overflow detection
             $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong
             -D_FORTIFY_SOURCE=2>
@@ -147,7 +147,7 @@ target_compile_options(
             /guard:cf>
 )
 target_compile_options(
-    fork_union_static
+    forkunion_static
     PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong
             -D_FORTIFY_SOURCE=2>
             $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
@@ -159,7 +159,7 @@ target_compile_options(
 
 # Hardened linking flags
 target_link_options(
-    fork_union_dynamic
+    forkunion_dynamic
     PRIVATE
     # Enable RELRO, stack canaries, and NX bit
     $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
@@ -169,7 +169,7 @@ target_link_options(
     /guard:cf>
 )
 target_link_options(
-    fork_union_static PRIVATE $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
+    forkunion_static PRIVATE $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
     $<$<CXX_COMPILER_ID:MSVC>:/guard:cf>
 )
 
@@ -225,9 +225,9 @@ endif ()
 # Tests & benchmarking scripts
 include(CTest)
 
-option(FORK_UNION_BUILD_TESTS "Build fork_union tests" ON)
+option(FORKUNION_BUILD_TESTS "Build forkunion tests" ON)
 
-if (BUILD_TESTING AND FORK_UNION_BUILD_TESTS)
+if (BUILD_TESTING AND FORKUNION_BUILD_TESTS)
     enable_testing()
     add_subdirectory(scripts)
 endif ()
@@ -237,14 +237,14 @@ include(GNUInstallDirs)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(
-    TARGETS fork_union
-    EXPORT fork_unionTargets
+    TARGETS forkunion
+    EXPORT forkunionTargets
     INCLUDES
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 install(
-    TARGETS fork_union_dynamic fork_union_static
-    EXPORT fork_unionTargets # same export set
+    TARGETS forkunion_dynamic forkunion_static
+    EXPORT forkunionTargets # same export set
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} # .so / .dylib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} # .a
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} # .dll on Windows
@@ -253,28 +253,28 @@ install(
 # Export config files for find_package
 include(CMakePackageConfigHelpers)
 write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfigVersion.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfigVersion.cmake"
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY AnyNewerVersion
 )
 
 configure_package_config_file(
-    cmake/fork_unionConfig.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfig.cmake"
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fork_union
+    cmake/forkunionConfig.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfig.cmake"
-              "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfigVersion.cmake"
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fork_union
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfig.cmake"
+              "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfigVersion.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
 install(
-    EXPORT fork_unionTargets
-    NAMESPACE fork_union::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fork_union
+    EXPORT forkunionTargets
+    NAMESPACE forkunion::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
-# NUMA selection logic controlled by FORK_UNION_ENABLE_NUMA
+# NUMA selection logic controlled by FORKUNION_ENABLE_NUMA
 if (UNIX AND NOT APPLE) # Linux
     # Find POSIX threads library
     find_package(Threads)
@@ -288,23 +288,23 @@ if (UNIX AND NOT APPLE) # Linux
         message(STATUS "libNUMA not found - NUMA-dependent features unavailable")
     endif ()
 
-    if (FORK_UNION_ENABLE_NUMA STREQUAL "ON")
+    if (FORKUNION_ENABLE_NUMA STREQUAL "ON")
         if (Threads_FOUND AND NUMA_FOUND)
-            target_link_libraries(fork_union INTERFACE ${NUMA_LIBRARY} Threads::Threads)
-            target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=1)
+            target_link_libraries(forkunion INTERFACE ${NUMA_LIBRARY} Threads::Threads)
+            target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=1)
         else ()
-            message(FATAL_ERROR "FORK_UNION_ENABLE_NUMA=ON, but Threads or libnuma not found")
+            message(FATAL_ERROR "FORKUNION_ENABLE_NUMA=ON, but Threads or libnuma not found")
         endif ()
-    elseif (FORK_UNION_ENABLE_NUMA STREQUAL "AUTO")
+    elseif (FORKUNION_ENABLE_NUMA STREQUAL "AUTO")
         if (Threads_FOUND AND NUMA_FOUND)
-            target_link_libraries(fork_union INTERFACE ${NUMA_LIBRARY} Threads::Threads)
-            target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=1)
+            target_link_libraries(forkunion INTERFACE ${NUMA_LIBRARY} Threads::Threads)
+            target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=1)
         else ()
-            target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=0)
+            target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=0)
         endif ()
     else () # OFF
-        target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=0)
+        target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=0)
     endif ()
 else () # Non-Linux platforms
-    target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=0)
+    target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=0)
 endif ()

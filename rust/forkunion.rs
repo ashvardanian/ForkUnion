@@ -1,6 +1,6 @@
 //! Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
 //!
-//! Fork Union provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
+//! ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
 //! avoiding dynamic memory allocations, exceptions, system calls, and heavy Compare-And-Swap instructions.
 //! The library leverages the "weak memory model" to allow Arm and IBM Power CPUs to aggressively optimize
 //! execution at runtime. It also aggressively tests against overflows on smaller index types, and is safe
@@ -27,7 +27,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Default alignment for preventing false sharing between threads.
 ///
 /// Set to 128 bytes to account for adjacent cache-line prefetching on modern CPUs.
-/// This matches the C++ `default_alignment_k` constant defined in `fork_union.hpp`.
+/// This matches the C++ `default_alignment_k` constant defined in `forkunion.hpp`.
 ///
 /// On x86, most CPUs fetch 2 cache lines (128 bytes) at once with spatial prefetching enabled.
 /// This conservative padding prevents false sharing even with aggressive prefetch settings.
@@ -45,7 +45,7 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::{CacheAligned, ThreadPool};
+/// use forkunion::{CacheAligned, ThreadPool};
 ///
 /// let mut pool = ThreadPool::try_spawn(4).unwrap();
 /// let data: Vec<usize> = (0..1000).collect();
@@ -85,7 +85,7 @@ const _: () = assert!(
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 ///
 /// // Create a spin mutex with pause instructions enabled
 /// let mutex = BasicSpinMutex::<i32, true>::new(42);
@@ -117,7 +117,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     /// ```
@@ -136,7 +136,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     /// let mut guard = mutex.lock();
@@ -164,7 +164,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     ///
@@ -195,7 +195,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     /// assert!(!mutex.is_locked());
@@ -219,7 +219,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(42);
     /// let data = mutex.into_inner();
@@ -237,7 +237,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut mutex = BasicSpinMutex::<i32, true>::new(0);
     /// *mutex.get_mut() = 42;
@@ -304,7 +304,7 @@ impl<'a, T, const PAUSE: bool> Drop for BasicSpinMutexGuard<'a, T, PAUSE> {
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 ///
 /// let mutex = SpinMutex::new(42);
 /// let mut guard = mutex.lock();
@@ -506,17 +506,17 @@ pub fn numa_enabled() -> bool {
     unsafe { fu_enabled_numa() != 0 }
 }
 
-/// Returns the major version number of the Fork Union library.
+/// Returns the major version number of the ForkUnion library.
 pub fn version_major() -> usize {
     unsafe { fu_version_major() as usize }
 }
 
-/// Returns the minor version number of the Fork Union library.
+/// Returns the minor version number of the ForkUnion library.
 pub fn version_minor() -> usize {
     unsafe { fu_version_minor() as usize }
 }
 
-/// Returns the patch version number of the Fork Union library.
+/// Returns the patch version number of the ForkUnion library.
 pub fn version_patch() -> usize {
     unsafe { fu_version_patch() as usize }
 }
@@ -550,7 +550,7 @@ pub fn version() -> (usize, usize, usize) {
 /// Basic usage with simple computations:
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 ///
 /// // Create a thread pool with 4 threads
 /// let mut pool = spawn(4);
@@ -632,7 +632,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// // Create a pool that uses 4 threads total (3 spawned + caller)
     /// let pool = ThreadPool::try_spawn(4).expect("Failed to create thread pool");
@@ -656,7 +656,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let pool = ThreadPool::try_named_spawn("worker_pool", 4).expect("Failed to create thread pool");
     /// assert_eq!(pool.threads(), 4);
@@ -690,7 +690,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let pool = spawn(8);
     /// let total_colocations = pool.colocations();
@@ -740,7 +740,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut pool = spawn(4);
     ///
@@ -777,7 +777,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut pool = spawn(4);
     ///
@@ -812,7 +812,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut pool = spawn(4);
     ///
@@ -847,7 +847,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut pool = spawn(4);
     ///
@@ -884,7 +884,7 @@ impl ThreadPool {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut pool = spawn(4);
     ///
@@ -1019,7 +1019,7 @@ unsafe impl Sync for AllocationResult {}
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc for NUMA node 0");
 /// let allocation = allocator.allocate(1024).expect("Failed to allocate 1024 bytes");
 ///
@@ -1048,7 +1048,7 @@ impl PinnedAllocator {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// // Create allocator for the first NUMA node
     /// let allocator = PinnedAllocator::new(0).expect("NUMA node 0 should be available");
@@ -1099,7 +1099,7 @@ impl PinnedAllocator {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).unwrap();
     /// let allocation = allocator.allocate_at_least(1024).expect("Failed to allocate memory");
@@ -1158,7 +1158,7 @@ impl PinnedAllocator {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).unwrap();
     /// let allocation = allocator.allocate(1024).expect("Failed to allocate memory");
@@ -1206,7 +1206,7 @@ impl PinnedAllocator {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).unwrap();
     /// let mut allocation = allocator.allocate_for::<u64>(100).expect("Failed to allocate");
@@ -1268,7 +1268,7 @@ impl PinnedAllocator {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).unwrap();
     /// let mut allocation = allocator.allocate_for_at_least::<u32>(1000).expect("Failed to allocate");
@@ -1302,7 +1302,7 @@ impl PinnedAllocator {
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 ///
 /// let allocator = default_numa_allocator().expect("No NUMA nodes available");
 /// let allocation = allocator.allocate(1024).expect("Failed to allocate");
@@ -1333,7 +1333,7 @@ pub fn default_numa_allocator() -> Option<PinnedAllocator> {
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 ///
 /// // Create a vector on NUMA node 0
 /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -1372,7 +1372,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::new_in(allocator);
@@ -1403,7 +1403,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::with_capacity_in(allocator, 100).expect("Failed to create vec");
@@ -1459,7 +1459,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
@@ -1517,7 +1517,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
@@ -1547,7 +1547,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
@@ -1572,7 +1572,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
@@ -1844,7 +1844,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
@@ -1868,7 +1868,7 @@ impl<T> PinnedVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
@@ -1915,7 +1915,7 @@ unsafe impl<T: Sync> Sync for PinnedVec<T> {}
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 ///
 /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
 /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
@@ -1939,7 +1939,7 @@ impl<T> RoundRobinVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
     /// assert_eq!(rr_vec.colocations_count(), count_colocations());
@@ -1986,7 +1986,7 @@ impl<T> RoundRobinVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let rr_vec = RoundRobinVec::<i32>::with_capacity_per_colocation(1000)
     ///     .expect("Failed to create RoundRobinVec");
@@ -2111,7 +2111,7 @@ impl<T> RoundRobinVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
     /// // Add some elements...
@@ -2170,7 +2170,7 @@ impl<T> RoundRobinVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
     /// rr_vec.push(42).expect("Failed to push");
@@ -2239,7 +2239,7 @@ impl<T> RoundRobinVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
     /// rr_vec.push(42).expect("Failed to push");
@@ -2308,7 +2308,7 @@ impl<T> RoundRobinVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
     /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_colocation(1000)
@@ -2363,7 +2363,7 @@ impl<T> RoundRobinVec<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use fork_union::*;
+    /// use forkunion::*;
     ///
     /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
     /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_colocation(1000)
@@ -2604,7 +2604,7 @@ unsafe impl<T: Sync> Sync for RoundRobinVec<T> {}
 /// # Examples
 ///
 /// ```rust
-/// use fork_union::*;
+/// use forkunion::*;
 ///
 /// let data = vec![1, 2, 3, 4, 5];
 /// let sync_ptr = SyncConstPtr::new(data.as_ptr());
@@ -2694,6 +2694,37 @@ impl<T> SyncMutPtr<T> {
 
 unsafe impl<T> Send for SyncMutPtr<T> {}
 unsafe impl<T> Sync for SyncMutPtr<T> {}
+
+/// Sync wrapper for single-write cells used in early-exit operations.
+///
+/// # Safety
+///
+/// This is safe because:
+/// - Only one thread writes (enforced by AtomicBool in caller)
+/// - Write happens-before any subsequent read (synchronized by atomic operations)
+/// - Final read happens after all threads finish (enforced by drive() completion)
+struct SyncOnceCell<T> {
+    inner: UnsafeCell<Option<T>>,
+}
+
+unsafe impl<T> Sync for SyncOnceCell<T> {}
+
+impl<T> SyncOnceCell<T> {
+    const fn new() -> Self {
+        Self {
+            inner: UnsafeCell::new(None),
+        }
+    }
+
+    /// SAFETY: Caller must ensure only one thread calls this
+    unsafe fn set(&self, value: T) {
+        *self.inner.get() = Some(value);
+    }
+
+    fn into_inner(self) -> Option<T> {
+        self.inner.into_inner()
+    }
+}
 
 /// Scheduler that uses static chunk assignment.
 #[derive(Clone, Copy, Debug)]
@@ -2915,7 +2946,7 @@ where
     ///
     /// # Example
     /// ```
-    /// use fork_union::*;
+    /// use forkunion::*;
     /// let mut pool = ThreadPool::try_spawn(4).unwrap();
     /// let data: Vec<u64> = (0..1000).collect();
     /// let mut scratch: Vec<CacheAligned<u64>> =
@@ -2944,7 +2975,9 @@ where
         fold_with_scratch(pool, iterator, schedule, scratch, fold);
 
         // Combine phase: merge all slots into first slot in-place
-        let (first, rest) = scratch.split_first_mut().expect("scratch must not be empty");
+        let (first, rest) = scratch
+            .split_first_mut()
+            .expect("scratch must not be empty");
         for slot in rest {
             let value = core::mem::take(slot);
             combine(first, value);
@@ -3377,7 +3410,7 @@ where
     ///
     /// # Example
     /// ```
-    /// use fork_union::*;
+    /// use forkunion::*;
     /// let mut pool = ThreadPool::try_spawn(4).unwrap();
     /// let data: Vec<u64> = (0..1000).collect();
     ///
@@ -3430,7 +3463,7 @@ where
     ///
     /// # Example
     /// ```
-    /// use fork_union::*;
+    /// use forkunion::*;
     /// let mut pool = ThreadPool::try_spawn(4).unwrap();
     /// let data = vec![1u64, 2, 3, 4, 5];
     /// let sum: u64 = (&data[..]).into_par_iter().with_pool(&mut pool).sum();
@@ -3452,7 +3485,7 @@ where
     ///
     /// # Example
     /// ```
-    /// use fork_union::*;
+    /// use forkunion::*;
     /// let mut pool = ThreadPool::try_spawn(4).unwrap();
     /// let data: Vec<usize> = (0..1000).collect();
     /// let count = (&data[..]).into_par_iter().with_pool(&mut pool).count();

@@ -1,14 +1,14 @@
-//! Demo app: N-Body simulation with Fork Union and Rayon.
+//! Demo app: N-Body simulation with ForkUnion and Rayon.
 //!
 //! To control the script, several environment variables are used:
 //!
 //! - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
 //! - `NBODY_ITERATIONS` - number of iterations to run the simulation (default: 1000).
-//! - `NBODY_BACKEND` - backend to use for the simulation (default: `fork_union_static`).
+//! - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static`).
 //! - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
 //!
-//! The backends include: `fork_union_static`, `fork_union_dynamic`, `fork_union_iter_static`,
-//! `fork_union_iter_dynamic`, `rayon_static`, `rayon_dynamic`, and `tokio`. To compile and run:
+//! The backends include: `forkunion_static`, `forkunion_dynamic`, `forkunion_iter_static`,
+//! `forkunion_iter_dynamic`, `rayon_static`, `rayon_dynamic`, and `tokio`. To compile and run:
 //!
 //! ```sh
 //! cargo run --example nbody --release
@@ -27,25 +27,25 @@
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
 //!     NBODY_BACKEND=rayon_dynamic target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=fork_union_static target/release/examples/nbody
+//!     NBODY_BACKEND=forkunion_static target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=fork_union_dynamic target/release/examples/nbody
+//!     NBODY_BACKEND=forkunion_dynamic target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=fork_union_iter_static target/release/examples/nbody
+//!     NBODY_BACKEND=forkunion_iter_static target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=fork_union_iter_dynamic target/release/examples/nbody
+//!     NBODY_BACKEND=forkunion_iter_dynamic target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
 //!     NBODY_BACKEND=tokio target/release/examples/nbody
 //!
 //! # macOS benchmarks (use sysctl -n hw.logicalcpu for CPU count)
 //! time NBODY_COUNT=128 NBODY_THREADS=$(sysctl -n hw.logicalcpu) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=fork_union_iter_static target/release/examples/nbody
+//!     NBODY_BACKEND=forkunion_iter_static target/release/examples/nbody
 //! ```
 use rand::{rng, Rng};
 use std::env;
 use std::error::Error;
 
-use fork_union as fu;
+use forkunion as fu;
 use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use tokio::task::JoinSet;
 
@@ -357,7 +357,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1_000);
-    let backend = env::var("NBODY_BACKEND").unwrap_or_else(|_| "fork_union_static".into());
+    let backend = env::var("NBODY_BACKEND").unwrap_or_else(|_| "forkunion_static".into());
     let threads = env::var("NBODY_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -396,28 +396,28 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Run the chosen backend
     match backend.as_str() {
-        "fork_union_static" => {
+        "forkunion_static" => {
             let mut pool = fu::ThreadPool::try_spawn(threads)
                 .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}"));
             for _ in 0..iters {
                 iteration_fu_static(&mut pool, &mut bodies, &mut forces);
             }
         }
-        "fork_union_dynamic" => {
+        "forkunion_dynamic" => {
             let mut pool = fu::ThreadPool::try_spawn(threads)
                 .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}"));
             for _ in 0..iters {
                 iteration_fu_dynamic(&mut pool, &mut bodies, &mut forces);
             }
         }
-        "fork_union_iter_static" => {
+        "forkunion_iter_static" => {
             let mut pool = fu::ThreadPool::try_spawn(threads)
                 .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}"));
             for _ in 0..iters {
                 iteration_fu_iter_static(&mut pool, &mut bodies, &mut forces);
             }
         }
-        "fork_union_iter_dynamic" => {
+        "forkunion_iter_dynamic" => {
             let mut pool = fu::ThreadPool::try_spawn(threads)
                 .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}"));
             for _ in 0..iters {

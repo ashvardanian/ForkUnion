@@ -1,11 +1,11 @@
 /**
  *  @brief  Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file   lib.cpp
+ *  @file   forkunion.cpp
  *  @author Ash Vardanian
  *  @date   June 27, 2025
  */
-#include <fork_union.h>   // C type aliases
-#include <fork_union.hpp> // C++ core implementation
+#include <forkunion.h>   // C type aliases
+#include <forkunion.hpp> // C++ core implementation
 
 #include <utility>     // `std::in_place_type_t`
 #include <algorithm>   // `std::max`
@@ -13,7 +13,7 @@
 #include <cstdint>     // `std::uint8_t`
 #include <type_traits> // `std::aligned_storage`
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 using thread_allocator_t = std::allocator<std::thread>;
 
@@ -22,7 +22,7 @@ using thread_allocator_t = std::allocator<std::thread>;
  *
  *  MSVC cannot handle alignas > 64 when objects are passed by value in `std::variant`.
  *  This custom implementation uses a tagged union with manual type management.
- *  @see https://github.com/ashvardanian/fork_union/issues/26
+ *  @see https://github.com/ashvardanian/forkunion/issues/26
  */
 struct pool_variants_t {
 
@@ -269,9 +269,9 @@ bool globals_initialize(void) {
 
 extern "C" {
 
-int fu_version_major(void) { return FORK_UNION_VERSION_MAJOR; }
-int fu_version_minor(void) { return FORK_UNION_VERSION_MINOR; }
-int fu_version_patch(void) { return FORK_UNION_VERSION_PATCH; }
+int fu_version_major(void) { return FORKUNION_VERSION_MAJOR; }
+int fu_version_minor(void) { return FORKUNION_VERSION_MINOR; }
+int fu_version_patch(void) { return FORKUNION_VERSION_PATCH; }
 int fu_enabled_numa(void) { return FU_ENABLE_NUMA; }
 
 #pragma region - Metadata
