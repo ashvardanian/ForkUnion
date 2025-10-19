@@ -2,6 +2,8 @@
 #include <cstdlib>   // `EXIT_FAILURE`, `EXIT_SUCCESS`
 #include <vector>    // `std::vector`
 #include <algorithm> // `std::sort`
+#include <numeric>   // `std::iota`
+#include <random>    // `std::random_device`, `std::mt19937`, `std::shuffle`
 
 #include <fork_union.hpp>
 
@@ -435,6 +437,157 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
     return true;
 }
 
+template <typename make_pool_type_ = make_pool_t>
+static bool test_sort_edge_cases() noexcept {
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    if (!pool.try_spawn(maker.scope())) return false;
+
+    // Test various problematic size/thread combinations
+    std::vector<std::size_t> thread_counts = {1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32};
+    std::vector<std::size_t> sizes = {
+        0,   1,   2,   3,   7,    8,    15,   16,   31,   32,   63,   64,   127,  128,
+        255, 256, 511, 512, 1023, 1024, 1025, 2047, 2048, 4095, 4096, 8191, 8192,
+    };
+
+    for (auto size : sizes) {
+        for (auto threads : thread_counts) {
+            if (threads > pool.threads_count()) continue;
+
+            // Create test data: reverse sorted to stress the algorithm
+            std::vector<int> data(size);
+            std::iota(data.rbegin(), data.rend(), 0);
+
+            std::vector<int> expected = data;
+            std::sort(expected.begin(), expected.end());
+
+            // Test with a pool limited to specific thread count
+            auto test_pool = maker.construct();
+            if (!test_pool.try_spawn(static_cast<typename decltype(test_pool)::index_t>(threads))) return false;
+
+            fu::sort(test_pool, data.begin(), data.end());
+
+            if (data != expected) return false;
+        }
+    }
+
+    return true;
+}
+
+template <typename make_pool_type_ = make_pool_t>
+static bool test_sort_duplicates() noexcept {
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    if (!pool.try_spawn(maker.scope())) return false;
+
+    // Test with many duplicates - this stresses the three-way quicksort
+    std::vector<std::size_t> sizes = {100, 1000, 10000};
+    std::vector<unsigned> patterns = {1, 5, 10, 50}; // Number of unique values
+
+    for (auto size : sizes) {
+        for (auto pattern : patterns) {
+            std::vector<unsigned> data(size);
+            for (std::size_t i = 0; i < size; ++i) { data[i] = static_cast<unsigned>(i % pattern); }
+
+            // Shuffle to create random order
+            std::random_device random_device;
+            std::mt19937 random_generator(random_device());
+            std::shuffle(data.begin(), data.end(), random_generator);
+
+            std::vector<unsigned> expected = data;
+            std::sort(expected.begin(), expected.end());
+
+            fu::sort(pool, data.begin(), data.end());
+
+            if (data != expected) return false;
+        }
+    }
+
+    return true;
+}
+
+template <typename make_pool_type_ = make_pool_t>
+static bool test_sort_pathological() noexcept {
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    if (!pool.try_spawn(maker.scope())) return false;
+
+    // Test cases that are problematic for quicksort variants
+    std::vector<std::vector<int>> test_cases {
+        // Already sorted
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+        // Reverse sorted
+        {10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
+        // All same elements
+        {5, 5, 5, 5, 5, 5, 5, 5, 5, 5},
+        // Alternating pattern
+        {1, 10, 2, 9, 3, 8, 4, 7, 5, 6},
+        // Single outlier
+        {1, 1, 1, 1, 1000, 1, 1, 1, 1, 1},
+        // Two groups
+        {1, 1, 1, 1, 1, 100, 100, 100, 100, 100},
+    };
+
+    for (auto &test_case : test_cases) {
+        // Test with different sizes by replicating the pattern
+        for (std::size_t multiplier : {1, 10, 100}) {
+
+            std::vector<int> data;
+            for (std::size_t i = 0; i < multiplier; ++i) data.insert(data.end(), test_case.begin(), test_case.end());
+
+            std::vector<int> expected = data;
+            std::sort(expected.begin(), expected.end());
+
+            fu::sort(pool, data.begin(), data.end());
+
+            if (data != expected) return false;
+        }
+    }
+
+    return true;
+}
+
+template <typename make_pool_type_ = make_pool_t>
+static bool test_sort_chunk_boundaries() noexcept {
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    if (!pool.try_spawn(maker.scope())) return false;
+
+    std::size_t threads = pool.threads_count();
+
+    // Test sizes that create edge cases in chunk distribution
+    std::vector<std::size_t> critical_sizes = {
+        threads - 1,       // Fewer elements than threads
+        threads,           // Equal to thread count
+        threads + 1,       // One more than thread count
+        threads * 2 - 1,   // Almost 2 per thread
+        threads * 2,       // Exactly 2 per thread
+        threads * 2 + 1,   // Just over 2 per thread
+        threads * 100 - 1, // Large with uneven distribution
+        threads * 100,     // Large with even distribution
+        threads * 100 + 1  // Large with slight imbalance
+    };
+
+    for (auto size : critical_sizes) {
+        std::vector<int> data(size);
+        std::iota(data.rbegin(), data.rend(), 0);
+
+        // Add some randomness to avoid best-case scenarios
+        std::random_device random_device;
+        std::mt19937 random_generator(random_device());
+        std::shuffle(data.begin(), data.end(), random_generator);
+
+        std::vector<int> expected = data;
+        std::sort(expected.begin(), expected.end());
+
+        fu::sort(pool, data.begin(), data.end());
+
+        if (data != expected) return false;
+    }
+
+    return true;
+}
+
 /**
  *  @brief Enhanced NUMA topology logging function using the logger class.
  */
@@ -485,6 +638,11 @@ int main(void) {
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads}, //
         {"`terminate` avoided", test_mixed_restart<false>},                      //
         {"`terminate` and re-spawn", test_mixed_restart<true>},                  //
+        // Parallel sort tests
+        {"`sort` edge cases", test_sort_edge_cases},             //
+        {"`sort` duplicates", test_sort_duplicates},             //
+        {"`sort` pathological cases", test_sort_pathological},   //
+        {"`sort` chunk boundaries", test_sort_chunk_boundaries}, //
 #if FU_ENABLE_NUMA
         // Uniform Memory Access (UMA) tests for threads pinned to the same NUMA node
         {"UMA `try_spawn` normal", test_try_spawn_success<make_linux_colocated_pool_t>},
