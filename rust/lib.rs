@@ -930,6 +930,9 @@ pub struct AllocationResult {
     allocated_bytes: usize,
     bytes_per_page: usize,
     numa_node: usize,
+    // For over-aligned allocations, tracks the unaligned pointer/size for freeing
+    overaligned_ptr: Option<NonNull<u8>>,
+    overaligned_bytes: Option<usize>,
 }
 
 impl AllocationResult {
@@ -994,11 +997,10 @@ impl AllocationResult {
 impl Drop for AllocationResult {
     fn drop(&mut self) {
         unsafe {
-            fu_free(
-                self.numa_node,
-                self.ptr.as_ptr() as *mut c_void,
-                self.allocated_bytes,
-            );
+            // Use unaligned pointer/size if this was an over-aligned allocation
+            let ptr = self.overaligned_ptr.unwrap_or(self.ptr);
+            let bytes = self.overaligned_bytes.unwrap_or(self.allocated_bytes);
+            fu_free(self.numa_node, ptr.as_ptr() as *mut c_void, bytes);
         }
     }
 }
@@ -1137,6 +1139,8 @@ impl PinnedAllocator {
                 allocated_bytes,
                 bytes_per_page,
                 numa_node: self.numa_node,
+                overaligned_ptr: None,
+                overaligned_bytes: None,
             })
         }
     }
@@ -1187,6 +1191,8 @@ impl PinnedAllocator {
                 allocated_bytes: bytes,
                 bytes_per_page: 0, // Not provided by fu_allocate
                 numa_node: self.numa_node,
+                overaligned_ptr: None,
+                overaligned_bytes: None,
             })
         }
     }
@@ -1218,8 +1224,37 @@ impl PinnedAllocator {
     /// assert_eq!(slice[99], 12345);
     /// ```
     pub fn allocate_for<T>(&self, count: usize) -> Option<AllocationResult> {
-        let bytes = count.checked_mul(core::mem::size_of::<T>())?;
-        self.allocate(bytes)
+        let size = core::mem::size_of::<T>();
+        let align = core::mem::align_of::<T>();
+        let bytes = count.checked_mul(size)?;
+
+        // If alignment is <= default malloc alignment (16 bytes), use simple path
+        if align <= 16 {
+            return self.allocate(bytes);
+        }
+
+        // For over-aligned types (like CacheAligned<T> with 128-byte alignment),
+        // we need to over-allocate and manually align the pointer
+        let padding = align - 1;
+        let total_bytes = bytes.checked_add(padding)?;
+
+        let mut allocation = self.allocate(total_bytes)?;
+
+        // Save unaligned pointer and size for freeing
+        let unaligned_ptr = allocation.ptr;
+        let unaligned_bytes = allocation.allocated_bytes;
+
+        // Calculate aligned pointer
+        let ptr = allocation.as_ptr() as usize;
+        let aligned_ptr = (ptr + padding) & !(align - 1);
+
+        // Adjust the allocation to point to the aligned address
+        allocation.ptr = unsafe { core::ptr::NonNull::new_unchecked(aligned_ptr as *mut u8) };
+        allocation.allocated_bytes = bytes;
+        allocation.overaligned_ptr = Some(unaligned_ptr);
+        allocation.overaligned_bytes = Some(unaligned_bytes);
+
+        Some(allocation)
     }
 
     /// Allocates memory for at least the specified number of elements of type T.

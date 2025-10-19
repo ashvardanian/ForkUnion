@@ -53,6 +53,7 @@
         "NUMA",
         "OpenMP",
         "orelse",
+        "overaligned",
         "prefetcher",
         "println",
         "pthreads",
