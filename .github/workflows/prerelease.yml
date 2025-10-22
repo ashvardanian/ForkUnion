@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v2.1.1
+        uses: ashvardanian/tinysemver@v3
         with:
           verbose: "true"
           version-file: "VERSION"
