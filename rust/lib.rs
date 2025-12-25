@@ -571,6 +571,7 @@ unsafe impl Send for ThreadPool {}
 unsafe impl Sync for ThreadPool {}
 
 impl ThreadPool {
+    #[must_use]
     pub fn try_spawn_with_exclusivity(
         threads: usize,
         exclusivity: CallerExclusivity,
@@ -587,18 +588,20 @@ impl ThreadPool {
             return Err(Error::InvalidParameter);
         }
 
-        unsafe {
-            let name_ptr = if let Some(name_str) = name {
-                let mut name_buffer = [0u8; 16];
-                let name_bytes = name_str.as_bytes();
-                let copy_len = core::cmp::min(name_bytes.len(), 15); // Leave space for null terminator
-                name_buffer[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-                // name_buffer[copy_len] is already 0 from initialization
-                name_buffer.as_ptr() as *const c_char
-            } else {
-                core::ptr::null()
-            };
+        // SAFETY: Buffer must outlive the fu_pool_new call, so we declare it here
+        // before the unsafe block to ensure it lives long enough.
+        let mut name_buffer = [0u8; 16];
+        let name_ptr = if let Some(name_str) = name {
+            let name_bytes = name_str.as_bytes();
+            let copy_len = core::cmp::min(name_bytes.len(), 15); // Leave space for null terminator
+            name_buffer[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+            // name_buffer[copy_len] is already 0 from initialization
+            name_buffer.as_ptr() as *const c_char
+        } else {
+            core::ptr::null()
+        };
 
+        unsafe {
             let inner = fu_pool_new(name_ptr);
             if inner.is_null() {
                 return Err(Error::CreationFailed);
@@ -632,6 +635,7 @@ impl ThreadPool {
     /// let pool = ThreadPool::try_spawn(4).expect("Failed to create thread pool");
     /// assert_eq!(pool.threads(), 4);
     /// ```
+    #[must_use]
     pub fn try_spawn(threads: usize) -> Result<Self, Error> {
         Self::try_spawn_with_exclusivity(threads, CallerExclusivity::Inclusive)
     }
@@ -655,6 +659,7 @@ impl ThreadPool {
     /// let pool = ThreadPool::try_named_spawn("worker_pool", 4).expect("Failed to create thread pool");
     /// assert_eq!(pool.threads(), 4);
     /// ```
+    #[must_use]
     pub fn try_named_spawn(name: &str, threads: usize) -> Result<Self, Error> {
         Self::try_named_spawn_with_exclusivity(Some(name), threads, CallerExclusivity::Inclusive)
     }
@@ -2333,23 +2338,24 @@ impl<T> RoundRobinVec<T> {
     /// }
     ///
     /// // Fill all vectors with random values
-    /// rr_vec.fill_with(|| rand::random::<i32>(), &mut pool);
+    /// rr_vec.fill_with(|| 42, &mut pool);
     /// ```
-    pub fn fill_with<F>(&mut self, mut f: F, pool: &mut ThreadPool)
+    pub fn fill_with<F>(&mut self, f: F, pool: &mut ThreadPool)
     where
-        F: FnMut() -> T + Send + Sync,
+        F: Fn() -> T + Send + Sync,
         T: Send + Sync,
     {
         let colocations_count = self.colocations_count();
         let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
-        let f_ptr = SafePtr(&mut f as *mut F);
+        let f_ptr = SyncConstPtr::new(&f as *const F);
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
         pool.for_threads(move |thread_index, colocation_index| {
             if colocation_index < colocations_count {
                 // Get the specific pinned vector for this NUMA node
                 let node_vec = safe_ptr.get_mut_at(colocation_index);
-                let f_ref = f_ptr.get_mut();
+                // SAFETY: f is Fn (not FnMut), so concurrent calls are safe
+                let f_ref = unsafe { &*f_ptr.as_ptr() };
                 let pool = pool_ptr.get_mut();
 
                 let threads_in_colocation = pool.count_threads_in(colocation_index);
@@ -2614,11 +2620,13 @@ impl<T> SyncConstPtr<T> {
     /// # Returns
     ///
     /// A reference to the element at the given index.
+    #[inline]
     pub unsafe fn get(&self, index: usize) -> &T {
         &*self.ptr.add(index)
     }
 
     /// Returns the raw pointer.
+    #[inline]
     pub fn as_ptr(&self) -> *const T {
         self.ptr
     }
@@ -2650,10 +2658,12 @@ impl<T> SyncMutPtr<T> {
     /// - No overlapping mutable access occurs from multiple threads
     /// - Each thread accesses disjoint indices when used concurrently
     /// - The pointer remains valid for the duration of access
+    #[inline]
     pub unsafe fn get(&self, index: usize) -> *mut T {
         self.ptr.add(index)
     }
 
+    #[inline]
     pub fn as_ptr(&self) -> *mut T {
         self.ptr
     }
@@ -3708,6 +3718,7 @@ impl IndexedSplit {
     }
 
     /// Returns the range for a specific thread index.
+    #[inline]
     pub fn get(&self, thread_index: usize) -> core::ops::Range<usize> {
         let begin = self.quotient * thread_index + thread_index.min(self.remainder);
         let count = self.quotient + if thread_index < self.remainder { 1 } else { 0 };

@@ -317,6 +317,9 @@ size_t fu_volume_any_pages(void) { return fu::get_ram_total_volume(); }
 
 size_t fu_volume_huge_pages_in(FU_MAYBE_UNUSED_ size_t numa_node_index) {
 #if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (numa_node_index >= global_numa_topology.nodes_count()) return 0;
+
     size_t total_volume = 0;
     auto const &node = global_numa_topology.node(numa_node_index);
     for (auto const &page_size : node.page_sizes) total_volume += page_size.bytes_per_page * page_size.free_pages;
@@ -590,7 +593,7 @@ void fu_pool_for_slices(fu_pool_t *pool, size_t n, fu_for_slices_t callback, fu_
 #pragma region - Flexible API
 
 void fu_pool_unsafe_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_context_t context) {
-    assert(pool != nullptr && callback != nullptr);
+    if (pool == nullptr || callback == nullptr) return;
     opaque_pool_t *opaque = upcast_pool(pool);
     opaque->current_context = context;
     opaque->current_callback = callback;
@@ -598,9 +601,9 @@ void fu_pool_unsafe_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_l
 }
 
 void fu_pool_unsafe_join(fu_pool_t *pool) {
-    assert(pool != nullptr);
+    if (pool == nullptr) return;
     opaque_pool_t *opaque = upcast_pool(pool);
-    assert(opaque->current_context != nullptr);
+    if (opaque->current_context == nullptr) return;  // No broadcast was issued
     visit([](auto &variant) { variant.unsafe_join(); }, opaque->variants);
     opaque->current_context = nullptr;
     opaque->current_callback = nullptr;

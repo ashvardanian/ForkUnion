@@ -96,7 +96,7 @@ use fork_union as fu;
 fn heavy_math(_: usize) {}
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut pool = fu::ThreadPool::try_spawn(4)?;
+    // Create a named thread pool for easier debugging and profiling
     let mut pool = fu::ThreadPool::try_named_spawn("heavy-math", 4)?;
     pool.for_n_dynamic(400, |prong| {
         heavy_math(prong.task_index);
