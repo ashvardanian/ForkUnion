@@ -22,7 +22,7 @@ using thread_allocator_t = std::allocator<std::thread>;
  *
  *  MSVC cannot handle alignas > 64 when objects are passed by value in `std::variant`.
  *  This custom implementation uses a tagged union with manual type management.
- *  @see https://github.com/ashvardanian/forkunion/issues/26
+ *  @see https://github.com/ashvardanian/ForkUnion/issues/26
  */
 struct pool_variants_t {
 

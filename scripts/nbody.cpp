@@ -354,7 +354,8 @@ int main(void) {
             std::fprintf(stderr, "Failed to spawn thread pool\n");
             return EXIT_FAILURE;
         }
-        for (std::size_t i = 0; i < iterations; ++i) iteration_forkunion_dynamic(pool, bodies.data(), forces.data(), n);
+        for (std::size_t i = 0; i < iterations; ++i)
+            iteration_forkunion_dynamic(pool, bodies.data(), forces.data(), n);
         return EXIT_SUCCESS;
     }
 

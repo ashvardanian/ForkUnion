@@ -10,7 +10,7 @@ All of that is slow... and true across C++, C, and Rust projects.
 Short of [OpenMP](https://en.wikipedia.org/wiki/OpenMP), practically every other solution has high dispatch latency and noticeable memory overhead.
 OpenMP, however, is not ideal for fine-grained parallelism and is less portable than the C++ and Rust standard libraries.
 
-[![`forkunion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/forkunion.jpg?raw=true)](https://github.com/ashvardanian/forkunion)
+[![`forkunion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
 
 This is where __`forkunion`__ comes in.
 It's a C++ 17 library with C 99, Rust, and Zig bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
@@ -57,7 +57,7 @@ Or for the preview development version:
 
 ```toml
 [dependencies]
-forkunion = { git = "https://github.com/ashvardanian/forkunion.git", branch = "main-dev" }
+forkunion = { git = "https://github.com/ashvardanian/ForkUnion.git", branch = "main-dev" }
 ```
 
 A minimal example may look like this:
@@ -114,7 +114,7 @@ To integrate into your C++ project, either just copy the `include/forkunion.hpp`
 For a Git submodule, run:
 
 ```bash
-git submodule add https://github.com/ashvardanian/forkunion.git extern/forkunion
+git submodule add https://github.com/ashvardanian/ForkUnion.git extern/forkunion
 ```
 
 Alternatively, using CMake:
@@ -122,7 +122,7 @@ Alternatively, using CMake:
 ```cmake
 FetchContent_Declare(
     forkunion
-    GIT_REPOSITORY https://github.com/ashvardanian/forkunion
+    GIT_REPOSITORY https://github.com/ashvardanian/ForkUnion
     GIT_TAG v2.3.0
 )
 FetchContent_MakeAvailable(forkunion)
@@ -179,6 +179,7 @@ int main() {
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
 NUMA detection on Linux defaults to AUTO. Override with `-D FORKUNION_ENABLE_NUMA=ON` or `OFF`.
 
+
 ### Intro in Zig
 
 To integrate into your Zig project, add ForkUnion to your `build.zig.zon`:
@@ -186,7 +187,7 @@ To integrate into your Zig project, add ForkUnion to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .forkunion = .{
-        .url = "https://github.com/ashvardanian/forkunion/archive/refs/tags/v2.3.0.tar.gz",
+        .url = "https://github.com/ashvardanian/ForkUnion/archive/refs/tags/v2.3.0.tar.gz",
         .hash = "12200000000000000000000000000000000000000000000000000000000000000000",
     },
 },
@@ -232,7 +233,7 @@ To integrate using CMake:
 ```cmake
 FetchContent_Declare(
     forkunion
-    GIT_REPOSITORY https://github.com/ashvardanian/forkunion
+    GIT_REPOSITORY https://github.com/ashvardanian/ForkUnion
     GIT_TAG v2.3.0
 )
 FetchContent_MakeAvailable(forkunion)
@@ -675,6 +676,7 @@ Rust benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 > ¹ Another common workload is "Parallel Reductions" covered in a separate [repository](https://github.com/ashvardanian/ParallelReductionsBenchmark).
 > ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing. It's also fair to say, that OpenMP is not optimized for AppleClang.
 > 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for ForkUnion.
+
 
 Zig benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 
