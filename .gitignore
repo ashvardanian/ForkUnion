@@ -38,3 +38,4 @@
 # Rust build artifacts
 Cargo.lock
 target/
+.cache/
