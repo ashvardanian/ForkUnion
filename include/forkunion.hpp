@@ -78,9 +78,9 @@
 #include <new>     // `std::hardware_destructive_interference_size`
 #include <array>   // `std::array`
 
-#define FORKUNION_VERSION_MAJOR 2
-#define FORKUNION_VERSION_MINOR 3
-#define FORKUNION_VERSION_PATCH 0
+#define FORK_UNION_VERSION_MAJOR 2
+#define FORK_UNION_VERSION_MINOR 3
+#define FORK_UNION_VERSION_PATCH 1
 
 #if !defined(FU_ALLOW_UNSAFE)
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
@@ -1540,11 +1540,11 @@ struct arm64_wfet_t {
         //
         //      __asm__ __volatile__("wfet %x0\n\t" : : "r"(deadline) : "memory", "cc");
         //
-        // So instead, we can encode the instruction manually as `D50320XX`,
+        // So instead, we can encode the instruction manually as `D50310XX`,
         // where XX encodes the lower bits of Xt - the deadline register number.
         __asm__ __volatile__(    //
             "mov x0, %0\n"       // move the deadline to x0
-            ".inst 0xD5032000\n" // wfet x0
+            ".inst 0xD5031000\n" // wfet x0
             :
             : "r"(deadline)
             : "x0", "memory", "cc");

@@ -38,6 +38,9 @@
 # Rust build artifacts
 Cargo.lock
 target/
+.cache/
+
+# Zig build artifacts
 .zig-cache/
 zig-out/
 zig-cache/
