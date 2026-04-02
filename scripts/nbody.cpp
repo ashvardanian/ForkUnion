@@ -1,5 +1,5 @@
 /**
- *  @brief Demo app: N-Body simulation with Fork Union and OpenMP.
+ *  @brief Demo app: N-Body simulation with ForkUnion and OpenMP.
  *  @author Ash Vardanian
  *  @file nbody.cpp
  *
@@ -7,29 +7,29 @@
  *
  *  - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
  *  - `NBODY_ITERATIONS` - number of iterations to run the simulation (default: 1000).
- *  - `NBODY_BACKEND` - backend to use for the simulation (default: `fork_union_static`).
+ *  - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static`).
  *  - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
  *
- *  The backends include: `fork_union_static`, `fork_union_dynamic`, `openmp_static`, and `openmp_dynamic`.
+ *  The backends include: `forkunion_static`, `forkunion_dynamic`, `openmp_static`, and `openmp_dynamic`.
  *  To compile and run on all cores in Linux:
  *
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release
  *  cmake --build build_release --config Release
- *  NBODY_COUNT=128 NBODY_THREADS=$(nproc) build_release/fork_union_nbody
+ *  NBODY_COUNT=128 NBODY_THREADS=$(nproc) build_release/forkunion_nbody
  *  @endcode
  *
  *  The default profiling scheme is to 1M iterations for 128 particles on each backend:
  *
  *  @code{.sh}
  *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=openmp_static build_release/fork_union_nbody
+ *      NBODY_BACKEND=openmp_static build_release/forkunion_nbody
  *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=openmp_dynamic build_release/fork_union_nbody
+ *      NBODY_BACKEND=openmp_dynamic build_release/forkunion_nbody
  *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=fork_union_static build_release/fork_union_nbody
+ *      NBODY_BACKEND=forkunion_static build_release/forkunion_nbody
  *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=fork_union_dynamic build_release/fork_union_nbody
+ *      NBODY_BACKEND=forkunion_dynamic build_release/forkunion_nbody
  *  @endcode
  *
  *  On macOS, you may need to install OpenMP support via Homebrew:
@@ -43,7 +43,7 @@
  *    -D CMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib"
  *  cmake --build build_release --config Release
  *  NBODY_COUNT=128 NBODY_THREADS=$(sysctl -n hw.logicalcpu) NBODY_ITERATIONS=1000000 \
- *    NBODY_BACKEND=fork_union_static build_release/fork_union_nbody
+ *    NBODY_BACKEND=forkunion_static build_release/forkunion_nbody
  *  @endcode
  */
 #include <vector> // `std::vector`
@@ -63,9 +63,9 @@
 #endif
 #endif
 
-#include <fork_union.hpp>
+#include <forkunion.hpp>
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 #if defined(__GNUC__) || defined(__clang__)
 #define _FU_RESTRICT __restrict__
@@ -160,8 +160,8 @@ void iteration_openmp_dynamic(FU_MAYBE_UNUSED_ body_t *_FU_RESTRICT bodies,
 
 using pool_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t>;
 
-void iteration_fork_union_static(pool_t &pool, body_t *_FU_RESTRICT bodies, vector3_t *_FU_RESTRICT forces,
-                                 std::size_t n) noexcept {
+void iteration_forkunion_static(pool_t &pool, body_t *_FU_RESTRICT bodies, vector3_t *_FU_RESTRICT forces,
+                                std::size_t n) noexcept {
     pool.for_n(n, [=](std::size_t i) noexcept {
         vector3_t f {0.0, 0.0, 0.0};
         for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
@@ -170,8 +170,8 @@ void iteration_fork_union_static(pool_t &pool, body_t *_FU_RESTRICT bodies, vect
     pool.for_n(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
 }
 
-void iteration_fork_union_dynamic(pool_t &pool, body_t *_FU_RESTRICT bodies, vector3_t *_FU_RESTRICT forces,
-                                  std::size_t n) noexcept {
+void iteration_forkunion_dynamic(pool_t &pool, body_t *_FU_RESTRICT bodies, vector3_t *_FU_RESTRICT forces,
+                                 std::size_t n) noexcept {
     pool.for_n_dynamic(n, [=](std::size_t i) noexcept {
         vector3_t f {0.0, 0.0, 0.0};
         for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
@@ -185,8 +185,8 @@ using linux_numa_bodies_allocator_t = fu::linux_numa_allocator<body_t>;
 using linux_numa_bodies_t = std::vector<body_t, linux_numa_bodies_allocator_t>;
 using linux_distributed_pool_t = fu::linux_distributed_pool<fu::standard_yield_t>;
 
-std::vector<linux_numa_bodies_t> make_buffers_for_fork_union_numa(linux_distributed_pool_t &pool,
-                                                                  std::size_t n) noexcept {
+std::vector<linux_numa_bodies_t> make_buffers_for_forkunion_numa(linux_distributed_pool_t &pool,
+                                                                 std::size_t n) noexcept {
     fu::numa_topology_t const &topology = pool.topology();
     std::size_t const numa_nodes_count = topology.nodes_count();
 
@@ -201,9 +201,9 @@ std::vector<linux_numa_bodies_t> make_buffers_for_fork_union_numa(linux_distribu
     return result;
 }
 
-void iteration_fork_union_numa_static(linux_distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
-                                      vector3_t *_FU_RESTRICT forces, std::size_t n,
-                                      body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
+void iteration_forkunion_numa_static(linux_distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
+                                     vector3_t *_FU_RESTRICT forces, std::size_t n,
+                                     body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
     using colocated_prong_t = typename linux_distributed_pool_t::prong_t;
 
@@ -236,13 +236,13 @@ void iteration_fork_union_numa_static(linux_distributed_pool_t &pool, body_t *_F
     pool.for_n(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
 }
 
-void iteration_fork_union_numa_dynamic(linux_distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
-                                       vector3_t *_FU_RESTRICT forces, std::size_t n,
-                                       body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
+void iteration_forkunion_numa_dynamic(linux_distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
+                                      vector3_t *_FU_RESTRICT forces, std::size_t n,
+                                      body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
     using colocated_prong_t = typename linux_distributed_pool_t::prong_t;
 
-    // This expressions is same as in `iteration_fork_union_numa_static` static version:
+    // This expressions is same as in `iteration_forkunion_numa_static` static version:
     pool.for_threads([&](auto thread_index) noexcept {
         std::size_t const numa_node_index = pool.thread_colocation(thread_index);
         std::size_t const threads_next_to_numa_node = pool.threads_count(numa_node_index);
@@ -274,7 +274,7 @@ void iteration_fork_union_numa_dynamic(linux_distributed_pool_t &pool, body_t *_
 #pragma endregion - Backends
 
 int main(void) {
-    std::printf("Welcome to the Fork Union N-Body simulation!\n");
+    std::printf("Welcome to the ForkUnion N-Body simulation!\n");
 
     // Helper function to safely get environment variables
     auto safe_getenv = [](char const *name) -> char const * {
@@ -303,7 +303,7 @@ int main(void) {
     std::size_t n = (n_ull > size_max) ? size_max : static_cast<std::size_t>(n_ull);
     std::size_t const iterations = (iterations_ull > size_max) ? size_max : static_cast<std::size_t>(iterations_ull);
     std::size_t threads = (threads_ull > size_max) ? size_max : static_cast<std::size_t>(threads_ull);
-    std::string_view const backend = backend_str ? backend_str : "fork_union_static";
+    std::string_view const backend = backend_str ? backend_str : "forkunion_static";
     if (threads == 0) threads = std::thread::hardware_concurrency();
     if (n == 0) n = threads;
 
@@ -338,24 +338,23 @@ int main(void) {
     }
 #endif
 
-    // Every other configuration uses Fork Union
+    // Every other configuration uses ForkUnion
     pool_t pool;
-    if (backend == "fork_union_static") {
+    if (backend == "forkunion_static") {
         if (!pool.try_spawn(threads)) {
             std::fprintf(stderr, "Failed to spawn thread pool\n");
             return EXIT_FAILURE;
         }
         for (std::size_t i = 0; i < iterations; ++i) //
-            iteration_fork_union_static(pool, bodies.data(), forces.data(), n);
+            iteration_forkunion_static(pool, bodies.data(), forces.data(), n);
         return EXIT_SUCCESS;
     }
-    if (backend == "fork_union_dynamic") {
+    if (backend == "forkunion_dynamic") {
         if (!pool.try_spawn(threads)) {
             std::fprintf(stderr, "Failed to spawn thread pool\n");
             return EXIT_FAILURE;
         }
-        for (std::size_t i = 0; i < iterations; ++i)
-            iteration_fork_union_dynamic(pool, bodies.data(), forces.data(), n);
+        for (std::size_t i = 0; i < iterations; ++i) iteration_forkunion_dynamic(pool, bodies.data(), forces.data(), n);
         return EXIT_SUCCESS;
     }
 
@@ -367,26 +366,26 @@ int main(void) {
     }
 
     linux_distributed_pool_t numa_pool(std::move(topology));
-    std::vector<linux_numa_bodies_t> bodies_numa_arrays = make_buffers_for_fork_union_numa(numa_pool, n);
+    std::vector<linux_numa_bodies_t> bodies_numa_arrays = make_buffers_for_forkunion_numa(numa_pool, n);
     std::vector<body_t *> bodies_numa_buffers(bodies_numa_arrays.size());
     for (std::size_t i = 0; i < bodies_numa_arrays.size(); ++i) bodies_numa_buffers[i] = bodies_numa_arrays[i].data();
 
-    if (backend == "fork_union_numa_static") {
+    if (backend == "forkunion_numa_static") {
         if (!numa_pool.try_spawn(threads)) {
             std::fprintf(stderr, "Failed to spawn NUMA thread pools\n");
             return EXIT_FAILURE;
         }
         for (std::size_t i = 0; i < iterations; ++i)
-            iteration_fork_union_numa_static(numa_pool, bodies.data(), forces.data(), n, bodies_numa_buffers.data());
+            iteration_forkunion_numa_static(numa_pool, bodies.data(), forces.data(), n, bodies_numa_buffers.data());
         return EXIT_SUCCESS;
     }
-    if (backend == "fork_union_numa_dynamic") {
+    if (backend == "forkunion_numa_dynamic") {
         if (!numa_pool.try_spawn(threads)) {
             std::fprintf(stderr, "Failed to spawn NUMA thread pools\n");
             return EXIT_FAILURE;
         }
         for (std::size_t i = 0; i < iterations; ++i)
-            iteration_fork_union_numa_dynamic(numa_pool, bodies.data(), forces.data(), n, bodies_numa_buffers.data());
+            iteration_forkunion_numa_dynamic(numa_pool, bodies.data(), forces.data(), n, bodies_numa_buffers.data());
         return EXIT_SUCCESS;
     }
 #endif // FU_ENABLE_NUMA

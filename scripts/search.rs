@@ -1,7 +1,7 @@
-//! NUMA-aware vector search implementation using Fork Union and PinnedVec with SimSIMD.
+//! NUMA-aware vector search implementation using ForkUnion and PinnedVec with SimSIMD.
 //!
 //! This example demonstrates how to perform efficient similarity search across
-//! multiple NUMA nodes using the PinnedVec container, Fork Union's distributed
+//! multiple NUMA nodes using the PinnedVec container, ForkUnion's distributed
 //! thread pool capabilities, and SimSIMD for optimized distance calculations.
 //!
 //! To run this example:
@@ -18,7 +18,7 @@ use rand::{rng, Rng};
 use std::env;
 use std::time::Instant;
 
-use fork_union as fu;
+use forkunion as fu;
 use simsimd::{bf16, Distance, SpatialSimilarity};
 
 /// Embedding dimensions - fixed at compile time for better performance
@@ -119,7 +119,7 @@ fn create_distributed_embeddings(
     Some(distributed_vec)
 }
 
-/// Performs NUMA-aware search using Fork Union's for_threads API for optimal colocation
+/// Performs NUMA-aware search using ForkUnion's for_threads API for optimal colocation
 fn numa_aware_search(
     storage: &DistributedEmbeddings,
     query: &Embedding,

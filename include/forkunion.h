@@ -1,10 +1,10 @@
 /**
  *  @brief  Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file   fork_union.h
+ *  @file   forkunion.h
  *  @author Ash Vardanian
  *  @date   June 17, 2025
  *
- *  Fork Union provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
+ *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
  *  avoiding dynamic memory allocations, exceptions, system calls, and heavy Compare-And-Swap instructions.
  *  The library leverages the "weak memory model" to allow Arm and IBM Power CPUs to aggressively optimize
  *  execution at runtime. It also aggressively tests against overflows on smaller index types, and is safe
@@ -13,7 +13,7 @@
  *  @code{.c}
  *  #include <stdio.h> // `printf`
  *  #include <stdlib.h> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <fork_union.h> // `fu_pool_t`
+ *  #include <forkunion.h> // `fu_pool_t`
  *
  *  struct print_args_context_t {
  *      size_t argc; // ? Number of arguments
@@ -30,9 +30,9 @@
  *  int main(int argc, char *argv[]) {
  *      char const *caps = fu_capabilities_string();
  *      if (!caps) return EXIT_FAILURE; // ! Thread pool is not supported
- *      printf("Fork Union capabilities: %s\n", caps);
+ *      printf("ForkUnion capabilities: %s\n", caps);
  *
- *      fu_pool_t *pool = fu_pool_new("fork_union_demo");
+ *      fu_pool_t *pool = fu_pool_new("forkunion_demo");
  *      if (!pool) return EXIT_FAILURE; // ! Failed to create a thread pool
  *
  *      size_t threads = fu_count_logical_cores();
@@ -87,9 +87,9 @@ extern "C" {
 
 #include <stddef.h> // `size_t`, `bool`
 
-int fu_version_major(void); // ? Returns the major version of the Fork Union library
-int fu_version_minor(void); // ? Returns the minor version of the Fork Union library
-int fu_version_patch(void); // ? Returns the patch version of the Fork Union library
+int fu_version_major(void); // ? Returns the major version of the ForkUnion library
+int fu_version_minor(void); // ? Returns the minor version of the ForkUnion library
+int fu_version_patch(void); // ? Returns the patch version of the ForkUnion library
 int fu_enabled_numa(void);  // ? Checks if the library was compiled with NUMA support
 
 #pragma region - Types

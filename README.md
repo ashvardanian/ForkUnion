@@ -1,6 +1,6 @@
-# Fork Union 🍴
+# ForkUnion 🍴
 
-Fork Union is arguably the lowest-latency OpenMP-style NUMA-aware minimalistic scoped thread-pool designed for 'Fork-Join' parallelism in C++, C, and Rust, avoiding × [mutexes & system calls](#locks-and-mutexes), × [dynamic memory allocations](#memory-allocations), × [CAS-primitives](#atomics-and-cas), and × [false-sharing](#alignment--false-sharing) of CPU cache-lines on the hot path 🍴
+ForkUnion is arguably the lowest-latency OpenMP-style NUMA-aware minimalistic scoped thread-pool designed for 'Fork-Join' parallelism in C++, C, Rust, and Zig, avoiding × [mutexes & system calls](#locks-and-mutexes), × [dynamic memory allocations](#memory-allocations), × [CAS-primitives](#atomics-and-cas), and × [false-sharing](#alignment--false-sharing) of CPU cache-lines on the hot path 🍴
 
 ## Motivation
 
@@ -10,15 +10,15 @@ All of that is slow... and true across C++, C, and Rust projects.
 Short of [OpenMP](https://en.wikipedia.org/wiki/OpenMP), practically every other solution has high dispatch latency and noticeable memory overhead.
 OpenMP, however, is not ideal for fine-grained parallelism and is less portable than the C++ and Rust standard libraries.
 
-[![`fork_union` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/fork_union.jpg?raw=true)](https://github.com/ashvardanian/fork_union)
+[![`forkunion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/forkunion.jpg?raw=true)](https://github.com/ashvardanian/forkunion)
 
-This is where __`fork_union`__ comes in.
-It's a C++ 17 library with C 99 and Rust bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
+This is where __`forkunion`__ comes in.
+It's a C++ 17 library with C 99, Rust, and Zig bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
 It supports pinning threads to specific [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual CPU cores, making it much easier to ensure data locality and halving the latency of individual loads in Big Data applications.
 
 ## Basic Usage
 
-__`Fork Union`__ is dead-simple to use!
+__`ForkUnion`__ is dead-simple to use!
 There is no nested parallelism, exception handling, or "future promises"; they are banned.
 The thread pool itself has a few core operations:
 
@@ -57,13 +57,13 @@ Or for the preview development version:
 
 ```toml
 [dependencies]
-fork_union = { git = "https://github.com/ashvardanian/fork_union.git", branch = "main-dev" }
+forkunion = { git = "https://github.com/ashvardanian/forkunion.git", branch = "main-dev" }
 ```
 
 A minimal example may look like this:
 
 ```rust
-use fork_union as fu;
+use forkunion as fu;
 let mut pool = fu::spawn(2);
 pool.for_threads(|thread_index, colocation_index| {
     println!("Hello from thread # {} on colocation # {}", thread_index + 1, colocation_index + 1);
@@ -91,7 +91,7 @@ A more realistic example with named threads and error handling may look like thi
 
 ```rust
 use std::error::Error;
-use fork_union as fu;
+use forkunion as fu;
 
 fn heavy_math(_: usize) {}
 
@@ -110,11 +110,11 @@ For convenience Rayon-style parallel iterators pull the `prelude` module and [ch
 
 ### Intro in C++
 
-To integrate into your C++ project, either just copy the `include/fork_union.hpp` file into your project, add a Git submodule, or CMake.
+To integrate into your C++ project, either just copy the `include/forkunion.hpp` file into your project, add a Git submodule, or CMake.
 For a Git submodule, run:
 
 ```bash
-git submodule add https://github.com/ashvardanian/fork_union.git extern/fork_union
+git submodule add https://github.com/ashvardanian/forkunion.git extern/forkunion
 ```
 
 Alternatively, using CMake:
@@ -125,18 +125,18 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/ashvardanian/fork_union
     GIT_TAG v2.3.1
 )
-FetchContent_MakeAvailable(fork_union)
-target_link_libraries(your_target PRIVATE fork_union::fork_union)
+FetchContent_MakeAvailable(forkunion)
+target_link_libraries(your_target PRIVATE forkunion::forkunion)
 ```
 
 Then, include the header in your C++ code:
 
 ```cpp
-#include <fork_union.hpp>   // `basic_pool_t`
+#include <forkunion.hpp>   // `basic_pool_t`
 #include <cstdio>           // `stderr`
 #include <cstdlib>          // `EXIT_SUCCESS`
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 int main() {
     alignas(fu::default_alignment_k) fu::basic_pool_t pool;
@@ -177,7 +177,192 @@ int main() {
 ```
 
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
-NUMA detection on Linux defaults to AUTO. Override with `-D FORK_UNION_ENABLE_NUMA=ON` or `OFF`.
+NUMA detection on Linux defaults to AUTO. Override with `-D FORKUNION_ENABLE_NUMA=ON` or `OFF`.
+
+### Intro in Zig
+
+To integrate into your Zig project, add ForkUnion to your `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .forkunion = .{
+        .url = "https://github.com/ashvardanian/forkunion/archive/refs/tags/v2.3.0.tar.gz",
+        .hash = "12200000000000000000000000000000000000000000000000000000000000000000",
+    },
+},
+```
+
+Then import and use in your code:
+
+```zig
+const std = @import("std");
+const fu = @import("forkunion");
+
+pub fn main() !void {
+    var pool = try fu.Pool.init(allocator, 4, .inclusive);
+    defer pool.deinit();
+
+    // Execute work on each thread (OpenMP-style parallel)
+    pool.forThreads(struct {
+        fn work(thread_idx: usize, colocation_idx: usize) void {
+            std.debug.print("Thread {}\n", .{thread_idx});
+        }
+    }.work, {});
+
+    // Distribute 1000 tasks across threads (OpenMP-style parallel for)
+    var results = [_]i32{0} ** 1000;
+    pool.forN(1000, struct {
+        fn process(prong: fu.Prong, ctx: Context) void {
+            ctx.results[prong.task_index] = @intCast(prong.task_index * 2);
+        }
+    }.process, .{ .results = &results });
+}
+```
+
+Unlike `std.Thread.Pool` task queue for async work, ForkUnion is designed for __data parallelism__
+and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
+
+### Intro in C
+
+ForkUnion provides a pure C99 API via `forkunion.h`, wrapping the C++ implementation in pre-compiled libraries: `forkunion_static.a` or `forkunion_dynamic.so`.
+The C API uses opaque `fu_pool_t` handles and function pointers for callbacks, making it compatible with any C99+ compiler.
+
+To integrate using CMake:
+
+```cmake
+FetchContent_Declare(
+    forkunion
+    GIT_REPOSITORY https://github.com/ashvardanian/forkunion
+    GIT_TAG v2.3.0
+)
+FetchContent_MakeAvailable(forkunion)
+target_link_libraries(your_target PRIVATE forkunion::forkunion_static)
+```
+
+A minimal C example:
+
+```c
+#include <stdio.h>      // printf
+#include <forkunion.h> // fu_pool_t, fu_pool_new, fu_pool_spawn
+
+void hello_callback(void *context, size_t thread, size_t colocation) {
+    (void)context;
+    printf("Hello from thread %zu (colocation %zu)\n", thread, colocation);
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("my_pool");
+    if (!pool || !fu_pool_spawn(pool, fu_count_logical_cores(), fu_caller_inclusive_k))
+        return 1;
+
+    fu_pool_for_threads(pool, hello_callback, NULL);
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+For parallel tasks with context:
+
+```c
+struct task_context {
+    int *data;
+    size_t size;
+};
+
+void process_task(void *ctx, size_t task, size_t thread, size_t colocation) {
+    (void)thread; (void)colocation;
+    struct task_context *context = (struct task_context *)ctx;
+    context->data[task] = task * 2;
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("tasks");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    int data[100] = {0};
+    struct task_context ctx = { .data = data, .size = 100 };
+    fu_pool_for_n(pool, 100, process_task, &ctx);        // static scheduling
+    fu_pool_for_n_dynamic(pool, 100, process_task, &ctx); // dynamic scheduling
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+#### GCC Nested Functions Extension
+
+GCC supports [nested functions](https://gcc.gnu.org/onlinedocs/gcc/Nested-Functions.html) that can capture variables from the enclosing scope:
+
+```c
+#include <stdio.h>
+#include <stdatomic.h>
+#include <forkunion.h>
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("gcc_nested");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    atomic_size_t counter = 0;
+
+    // GCC nested function - captures 'counter' from enclosing scope
+    void nested_callback(void *ctx, size_t task, size_t thread, size_t colocation) {
+        (void)ctx; (void)thread; (void)colocation;
+        atomic_fetch_add(&counter, 1);
+    }
+
+    fu_pool_for_n(pool, 100, nested_callback, NULL);
+    printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+Compile: `gcc -std=c11 test.c -lforkunion_static -lpthread -lnuma`
+
+#### Clang Blocks Extension
+
+Clang provides [blocks](https://clang.llvm.org/docs/BlockLanguageSpec.html) with `^{}` syntax:
+
+```c
+#include <stdio.h>
+#include <stdatomic.h>
+#include <Block.h>
+#include <forkunion.h>
+
+typedef void (^task_block_t)(void *, size_t, size_t, size_t);
+
+struct block_wrapper { task_block_t block; };
+
+void block_wrapper_fn(void *ctx, size_t task, size_t thread, size_t colocation) {
+    ((struct block_wrapper *)ctx)->block(NULL, task, thread, colocation);
+}
+
+int main(void) {
+    fu_pool_t *pool = fu_pool_new("clang_blocks");
+    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+
+    __block atomic_size_t counter = 0;
+
+    task_block_t my_block = ^(void *c, size_t task, size_t t, size_t col) {
+        (void)c; (void)t; (void)col;
+        atomic_fetch_add(&counter, 1);
+    };
+
+    task_block_t heap_block = Block_copy(my_block);
+    struct block_wrapper wrapper = { .block = heap_block };
+
+    fu_pool_for_n(pool, 100, block_wrapper_fn, &wrapper);
+
+    Block_release(heap_block);
+    printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
+
+    fu_pool_delete(pool);
+    return 0;
+}
+```
+
+Compile: `clang -std=c11 -fblocks test.c -lforkunion_static -lpthread -lnuma -lBlocksRuntime`
 
 ## Alternatives & Differences
 
@@ -186,8 +371,9 @@ Many other thread-pool implementations are more feature-rich but have different 
 - Modern C++: [`taskflow/taskflow`](https://github.com/taskflow/taskflow), [`progschj/ThreadPool`](https://github.com/progschj/ThreadPool), [`bshoshany/thread-pool`](https://github.com/bshoshany/thread-pool)
 - Traditional C++: [`vit-vit/CTPL`](https://github.com/vit-vit/CTPL), [`mtrebi/thread-pool`](https://github.com/mtrebi/thread-pool)
 - Rust: [`tokio-rs/tokio`](https://github.com/tokio-rs/tokio), [`rayon-rs/rayon`](https://github.com/rayon-rs/rayon), [`smol-rs/smol`](https://github.com/smol-rs/smol)
+- Zig: [`std.Thread.Pool`](https://ziglang.org/documentation/master/std/#std.Thread.Pool)
 
-Those are not designed for the same OpenMP-like use cases as __`fork_union`__.
+Those are not designed for the same OpenMP-like use cases as __`forkunion`__.
 Instead, they primarily focus on task queuing, which requires significantly more work.
 
 ### Locks and Mutexes
@@ -247,7 +433,7 @@ Because of these rules, padding hot variables to 128 bytes is a conservative but
 ### Non-Uniform Memory Access (NUMA)
 
 Handling NUMA isn't trivial and is only supported on Linux with the help of the [`libnuma` library](https://github.com/numactl/numactl).
-It provides the `mbind` interface to pin specific memory regions to particular NUMA nodes, as well as helper functions to query the system topology, which are exposed via the `fork_union::numa_topology` template.
+It provides the `mbind` interface to pin specific memory regions to particular NUMA nodes, as well as helper functions to query the system topology, which are exposed via the `forkunion::numa_topology` template.
 
 Let's say you are working on a Big Data application, like brute-forcing Vector Search using the [SimSIMD](https://github.com/ashvardanian/simsimd) library on a 2 dual-socket CPU system, similar to [USearch](https://github.com/unum-cloud/usearch/pulls).
 The first part of that program may be responsible for sharding the incoming stream of data between distinct memory regions.
@@ -256,10 +442,10 @@ That part, in our simple example will be single-threaded:
 ```cpp
 #include <vector> // `std::vector`
 #include <span> // `std::span`
-#include <fork_union.hpp> // `linux_numa_allocator`, `numa_topology_t`, `linux_distributed_pool_t`
+#include <forkunion.hpp> // `linux_numa_allocator`, `numa_topology_t`, `linux_distributed_pool_t`
 #include <simsimd/simsimd.h> // `simsimd_f32_cos`, `simsimd_distance_t`
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 using floats_alloc_t = fu::linux_numa_allocator<float>;
 
 constexpr std::size_t dimensions = 768; /// Matches most BERT-like models
@@ -373,12 +559,12 @@ Works in tight loops.
 ### Rayon-style Parallel Iterators
 
 For Rayon-style ergonomics, use the parallel iterator API with the `prelude`.
-Unlike Rayon, Fork Union's parallel iterators don't depend on the global state and allow explicit control over the thread pool and scheduling strategy.
+Unlike Rayon, ForkUnion's parallel iterators don't depend on the global state and allow explicit control over the thread pool and scheduling strategy.
 For statically shaped workloads, the default static scheduling is more efficient: 
 
 ```rust
-use fork_union as fu;
-use fork_union::prelude::*;
+use forkunion as fu;
+use forkunion::prelude::*;
 
 let mut pool = fu::spawn(4);
 let mut data: Vec<usize> = (0..1000).collect();
@@ -415,21 +601,50 @@ This easily composes with other iterator adaptors, like `map`, `filter`, and `zi
     });
 ```
 
-Moreover, each thread can maintain its own scratch space to avoid contention during reductions.
-Cache-line alignment via `CacheAligned` prevents false sharing:
+For parallel reductions, ForkUnion provides Rayon-like convenience methods with automatic NUMA-aware cache-aligned scratch allocation:
+
+```rust
+let data: Vec<u64> = (0..1_000_000).map(|i| i as u64).collect();
+
+// Sum all elements with automatic scratch allocation
+let total: u64 = (&data[..])
+    .into_par_iter()
+    .with_pool(&mut pool)
+    .sum();
+
+// Count elements matching a predicate
+let evens = (&data[..])
+    .into_par_iter()
+    .filter(|&x| x % 2 == 0)
+    .with_pool(&mut pool)
+    .count();
+
+// Custom reduction (product)
+let product = (&data[..])
+    .into_par_iter()
+    .with_pool(&mut pool)
+    .reduce(
+        || 1u64,                     // initial value
+        |acc, value, _| *acc *= *value,  // fold function
+        |a, b| a * b                 // combine function
+    );
+```
+
+For manual control over scratch allocation, use `reduce_with_scratch`:
 
 ```rust
 // Cache-line aligned wrapper to prevent false sharing
-let mut scratch: Vec<CacheAligned<usize>> =
+let mut scratch: Vec<CacheAligned<u64>> =
     (0..pool.threads()).map(|_| CacheAligned(0)).collect();
 
-(&data[..])
+let total = (&data[..])
     .into_par_iter()
     .with_pool(&mut pool)
-    .fold_with_scratch(scratch.as_mut_slice(), |acc, value, _prong| {
-        acc.0 += *value;
-    });
-let total: usize = scratch.iter().map(|a| a.0).sum();
+    .reduce_with_scratch(
+        scratch.as_mut_slice(),
+        |acc, value, _| acc.0 += *value,  // fold
+        |a, b| a.0 += b.0                 // combine in-place
+    );
 ```
 
 ## Performance
@@ -443,15 +658,15 @@ Additional NUMA-aware Search examples are available in `scripts/search.rs`.
 
 C++ benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 
-| Machine        | OpenMP (D) | OpenMP (S) | Fork Union (D) | Fork Union (S) |
-| :------------- | ---------: | ---------: | -------------: | -------------: |
-| 16x Intel SPR  |      18.9s |      12.4s |          16.8s |           8.7s |
-| 12x Apple M2   | 1m:34.8s ² | 1m:25.9s ² |          31.5s |          20.3s |
-| 96x Graviton 4 |      32.2s |      20.8s |          39.8s |          26.0s |
+| Machine        | OpenMP (D) | OpenMP (S) | ForkUnion (D) | ForkUnion (S) |
+| :------------- | ---------: | ---------: | ------------: | ------------: |
+| 16x Intel SPR  |      18.9s |      12.4s |         16.8s |          8.7s |
+| 12x Apple M2   | 1m:34.8s ² | 1m:25.9s ² |         31.5s |         20.3s |
+| 96x Graviton 4 |      32.2s |      20.8s |         39.8s |         26.0s |
 
 Rust benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 
-| Machine        |  Rayon (D) |  Rayon (S) | Fork Union (D) | Fork Union (S) |
+| Machine        |  Rayon (D) |  Rayon (S) |  ForkUnion (D) |  ForkUnion (S) |
 | :------------- | ---------: | ---------: | -------------: | -------------: |
 | 16x Intel SPR  |    🔄 45.4s |    🔄 32.1s | 18.1s, 🔄 22.4s | 12.4s, 🔄 12.9s |
 | 12x Apple M2   | 🔄 1m:47.8s | 🔄 1m:07.1s | 24.5s, 🔄 26.8s | 11.0s, 🔄 11.8s |
@@ -459,15 +674,26 @@ Rust benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
 
 > ¹ Another common workload is "Parallel Reductions" covered in a separate [repository](https://github.com/ashvardanian/ParallelReductionsBenchmark).
 > ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing. It's also fair to say, that OpenMP is not optimized for AppleClang.
-> 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for Fork Union.
+> 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for ForkUnion.
+
+Zig benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
+
+| Machine        | Standard (S) | ForkUnion (D) | ForkUnion (S) |
+| :------------- | -----------: | ------------: | ------------: |
+| 16x Intel SPR  |      2m52.0s |         18.2s |         12.8s |
+| 12x Apple M2   |      1m44.8s |         33.2s |         12.2s |
+| 96x Graviton 4 |            - |             - |             - |
+
+> Benchmarking suite also includes [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev), two popular Zig libraries for async processing, but those don't provide comparable bulk-synchronous APIs.
+> Thus, typically, all of the submitted tasks are executed on a single thread, making results not comparable.
 
 You can rerun those benchmarks with the following commands:
 
 ```bash
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release
 cmake --build build_release --config Release
-time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_static build_release/fork_union_nbody
-time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=fork_union_dynamic build_release/fork_union_nbody
+time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static build_release/forkunion_nbody
+time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_dynamic build_release/forkunion_nbody
 ```
 
 > Consult the header of `scripts/nbody.cpp` and `scripts/nbody.rs` for additional benchmarking options.
@@ -516,7 +742,7 @@ To run the C++ tests, use CMake:
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D BUILD_TESTING=ON
 cmake --build build_release --config Release -j
 ctest --test-dir build_release                  # run all tests
-build_release/fork_union_nbody                  # run the benchmarks
+build_release/forkunion_nbody                  # run the benchmarks
 ```
 
 For C++ debug builds, consider using the VS Code debugger presets or the following commands:
@@ -524,7 +750,7 @@ For C++ debug builds, consider using the VS Code debugger presets or the followi
 ```bash
 cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D BUILD_TESTING=ON
 cmake --build build_debug --config Debug        # build with Debug symbols
-build_debug/fork_union_test_cpp20               # run a single test executable
+build_debug/forkunion_test_cpp20               # run a single test executable
 ```
 
 To run static analysis:
@@ -549,7 +775,7 @@ To build with an alternative compiler, like LLVM Clang, use the following comman
 sudo apt-get install libomp-15-dev clang++-15 # OpenMP version must match Clang
 cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D CMAKE_CXX_COMPILER=clang++-15
 cmake --build build_debug --config Debug
-build_debug/fork_union_test_cpp20
+build_debug/forkunion_test_cpp20
 ```
 
 Or on macOS with Apple Clang:
@@ -558,18 +784,28 @@ Or on macOS with Apple Clang:
 brew install llvm@20
 cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D CMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++
 cmake --build build_debug --config Debug
-build_debug/fork_union_test_cpp20
+build_debug/forkunion_test_cpp20
 ```
 
-For Rust, use the following command:
+For Rust, use the following commands to verify no_std compatibility:
 
 ```bash
-rustup toolchain install                # for Alloc API
-cargo miri test                         # to catch UBs
-cargo build --features numa             # for NUMA support on Linux
-cargo test --release                    # to run the tests fast
-cargo test --features numa --release    # for NUMA tests on Linux
+rustup toolchain install
+cargo build --lib --no-default-features --release
+cargo build --lib --no-default-features --features numa --release
+cargo doc --lib --no-default-features --no-deps
 ```
+
+Verify the tests pass:
+
+```bash
+cargo test --lib --release
+cargo test --doc --release
+cargo test --lib --features numa --release
+```
+
+Rust provides a lot of tooling for concurrency testing, like Miri and Loom.
+Most of it, however, is not applicable in this case, as the core logic is implemented in C++.
 
 To automatically detect the Minimum Supported Rust Version (MSRV):
 
@@ -577,6 +813,23 @@ To automatically detect the Minimum Supported Rust Version (MSRV):
 cargo +stable install cargo-msrv
 cargo msrv find --ignore-lockfile
 ```
+
+---
+
+For Zig, use the following commands:
+
+```bash
+zig build test --summary all            # run tests
+zig build -Dnuma=true                   # enable NUMA support (Linux)
+
+# Run benchmark from the `scripts` directory
+cd scripts
+zig build -Doptimize=ReleaseFast
+time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static \
+    ./zig-out/bin/nbody_zig
+```
+
+Check the `scripts/nbody.zig` header for additional benchmarking options.
 
 ## License
 

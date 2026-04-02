@@ -1,0 +1,23 @@
+.{
+    .name = .nbody,
+    .version = "0.1.0",
+    .fingerprint = 0x1accea9f530b9d5f,
+    .minimum_zig_version = "0.15.0",
+
+    .dependencies = .{
+        .forkunion = .{
+            .path = "..",
+        },
+        .libxev = .{
+            .url = "git+https://github.com/mitchellh/libxev#96a08cd8ae3bbf291f07b7cc3de8b401cb60df5e",
+            .hash = "12209dc002b8a58b69cd8e55034a00b4124b5d9abc8b1c1eaecbd31a39282caae267",
+            .lazy = true,
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "nbody.zig",
+    },
+}

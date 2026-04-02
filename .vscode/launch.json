@@ -9,7 +9,7 @@
             "type": "cppdbg",
             "request": "launch",
             "preLaunchTask": "Build: Debug with GDB",
-            "program": "${workspaceFolder}/build_debug/fork_union_test_cpp20",
+            "program": "${workspaceFolder}/build_debug/forkunion_test_cpp20",
             "cwd": "${workspaceFolder}",
             "args": [],
             "setupCommands": [
@@ -40,7 +40,7 @@
                 "MIMode": "gdb"
             },
             "windows": {
-                "program": "${workspaceFolder}\\build_debug\\scripts\\fork_union_test_cpp20.exe",
+                "program": "${workspaceFolder}\\build_debug\\scripts\\forkunion_test_cpp20.exe",
                 "MIMode": "gdb",
                 "miDebuggerPath": "C:\\MinGw\\bin\\gdb.exe"
             }
@@ -50,7 +50,7 @@
             "type": "cppdbg",
             "request": "launch",
             "preLaunchTask": "Build: Debug i386 with GDB",
-            "program": "${workspaceFolder}/build_i386/fork_union_test_cpp20",
+            "program": "${workspaceFolder}/build_i386/forkunion_test_cpp20",
             "cwd": "${workspaceFolder}",
             "args": [],
             "setupCommands": [
@@ -86,7 +86,7 @@
             "type": "cppdbg",
             "request": "launch",
             "preLaunchTask": "Build: Debug with LLDB",
-            "program": "${workspaceFolder}/build_debug/fork_union_test_cpp20",
+            "program": "${workspaceFolder}/build_debug/forkunion_test_cpp20",
             "cwd": "${workspaceFolder}",
             "args": [],
             "setupCommands": [
@@ -116,7 +116,7 @@
             "type": "cppdbg",
             "request": "launch",
             "preLaunchTask": "Build: Debug with GDB",
-            "program": "${workspaceFolder}/build_debug/fork_union_nbody",
+            "program": "${workspaceFolder}/build_debug/forkunion_nbody",
             "cwd": "${workspaceFolder}",
             "args": [],
             "setupCommands": [
@@ -146,7 +146,7 @@
                 },
                 {
                     "name": "NBODY_BACKEND",
-                    "value": "fork_union_dynamic"
+                    "value": "forkunion_dynamic"
                 }
             ],
             "stopAtEntry": false,

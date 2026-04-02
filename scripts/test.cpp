@@ -3,10 +3,10 @@
 #include <vector>    // `std::vector`
 #include <algorithm> // `std::sort`
 
-#include <fork_union.hpp>
+#include <forkunion.hpp>
 
 /* Namespaces, constants, and explicit type instantiations. */
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 using fu32_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
 using fu16_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
@@ -95,11 +95,11 @@ struct make_pool_t {
 #if FU_ENABLE_NUMA
 static fu::numa_topology_t numa_topology;
 struct make_linux_colocated_pool_t {
-    fu::linux_colocated_pool_t construct() const noexcept { return fu::linux_colocated_pool_t("fork_union"); }
+    fu::linux_colocated_pool_t construct() const noexcept { return fu::linux_colocated_pool_t("forkunion"); }
     fu::numa_node_t scope(std::size_t = 0) const noexcept { return numa_topology.node(0); }
 };
 struct make_linux_distributed_pool_t {
-    fu::linux_distributed_pool_t construct() const noexcept { return fu::linux_distributed_pool_t("fork_union"); }
+    fu::linux_distributed_pool_t construct() const noexcept { return fu::linux_distributed_pool_t("forkunion"); }
     fu::numa_topology_t const &scope(std::size_t = 0) const noexcept { return numa_topology; }
 };
 #endif
@@ -461,7 +461,7 @@ void log_numa_topology() noexcept {
 
 int main(void) {
 
-    std::printf("Welcome to the Fork Union library test suite!\n");
+    std::printf("Welcome to the ForkUnion library test suite!\n");
     log_numa_topology();
 
     std::printf("Starting unit tests...\n");

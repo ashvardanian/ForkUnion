@@ -1,11 +1,11 @@
 /**
  *  @brief  Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file   lib.cpp
+ *  @file   forkunion.cpp
  *  @author Ash Vardanian
  *  @date   June 27, 2025
  */
-#include <fork_union.h>   // C type aliases
-#include <fork_union.hpp> // C++ core implementation
+#include <forkunion.h>   // C type aliases
+#include <forkunion.hpp> // C++ core implementation
 
 #include <utility>     // `std::in_place_type_t`
 #include <algorithm>   // `std::max`
@@ -13,7 +13,7 @@
 #include <cstdint>     // `std::uint8_t`
 #include <type_traits> // `std::aligned_storage`
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 using thread_allocator_t = std::allocator<std::thread>;
 
@@ -22,7 +22,7 @@ using thread_allocator_t = std::allocator<std::thread>;
  *
  *  MSVC cannot handle alignas > 64 when objects are passed by value in `std::variant`.
  *  This custom implementation uses a tagged union with manual type management.
- *  @see https://github.com/ashvardanian/fork_union/issues/26
+ *  @see https://github.com/ashvardanian/forkunion/issues/26
  */
 struct pool_variants_t {
 
@@ -269,9 +269,9 @@ bool globals_initialize(void) {
 
 extern "C" {
 
-int fu_version_major(void) { return FORK_UNION_VERSION_MAJOR; }
-int fu_version_minor(void) { return FORK_UNION_VERSION_MINOR; }
-int fu_version_patch(void) { return FORK_UNION_VERSION_PATCH; }
+int fu_version_major(void) { return FORKUNION_VERSION_MAJOR; }
+int fu_version_minor(void) { return FORKUNION_VERSION_MINOR; }
+int fu_version_patch(void) { return FORKUNION_VERSION_PATCH; }
 int fu_enabled_numa(void) { return FU_ENABLE_NUMA; }
 
 #pragma region - Metadata
@@ -388,17 +388,47 @@ void fu_free(FU_MAYBE_UNUSED_ size_t numa_node_index, void *pointer, FU_MAYBE_UN
 
 #pragma region - Lifetime
 
+/**
+ *  @brief Cross-platform aligned memory allocation.
+ *  @note Returns nullptr on failure, never throws exceptions.
+ */
+inline void *fu_aligned_malloc(std::size_t size, std::size_t alignment) noexcept {
+#if defined(_MSC_VER)
+    return _aligned_malloc(size, alignment);
+#elif defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
+    void *ptr = nullptr;
+    return (posix_memalign(&ptr, alignment, size) == 0) ? ptr : nullptr;
+#else
+    return ::operator new(size, std::align_val_t {alignment}, std::nothrow);
+#endif
+}
+
+/**
+ *  @brief Cross-platform aligned memory deallocation.
+ *  @note Matches fu_aligned_malloc - must use same alignment value.
+ */
+inline void fu_aligned_free(void *ptr, std::size_t alignment) noexcept {
+#if defined(_MSC_VER)
+    _aligned_free(ptr);
+#elif defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
+    std::free(ptr);
+#else
+    ::operator delete(ptr, std::align_val_t {alignment}, std::nothrow);
+#endif
+}
+
 fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
     if (!globals_initialize()) return nullptr;
 
-    opaque_pool_t *opaque = static_cast<opaque_pool_t *>(std::malloc(sizeof(opaque_pool_t)));
+    opaque_pool_t *opaque =
+        static_cast<opaque_pool_t *>(fu_aligned_malloc(sizeof(opaque_pool_t), alignof(opaque_pool_t)));
     if (!opaque) return nullptr;
 
     // Best case, use the NUMA-aware distributed pool
 #if FU_ENABLE_NUMA
     fu::numa_topology_t copied_topology;
     if (!copied_topology.try_assign(global_numa_topology)) {
-        std::free(opaque);
+        fu_aligned_free(opaque, alignof(opaque_pool_t));
         return nullptr;
     }
 
@@ -485,7 +515,7 @@ void fu_pool_delete(fu_pool_t *pool) {
 
     // Call the object's destructor and deallocate the memory
     opaque->~opaque_pool_t();
-    std::free(opaque);
+    fu_aligned_free(opaque, alignof(opaque_pool_t));
 }
 
 fu_bool_t fu_pool_spawn(fu_pool_t *pool, size_t threads, fu_caller_exclusivity_t c_exclusivity) {

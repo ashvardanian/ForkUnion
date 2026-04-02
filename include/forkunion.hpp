@@ -1,10 +1,10 @@
 /**
  *  @brief  Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file   fork_union.hpp
+ *  @file   forkunion.hpp
  *  @author Ash Vardanian
  *  @date   May 2, 2025
  *
- *  Fork Union provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
+ *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
  *  avoiding dynamic memory allocations, exceptions, system calls, and heavy Compare-And-Swap instructions.
  *  The library leverages the "weak memory model" to allow Arm and IBM Power CPUs to aggressively optimize
  *  execution at runtime. It also aggressively tests against overflows on smaller index types, and is safe
@@ -13,9 +13,9 @@
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <fork_union.hpp> // `fu::basic_pool_t`
+ *  #include <forkunion.hpp> // `fu::basic_pool_t`
  *
- *  using fu = ashvardanian::fork_union;
+ *  using fu = ashvardanian::forkunion;
  *  int main(int argc, char *argv[]) {
  *
  *      fu::basic_pool_t pool;
@@ -83,7 +83,11 @@
 #define FORK_UNION_VERSION_PATCH 1
 
 #if !defined(FU_ALLOW_UNSAFE)
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+#define FU_ALLOW_UNSAFE 1
+#else
 #define FU_ALLOW_UNSAFE 0
+#endif
 #endif
 
 /**
@@ -202,7 +206,7 @@
 #endif
 
 namespace ashvardanian {
-namespace fork_union {
+namespace forkunion {
 
 #pragma region - Helpers and Constants
 
@@ -292,7 +296,7 @@ enum capabilities_t : unsigned int {
 };
 
 inline capabilities_t operator|(capabilities_t a, capabilities_t b) {
-  return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
+    return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
 }
 
 struct standard_yield_t {
@@ -584,6 +588,19 @@ class unique_padded_buffer {
  */
 struct dummy_lambda_t {};
 
+template <typename yield_type_, typename thread_index_type_>
+struct yield_traits {
+    static constexpr bool supports_no_arg = std::is_nothrow_invocable_r_v<void, yield_type_>;
+    static constexpr bool supports_thread_index = std::is_nothrow_invocable_r_v<void, yield_type_, thread_index_type_>;
+    static constexpr bool valid = supports_no_arg || supports_thread_index;
+};
+
+template <typename yield_type_, typename thread_index_type_>
+inline void call_yield_(yield_type_ &yield, thread_index_type_ thread_index) noexcept {
+    if constexpr (yield_traits<yield_type_, thread_index_type_>::supports_thread_index) { yield(thread_index); }
+    else { yield(); }
+}
+
 /**
  *  @brief A trivial minimalistic lock-free "mutex" implementation using `std::atomic_flag`.
  *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
@@ -606,7 +623,7 @@ class spin_mutex {
   public:
     void lock() noexcept {
         micro_yield_t micro_yield;
-        while (flag_.test_and_set(std::memory_order_acquire)) micro_yield();
+        while (flag_.test_and_set(std::memory_order_acquire)) call_yield_(micro_yield);
     }
     bool try_lock() noexcept { return !flag_.test_and_set(std::memory_order_acquire); }
     void unlock() noexcept { flag_.clear(std::memory_order_release); }
@@ -630,7 +647,7 @@ class spin_mutex {
   public:
     void lock() noexcept {
         micro_yield_t micro_yield;
-        while (flag_.exchange(true, std::memory_order_acquire)) micro_yield();
+        while (flag_.exchange(true, std::memory_order_acquire)) call_yield_(micro_yield);
     }
     bool try_lock() noexcept { return !flag_.exchange(true, std::memory_order_acquire); }
     void unlock() noexcept { flag_.store(false, std::memory_order_release); }
@@ -969,9 +986,9 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <fork_union.hpp> // `basic_pool_t`
+ *  #include <forkunion.hpp> // `basic_pool_t`
  *
- *  using fu = ashvardanian::fork_union;
+ *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::basic_pool_t pool; // ? Alias to `fu::basic_pool<>` template
  *      if (!pool.try_spawn(std::thread::hardware_concurrency())) return EXIT_FAILURE;
@@ -987,9 +1004,9 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <fork_union.hpp> // `basic_pool_t`
+ *  #include <forkunion.hpp> // `basic_pool_t`
  *
- *  using fu = ashvardanian::fork_union;
+ *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::basic_pool_t first_pool, second_pool;
  *      if (!first_pool.try_spawn(2) || !second_pool.try_spawn(2, fu::caller_exclusive_k)) return EXIT_FAILURE;
@@ -1018,8 +1035,6 @@ class basic_pool {
   public:
     using allocator_t = allocator_type_;
     using micro_yield_t = micro_yield_type_;
-    static_assert(std::is_nothrow_invocable_r<void, micro_yield_t>::value,
-                  "Yield must be callable w/out arguments & return void");
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(is_power_of_two(alignment_k), "Alignment must be a power of 2");
 
@@ -1034,6 +1049,9 @@ class basic_pool {
 
     using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, thread_index_t); // ? Wraps lambda's `operator()`
+
+    using micro_yield_traits_t = yield_traits<micro_yield_t, thread_index_t>;
+    static_assert(micro_yield_traits_t::valid, "Yield must be invocable w/out args or with a thread index");
 
   private:
     // Thread-pool-specific variables:
@@ -1141,20 +1159,33 @@ class basic_pool {
         // Initializing the thread pool can fail for all kinds of reasons,
         // that the `std::thread` documentation describes as "implementation-defined".
         // https://en.cppreference.com/w/cpp/thread/thread/thread
-        for (thread_index_t i = 0; i < worker_threads; ++i) {
+        auto spawn_worker = [&](thread_index_t i) noexcept -> bool {
+            thread_index_t const i_with_caller = i + use_caller_thread;
+#if FU_ALLOW_UNSAFE
             try {
-                thread_index_t const i_with_caller = i + use_caller_thread;
                 new (&workers[i]) std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+                return true;
             }
             catch (...) {
-                mood_.store(mood_t::die_k, std::memory_order_release);
-                for (thread_index_t j = 0; j < i; ++j) {
-                    workers[j].join(); // ? Wait for the thread to exit
-                    workers[j].~thread();
-                }
-                reset_on_failure();
                 return false;
             }
+#else
+            new (&workers[i]) std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+            return true;
+#endif
+        };
+
+        for (thread_index_t i = 0; i < worker_threads; ++i) {
+            if (spawn_worker(i)) continue;
+
+            // ! Failed to spawn a thread, roll back everything
+            mood_.store(mood_t::die_k, std::memory_order_release);
+            for (thread_index_t j = 0; j < i; ++j) {
+                workers[j].join(); // ? Wait for the thread to exit
+                workers[j].~thread();
+            }
+            reset_on_failure();
+            return false;
         }
 
         return true;
@@ -1217,7 +1248,8 @@ class basic_pool {
 
         // Actually wait for everyone to finish
         micro_yield_t micro_yield;
-        while (threads_to_sync_.load(std::memory_order_acquire)) micro_yield();
+        while (threads_to_sync_.load(std::memory_order_acquire))
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
     }
 
 #pragma endregion Core API
@@ -1403,7 +1435,7 @@ class basic_pool {
             micro_yield_t micro_yield;
             while ((new_epoch = epoch_.load(std::memory_order_acquire)) == last_epoch &&
                    (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                micro_yield();
+                call_yield_(micro_yield, thread_index);
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
@@ -2517,8 +2549,6 @@ struct linux_colocated_pool {
   public:
     using allocator_t = linux_numa_allocator_t;
     using micro_yield_t = micro_yield_type_;
-    static_assert(std::is_nothrow_invocable_r<void, micro_yield_t>::value,
-                  "Yield must be callable w/out arguments & return void");
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(alignment_k > 0 && (alignment_k & (alignment_k - 1)) == 0, "Alignment must be a power of 2");
 
@@ -2531,6 +2561,9 @@ struct linux_colocated_pool {
 
     using punned_fork_context_t = void *;                                     // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, colocated_thread_t); // ? Wraps lambda's `operator()`
+
+    using micro_yield_traits_t = yield_traits<micro_yield_t, thread_index_t>;
+    static_assert(micro_yield_traits_t::valid, "Yield must be invocable w/out args or with a thread index");
 
   private:
     using allocator_traits_t = std::allocator_traits<allocator_t>;
@@ -2572,9 +2605,9 @@ struct linux_colocated_pool {
     linux_colocated_pool &operator=(linux_colocated_pool &&) = delete;
     linux_colocated_pool &operator=(linux_colocated_pool const &) = delete;
 
-    explicit linux_colocated_pool(char const *name = "fork_union") noexcept {
+    explicit linux_colocated_pool(char const *name = "forkunion") noexcept {
         // Accept NULL or empty names by falling back to a sensible default
-        char const *effective_name = (name && name[0] != '\0') ? name : "fork_union";
+        char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::strncpy(name_, effective_name, sizeof(name_) - 1);
         name_[sizeof(name_) - 1] = '\0';
     }
@@ -2861,7 +2894,8 @@ struct linux_colocated_pool {
 
         // Actually wait for everyone to finish
         micro_yield_t micro_yield;
-        while (threads_to_sync_.load(std::memory_order_acquire)) micro_yield();
+        while (threads_to_sync_.load(std::memory_order_acquire))
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
     }
 
 #pragma endregion Core API
@@ -3071,7 +3105,9 @@ struct linux_colocated_pool {
         // so spin-loop for a bit until the pool is ready.
         mood_t mood;
         micro_yield_t micro_yield;
-        while ((mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::chill_k) micro_yield();
+        while ((mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::chill_k)
+            // Technically, we are not on the zero thread index, but we don't know our index yet.
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
 
         // If we are ready to start grinding, export this threads metadata to make it externally
         // observable and controllable.
@@ -3106,7 +3142,7 @@ struct linux_colocated_pool {
             // Wait for either: a new ticket or a stop flag
             while ((new_epoch = pool->epoch_.load(std::memory_order_acquire)) == last_epoch &&
                    (mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                micro_yield();
+                call_yield_(micro_yield, global_thread_index);
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
@@ -3350,12 +3386,11 @@ struct linux_distributed_pool {
     linux_distributed_pool &operator=(linux_distributed_pool &&) = delete;
     linux_distributed_pool &operator=(linux_distributed_pool const &) = delete;
 
-    linux_distributed_pool(numa_topology_t topo = {}) noexcept
-        : linux_distributed_pool("fork_union", std::move(topo)) {}
+    linux_distributed_pool(numa_topology_t topo = {}) noexcept : linux_distributed_pool("forkunion", std::move(topo)) {}
 
     explicit linux_distributed_pool(char const *name, numa_topology_t topo = {}) noexcept : topology_(std::move(topo)) {
         // Accept null or empty names by falling back to a sensible default
-        char const *effective_name = (name && name[0] != '\0') ? name : "fork_union";
+        char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::strncpy(name_, effective_name, sizeof(name_) - 1);
         name_[sizeof(name_) - 1] = '\0';
     }
@@ -4069,5 +4104,5 @@ struct log_capabilities_t {
 };
 #pragma endregion - Logging
 
-} // namespace fork_union
+} // namespace forkunion
 } // namespace ashvardanian

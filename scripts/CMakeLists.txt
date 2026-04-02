@@ -1,6 +1,6 @@
 # Shared logic for setting target properties for tests and examples
-function (set_target_properties_for_fork_union_script target_name)
-    target_link_libraries(${target_name} PRIVATE fork_union)
+function (set_target_properties_for_forkunion_script target_name)
+    target_link_libraries(${target_name} PRIVATE forkunion)
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # This warning annoys us by reminding, that before GCC 4.6 the ABI for passing objects aligned to ≥32-bytes was
@@ -12,9 +12,8 @@ function (set_target_properties_for_fork_union_script target_name)
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         message(STATUS "Enabling optimizations for ${target_name}")
         target_compile_options(
-            ${target_name}
-            PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
-                    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
+            ${target_name} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+                                   $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
         )
     endif ()
 
@@ -43,7 +42,7 @@ set(TEST_SOURCES test.cpp)
 set(CXX_STANDARDS 17 20 23)
 foreach (STD IN LISTS CXX_STANDARDS)
     # Derive a unique target name
-    set(TGT fork_union_test_cpp${STD})
+    set(TGT forkunion_test_cpp${STD})
 
     # Create the executable
     add_executable(${TGT} ${TEST_SOURCES})
@@ -57,7 +56,7 @@ foreach (STD IN LISTS CXX_STANDARDS)
 
     # register it as a CTest test
     add_test(NAME ${TGT} COMMAND ${TGT})
-    set_target_properties_for_fork_union_script(${TGT})
+    set_target_properties_for_forkunion_script(${TGT})
 
     # Link against `libatomic` for Linux toolchains that might need it
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -68,39 +67,101 @@ foreach (STD IN LISTS CXX_STANDARDS)
 
 endforeach ()
 
+enable_language(C)
+
+# Standard C11 test
+if (CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    message(STATUS "Skipping C11 C API tests on MSVC due to missing <stdatomic.h> support")
+else ()
+    add_executable(forkunion_test_c11 test.c)
+    set_target_properties(
+        forkunion_test_c11
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS OFF
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(forkunion_test_c11 PRIVATE forkunion_static)
+    add_test(NAME forkunion_test_c11 COMMAND forkunion_test_c11)
+
+    if (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        if (UNIX AND NOT APPLE)
+            target_link_libraries(forkunion_test_c11 PRIVATE -latomic)
+        endif ()
+    endif ()
+endif ()
+
+# GCC nested functions extension test
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_executable(forkunion_test_c_gcc_nested test.c)
+    set_target_properties(
+        forkunion_test_c_gcc_nested
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS ON
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(forkunion_test_c_gcc_nested PRIVATE forkunion_static)
+    add_test(NAME forkunion_test_c_gcc_nested COMMAND forkunion_test_c_gcc_nested)
+
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(forkunion_test_c_gcc_nested PRIVATE -latomic)
+    endif ()
+endif ()
+
+# Clang blocks extension test
+if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+    add_executable(forkunion_test_c_clang_blocks test.c)
+    set_target_properties(
+        forkunion_test_c_clang_blocks
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS ON
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_compile_options(forkunion_test_c_clang_blocks PRIVATE -fblocks)
+    target_link_libraries(forkunion_test_c_clang_blocks PRIVATE forkunion_static)
+    add_test(NAME forkunion_test_c_clang_blocks COMMAND forkunion_test_c_clang_blocks)
+
+    if (APPLE)
+        # Apple's `libSystem` already ships the Blocks runtime, so no extra linkage is required
+    elseif (UNIX)
+        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE -latomic -lBlocksRuntime)
+    endif ()
+endif ()
+
 # Include the N-body benchmark
-add_executable(fork_union_nbody nbody.cpp)
-target_link_libraries(fork_union_nbody PRIVATE fork_union)
+add_executable(forkunion_nbody nbody.cpp)
+target_link_libraries(forkunion_nbody PRIVATE forkunion)
 set_target_properties(
-    fork_union_nbody
+    forkunion_nbody
     PROPERTIES CXX_STANDARD 20
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
 )
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(STATUS "Enabling OpenMP for fork_union_nbody on GCC")
-    target_compile_options(fork_union_nbody PRIVATE -fopenmp -flto -ffast-math)
-    target_link_options(fork_union_nbody PRIVATE -fopenmp)
+    message(STATUS "Enabling OpenMP for forkunion_nbody on GCC")
+    target_compile_options(forkunion_nbody PRIVATE -fopenmp -flto -ffast-math)
+    target_link_options(forkunion_nbody PRIVATE -fopenmp)
 elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     find_program(BREW_EXECUTABLE brew)
     if (BREW_EXECUTABLE)
         execute_process(
             COMMAND ${BREW_EXECUTABLE} --prefix libomp
             OUTPUT_VARIABLE LIBOMP_PREFIX
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
         )
         if (LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}/include/omp.h")
-            message(STATUS "Enabling OpenMP for fork_union_nbody on Clang with Homebrew libomp")
-            target_include_directories(fork_union_nbody PRIVATE ${LIBOMP_PREFIX}/include)
-            target_link_directories(fork_union_nbody PRIVATE ${LIBOMP_PREFIX}/lib)
-            target_compile_options(fork_union_nbody PRIVATE -Xclang -fopenmp)
-            target_link_libraries(fork_union_nbody PRIVATE omp)
+            message(STATUS "Enabling OpenMP for forkunion_nbody on Clang with Homebrew libomp")
+            target_include_directories(forkunion_nbody PRIVATE ${LIBOMP_PREFIX}/include)
+            target_link_directories(forkunion_nbody PRIVATE ${LIBOMP_PREFIX}/lib)
+            target_compile_options(forkunion_nbody PRIVATE -Xclang -fopenmp)
+            target_link_libraries(forkunion_nbody PRIVATE omp)
         else ()
-            message(STATUS "Homebrew libomp not found - OpenMP disabled for fork_union_nbody")
+            message(STATUS "Homebrew libomp not found - OpenMP disabled for forkunion_nbody")
         endif ()
     else ()
-        message(STATUS "Homebrew not found - OpenMP disabled for fork_union_nbody")
+        message(STATUS "Homebrew not found - OpenMP disabled for forkunion_nbody")
     endif ()
 endif ()
-set_target_properties_for_fork_union_script(fork_union_nbody)
+set_target_properties_for_forkunion_script(forkunion_nbody)

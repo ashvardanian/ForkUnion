@@ -1,15 +1,15 @@
 [package]
-name = "fork_union"
+name = "forkunion"
 description = "Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library"
 version = "2.3.1"
 edition = "2021"
 authors = ["Ash Vardanian"]
 license = "Apache-2.0"
-repository = "https://github.com/ashvardanian/fork_union"
+repository = "https://github.com/ashvardanian/forkunion"
 rust-version = "1.64" # Introduced Core C FFI in stable Rust
 readme = "README.md"
-documentation = "https://docs.rs/fork_union"
-homepage = "https://github.com/ashvardanian/fork_union"
+documentation = "https://docs.rs/forkunion"
+homepage = "https://github.com/ashvardanian/forkunion"
 keywords = ["numa", "parallel", "thread-pool", "allocator", "no-std"]
 categories = ["concurrency", "os::linux-apis", "external-ffi-bindings"]
 include = [
@@ -21,11 +21,11 @@ include = [
     "include/**",
     "c/**",
 ]
-links = "fork_union"
+links = "forkunion"
 
 [lib]
-name = "fork_union"
-path = "rust/lib.rs"
+name = "forkunion"
+path = "rust/forkunion.rs"
 
 [build-dependencies]
 cc = "1.2.40"

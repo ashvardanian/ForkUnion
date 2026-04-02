@@ -1,13 +1,13 @@
 @PACKAGE_INIT@
 
-include("${CMAKE_CURRENT_LIST_DIR}/fork_unionTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/forkunionTargets.cmake")
 
 # Provide an un-namespaced alias so downstream consumers can do both:
 # ~~~
-# target_link_libraries(my_executable PRIVATE fork_union)
-# target_link_libraries(my_executable PRIVATE fork_union::fork_union)
+# target_link_libraries(my_executable PRIVATE forkunion)
+# target_link_libraries(my_executable PRIVATE forkunion::forkunion)
 # ~~~
-if (NOT TARGET fork_union::fork_union)
-    add_library(fork_union::fork_union ALIAS fork_union)
+if (NOT TARGET forkunion::forkunion)
+    add_library(forkunion::forkunion ALIAS forkunion)
 endif ()
-set(fork_union_VERSION @PACKAGE_VERSION@)
+set(forkunion_VERSION @PACKAGE_VERSION@)
