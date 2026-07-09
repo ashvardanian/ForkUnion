@@ -713,7 +713,7 @@ impl ThreadPool {
         }
     }
 
-    /// Spawns a pool pinned to a single compute_domain (one NUMA node + QoS level).
+    /// Spawns a pool pinned to a single compute domain (a same-QoS core cluster).
     ///
     /// The pool's threads and NUMA-local allocations stay on `compute_domain_index`, in
     /// `0..count_compute_domains()`. Spawn one such pool per compute domain and coordinate them
@@ -817,7 +817,7 @@ impl ThreadPool {
 
     /// Returns the number of thread compute_domains in the pool.
     ///
-    /// ComputeDomains group threads by NUMA domain, QoS level, and cache hierarchy.
+    /// Compute domains group threads sharing a memory domain, QoS level, and cache hierarchy.
     /// This information is useful for NUMA-aware load balancing and memory allocation.
     pub fn compute_domains(&self) -> usize {
         unsafe { fu_pool_count_compute_domains(self.inner) }
@@ -852,7 +852,7 @@ impl ThreadPool {
     /// Converts a global thread index to a local thread index within a compute_domain.
     ///
     /// This is useful for distributed thread pools where threads are grouped into
-    /// compute_domains (NUMA nodes or QoS levels). The local index can be used for
+    /// compute domains (same-QoS core clusters). The local index can be used for
     /// per-compute_domain data structures or algorithms.
     ///
     /// # Arguments

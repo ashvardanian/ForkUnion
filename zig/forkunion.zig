@@ -143,7 +143,7 @@ pub const Prong = struct {
     task_index: usize,
     /// The physical thread executing this task
     thread_index: usize,
-    /// The compute_domain group (NUMA node + QoS level)
+    /// The compute domain (a same-QoS core cluster)
     compute_domain_index: usize,
 };
 

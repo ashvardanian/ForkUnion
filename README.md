@@ -45,9 +45,9 @@ On `caller_inclusive_k` pools the calling thread owes one slice of the work, whi
 The same rule shapes the RAII guard returned by `for_threads` and the `for_n` family: on exclusive pools the work starts at the guard's construction, while on inclusive pools it runs at `join` or destruction.
 
 On Linux, in C++, given the maturity and flexibility of the HPC ecosystem, it provides [NUMA extensions](#non-uniform-memory-access-numa).
-That includes the `linux_compute_domain_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory on a specific NUMA node.
+That includes the `linux_compute_domain_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory in a specific memory domain.
 Those are out-of-the-box compatible with the higher-level APIs.
-Most interestingly, for Big Data applications, a higher-level `distributed_pool` class will address and balance the work across all NUMA nodes.
+Most interestingly, for Big Data applications, a higher-level `distributed_pool` class will address and balance the work across all compute domains.
 
 ### Intro in Rust
 
@@ -440,7 +440,7 @@ Because of these rules, padding hot variables to 128 bytes is a conservative but
 ### Non-Uniform Memory Access (NUMA)
 
 Handling NUMA isn't trivial and is only supported on Linux with the help of the [`libnuma` library](https://github.com/numactl/numactl).
-It provides the `mbind` interface to pin specific memory regions to particular NUMA nodes, as well as helper functions to query the system topology, which are exposed via the `forkunion::numa_topology` template.
+It provides the `mbind` interface to pin specific memory regions to particular memory domains, as well as helper functions to query the system topology, which are exposed via the `forkunion::numa_topology` template.
 
 Let's say you are working on a Big Data application, like brute-forcing Vector Search using the [SimSIMD](https://github.com/ashvardanian/simsimd) library on a 2 dual-socket CPU system, similar to [USearch](https://github.com/unum-cloud/usearch/pulls).
 The first part of that program may be responsible for sharding the incoming stream of data between distinct memory regions.
@@ -472,16 +472,16 @@ void append(std::span<float, dimensions> vector) {
 The concurrent part would involve spawning threads adjacent to every memory pool to find the best `search_result_t`.
 The primary `search` function, in ideal world would look like this:
 
-1. Each thread finds the best match within its "slice" of a NUMA node, tracking the best distance and index in a local CPU register.
-2. All threads in each NUMA node atomically synchronize using a NUMA-local instance of `search_result_t`.
-3. The main thread collects aggregates of partial results from all NUMA nodes.
+1. Each thread finds the best match within its "slice" of a compute domain, tracking the best distance and index in a local CPU register.
+2. All threads in each compute domain atomically synchronize using a domain-local instance of `search_result_t`.
+3. The main thread collects aggregates of partial results from all compute domains.
 
 That is, however, overly complicated to implement.
 Such tree-like hierarchical reductions are optimal in a theoretical sense. Still, assuming the relative cost of spin-locking once at the end of a thread scope and the complexity of organizing the code, the more straightforward path is better.
 A minimal example would look like this:
 
 ```cpp
-/// On each NUMA node we'll synchronize the threads
+/// On each compute domain we'll synchronize the threads
 struct search_result_t {
     simsimd_distance_t best_distance {std::numeric_limits<simsimd_distance_t>::max()};
     std::size_t best_index {0};
@@ -535,7 +535,7 @@ search_result_t search(std::span<float, dimensions> query) {
 ```
 
 In a dream world, we would call `distributed_pool.for_n`, but there is no clean way to make the scheduling processes aware of the data distribution in an arbitrary application, so that's left to the user.
-The `for_slices` helper provides compute_domain metadata (`fu::local_prong`) that lets you pick the right shard of data based on the NUMA node, while keeping scheduling inside the distributed pool.
+The `for_slices` helper provides compute_domain metadata (`fu::local_prong`) that lets you pick the right shard of data based on the compute domain, while keeping scheduling inside the distributed pool.
 For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns an always-odd generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
 
 ### Efficient Busy Waiting

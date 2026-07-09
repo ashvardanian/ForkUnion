@@ -1,7 +1,7 @@
-//! NUMA-aware vector search implementation using ForkUnion and PinnedVec with SimSIMD.
+//! Compute-domain-aware vector search using ForkUnion and PinnedVec with SimSIMD.
 //!
 //! This example demonstrates how to perform efficient similarity search across
-//! multiple NUMA nodes using the PinnedVec container, ForkUnion's distributed
+//! multiple compute domains using the PinnedVec container, ForkUnion's distributed
 //! thread pool capabilities, and SimSIMD for optimized distance calculations.
 //!
 //! To run this example:
@@ -55,10 +55,10 @@ impl SearchResult {
     }
 }
 
-/// NUMA-aware vector storage using RoundRobinVec with fixed-size vectors
+/// Compute-domain-distributed vector storage using RoundRobinVec with fixed-size vectors
 type DistributedEmbeddings = fu::RoundRobinVec<Embedding>;
 
-/// Creates a new NUMA-aware vector storage based on memory scope percentage
+/// Creates a new compute-domain-distributed vector storage based on memory scope percentage
 fn create_distributed_embeddings(
     pool: &mut fu::ThreadPool,
     memory_scope_percent: usize,
@@ -119,7 +119,7 @@ fn create_distributed_embeddings(
     Some(distributed_vec)
 }
 
-/// Performs NUMA-aware search using ForkUnion's for_threads API for optimal compute_domain
+/// Performs compute-domain-local search, each thread scanning its own compute domain's vectors
 fn numa_aware_search(
     storage: &DistributedEmbeddings,
     query: &Embedding,
@@ -173,7 +173,7 @@ fn numa_aware_search(
     *result
 }
 
-/// Performs unbalanced search where threads work on any NUMA node (for comparison)
+/// Performs unbalanced search where threads sweep every compute domain (for comparison)
 fn worst_case_search(
     storage: &DistributedEmbeddings,
     query: &Embedding,
@@ -266,7 +266,7 @@ fn benchmark_search<F>(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("NUMA-Aware Embedding Search");
+    println!("Compute-Domain-Aware Embedding Search");
 
     // Parse environment variables
     let memory_scope_percent = env::var("SEARCH_SCOPE")
@@ -286,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Print system information
     println!("System Information:");
     println!("  Logical cores: {}", fu::count_logical_cores());
-    println!("  NUMA nodes: {}", fu::count_memory_domains());
+    println!("  Memory domains: {}", fu::count_memory_domains());
     println!("  Thread compute_domains: {}", fu::count_compute_domains());
     println!("  NUMA enabled: {}", fu::numa_enabled());
     println!("Configuration:");
@@ -297,11 +297,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create thread pool
     let mut pool = fu::ThreadPool::try_spawn(threads)?;
 
-    // Initialize NUMA-aware vector storage
+    // Initialize compute-domain-distributed vector storage
     println!();
     println!("📚 Initializing vector storage...");
     let storage = create_distributed_embeddings(&mut pool, memory_scope_percent)
-        .ok_or("Failed to initialize NUMA vector storage")?;
+        .ok_or("Failed to initialize vector storage")?;
     println!(
         "Thread pool initialized with {} threads across {} compute_domains",
         pool.threads(),
@@ -325,7 +325,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Benchmark different search strategies
     benchmark_search(
-        "NUMA-Aware Search",
+        "Compute-Domain-Aware Search",
         &storage,
         &queries,
         &mut pool,

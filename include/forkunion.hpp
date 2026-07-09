@@ -290,7 +290,7 @@ enum capabilities_t : unsigned int {
     capability_risc5_pause_k = 1 << 5, // ? RISC-V
 
     // Pool-topology capabilities:
-    capability_compute_domain_k = 1 << 6, // ? Pinned to a single {NUMA node + QoS level} compute_domain
+    capability_compute_domain_k = 1 << 6, // ? Pinned to a single compute_domain (a same-QoS core cluster)
 
     // RAM-specific capabilities:
     capability_numa_aware_k = 1 << 10,             // ? NUMA-aware memory allocations
@@ -422,7 +422,7 @@ struct local_prong {
 using local_prong_t = local_prong<>; // ? Default prong type with `std::size_t` indices
 
 /**
- *  @brief Describes a thread ID pinned to a specific NUMA node or QoS level.
+ *  @brief Describes a thread ID pinned to a specific compute domain.
  */
 template <typename index_type_ = std::size_t>
 struct local_thread {
