@@ -8,7 +8,9 @@
 //! - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
 //!
 //! The backends include: `forkunion_static`, `forkunion_dynamic`, `forkunion_iter_static`,
-//! `forkunion_iter_dynamic`, `rayon_static`, `rayon_dynamic`, and `tokio`. To compile and run:
+//! `forkunion_iter_dynamic`, `rayon_static`, `rayon_dynamic`, and `tokio`. With the `numa`
+//! feature on Linux, `forkunion_numa_static` and `forkunion_numa_dynamic` are also available,
+//! replicating the body positions into each compute domain's local memory. To compile and run:
 //!
 //! ```sh
 //! cargo run --example nbody --release
@@ -123,9 +125,6 @@ fn hw_threads() -> usize {
         .unwrap_or(1)
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Fork-Union kernels
-// ────────────────────────────────────────────────────────────────────────────
 fn iteration_fu_static(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
     let n = bodies.len();
 
@@ -178,9 +177,6 @@ fn iteration_fu_dynamic(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: 
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Fork-Union Iterator API kernels
-// ────────────────────────────────────────────────────────────────────────────
 fn iteration_fu_iter_static(
     pool: &mut fu::ThreadPool,
     bodies: &mut [Body],
@@ -249,9 +245,149 @@ fn iteration_fu_iter_dynamic(
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Rayon kernels
-// ────────────────────────────────────────────────────────────────────────────
+/// One replica of the body positions per compute domain, each pinned to that domain's
+/// local memory. Mirrors `make_buffers_for_forkunion_numa` in `nbody.cpp`.
+#[cfg(feature = "numa")]
+fn make_numa_replicas(bodies: &[Body]) -> Vec<fu::PinnedVec<Body>> {
+    (0..fu::count_compute_domains())
+        .map(|compute_domain| {
+            let memory_domain = fu::local_memory_of(compute_domain);
+            let allocator = fu::PinnedAllocator::new(memory_domain)
+                .unwrap_or_else(|| panic!("No allocator for memory domain {memory_domain}"));
+            let mut replica = fu::PinnedVec::with_capacity_in(allocator, bodies.len())
+                .unwrap_or_else(|| panic!("Failed to pin {} bodies", bodies.len()));
+            for body in bodies {
+                replica.push(*body).expect("Capacity reserved above");
+            }
+            replica
+        })
+        .collect()
+}
+
+/// Mirrors `bodies` into every domain-local replica in a single broadcast.
+///
+/// Each thread copies only the slice it will later read, into only the replica of the domain it
+/// runs on, so each page is written by a core that owns it. One barrier serves all replicas.
+#[cfg(feature = "numa")]
+fn refresh_numa_replicas(
+    pool: &mut fu::ThreadPool,
+    bodies: &[Body],
+    replicas: &mut [fu::PinnedVec<Body>],
+) {
+    let n = bodies.len();
+    let source = fu::SyncConstPtr::new(bodies.as_ptr());
+    let targets: Vec<fu::SafePtr<Body>> = replicas
+        .iter_mut()
+        .map(|replica| fu::SafePtr::new(replica.as_mut_slice().as_mut_ptr()))
+        .collect();
+    let targets = &targets[..];
+
+    pool.scope(|scope| {
+        scope.broadcast(|thread_index, compute_domain_index| {
+            let threads_here = scope.count_threads_in(compute_domain_index);
+            let local_index = scope.locate_thread_in(thread_index, compute_domain_index);
+            let range = fu::IndexedSplit::new(n, threads_here).get(local_index);
+            if range.is_empty() {
+                return;
+            }
+            // SAFETY: within a domain the split hands each thread a disjoint, in-bounds range, and
+            // each domain writes only its own replica, so no two threads alias. `bodies` is read
+            // only, and both it and `replicas` outlive the join.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    source.get(range.start) as *const Body,
+                    targets[compute_domain_index].get_mut_at(range.start) as *mut Body,
+                    range.len(),
+                );
+            }
+        });
+    });
+}
+
+/// Borrows every replica as a read-only, `Sync` base pointer, indexed by compute domain.
+#[cfg(feature = "numa")]
+fn numa_replica_ptrs(replicas: &[fu::PinnedVec<Body>]) -> Vec<fu::SyncConstPtr<Body>> {
+    replicas
+        .iter()
+        .map(|replica| fu::SyncConstPtr::new(replica.as_slice().as_ptr()))
+        .collect()
+}
+
+/// The all-to-all interaction cannot be sharded - every body reads every other body - so the only
+/// locality left to win is the read side: replicate the positions once per iteration, then keep the
+/// quadratic inner loop entirely inside the caller's own memory domain.
+#[cfg(feature = "numa")]
+fn iteration_fu_numa_static(
+    pool: &mut fu::ThreadPool,
+    bodies: &mut [Body],
+    forces: &mut [Vector3],
+    replicas: &mut [fu::PinnedVec<Body>],
+) {
+    let n = bodies.len();
+    refresh_numa_replicas(pool, bodies, replicas);
+
+    {
+        let locals = numa_replica_ptrs(replicas);
+        let locals = &locals[..];
+        fu::for_each_prong_mut(pool, forces, move |force, prong| {
+            // SAFETY: every replica holds `n` initialized bodies and is only read here; the
+            // refresh above joined, and this dispatch joins before `replicas` is touched again.
+            let local = unsafe {
+                core::slice::from_raw_parts(locals[prong.compute_domain_index].as_ptr(), n)
+            };
+            let bi = &local[prong.task_index];
+            let mut acc = Vector3::default();
+            for bj in local {
+                acc += gravitational_force(bi, bj);
+            }
+            *force = acc;
+        });
+    }
+
+    {
+        let forces_ref = &*forces;
+        fu::for_each_prong_mut(pool, bodies, move |body, prong| {
+            apply_force(body, &forces_ref[prong.task_index]);
+        });
+    }
+}
+
+/// Same as [`iteration_fu_numa_static`], differing only in the work-stealing schedule.
+#[cfg(feature = "numa")]
+fn iteration_fu_numa_dynamic(
+    pool: &mut fu::ThreadPool,
+    bodies: &mut [Body],
+    forces: &mut [Vector3],
+    replicas: &mut [fu::PinnedVec<Body>],
+) {
+    let n = bodies.len();
+    refresh_numa_replicas(pool, bodies, replicas);
+
+    {
+        let locals = numa_replica_ptrs(replicas);
+        let locals = &locals[..];
+        fu::for_each_prong_mut_dynamic(pool, forces, move |force, prong| {
+            // SAFETY: as in the static variant above.
+            let local = unsafe {
+                core::slice::from_raw_parts(locals[prong.compute_domain_index].as_ptr(), n)
+            };
+            let bi = &local[prong.task_index];
+            let mut acc = Vector3::default();
+            for bj in local {
+                acc += gravitational_force(bi, bj);
+            }
+            *force = acc;
+        });
+    }
+
+    {
+        let forces_ref = &*forces;
+        fu::for_each_prong_mut_dynamic(pool, bodies, move |body, prong| {
+            apply_force(body, &forces_ref[prong.task_index]);
+        });
+    }
+}
+
 fn iteration_rayon_dynamic(pool: &ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
     let n = bodies.len();
 
@@ -314,10 +450,6 @@ fn iteration_rayon_static(pool: &ThreadPool, bodies: &mut [Body], forces: &mut [
     });
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Tokio kernels
-// ────────────────────────────────────────────────────────────────────────────
-
 async fn iteration_tokio_blocking(
     set: &mut JoinSet<(usize, Vector3)>,
     bodies: &mut [Body],
@@ -352,6 +484,7 @@ async fn iteration_tokio_blocking(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Every knob this script understands, read once, up front.
     let n = env::var("NBODY_COUNT").ok().and_then(|v| v.parse().ok());
     let iters = env::var("NBODY_ITERATIONS")
         .ok()
@@ -422,6 +555,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}"));
             for _ in 0..iters {
                 iteration_fu_iter_dynamic(&mut pool, &mut bodies, &mut forces);
+            }
+        }
+        #[cfg(feature = "numa")]
+        "forkunion_numa_static" => {
+            let mut pool = fu::ThreadPool::try_spawn(threads)
+                .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}"));
+            let mut replicas = make_numa_replicas(&bodies);
+            for _ in 0..iters {
+                iteration_fu_numa_static(&mut pool, &mut bodies, &mut forces, &mut replicas);
+            }
+        }
+        #[cfg(feature = "numa")]
+        "forkunion_numa_dynamic" => {
+            let mut pool = fu::ThreadPool::try_spawn(threads)
+                .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}"));
+            let mut replicas = make_numa_replicas(&bodies);
+            for _ in 0..iters {
+                iteration_fu_numa_dynamic(&mut pool, &mut bodies, &mut forces, &mut replicas);
             }
         }
         "rayon_static" => {

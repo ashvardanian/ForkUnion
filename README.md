@@ -719,43 +719,51 @@ let total = (&data[..])
 ## Performance
 
 One of the most common parallel workloads is the N-body simulation ¹.
-Implementations are available in both C++ and Rust in `scripts/nbody.cpp` and `scripts/nbody.rs`, respectively.
-Both are lightweight and involve little logic outside of number-crunching, so both can be easily profiled with `time` and introspected with `perf` Linux tools.
+Implementations are available in C++, Rust, and Zig in `scripts/nbody.cpp`, `scripts/nbody.rs`, and `scripts/nbody.zig`, respectively.
+All are lightweight and involve little logic outside of number-crunching, so each can be easily profiled with `time` and introspected with `perf` Linux tools.
 Additional NUMA-aware Search examples are available in `scripts/search.rs`.
+
+In all of the following measurements we allocate $N=128$ bodies and cycle for $I=1e6$ iterations.
+That's a small enough job to truly pressure the communication primitives, rather than the arithmetic.
 
 ---
 
-C++ benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
+The most popular parallel programming toolkit in the world is __OpenMP__, which also happens to be tightly integrated into modern __C/C++__ compilers.
+It's vastly superior to [Taskflow](https://github.com/taskflow/taskflow) and most other C++ libraries, so we prefer it as our baseline for performance comparisons:
 
 | Machine        | OpenMP (D) | OpenMP (S) | ForkUnion (D) | ForkUnion (S) |
 | :------------- | ---------: | ---------: | ------------: | ------------: |
 | 16x Intel SPR  |      18.9s |      12.4s |         16.8s |          8.7s |
+| 128x Intel SPR |   1m:40.6s |   1m:10.3s |         27.8s |         23.3s |
 | 12x Apple M2   | 1m:34.8s ² | 1m:25.9s ² |         31.5s |         20.3s |
 | 96x Graviton 4 |      32.2s |      20.8s |         39.8s |         26.0s |
 
-Rust benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
+The most popular parallel programming toolkit in the __Rust__ ecosystem is [__Rayon__](https://github.com/rayon-rs/rayon).
+It's vastly faster than [Tokio](https://github.com/tokio-rs/tokio), yet still loses to ForkUnion by an order of magnitude or more on larger systems:
 
 | Machine        |  Rayon (D) |  Rayon (S) |  ForkUnion (D) |  ForkUnion (S) |
 | :------------- | ---------: | ---------: | -------------: | -------------: |
 | 16x Intel SPR  |    🔄 45.4s |    🔄 32.1s | 18.1s, 🔄 22.4s | 12.4s, 🔄 12.9s |
+| 128x Intel SPR | 🔄 7m:41.2s | 🔄 6m:13.5s | 30.1s, 🔄 36.2s | 17.2s, 🔄 17.9s |
 | 12x Apple M2   | 🔄 1m:47.8s | 🔄 1m:07.1s | 24.5s, 🔄 26.8s | 11.0s, 🔄 11.8s |
 | 96x Graviton 4 | 🔄 2m:13.9s | 🔄 1m:35.6s |          18.9s |          10.1s |
 
-> ¹ Another common workload is "Parallel Reductions" covered in a separate [repository](https://github.com/ashvardanian/ParallelReductionsBenchmark).
-> ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing. It's also fair to say, that OpenMP is not optimized for AppleClang.
-> 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for ForkUnion.
-
-
-Zig benchmarking results for $N=128$ bodies and $I=1e6$ iterations:
+__Zig__ has a less mature library ecosystem, featuring [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev).
+Neither, however, provides a comparable bulk-synchronous API.
+Both typically execute all of the submitted tasks on a single thread, so their numbers wouldn't line up against the rest.
+That leaves the standard library thread-pool as our only point of comparison:
 
 | Machine        | Standard (S) | ForkUnion (D) | ForkUnion (S) |
 | :------------- | -----------: | ------------: | ------------: |
 | 16x Intel SPR  |      2m52.0s |         18.2s |         12.8s |
+| 128x Intel SPR |            - |         43.5s |         19.2s |
 | 12x Apple M2   |      1m44.8s |         33.2s |         12.2s |
 | 96x Graviton 4 |            - |             - |             - |
 
-> Benchmarking suite also includes [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev), two popular Zig libraries for async processing, but those don't provide comparable bulk-synchronous APIs.
-> Thus, typically, all of the submitted tasks are executed on a single thread, making results not comparable.
+> ¹ Another common workload is "Parallel Reductions" covered in a separate [repository](https://github.com/ashvardanian/ParallelReductionsBenchmark).
+> ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing.
+> It's also fair to say, that OpenMP is not optimized for AppleClang.
+> 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for ForkUnion.
 
 You can rerun those benchmarks with the following commands:
 
