@@ -808,9 +808,9 @@ struct coprime_permutation_range {
       private:
         friend struct coprime_permutation_range;
 
-        inline iterator(index_t const start, index_t const length, index_t const stride,
+        inline iterator(index_t const start, index_t const length, index_t const stride, index_t const first_offset,
                         index_t const elements_left) noexcept
-            : start_(start), length_(length), stride_(stride), offset_(0), elements_left_(elements_left) {}
+            : start_(start), length_(length), stride_(stride), offset_(first_offset), elements_left_(elements_left) {}
 
         index_t start_ {0};         // first value of the domain
         index_t length_ {1};        // |domain|
@@ -827,11 +827,17 @@ struct coprime_permutation_range {
      *  @param[in] seed Thread-specific value used to derive a unique stride.
      */
     coprime_permutation_range(index_t const start, index_t const length, index_t const seed) noexcept
-        : start_(start), length_(length), stride_(pick_stride(seed, length_)) {
+        : start_(start), length_(length), stride_(pick_stride(seed, length_)),
+          first_offset_(static_cast<index_t>(seed % length)) {
         assert(length_ > 0 && "Length must be greater than zero, or expect division by zero");
     }
 
-    iterator begin() const noexcept { return iterator(start_, length_, stride_, length_); }
+    /**
+     *  @note The seed shifts where the walk @b starts, not only how it steps. Deriving the stride
+     *        alone would leave every seed emitting the same first value, so a pool of drained threads
+     *        would descend on that one victim together before their strides pulled them apart.
+     */
+    iterator begin() const noexcept { return iterator(start_, length_, stride_, first_offset_, length_); }
     default_sentinel_t end() const noexcept { return {}; }
     index_t size() const noexcept { return length_; }
 
@@ -859,6 +865,7 @@ struct coprime_permutation_range {
     index_t start_ {0};
     index_t length_ {1};
     index_t stride_ {1};
+    index_t first_offset_ {0}; // ? Where this seed's walk begins, in [0, length_)
 };
 
 using coprime_permutation_range_t = coprime_permutation_range<>;
@@ -945,9 +952,15 @@ using dynamic_claim_t = dynamic_claim<>;
  *  without worrying about the overflow. The way to achieve that is to preprocess the trailing `threads`
  *  of elements externally, before entering this loop!
  *
- *  That trailing reservation also bounds the cursors. Every thread overshoots a given slice at most
- *  once - it increments, sees `>= end`, and leaves - so a cursor tops out at `end + threads`. Since
- *  the last slice ends at `n - threads`, no cursor can exceed `n`, whatever the index type.
+ *  That trailing reservation also bounds the cursors. Every thread touches a given slice exactly once
+ *  - the owner drains it, each other thread helps drain it once, and the `!= thread` guard below keeps
+ *  the owner from doing both - and each visit overshoots by at most one increment, since `drain_` leaves
+ *  the moment it reads `>= end`. A cursor therefore settles at exactly `end + threads`.
+ *
+ *  Two regimes bound that. When `n > threads` the last slice ends at `n - threads`, so no cursor passes
+ *  `n`. When `n <= threads` every slice is empty and `end == 0`, so no cursor passes `threads` - which
+ *  may exceed `n`, but is still an index the type must represent to have spawned the pool at all.
+ *  Either way `max(cursor) == max(n, threads)`, and no index type can wrap.
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_for_n_dynamic {
@@ -3287,6 +3300,9 @@ struct alignas(default_alignment_k) numa_pthread_t {
      *  @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`.
      *  @note Lives here, rather than in a second array, so the pool allocates once and the cursor
      *        inherits both this record's cache-line padding and its NUMA node.
+     *  @note Fixed to `std::size_t` because `linux_compute_domain_pool` is not templated on an index
+     *        width, unlike `basic_pool`. The narrow-index debug configs, and the cursor's overflow
+     *        argument, therefore only ever exercise `basic_pool`.
      */
     dynamic_claim<std::size_t> claim {};
 };
