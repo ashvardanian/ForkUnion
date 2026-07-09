@@ -140,7 +140,7 @@ fn numa_aware_search(
     );
 
     // Use for_threads to ensure threads work on their colocated NUMA nodes
-    pool.for_threads(move |thread_index, colocation_index| {
+    let broadcast_function = move |thread_index: usize, colocation_index: usize| {
         let storage = storage_ptr.get_mut();
         let query = query_ptr.get_mut();
         let pool = pool_ptr.get_mut();
@@ -180,7 +180,8 @@ fn numa_aware_search(
                 }
             }
         }
-    });
+    };
+    pool.for_threads(&broadcast_function);
 
     let result = best_result.lock();
     *result
@@ -207,7 +208,7 @@ fn worst_case_search(
     );
 
     // Use for_threads but deliberately create cross-NUMA access
-    pool.for_threads(move |thread_index, colocation_index| {
+    let broadcast_function = move |thread_index: usize, colocation_index: usize| {
         let mut local_result = SearchResult::new(colocation_index);
         let storage = storage_ptr.get_mut();
         let query = query_ptr.get_mut();
@@ -244,7 +245,8 @@ fn worst_case_search(
                 *best = local_result;
             }
         }
-    });
+    };
+    pool.for_threads(&broadcast_function);
 
     let result = best_result.lock();
     *result
