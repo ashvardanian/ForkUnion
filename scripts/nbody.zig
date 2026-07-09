@@ -83,9 +83,7 @@ inline fn applyForce(b: *Body, f: *const Vector3) void {
     b.position.z += b.velocity.z * DT;
 }
 
-// ============================================================================
 // ForkUnion Kernels
-// ============================================================================
 
 fn iterationForkUnionStatic(pool: *fu.Pool, bodies: []Body, forces: []Vector3) void {
     const n = bodies.len;
@@ -171,10 +169,8 @@ fn iterationForkUnionDynamic(pool: *fu.Pool, bodies: []Body, forces: []Vector3) 
     });
 }
 
-// ============================================================================
 // std.Thread.Pool Backend (Static Work Division)
 // Divides N tasks into equal slices per thread for static work distribution.
-// ============================================================================
 
 fn iterationStdPool(pool: *std.Thread.Pool, bodies: []Body, forces: []Vector3, n_threads: usize) !void {
     const n = bodies.len;
@@ -227,12 +223,10 @@ fn iterationStdPool(pool: *std.Thread.Pool, bodies: []Body, forces: []Vector3, n
     }
 }
 
-// ============================================================================
 // libxev ThreadPool Backend (Lock-Free Queue - Dynamic)
 // Uses libxev's lock-free thread pool with batch task scheduling. Creates N
 // tasks, batches them, and relies on the framework's lock-free queue for
 // dynamic work distribution across workers.
-// ============================================================================
 
 fn iterationLibxev(pool: *xev.ThreadPool, bodies: []Body, forces: []Vector3, allocator: std.mem.Allocator) !void {
     const n = bodies.len;
@@ -327,9 +321,7 @@ fn iterationLibxev(pool: *xev.ThreadPool, bodies: []Body, forces: []Vector3, all
     }
 }
 
-// ============================================================================
 // Main
-// ============================================================================
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
