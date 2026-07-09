@@ -38,8 +38,6 @@
  *  - `for_n_dynamic` - for unevenly distributed tasks, where each task may take a different time.
  *  - `for_slices` - for iterating over a range of similar duration tasks, addressable by a slice.
  *
- *  ------------------------------------------------------------------------------------------------
- *
  *  On Linux, when NUMA and PThreads are available, the library can also leverage @b NUMA-aware
  *  memory allocations and pin threads to specific physical cores to increase memory locality.
  *  It should reduce memory access latency by around 35% on average, compared to remote accesses.
@@ -996,8 +994,6 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  @see https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
  *  @see https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2055r0.pdf
  *
- *  ------------------------------------------------------------------------------------------------
- *
  *  A minimal example, similar to `#pragma omp parallel` in OpenMP:
  *
  *  @code{.cpp}
@@ -1034,8 +1030,6 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  }
  *  @endcode
  *
- *  ------------------------------------------------------------------------------------------------
- *
  *  @section pool_concurrency_model Concurrency Model
  *
  *  Three roles interact with a pool:
@@ -1067,8 +1061,6 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  On `caller_inclusive_k` pools the calling thread owes a slice that only runs inside
  *  `unsafe_join`, so `is_complete` stays `false` until then: the poll-then-join pattern is
  *  reserved for `caller_exclusive_k` pools.
- *
- *  ------------------------------------------------------------------------------------------------
  *
  *  @tparam allocator_type_ The type of the allocator to be used for the thread pool.
  *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.

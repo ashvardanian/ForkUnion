@@ -50,15 +50,11 @@
  *  Under the hood, the `fu_pool_t` maps to a `basic_pool` or `linux_distributed_pool`.
  *  For advanced usage, prefer the core C++ library.
  *
- *  ------------------------------------------------------------------------------------------------
- *
  *  The next layer of logic is for basic index-addressable tasks. It includes basic parallel loops:
  *
  *  - `fu_pool_for_n` - for iterating over a range of similar duration tasks, addressable by an index.
  *  - `fu_pool_for_n_dynamic` - for unevenly distributed tasks, where each task may take a different time.
  *  - `fu_pool_for_slices` - for iterating over a range of similar duration tasks, addressable by a slice.
- *
- *  ------------------------------------------------------------------------------------------------
  *
  *  On Linux, when NUMA and PThreads are available, the library can also leverage @b NUMA-aware
  *  memory allocations and pin threads to specific physical cores to increase memory locality.
