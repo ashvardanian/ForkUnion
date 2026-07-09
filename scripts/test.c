@@ -34,8 +34,8 @@ struct for_threads_context {
     atomic_bool *visited;
 };
 
-static void for_threads_callback(void *context_punned, size_t thread, size_t colocation) {
-    (void)colocation;
+static void for_threads_callback(void *context_punned, size_t thread, size_t compute_domain) {
+    (void)compute_domain;
     struct for_threads_context *context = (struct for_threads_context *)context_punned;
     atomic_store(&context->visited[thread], true);
 }
@@ -94,6 +94,34 @@ static bool test_caller_exclusivity_query(void) {
     return result;
 }
 
+static bool test_per_compute_domain_pool(void) {
+    size_t compute_domains = fu_count_compute_domains();
+    if (compute_domains == 0) return false;
+
+    /* Spawn one pool per compute domain, sized to that domain's core count. */
+    bool result = true;
+    for (size_t compute_domain = 0; compute_domain < compute_domains && result; ++compute_domain) {
+        size_t cores = fu_count_logical_cores_in(compute_domain);
+        if (cores == 0) cores = 2; /* Non-NUMA build reports via hardware_concurrency */
+
+        fu_pool_t *pool = fu_pool_new("compute_domain");
+        if (!pool) {
+            result = false;
+            break;
+        }
+        if (!fu_pool_spawn_on(pool, compute_domain, cores, fu_caller_exclusive_k)) result = false;
+        else if (fu_pool_count_threads(pool) == 0)
+            result = false;
+        fu_pool_delete(pool);
+    }
+
+    /* Out-of-range compute domain must fail cleanly, not crash. */
+    fu_pool_t *out_of_range = fu_pool_new("bad");
+    if (out_of_range && fu_pool_spawn_on(out_of_range, compute_domains + 100, 2, fu_caller_exclusive_k)) result = false;
+    fu_pool_delete(out_of_range);
+    return result;
+}
+
 static bool test_generation_polling(void) {
     fu_pool_t *pool = fu_pool_new("test_generation");
     if (!pool) return false;
@@ -137,9 +165,9 @@ struct uncomfortable_context {
     atomic_bool out_of_bounds;
 };
 
-static void uncomfortable_callback(void *context_punned, size_t task, size_t thread, size_t colocation) {
+static void uncomfortable_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
-    (void)colocation;
+    (void)compute_domain;
     struct uncomfortable_context *context = (struct uncomfortable_context *)context_punned;
     if (task >= context->input_size) atomic_store(&context->out_of_bounds, true);
 }
@@ -202,9 +230,9 @@ struct for_n_context {
     struct aligned_visit *visited;
 };
 
-static void for_n_callback(void *context_punned, size_t task, size_t thread, size_t colocation) {
+static void for_n_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
-    (void)colocation;
+    (void)compute_domain;
     struct for_n_context *context = (struct for_n_context *)context_punned;
 
     size_t count_populated = atomic_fetch_add(&context->counter, 1);
@@ -279,9 +307,9 @@ static bool test_for_n_dynamic(void) {
     return result;
 }
 
-static void oversubscribed_callback(void *context_punned, size_t task, size_t thread, size_t colocation) {
+static void oversubscribed_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
-    (void)colocation;
+    (void)compute_domain;
     struct for_n_context *context = (struct for_n_context *)context_punned;
 
     // Perform some weird amount of work, that is not very different between consecutive tasks
@@ -338,10 +366,10 @@ static bool test_gcc_nested_functions(void) {
     size_t num_tasks = 100;
 
     /* GCC nested function - captures local variables */
-    void nested_callback(void *context, size_t task, size_t thread, size_t colocation) {
+    void nested_callback(void *context, size_t task, size_t thread, size_t compute_domain) {
         (void)context;
         (void)thread;
-        (void)colocation;
+        (void)compute_domain;
         atomic_fetch_add(&counter, 1);
         if (task % 20 == 0) printf("  GCC nested: Task %zu\n", task);
     }
@@ -366,9 +394,9 @@ struct block_wrapper {
     task_block_t block;
 };
 
-static void block_callback_wrapper(void *context_punned, size_t task, size_t thread, size_t colocation) {
+static void block_callback_wrapper(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     struct block_wrapper *wrapper = (struct block_wrapper *)context_punned;
-    wrapper->block(NULL, task, thread, colocation);
+    wrapper->block(NULL, task, thread, compute_domain);
 }
 
 static bool test_clang_blocks(void) {
@@ -387,10 +415,10 @@ static bool test_clang_blocks(void) {
     size_t num_tasks = 100;
 
     /* Clang block - captures local variables with __block */
-    task_block_t my_block = ^(void *ctx, size_t task, size_t thread, size_t colocation) {
+    task_block_t my_block = ^(void *ctx, size_t task, size_t thread, size_t compute_domain) {
       (void)ctx;
       (void)thread;
-      (void)colocation;
+      (void)compute_domain;
       atomic_fetch_add(&counter, 1);
       if (task % 20 == 0) printf("  Clang block: Task %zu\n", task);
     };
@@ -420,8 +448,8 @@ int main(void) {
 
     printf("Capabilities: %s\n", caps);
     printf("Logical cores: %zu\n", fu_count_logical_cores());
-    printf("NUMA nodes: %zu\n", fu_count_numa_nodes());
-    printf("Colocations: %zu\n", fu_count_colocations());
+    printf("NUMA nodes: %zu\n", fu_count_memory_domains());
+    printf("ComputeDomains: %zu\n", fu_count_compute_domains());
 
     printf("\nStarting unit tests...\n");
 
@@ -433,6 +461,7 @@ int main(void) {
         {"`try_spawn` zero threads", test_try_spawn_zero},
         {"`try_spawn` normal", test_try_spawn_success},
         {"`caller_exclusivity` query", test_caller_exclusivity_query},
+        {"`fu_pool_spawn_on` per-compute-domain", test_per_compute_domain_pool},
         {"`for_threads` dispatch", test_for_threads},
         {"`generation` polling", test_generation_polling},
         {"`for_n` for uncomfortable input size", test_uncomfortable_input_size},

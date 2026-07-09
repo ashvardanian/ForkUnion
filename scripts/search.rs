@@ -35,15 +35,15 @@ type Embedding = [bf16; EMBEDDING_DIMENSIONS];
 struct SearchResult {
     best_similarity: Distance,
     best_index: usize,
-    colocation_index: usize,
+    compute_domain_index: usize,
 }
 
 impl SearchResult {
-    fn new(colocation_index: usize) -> Self {
+    fn new(compute_domain_index: usize) -> Self {
         Self {
             best_similarity: Distance::NEG_INFINITY,
             best_index: 0,
-            colocation_index,
+            compute_domain_index,
         }
     }
 
@@ -63,11 +63,11 @@ fn create_distributed_embeddings(
     pool: &mut fu::ThreadPool,
     memory_scope_percent: usize,
 ) -> Option<DistributedEmbeddings> {
-    let colocations_count = fu::count_colocations();
-    println!("Initializing storage across {colocations_count} colocations");
+    let compute_domains_count = fu::count_compute_domains();
+    println!("Initializing storage across {compute_domains_count} compute_domains");
 
     // Calculate total capacity based on total system memory and scope percentage
-    let total_memory = fu::volume_any_pages();
+    let total_memory = fu::volume_ram();
     let target_memory = (total_memory * memory_scope_percent) / 100;
     let vector_size = core::mem::size_of::<Embedding>();
     let total_vectors = if vector_size > 0 {
@@ -112,20 +112,20 @@ fn create_distributed_embeddings(
     );
 
     println!(
-        "Successfully created {} vectors across {} colocations",
+        "Successfully created {} vectors across {} compute_domains",
         distributed_vec.len(),
-        colocations_count
+        compute_domains_count
     );
     Some(distributed_vec)
 }
 
-/// Performs NUMA-aware search using ForkUnion's for_threads API for optimal colocation
+/// Performs NUMA-aware search using ForkUnion's for_threads API for optimal compute_domain
 fn numa_aware_search(
     storage: &DistributedEmbeddings,
     query: &Embedding,
     pool: &mut fu::ThreadPool,
 ) -> SearchResult {
-    let colocations_count = storage.colocations_count();
+    let compute_domains_count = storage.compute_domains_count();
 
     // Use SpinMutex for the global best result
     let best_result = fu::SpinMutex::new(SearchResult::new(0));
@@ -139,24 +139,24 @@ fn numa_aware_search(
         &best_result as *const fu::SpinMutex<SearchResult> as *mut fu::SpinMutex<SearchResult>,
     );
 
-    // Use for_threads to ensure threads work on their colocated NUMA nodes
-    let broadcast_function = move |thread_index: usize, colocation_index: usize| {
+    // Use for_threads to ensure threads work on their compute_domain NUMA nodes
+    let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
         let storage = storage_ptr.get_mut();
         let query = query_ptr.get_mut();
         let pool = pool_ptr.get_mut();
 
-        // Each thread works on its colocated NUMA node
-        if colocation_index < colocations_count {
-            let mut local_result = SearchResult::new(colocation_index);
+        // Each thread works on its compute_domain NUMA node
+        if compute_domain_index < compute_domains_count {
+            let mut local_result = SearchResult::new(compute_domain_index);
 
             // Get the vectors for this NUMA node
-            if let Some(node_vectors) = storage.get_colocation(colocation_index) {
+            if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
                 let vectors_count = node_vectors.len();
-                let threads_in_colocation = pool.count_threads_in(colocation_index);
-                let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
+                let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
+                let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
 
-                // Split vectors among threads in this colocation
-                let split = fu::IndexedSplit::new(vectors_count, threads_in_colocation);
+                // Split vectors among threads in this compute_domain
+                let split = fu::IndexedSplit::new(vectors_count, threads_in_compute_domain);
                 let range = split.get(thread_local_index);
 
                 // Search vectors assigned to this thread
@@ -165,7 +165,7 @@ fn numa_aware_search(
                         let similarity = bf16::dot(query, vector).unwrap();
                         // Convert local index to global round-robin index using the new method
                         let global_index =
-                            storage.local_to_global_index(colocation_index, local_vector_idx);
+                            storage.local_to_global_index(compute_domain_index, local_vector_idx);
                         local_result.update_if_better(similarity, global_index);
                     }
                 }
@@ -193,7 +193,7 @@ fn worst_case_search(
     query: &Embedding,
     pool: &mut fu::ThreadPool,
 ) -> SearchResult {
-    let colocations_count = storage.colocations_count();
+    let compute_domains_count = storage.compute_domains_count();
 
     // Use SpinMutex for the global best result
     let best_result = fu::SpinMutex::new(SearchResult::new(0));
@@ -208,8 +208,8 @@ fn worst_case_search(
     );
 
     // Use for_threads but deliberately create cross-NUMA access
-    let broadcast_function = move |thread_index: usize, colocation_index: usize| {
-        let mut local_result = SearchResult::new(colocation_index);
+    let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
+        let mut local_result = SearchResult::new(compute_domain_index);
         let storage = storage_ptr.get_mut();
         let query = query_ptr.get_mut();
         let pool = pool_ptr.get_mut();
@@ -217,8 +217,8 @@ fn worst_case_search(
         // Split all vectors across all threads (ignoring NUMA boundaries)
         let total_threads: usize = pool.threads();
 
-        for colocation_index in 0..colocations_count {
-            if let Some(node_vectors) = storage.get_colocation(colocation_index) {
+        for compute_domain_index in 0..compute_domains_count {
+            if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
                 let vectors_in_node = node_vectors.len();
 
                 let split = fu::IndexedSplit::new(vectors_in_node, total_threads);
@@ -230,7 +230,7 @@ fn worst_case_search(
                         let similarity = bf16::dot(query, vector).unwrap();
                         // Convert to global index for consistent comparison
                         let global_index =
-                            storage.local_to_global_index(colocation_index, local_vector_idx);
+                            storage.local_to_global_index(compute_domain_index, local_vector_idx);
                         local_result.update_if_better(similarity, global_index);
                     }
                 }
@@ -274,8 +274,8 @@ fn benchmark_search<F>(
         if i < 5 {
             // Print first few results
             println!(
-                "Query {}: best similarity {:.6} at index {} (colocation {})",
-                i, result.best_similarity, result.best_index, result.colocation_index
+                "Query {}: best similarity {:.6} at index {} (compute_domain {})",
+                i, result.best_similarity, result.best_index, result.compute_domain_index
             );
         }
     }
@@ -316,8 +316,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Print system information
     println!("System Information:");
     println!("  Logical cores: {}", fu::count_logical_cores());
-    println!("  NUMA nodes: {}", fu::count_numa_nodes());
-    println!("  Thread colocations: {}", fu::count_colocations());
+    println!("  NUMA nodes: {}", fu::count_memory_domains());
+    println!("  Thread compute_domains: {}", fu::count_compute_domains());
     println!("  NUMA enabled: {}", fu::numa_enabled());
     println!("Configuration:");
     println!("  Embedding dimensions: {EMBEDDING_DIMENSIONS}");
@@ -333,9 +333,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = create_distributed_embeddings(&mut pool, memory_scope_percent)
         .ok_or("Failed to initialize NUMA vector storage")?;
     println!(
-        "Thread pool initialized with {} threads across {} colocations",
+        "Thread pool initialized with {} threads across {} compute_domains",
         pool.threads(),
-        pool.colocations()
+        pool.compute_domains()
     );
 
     // Generate random queries with fixed-size vectors

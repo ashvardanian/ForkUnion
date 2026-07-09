@@ -20,11 +20,11 @@
  *      char **argv; // ? Array of arguments
  *  };
  *
- *  void print_arg(void *context_punned, size_t task_index, size_t thread_index, size_t colocation_index) {
+ *  void print_arg(void *context_punned, size_t task_index, size_t thread_index, size_t compute_domain_index) {
  *      print_args_context_t *context = (print_args_context_t *)context_punned;
  *      printf(
- *          "Printing argument # %zu from thread # %zu at colocation # %zu: %s\n",
- *          task_index, context->argc, thread_index, colocation_index, context->argv[task_index]);
+ *          "Printing argument # %zu from thread # %zu at compute_domain # %zu: %s\n",
+ *          task_index, context->argc, thread_index, compute_domain_index, context->argv[task_index]);
  *  }
  *
  *  int main(int argc, char *argv[]) {
@@ -63,14 +63,14 @@
  *  On Linux, when NUMA and PThreads are available, the library can also leverage @b NUMA-aware
  *  memory allocations and pin threads to specific physical cores to increase memory locality.
  *  It should reduce memory access latency by around 35% on average, compared to remote accesses.
- *  @sa `fu_count_numa_nodes`, `fu_allocate_at_least`, `fu_free`.
+ *  @sa `fu_count_memory_domains`, `fu_allocate_at_least_in`, `fu_free_in`.
  *
  *  On heterogeneous chips, cores with a different @b "Quality-of-Service" (QoS) may be combined.
  *  A typical example is laptop/desktop chips, having 1 NUMA node, but 3 tiers of CPU cores:
  *  performance, efficiency, and power-saving cores. Each group will have vastly different speed,
  *  so considering them equal in tasks scheduling is a bad idea... and separating them automatically
  *  isn't feasible either. It's up to the user to isolate those groups into individual pools.
- *  @sa `fu_count_quality_levels`
+ *  @sa `fu_count_compute_levels`
  *
  *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
  *  exposes cheaper @b "busy-waiting" mechanisms, such as `tpause`, `wfet`, & `yield` instructions.
@@ -87,33 +87,40 @@ extern "C" {
 
 #include <stddef.h> // `size_t`, `bool`
 
-int fu_version_major(void); // ? Returns the major version of the ForkUnion library
-int fu_version_minor(void); // ? Returns the minor version of the ForkUnion library
-int fu_version_patch(void); // ? Returns the patch version of the ForkUnion library
-int fu_enabled_numa(void);  // ? Checks if the library was compiled with NUMA support
+/** @brief Returns the major version component of the ForkUnion library. */
+int fu_version_major(void);
+/** @brief Returns the minor version component of the ForkUnion library. */
+int fu_version_minor(void);
+/** @brief Returns the patch version component of the ForkUnion library. */
+int fu_version_patch(void);
+/** @brief Returns non-zero if the library was compiled with NUMA support. */
+int fu_numa_enabled(void);
 
 #pragma region - Types
 
-typedef int fu_bool_t;             // ? A simple boolean type, 0 for false, 1 for true
-typedef void *fu_pool_t;           // ? A simple cross-platform opaque wrapper
-typedef void *fu_lambda_context_t; // ? Type-punned pointer to the user-defined context
+/** @brief Boolean type: 0 for false, non-zero for true. */
+typedef int fu_bool_t;
+/** @brief Opaque, cross-platform thread-pool handle. */
+typedef void *fu_pool_t;
+/** @brief Type-punned pointer to a user-defined callback context. */
+typedef void *fu_lambda_context_t;
 
 /**
  *  @brief Callback type for thread-level operations.
  *  @param[in] context Type-punned pointer to user-defined context data.
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] colocation The colocation index (NUMA node & QoS level) in [0, colocations_count).
+ *  @param[in] compute_domain The compute-domain index in [0, `fu_count_compute_domains()`).
  */
-typedef void (*fu_for_threads_t)(fu_lambda_context_t context, size_t thread, size_t colocation);
+typedef void (*fu_for_threads_t)(fu_lambda_context_t context, size_t thread, size_t compute_domain);
 
 /**
  *  @brief Callback type for task-level operations receiving individual indices.
  *  @param[in] context Type-punned pointer to user-defined context data.
  *  @param[in] task The task index in [0, n).
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] colocation The colocation index (NUMA node & QoS level) in [0, colocations_count).
+ *  @param[in] compute_domain The compute-domain index in [0, `fu_count_compute_domains()`).
  */
-typedef void (*fu_for_prongs_t)(fu_lambda_context_t context, size_t task, size_t thread, size_t colocation);
+typedef void (*fu_for_prongs_t)(fu_lambda_context_t context, size_t task, size_t thread, size_t compute_domain);
 
 /**
  *  @brief Callback type for slice-level operations receiving ranges of tasks.
@@ -121,10 +128,10 @@ typedef void (*fu_for_prongs_t)(fu_lambda_context_t context, size_t task, size_t
  *  @param[in] first The first task index in the slice.
  *  @param[in] count The number of tasks in the slice.
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] colocation The colocation index (NUMA node & QoS level) in [0, colocations_count).
+ *  @param[in] compute_domain The compute-domain index in [0, `fu_count_compute_domains()`).
  */
 typedef void (*fu_for_slices_t)(fu_lambda_context_t context, size_t first, size_t count, size_t thread,
-                                size_t colocation);
+                                size_t compute_domain);
 
 /**
  *  @brief Defines the in- and exclusivity of the calling thread for the executing task.
@@ -173,156 +180,201 @@ char const *fu_capabilities_string(void);
  *
  *  When in doubt about optimal thread count:
  *  - CPU-bound tasks: use `fu_count_logical_cores()`
- *  - Memory-bound tasks: consider `fu_count_numa_nodes() * cores_per_node`
+ *  - Memory-bound tasks: consider `fu_count_memory_domains() * cores_per_node`
  *  - I/O-bound tasks: consider 2-4x `fu_count_logical_cores()`
  */
 size_t fu_count_logical_cores(void);
 
 /**
- *  @brief Describes the maximum number of individually addressable thread groups.
+ *  @brief Returns the number of compute domains (bindable clusters of cores).
  *  @retval 0 if the thread pool is not supported on the current platform.
- *  @retval 1 on most desktop, laptop, or IoT platforms with unified memory.
- *  @retval 2-8 on typical dual-socket servers or heterogeneous mobile chips.
- *  @retval 4-32 is a typical range on high-end cloud servers with multiple sockets.
+ *  @retval 1 on most desktop, laptop, or IoT platforms with a single core cluster.
+ *  @retval 2+ on multi-socket servers or heterogeneous chips (per NUMA node and QoS class).
  *
- *  A "colocation" represents a group of threads that share the same:
- *  - NUMA memory domain (fast local memory access)
- *  - Quality-of-Service level (performance vs efficiency cores)
- *  - Cache hierarchy (L3 cache sharing)
- *
- *  The total may be as large as the product of NUMA nodes and QoS levels.
- *  Understanding colocations helps optimize memory allocation and task distribution.
- *  @sa `fu_count_numa_nodes`, `fu_count_quality_levels`, `fu_allocate_at_least`.
+ *  A @b compute @b domain is a set of cores sharing one Quality-of-Service class (performance,
+ *  efficiency, ...) and locality. It is the unit a pool binds to and the index a worker
+ *  callback receives. Compute domains are one axis of the topology; @b memory @b domains
+ *  (`fu_count_memory_domains`) are the other. The two are bridged by `fu_local_memory_of`.
+ *  @sa `fu_count_logical_cores_in`, `fu_pool_spawn_on`, `fu_count_memory_domains`.
  */
-size_t fu_count_colocations(void);
+size_t fu_count_compute_domains(void);
 
 /**
- *  @brief Describes the number of NUMA (Non-Uniform Memory Access) nodes.
- *  @retval 0 if NUMA is not supported or detection failed.
- *  @retval 1 on systems with uniform memory access (UMA).
- *  @retval 2-8 on typical multi-socket servers.
- *  @retval 8+ on high-end systems with complex topologies.
+ *  @brief Returns the number of logical cores in a given compute domain.
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @retval Number of cores backing that compute domain, or 0 if the index is out of range.
  *
- *  NUMA nodes represent distinct memory domains with different access latencies.
- *  Memory allocated on the local NUMA node is typically 2-3x faster to access
- *  than remote NUMA node memory. For optimal performance, allocate memory and
- *  schedule tasks on the same NUMA node.
- *  @sa `fu_allocate_at_least`, `fu_free`.
+ *  Use this to size a per-compute-domain pool (`fu_pool_spawn_on`), or to weight work across
+ *  compute domains of differing core counts (e.g. performance vs efficiency cores).
+ *  @sa `fu_count_compute_domains`, `fu_pool_spawn_on`.
  */
-size_t fu_count_numa_nodes(void);
+size_t fu_count_logical_cores_in(size_t compute_domain_index);
 
 /**
- *  @brief Describes the number of distinct Quality-of-Service levels.
- *  @retval 0 if QoS detection is not supported.
- *  @retval 1 on systems with homogeneous cores.
- *  @retval 2-3 on systems with heterogeneous cores (e.g., ARM big.LITTLE, Intel P+E cores).
+ *  @brief Returns the performance level of a given compute domain.
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @retval A level ordinal where @b higher @b is @b more @b performant (0 = most efficient), or 0
+ *  if the index is out of range. Homogeneous systems report level 0 for every compute domain.
  *
- *  Different QoS levels may have vastly different performance characteristics.
- *  Consider creating separate thread pools for different workload types.
+ *  Distinguishes performance vs efficiency cores (Intel P/E, ARM big.LITTLE). @note The compute
+ *  ordinal grows with performance, while the memory-domain level (`fu_memory_level_in`) grows with
+ *  @b distance - both match their native hardware conventions, so they run opposite ways by design.
+ *  @sa `fu_count_compute_levels`, `fu_count_compute_domains`.
  */
-size_t fu_count_quality_levels(void);
+size_t fu_compute_level_in(size_t compute_domain_index);
 
 /**
- *  @brief Returns the total volume of any pages (huge or regular) available across all NUMA nodes.
- *  @retval Number of bytes of memory pages available across all NUMA nodes.
+ *  @brief Returns the number of distinct compute performance levels across all compute domains.
+ *  @retval 0 if unsupported, 1 on homogeneous cores, 2-3 with heterogeneous cores (P/E, big.LITTLE).
+ *  @sa `fu_compute_level_in`.
  */
-size_t fu_volume_any_pages(void);
+size_t fu_count_compute_levels(void);
 
 /**
- *  @brief Returns the volume of any pages (huge or regular) available on the specified NUMA node.
- *  @param[in] numa_node_index The index of the NUMA node to query, in [0, numa_nodes_count).
- *  @retval 0 if the NUMA node index is invalid or if no memory is available.
- *  @retval Number of bytes of memory pages available on the specified NUMA node.
+ *  @brief Returns the number of memory domains (distinct allocation targets).
+ *  @retval 0 if unsupported, 1 on uniform-memory systems, 2+ on NUMA / tiered-memory systems.
  *
- *  This function queries the operating system for the total amount of memory pages
- *  (both huge pages and regular pages) available for allocation on the specified NUMA node.
- *  This is useful for determining how much memory can be allocated for vector storage
- *  based on a percentage of available memory.
+ *  A @b memory @b domain is a bank of memory with a capacity and a performance @b level
+ *  (`fu_memory_level_in`; lower = faster: HBM < DDR < CXL). It is the unit the allocator targets.
+ *  A memory domain may be @b cpuless (CXL expander, GPU-attached HBM) and may be local to
+ *  @b several compute domains (performance and efficiency cores sharing one DDR controller).
+ *  @sa `fu_volume_ram_in`, `fu_memory_level_in`, `fu_local_memory_of`, `fu_allocate_in`.
  */
-size_t fu_volume_any_pages_in(size_t numa_node_index);
+size_t fu_count_memory_domains(void);
 
 /**
- *  @brief Describes the number of different huge page sizes supported.
- *  @param[in] numa_node_index The index of the NUMA node to allocate memory on, in [0, numa_nodes_count).
- *  @retval 0 if huge pages are not supported or not available.
- *  @retval 1-4 on systems with huge page support (typically 2MB, 1GB sizes).
+ *  @brief Returns the performance level of a given memory domain.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @retval A level ordinal where @b lower @b is @b faster (0 = fastest, e.g. HBM), or 0 if the index
+ *  is out of range. Uniform-memory systems report level 0 for every memory domain.
  *
- *  Huge pages reduce TLB (Translation Lookaside Buffer) pressure by using larger
- *  page sizes than the standard 4KB. This can significantly improve performance
- *  for memory-intensive applications by reducing page table overhead.
- *
- *  Common huge page sizes:
- *  - 2MB pages: Standard huge pages on x86-64 and AArch64
- *  - 1GB pages: Gigantic pages for very large allocations
- *  - 16KB/64KB: Base page sizes on some ARM configurations
- *  @sa `fu_allocate_at_least` for NUMA-aware allocation with huge page support.
+ *  Ranks memory by access speed independently of compute (HBM < DDR < CXL/PMEM), following the Linux
+ *  memory-tiering abstract-distance convention. @note Runs opposite to `fu_compute_level_in`, where
+ *  higher is faster - each direction matches its own hardware source.
+ *  @sa `fu_count_memory_domains`, `fu_volume_ram_in`.
  */
-size_t fu_volume_huge_pages_in(size_t numa_node_index);
+size_t fu_memory_level_in(size_t memory_domain_index);
+
+/**
+ *  @brief Returns the memory domain nearest to a given compute domain.
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @retval The index of that compute domain's primary (lowest-distance) memory domain, or 0 if
+ *  the compute-domain index is out of range.
+ *
+ *  The convenience bridge for the common "run here, allocate near here" pattern: pass the result
+ *  to `fu_allocate_in`. For the full cost picture use `fu_memory_distance`.
+ *  @sa `fu_memory_distance`, `fu_allocate_in`.
+ */
+size_t fu_local_memory_of(size_t compute_domain_index);
+
+/**
+ *  @brief Returns the relative access distance from a compute domain to a memory domain.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @retval A relative distance where @b 10 means local (SLIT convention); larger is farther;
+ *  0 means unknown or an out-of-range index.
+ *
+ *  A scalar summary of the (initiator -> target) cost. Per-edge bandwidth/latency is a later layer.
+ *  @sa `fu_local_memory_of`.
+ */
+size_t fu_memory_distance(size_t compute_domain_index, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the total RAM volume (bytes) across all memory domains.
+ *  @retval Number of bytes of RAM installed, regardless of page size.
+ *  @sa `fu_volume_ram_in`.
+ */
+size_t fu_volume_ram(void);
+
+/**
+ *  @brief Returns the RAM volume (bytes) of a given memory domain.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @retval Number of bytes of RAM in that memory domain, regardless of page size; 0 if out of range.
+ *  @sa `fu_volume_ram`, `fu_allocate_in`.
+ */
+size_t fu_volume_ram_in(size_t memory_domain_index);
+
+/**
+ *  @brief Returns the total huge-page volume (bytes) across all memory domains.
+ *  @retval Number of bytes backed by free huge pages, or 0 if huge pages are unavailable.
+ *  @sa `fu_volume_huge_pages_in`, `fu_count_huge_pages`.
+ */
+size_t fu_volume_huge_pages(void);
+
+/**
+ *  @brief Returns the huge-page volume (bytes) available in a given memory domain.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @retval Bytes backed by free huge pages in that memory domain; 0 if out of range or unavailable.
+ *
+ *  Huge pages reduce TLB pressure by mapping memory in larger units than the base page.
+ *  @sa `fu_count_huge_pages_in`, `fu_allocate_at_least_in`.
+ */
+size_t fu_volume_huge_pages_in(size_t memory_domain_index);
+
+/**
+ *  @brief Returns the total number of free huge pages across all memory domains.
+ *  @retval Count of free huge pages of any size, or 0 if huge pages are unavailable.
+ *  @sa `fu_volume_huge_pages`, `fu_count_huge_pages_in`.
+ */
+size_t fu_count_huge_pages(void);
+
+/**
+ *  @brief Returns the number of free huge pages in a given memory domain.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @retval Count of free huge pages (summed across page sizes) in that memory domain; 0 if
+ *  out of range or unavailable.
+ *  @sa `fu_volume_huge_pages_in`, `fu_count_huge_pages`.
+ */
+size_t fu_count_huge_pages_in(size_t memory_domain_index);
 
 #pragma endregion - Metadata
 
 #pragma region - Memory
 
 /**
- *  @brief Allocates memory on a specific NUMA node with optimal page size selection.
- *  @param[in] numa_node_index The index of the NUMA node to allocate memory on, in [0, numa_nodes_count).
+ *  @brief Allocates memory in a given memory domain with the largest suitable page size.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
  *  @param[in] minimum_bytes Minimum number of bytes to allocate, must be > 0.
- *  @param[out] allocated_pointer Pointer to store the address of the allocated memory, must not be NULL.
- *  @param[out] bytes_per_page Pointer to store the size of the RAM pages used for allocation, must not be NULL.
+ *  @param[out] allocated_bytes Receives the actual allocation size (>= @p minimum_bytes), must not be NULL.
+ *  @param[out] bytes_per_page Receives the page size used for the allocation, must not be NULL.
  *  @retval Pointer to allocated memory, or NULL if allocation failed.
  *  @note This API is @b thread-safe and can be called from any thread.
  *
- *  This function attempts to allocate memory with the largest available page size
- *  to minimize TLB pressure. The actual allocation size may be larger than requested
- *  due to page alignment requirements. Always check `allocated_bytes` for the actual size.
- *
- *  Memory allocation strategy:
- *  - Attempts 1 GB huge pages for allocations >= 2 GB
- *  - Attempts 2 MB huge pages for allocations >= 4 MB
- *  - Falls back to standard (typically 4KB) pages for smaller allocations
- *  - Always aligns to page boundaries for optimal performance
- *
+ *  Prefers the largest available huge-page size to minimize TLB pressure; the actual size may
+ *  exceed the request due to page alignment, so always read @p allocated_bytes. Pair with
+ *  `fu_local_memory_of` to allocate near the compute domain a thread runs on.
  *  @code{.c}
- *  void *ptr = NULL;
- *  size_t actual_bytes = 0;
- *  if (fu_allocate_at_least(0, 1024 * 1024, &ptr, &actual_bytes)) {
- *      ... // Do some work with the allocated memory
- *      fu_free(0, ptr, actual_bytes);
- *  }
+ *  size_t memory_domain = fu_local_memory_of(compute_domain);
+ *  void *pointer = NULL; size_t actual_bytes = 0, page = 0;
+ *  if ((pointer = fu_allocate_at_least_in(memory_domain, 1u << 20, &actual_bytes, &page)))
+ *      fu_free_in(memory_domain, pointer, actual_bytes);
  *  @endcode
- *  @sa `fu_free` for deallocation, `fu_count_numa_nodes` for valid node indices.
+ *  @sa `fu_free_in`, `fu_local_memory_of`, `fu_count_memory_domains`.
  */
-void *fu_allocate_at_least(                       //
-    size_t numa_node_index, size_t minimum_bytes, //
+void *fu_allocate_at_least_in(                        //
+    size_t memory_domain_index, size_t minimum_bytes, //
     size_t *allocated_bytes, size_t *bytes_per_page);
 
 /**
- *  @brief Releases memory allocated on a specific NUMA node.
- *  @param[in] numa_node_index The index of the NUMA node where the memory was allocated.
- *  @param[in] pointer Pointer to the memory to be released, must not be NULL.
- *  @param[in] bytes Number of bytes to release, must match the value from `allocated_bytes`.
- *  @note This API is @b thread-safe and can be called from any thread.
- *
- *  The `bytes` parameter must exactly match the `allocated_bytes` value returned
- *  by `fu_allocate_at_least`. Mismatched sizes may result in undefined behavior
- *  or memory corruption.
- *
- *  @sa `fu_allocate_at_least` for allocation.
+ *  @brief Releases memory allocated in a given memory domain.
+ *  @param[in] memory_domain_index The memory domain the memory was allocated in.
+ *  @param[in] pointer Pointer to the memory to release, must not be NULL.
+ *  @param[in] bytes Number of bytes to release; must match the `allocated_bytes` from allocation.
+ *  @note This API is @b thread-safe. A mismatched @p bytes is undefined behavior.
+ *  @sa `fu_allocate_at_least_in`, `fu_allocate_in`.
  */
-void fu_free(size_t numa_node_index, void *pointer, size_t bytes);
+void fu_free_in(size_t memory_domain_index, void *pointer, size_t bytes);
 
 /**
- *  @brief Allocates exactly the requested amount of memory on a specific NUMA node.
- *  @param[in] numa_node_index The index of the NUMA node to allocate memory on.
+ *  @brief Allocates exactly the requested number of bytes in a given memory domain.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
  *  @param[in] bytes Number of bytes to allocate, must be > 0.
  *  @retval Pointer to allocated memory, or NULL if allocation failed.
- *  @note This API is @b thread-safe and can be called from any thread.
- *
- *  This function allocates exactly `bytes` of memory with the specified alignment.
- *  Unlike `fu_allocate_at_least`, this function doesn't over-allocate for page optimization.
- *  Use this for compatibility with standard allocator interfaces.
+ *  @note This API is @b thread-safe. Unlike `fu_allocate_at_least_in`, it does not over-allocate
+ *  for page optimization — use it for standard-allocator compatibility.
+ *  @sa `fu_free_in`, `fu_allocate_at_least_in`.
  */
-void *fu_allocate(size_t numa_node_index, size_t bytes);
+void *fu_allocate_in(size_t memory_domain_index, size_t bytes);
 
 #pragma endregion - Memory
 
@@ -379,6 +431,25 @@ void fu_pool_delete(fu_pool_t *pool);
  *  @sa `fu_pool_terminate` for shutdown, `fu_count_logical_cores` for optimal thread count.
  */
 fu_bool_t fu_pool_spawn(fu_pool_t *pool, size_t threads, fu_caller_exclusivity_t exclusivity);
+
+/**
+ *  @brief Spawns a pool pinned to a single compute domain.
+ *  @param[in] pool Thread pool handle, must not be NULL.
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] threads The number of threads to create, must be > 0.
+ *  @param[in] exclusivity Whether the calling thread participates in task execution.
+ *  @retval 1 on success; 0 on failure or if @p compute_domain_index is out of range.
+ *  @note This API is @b not thread-safe and should only be called once per pool.
+ *
+ *  Placement lives here, not in creation: `fu_pool_new` allocates the handle, and this binds it
+ *  to one compute domain, so its threads and its NUMA-local allocations stay on that domain.
+ *  Spawn one pool per compute domain and coordinate them with the generation-token API. Contrast
+ *  `fu_pool_spawn`, which spans @b all compute domains. On builds without NUMA, only compute
+ *  domain 0 is valid.
+ *  @sa `fu_pool_spawn`, `fu_count_compute_domains`, `fu_count_logical_cores_in`.
+ */
+fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, size_t compute_domain_index, size_t threads,
+                           fu_caller_exclusivity_t exclusivity);
 
 /**
  *  @brief Transitions worker threads to a power-saving sleep state.
@@ -450,21 +521,21 @@ void fu_pool_terminate(fu_pool_t *pool);
 fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t *pool);
 
 /**
- *  @brief Returns the number of distinct thread colocations in the pool.
+ *  @brief Returns the number of distinct thread compute_domains in the pool.
  *  @param[in] pool Thread pool handle, must not be NULL.
  *  @retval 0 if the pool is not initialized.
  *  @retval 1 on systems without NUMA or QoS heterogeneity.
  *  @retval 2-N on systems with multiple NUMA nodes or QoS levels.
  *  @note This API is @b not synchronized.
  *
- *  A colocation represents a group of threads sharing the same memory domain
+ *  A compute_domain represents a group of threads sharing the same memory domain
  *  and performance characteristics. This information is useful for:
  *  - Understanding the system's memory topology
  *  - Optimizing memory allocation strategies
  *  - Load balancing across heterogeneous cores
- *  @sa `fu_pool_count_threads_in` for per-colocation thread counts.
+ *  @sa `fu_pool_count_threads_in` for per-compute_domain thread counts.
  */
-size_t fu_pool_count_colocations(fu_pool_t *pool);
+size_t fu_pool_count_compute_domains(fu_pool_t *pool);
 
 /**
  *  @brief Returns the total number of threads in the pool.
@@ -481,29 +552,29 @@ size_t fu_pool_count_colocations(fu_pool_t *pool);
 size_t fu_pool_count_threads(fu_pool_t *pool);
 
 /**
- *  @brief Returns the number of threads in a specific colocation.
+ *  @brief Returns the number of threads in a specific compute_domain.
  *  @param[in] pool Thread pool handle, must not be NULL.
- *  @param[in] colocation_index Index of the colocation, must be < `fu_pool_count_colocations(pool)`.
- *  @retval 0 if the pool is not initialized or colocation_index is invalid.
- *  @retval 1-N where N is the number of threads in the specified colocation.
+ *  @param[in] compute_domain_index Index of the compute_domain, must be < `fu_pool_count_compute_domains(pool)`.
+ *  @retval 0 if the pool is not initialized or compute_domain_index is invalid.
+ *  @retval 1-N where N is the number of threads in the specified compute_domain.
  *  @note This API is @b not synchronized and doesn't validate bounds.
  *
- *  Different colocations may have different thread counts depending on:
+ *  Different compute_domains may have different thread counts depending on:
  *  - NUMA node core counts (different sockets may have different core counts)
  *  - QoS level availability (P-cores vs E-cores)
  *  - User-specified thread distribution
- *  @sa `fu_pool_count_colocations` for valid colocation indices.
+ *  @sa `fu_pool_count_compute_domains` for valid compute_domain indices.
  */
-size_t fu_pool_count_threads_in(fu_pool_t *pool, size_t colocation_index);
+size_t fu_pool_count_threads_in(fu_pool_t *pool, size_t compute_domain_index);
 
 /**
- *  @brief Converts a global thread index to a local thread index within a colocation.
+ *  @brief Converts a global thread index to a local thread index within a compute_domain.
  *  @param[in] pool Thread pool handle, must not be NULL.
  *  @param[in] global_thread_index The global thread index to convert.
- *  @param[in] colocation_index Index of the colocation, must be < `fu_pool_count_colocations(pool)`.
- *  @retval Local thread index within the specified colocation.
+ *  @param[in] compute_domain_index Index of the compute_domain, must be < `fu_pool_count_compute_domains(pool)`.
+ *  @retval Local thread index within the specified compute_domain.
  */
-size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, size_t colocation_index);
+size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, size_t compute_domain_index);
 
 #pragma endregion - Lifetime
 
@@ -517,19 +588,19 @@ size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, siz
  *  @note This API blocks until all threads complete execution.
  *
  *  This is equivalent to OpenMP's `#pragma omp parallel` directive. Each thread
- *  executes the callback exactly once with its unique thread index and colocation.
+ *  executes the callback exactly once with its unique thread index and compute_domain.
  *
  *  The callback receives:
  *  - `context`: User-provided data (shared across all threads)
  *  - `thread`: Thread index in [0, threads_count)
- *  - `colocation`: NUMA node & QoS level identifier
+ *  - `compute_domain`: NUMA node & QoS level identifier
  *
  *  Synchronization guarantee: This function returns only after all threads have
  *  completed their callback execution. No additional synchronization is needed.
  *
  *  @code{.c}
- *  void hello_world(void *ctx, size_t thread, size_t colocation) {
- *      printf("Hello from thread %zu in colocation %zu\n", thread, colocation);
+ *  void hello_world(void *ctx, size_t thread, size_t compute_domain) {
+ *      printf("Hello from thread %zu in compute_domain %zu\n", thread, compute_domain);
  *  }
  *  fu_pool_for_threads(pool, hello_world, NULL);
  *  @endcode
@@ -558,10 +629,10 @@ void fu_pool_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_c
  *  - `context`: User-provided data (shared across all tasks)
  *  - `task`: Task index in [0, n)
  *  - `thread`: Thread index executing this task
- *  - `colocation`: NUMA node & QoS level of the executing thread
+ *  - `compute_domain`: NUMA node & QoS level of the executing thread
  *
  *  @code{.c}
- *  void process_element(void *array, size_t i, size_t thread, size_t colocation) {
+ *  void process_element(void *array, size_t i, size_t thread, size_t compute_domain) {
  *      int *data = (int*)array;
  *      data[i] = data[i] * 2; // Double each element
  *  }
@@ -599,7 +670,7 @@ void fu_pool_for_n(fu_pool_t *pool, size_t n, fu_for_prongs_t callback, fu_lambd
  *  indices may be processed out of order depending on thread scheduling.
  *
  *  @code{.c}
- *  void process_variable_work(void *ctx, size_t task, size_t thread, size_t colocation) {
+ *  void process_variable_work(void *ctx, size_t task, size_t thread, size_t compute_domain) {
  *      complex_computation(task); // May take 1ms or 100ms
  *  }
  *  fu_pool_for_n_dynamic(pool, task_count, process_variable_work, context);
@@ -632,7 +703,7 @@ void fu_pool_for_n_dynamic(fu_pool_t *pool, size_t n, fu_for_prongs_t callback, 
  *  - `first`: Starting task index for this slice
  *  - `count`: Number of tasks in this slice (may be 0)
  *  - `thread`: Thread index processing this slice
- *  - `colocation`: NUMA node & QoS level of the executing thread
+ *  - `compute_domain`: NUMA node & QoS level of the executing thread
  *
  *  Use cases:
  *  - Vectorized operations that benefit from contiguous data access
@@ -641,7 +712,7 @@ void fu_pool_for_n_dynamic(fu_pool_t *pool, size_t n, fu_for_prongs_t callback, 
  *  - SIMD operations that process multiple elements simultaneously
  *
  *  @code{.c}
- *  void process_slice(void *array, size_t first, size_t count, size_t thread, size_t colocation) {
+ *  void process_slice(void *array, size_t first, size_t count, size_t thread, size_t compute_domain) {
  *      float *data = (float*)array;
  *      for (size_t i = 0; i < count; ++i) {
  *          data[first + i] = sqrt(data[first + i]);

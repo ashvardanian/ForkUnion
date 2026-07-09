@@ -16,7 +16,7 @@
 //!
 //! // Execute work on each thread (like OpenMP parallel)
 //! pool.forThreads(struct {
-//!     fn work(thread_idx: usize, colocation_idx: usize) void {
+//!     fn work(thread_idx: usize, compute_domain_idx: usize) void {
 //!         std.debug.print("Thread {}\n", .{thread_idx});
 //!     }
 //! }.work, {});
@@ -31,30 +31,58 @@ const builtin = @import("builtin");
 
 // C ABI types
 const c = struct {
+    // Library metadata
     extern fn fu_version_major() c_int;
     extern fn fu_version_minor() c_int;
     extern fn fu_version_patch() c_int;
-    extern fn fu_enabled_numa() c_int;
+    extern fn fu_numa_enabled() c_int;
     extern fn fu_capabilities_string() [*:0]const u8;
 
+    // Compute topology
     extern fn fu_count_logical_cores() usize;
-    extern fn fu_count_colocations() usize;
-    extern fn fu_count_numa_nodes() usize;
-    extern fn fu_count_quality_levels() usize;
-    extern fn fu_volume_any_pages() usize;
-    extern fn fu_volume_any_pages_in(numa_node_index: usize) usize;
-    extern fn fu_volume_huge_pages_in(numa_node_index: usize) usize;
+    extern fn fu_count_compute_domains() usize;
+    extern fn fu_count_compute_levels() usize;
+    extern fn fu_count_logical_cores_in(compute_domain_index: usize) usize;
+    extern fn fu_compute_level_in(compute_domain_index: usize) usize;
 
+    // Memory topology
+    extern fn fu_count_memory_domains() usize;
+    extern fn fu_memory_level_in(memory_domain_index: usize) usize;
+    extern fn fu_volume_ram() usize;
+    extern fn fu_volume_ram_in(memory_domain_index: usize) usize;
+    extern fn fu_volume_huge_pages() usize;
+    extern fn fu_volume_huge_pages_in(memory_domain_index: usize) usize;
+    extern fn fu_count_huge_pages() usize;
+    extern fn fu_count_huge_pages_in(memory_domain_index: usize) usize;
+
+    // Affinity
+    extern fn fu_local_memory_of(compute_domain_index: usize) usize;
+    extern fn fu_memory_distance(compute_domain_index: usize, memory_domain_index: usize) usize;
+
+    // Allocation
+    extern fn fu_allocate_in(memory_domain_index: usize, bytes: usize) ?*anyopaque;
+    extern fn fu_allocate_at_least_in(
+        memory_domain_index: usize,
+        minimum_bytes: usize,
+        allocated_bytes: *usize,
+        bytes_per_page: *usize,
+    ) ?*anyopaque;
+    extern fn fu_free_in(memory_domain_index: usize, pointer: *anyopaque, bytes: usize) void;
+
+    // Pool lifecycle & introspection
     extern fn fu_pool_new(name: ?[*:0]const u8) ?*anyopaque;
     extern fn fu_pool_delete(pool: *anyopaque) void;
     extern fn fu_pool_spawn(pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
+    extern fn fu_pool_spawn_on(pool: *anyopaque, compute_domain_index: usize, threads: usize, exclusivity: c_int) c_int;
     extern fn fu_pool_terminate(pool: *anyopaque) void;
+    extern fn fu_pool_sleep(pool: *anyopaque, micros: usize) void;
     extern fn fu_pool_caller_exclusivity(pool: *anyopaque) c_int;
     extern fn fu_pool_count_threads(pool: *anyopaque) usize;
-    extern fn fu_pool_count_colocations(pool: *anyopaque) usize;
-    extern fn fu_pool_count_threads_in(pool: *anyopaque, colocation_index: usize) usize;
-    extern fn fu_pool_locate_thread_in(pool: *anyopaque, global_thread_index: usize, colocation_index: usize) usize;
+    extern fn fu_pool_count_compute_domains(pool: *anyopaque) usize;
+    extern fn fu_pool_count_threads_in(pool: *anyopaque, compute_domain_index: usize) usize;
+    extern fn fu_pool_locate_thread_in(pool: *anyopaque, global_thread_index: usize, compute_domain_index: usize) usize;
 
+    // Parallel dispatch
     extern fn fu_pool_for_threads(
         pool: *anyopaque,
         callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
@@ -79,6 +107,7 @@ const c = struct {
         context: ?*anyopaque,
     ) void;
 
+    // Generation tokens
     extern fn fu_pool_unsafe_for_threads(
         pool: *anyopaque,
         callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
@@ -86,16 +115,6 @@ const c = struct {
     ) usize;
     extern fn fu_pool_is_complete(pool: *anyopaque, generation: usize) c_int;
     extern fn fu_pool_unsafe_join(pool: *anyopaque, generation: usize) void;
-    extern fn fu_pool_sleep(pool: *anyopaque, micros: usize) void;
-
-    extern fn fu_allocate_at_least(
-        numa_node_index: usize,
-        minimum_bytes: usize,
-        allocated_bytes: *usize,
-        bytes_per_page: *usize,
-    ) ?*anyopaque;
-    extern fn fu_allocate(numa_node_index: usize, bytes: usize) ?*anyopaque;
-    extern fn fu_free(numa_node_index: usize, pointer: *anyopaque, bytes: usize) void;
 };
 
 /// Errors that can occur during thread pool operations
@@ -122,8 +141,8 @@ pub const Prong = struct {
     task_index: usize,
     /// The physical thread executing this task
     thread_index: usize,
-    /// The colocation group (NUMA node + QoS level)
-    colocation_index: usize,
+    /// The compute_domain group (NUMA node + QoS level)
+    compute_domain_index: usize,
 };
 
 /// Returns the library version as a struct
@@ -137,7 +156,7 @@ pub fn version() struct { major: u32, minor: u32, patch: u32 } {
 
 /// Returns true if NUMA support was compiled into the library
 pub fn numaEnabled() bool {
-    return c.fu_enabled_numa() != 0;
+    return c.fu_numa_enabled() != 0;
 }
 
 /// Returns a string describing available platform capabilities
@@ -151,33 +170,73 @@ pub fn countLogicalCores() usize {
 }
 
 /// Returns the number of NUMA nodes available
-pub fn countNumaNodes() usize {
-    return c.fu_count_numa_nodes();
+pub fn countMemoryDomains() usize {
+    return c.fu_count_memory_domains();
 }
 
-/// Returns the number of distinct thread colocations
-pub fn countColocations() usize {
-    return c.fu_count_colocations();
+/// Returns the number of distinct thread compute_domains
+pub fn countComputeDomains() usize {
+    return c.fu_count_compute_domains();
+}
+
+/// Returns the number of logical cores backing a given compute domain (0 if out of range).
+pub fn countLogicalCoresIn(compute_domain_index: usize) usize {
+    return c.fu_count_logical_cores_in(compute_domain_index);
+}
+
+/// Returns the performance level of a compute domain (higher = more performant).
+pub fn computeLevelIn(compute_domain_index: usize) usize {
+    return c.fu_compute_level_in(compute_domain_index);
+}
+
+/// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
+pub fn memoryLevelIn(memory_domain_index: usize) usize {
+    return c.fu_memory_level_in(memory_domain_index);
+}
+
+/// Returns the memory domain nearest a given compute domain (its local allocation target).
+pub fn localMemoryOf(compute_domain_index: usize) usize {
+    return c.fu_local_memory_of(compute_domain_index);
+}
+
+/// Returns the relative access distance from a compute domain to a memory domain (10 = local).
+pub fn memoryDistance(compute_domain_index: usize, memory_domain_index: usize) usize {
+    return c.fu_memory_distance(compute_domain_index, memory_domain_index);
 }
 
 /// Returns the number of distinct Quality-of-Service levels
-pub fn countQualityLevels() usize {
-    return c.fu_count_quality_levels();
+pub fn countComputeClasses() usize {
+    return c.fu_count_compute_levels();
 }
 
-/// Returns total volume of pages available across all NUMA nodes
-pub fn volumeAnyPages() usize {
-    return c.fu_volume_any_pages();
+/// Returns the total RAM volume (bytes) across all compute_domains, regardless of page size.
+pub fn volumeRam() usize {
+    return c.fu_volume_ram();
 }
 
-/// Returns volume of pages available on a specific NUMA node
-pub fn volumeAnyPagesIn(numa_node_index: usize) usize {
-    return c.fu_volume_any_pages_in(numa_node_index);
+/// Returns the RAM volume (bytes) local to a given compute_domain (0 if out of range).
+pub fn volumeRamIn(compute_domain_index: usize) usize {
+    return c.fu_volume_ram_in(compute_domain_index);
 }
 
-/// Returns volume of huge pages available on a specific NUMA node
-pub fn volumeHugePagesIn(numa_node_index: usize) usize {
-    return c.fu_volume_huge_pages_in(numa_node_index);
+/// Returns the total huge-page volume (bytes) across all compute_domains.
+pub fn volumeHugePages() usize {
+    return c.fu_volume_huge_pages();
+}
+
+/// Returns the huge-page volume (bytes) available on a given compute_domain (0 if out of range).
+pub fn volumeHugePagesIn(compute_domain_index: usize) usize {
+    return c.fu_volume_huge_pages_in(compute_domain_index);
+}
+
+/// Returns the total number of free huge pages across all compute_domains.
+pub fn countHugePages() usize {
+    return c.fu_count_huge_pages();
+}
+
+/// Returns the number of free huge pages on a given compute_domain (0 if out of range).
+pub fn countHugePagesIn(compute_domain_index: usize) usize {
+    return c.fu_count_huge_pages_in(compute_domain_index);
 }
 
 /// NUMA-aware memory allocation result
@@ -194,7 +253,7 @@ pub const NumaAllocation = struct {
 
     /// Frees the NUMA allocation
     pub fn free(self: NumaAllocation) void {
-        c.fu_free(self.numa_node, @ptrCast(self.ptr), self.allocated_bytes);
+        c.fu_free_in(self.numa_node, @ptrCast(self.ptr), self.allocated_bytes);
     }
 };
 
@@ -203,7 +262,7 @@ pub fn allocateAtLeast(numa_node_index: usize, minimum_bytes: usize) ?NumaAlloca
     var allocated_bytes: usize = undefined;
     var bytes_per_page: usize = undefined;
 
-    const ptr = c.fu_allocate_at_least(
+    const ptr = c.fu_allocate_at_least_in(
         numa_node_index,
         minimum_bytes,
         &allocated_bytes,
@@ -220,7 +279,7 @@ pub fn allocateAtLeast(numa_node_index: usize, minimum_bytes: usize) ?NumaAlloca
 
 /// Allocates exactly the requested bytes on a specific NUMA node
 pub fn allocate(numa_node_index: usize, bytes: usize) ?[*]u8 {
-    const ptr = c.fu_allocate(numa_node_index, bytes) orelse return null;
+    const ptr = c.fu_allocate_in(numa_node_index, bytes) orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
@@ -299,7 +358,7 @@ pub const NumaAllocator = struct {
 
         var allocated_bytes: usize = undefined;
         var bytes_per_page: usize = undefined;
-        const raw_ptr = c.fu_allocate_at_least(
+        const raw_ptr = c.fu_allocate_at_least_in(
             self.node_index,
             request_bytes,
             &allocated_bytes,
@@ -309,7 +368,7 @@ pub const NumaAllocator = struct {
         const base_addr = @intFromPtr(raw_ptr);
         const data_addr = alignment.forward(base_addr + header_size);
         if (data_addr + len > base_addr + allocated_bytes) {
-            c.fu_free(self.node_index, raw_ptr, allocated_bytes);
+            c.fu_free_in(self.node_index, raw_ptr, allocated_bytes);
             return null;
         }
 
@@ -351,7 +410,7 @@ pub const NumaAllocator = struct {
         const header_ptr = @as(*Header, @ptrFromInt(@intFromPtr(buf.ptr) - @sizeOf(Header)));
         const header = header_ptr.*;
         const base_ptr = @as(*anyopaque, @ptrFromInt(header.base_addr));
-        c.fu_free(self.node_index, base_ptr, header.allocated_bytes);
+        c.fu_free_in(self.node_index, base_ptr, header.allocated_bytes);
     }
 };
 
@@ -388,6 +447,22 @@ pub const Pool = struct {
         return .{ .handle = handle };
     }
 
+    /// Spawns a thread pool pinned to a single compute domain (cores of one QoS + locality).
+    ///
+    /// The pool's threads and NUMA-local allocations stay on `compute_domain_index`, in
+    /// `0..countComputeDomains()`. Spawn one per compute domain and coordinate them from a
+    /// single thread with the generation-token API. On builds without NUMA, only compute
+    /// domain 0 is valid.
+    pub fn spawnOn(compute_domain_index: usize, thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
+        const handle = c.fu_pool_new(null) orelse return Error.CreationFailed;
+        errdefer c.fu_pool_delete(handle);
+
+        const success = c.fu_pool_spawn_on(handle, compute_domain_index, thread_count, @intFromEnum(exclusivity));
+        if (success == 0) return Error.SpawnFailed;
+
+        return .{ .handle = handle };
+    }
+
     /// Destroys the thread pool
     pub fn deinit(self: Pool) void {
         c.fu_pool_delete(self.handle);
@@ -406,19 +481,19 @@ pub const Pool = struct {
         return @enumFromInt(c.fu_pool_caller_exclusivity(self.handle));
     }
 
-    /// Returns the number of colocations in the pool
-    pub fn colocations(self: *const Pool) usize {
-        return c.fu_pool_count_colocations(self.handle);
+    /// Returns the number of compute_domains in the pool
+    pub fn compute_domains(self: *const Pool) usize {
+        return c.fu_pool_count_compute_domains(self.handle);
     }
 
-    /// Returns the number of threads in a specific colocation
-    pub fn countThreadsIn(self: *const Pool, colocation_index: usize) usize {
-        return c.fu_pool_count_threads_in(self.handle, colocation_index);
+    /// Returns the number of threads in a specific compute_domain
+    pub fn countThreadsIn(self: *const Pool, compute_domain_index: usize) usize {
+        return c.fu_pool_count_threads_in(self.handle, compute_domain_index);
     }
 
-    /// Converts global thread index to local index within colocation
-    pub fn locateThreadIn(self: *const Pool, global_thread_index: usize, colocation_index: usize) usize {
-        return c.fu_pool_locate_thread_in(self.handle, global_thread_index, colocation_index);
+    /// Converts global thread index to local index within compute_domain
+    pub fn locateThreadIn(self: *const Pool, global_thread_index: usize, compute_domain_index: usize) usize {
+        return c.fu_pool_locate_thread_in(self.handle, global_thread_index, compute_domain_index);
     }
 
     /// Terminates all worker threads (pool can be respawned)
@@ -455,16 +530,16 @@ pub const Pool = struct {
 
         if (Context == void) {
             const Wrapper = struct {
-                fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
-                    func(thread_idx, colocation_idx);
+                fn callback(_: ?*anyopaque, thread_idx: usize, compute_domain_idx: usize) callconv(.c) void {
+                    func(thread_idx, compute_domain_idx);
                 }
             };
             c.fu_pool_for_threads(self.handle, Wrapper.callback, null);
         } else {
             const Wrapper = struct {
-                fn callback(ctx: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
+                fn callback(ctx: ?*anyopaque, thread_idx: usize, compute_domain_idx: usize) callconv(.c) void {
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
-                    func(thread_idx, colocation_idx, typed_ctx.*);
+                    func(thread_idx, compute_domain_idx, typed_ctx.*);
                 }
             };
             c.fu_pool_for_threads(self.handle, Wrapper.callback, @ptrCast(@constCast(&context)));
@@ -501,12 +576,12 @@ pub const Pool = struct {
                     _: ?*anyopaque,
                     task_idx: usize,
                     thread_idx: usize,
-                    colocation_idx: usize,
+                    compute_domain_idx: usize,
                 ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
-                        .colocation_index = colocation_idx,
+                        .compute_domain_index = compute_domain_idx,
                     };
                     func(prong);
                 }
@@ -519,12 +594,12 @@ pub const Pool = struct {
                     ctx: ?*anyopaque,
                     task_idx: usize,
                     thread_idx: usize,
-                    colocation_idx: usize,
+                    compute_domain_idx: usize,
                 ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
-                        .colocation_index = colocation_idx,
+                        .compute_domain_index = compute_domain_idx,
                     };
                     // SAFETY: Context pointer valid for duration of blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
@@ -565,12 +640,12 @@ pub const Pool = struct {
                     _: ?*anyopaque,
                     task_idx: usize,
                     thread_idx: usize,
-                    colocation_idx: usize,
+                    compute_domain_idx: usize,
                 ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
-                        .colocation_index = colocation_idx,
+                        .compute_domain_index = compute_domain_idx,
                     };
                     func(prong);
                 }
@@ -583,12 +658,12 @@ pub const Pool = struct {
                     ctx: ?*anyopaque,
                     task_idx: usize,
                     thread_idx: usize,
-                    colocation_idx: usize,
+                    compute_domain_idx: usize,
                 ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = task_idx,
                         .thread_index = thread_idx,
-                        .colocation_index = colocation_idx,
+                        .compute_domain_index = compute_domain_idx,
                     };
                     // SAFETY: Context pointer valid for duration of blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
@@ -632,12 +707,12 @@ pub const Pool = struct {
                     first_idx: usize,
                     count: usize,
                     thread_idx: usize,
-                    colocation_idx: usize,
+                    compute_domain_idx: usize,
                 ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = first_idx,
                         .thread_index = thread_idx,
-                        .colocation_index = colocation_idx,
+                        .compute_domain_index = compute_domain_idx,
                     };
                     func(prong, count);
                 }
@@ -651,12 +726,12 @@ pub const Pool = struct {
                     first_idx: usize,
                     count: usize,
                     thread_idx: usize,
-                    colocation_idx: usize,
+                    compute_domain_idx: usize,
                 ) callconv(.c) void {
                     const prong = Prong{
                         .task_index = first_idx,
                         .thread_index = thread_idx,
-                        .colocation_index = colocation_idx,
+                        .compute_domain_index = compute_domain_idx,
                     };
                     // SAFETY: Context pointer valid for duration of blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
@@ -692,8 +767,8 @@ pub const Pool = struct {
                 @compileError("Function signature must be: " ++ @typeName(expected_type));
             }
             const Wrapper = struct {
-                fn callback(_: ?*anyopaque, thread_index: usize, colocation_index: usize) callconv(.c) void {
-                    func(thread_index, colocation_index);
+                fn callback(_: ?*anyopaque, thread_index: usize, compute_domain_index: usize) callconv(.c) void {
+                    func(thread_index, compute_domain_index);
                 }
             };
             return c.fu_pool_unsafe_for_threads(self.handle, Wrapper.callback, null);
@@ -710,9 +785,9 @@ pub const Pool = struct {
                 @compileError("Function signature must be: " ++ @typeName(expected_type));
             }
             const Wrapper = struct {
-                fn callback(erased_context: ?*anyopaque, thread_index: usize, colocation_index: usize) callconv(.c) void {
+                fn callback(erased_context: ?*anyopaque, thread_index: usize, compute_domain_index: usize) callconv(.c) void {
                     const typed_context: Context = @ptrCast(@alignCast(erased_context));
-                    func(thread_index, colocation_index, typed_context);
+                    func(thread_index, compute_domain_index, typed_context);
                 }
             };
             return c.fu_pool_unsafe_for_threads(self.handle, Wrapper.callback, @ptrCast(@constCast(context)));
@@ -754,10 +829,10 @@ test "system metadata" {
     const cores = countLogicalCores();
     try std.testing.expect(cores > 0);
 
-    const numa = countNumaNodes();
+    const numa = countMemoryDomains();
     try std.testing.expect(numa > 0);
 
-    const colocs = countColocations();
+    const colocs = countComputeDomains();
     try std.testing.expect(colocs > 0);
 }
 
@@ -781,6 +856,29 @@ test "caller exclusivity query" {
     try std.testing.expectEqual(CallerExclusivity.exclusive, exclusive.callerExclusivity());
 }
 
+test "per-compute_domain pool" {
+    std.debug.print("Running test: per-compute_domain pool\n", .{});
+    const compute_domains = countComputeDomains();
+    try std.testing.expect(compute_domains >= 1);
+
+    // A pool pinned to compute_domain 0, sized to that compute_domain's core count.
+    const cores = @max(countLogicalCoresIn(0), 1);
+    var pool = try Pool.spawnOn(0, cores, .exclusive);
+    defer pool.deinit();
+
+    var counter = std.atomic.Value(usize).init(0);
+    const context = struct { counter_ptr: *std.atomic.Value(usize) }{ .counter_ptr = &counter };
+    const generation = pool.unsafeForThreads(struct {
+        fn worker(thread_index: usize, compute_domain_index: usize, ctx: *const @TypeOf(context)) void {
+            _ = thread_index;
+            _ = compute_domain_index;
+            _ = ctx.counter_ptr.fetchAdd(1, .monotonic);
+        }
+    }.worker, &context);
+    pool.unsafeJoin(generation);
+    try std.testing.expectEqual(pool.threads(), counter.load(.acquire));
+}
+
 test "named pool creation" {
     std.debug.print("Running test: named pool creation\n", .{});
     var pool = try Pool.initNamed(null, 2, .inclusive);
@@ -801,8 +899,8 @@ test "for_threads execution" {
     };
 
     pool.forThreads(struct {
-        fn worker(thread_idx: usize, colocation_idx: usize, ctx: Context) void {
-            _ = colocation_idx;
+        fn worker(thread_idx: usize, compute_domain_idx: usize, ctx: Context) void {
+            _ = compute_domain_idx;
             if (thread_idx < 4) {
                 ctx.visited_ptr[thread_idx].store(true, .release);
             }
@@ -975,9 +1073,9 @@ test "unsafe_for_threads and join" {
     // worker threads are still reading through it, until `unsafeJoin` completes.
     const context = Context{ .counter_ptr = &counter };
     const generation = pool.unsafeForThreads(struct {
-        fn worker(thread_index: usize, colocation_index: usize, worker_context: *const Context) void {
+        fn worker(thread_index: usize, compute_domain_index: usize, worker_context: *const Context) void {
             _ = thread_index;
-            _ = colocation_index;
+            _ = compute_domain_index;
             _ = worker_context.counter_ptr.fetchAdd(1, .monotonic);
         }
     }.worker, &context);
@@ -1006,9 +1104,9 @@ test "generation polling on exclusive pool" {
 
     const context = Context{ .counter_ptr = &counter };
     const generation = pool.unsafeForThreads(struct {
-        fn worker(thread_index: usize, colocation_index: usize, worker_context: *const Context) void {
+        fn worker(thread_index: usize, compute_domain_index: usize, worker_context: *const Context) void {
             _ = thread_index;
-            _ = colocation_index;
+            _ = compute_domain_index;
             _ = worker_context.counter_ptr.fetchAdd(1, .monotonic);
         }
     }.worker, &context);

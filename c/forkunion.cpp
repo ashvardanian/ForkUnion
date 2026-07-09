@@ -49,18 +49,24 @@ struct pool_variants_t {
 #endif // FU_WITH_ASM_YIELDS_
 
 #if FU_ENABLE_NUMA
-        fu::linux_distributed_pool<fu::standard_yield_t>, //
+        fu::linux_compute_domain_pool<fu::standard_yield_t>, // ? Single-compute-domain pools
+        fu::linux_distributed_pool<fu::standard_yield_t>,    // ? Whole-machine pools
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
-        fu::linux_distributed_pool<fu::x86_pause_t>,  //
-        fu::linux_distributed_pool<fu::x86_tpause_t>, //
+        fu::linux_compute_domain_pool<fu::x86_pause_t>,  //
+        fu::linux_compute_domain_pool<fu::x86_tpause_t>, //
+        fu::linux_distributed_pool<fu::x86_pause_t>,     //
+        fu::linux_distributed_pool<fu::x86_tpause_t>,    //
 #endif
 #if FU_DETECT_ARCH_ARM64_
-        fu::linux_distributed_pool<fu::arm64_yield_t>, //
-        fu::linux_distributed_pool<fu::arm64_wfet_t>,  //
+        fu::linux_compute_domain_pool<fu::arm64_yield_t>, //
+        fu::linux_compute_domain_pool<fu::arm64_wfet_t>,  //
+        fu::linux_distributed_pool<fu::arm64_yield_t>,    //
+        fu::linux_distributed_pool<fu::arm64_wfet_t>,     //
 #endif
 #if FU_DETECT_ARCH_RISC5_
-        fu::linux_distributed_pool<fu::risc5_pause_t>, //
+        fu::linux_compute_domain_pool<fu::risc5_pause_t>, //
+        fu::linux_distributed_pool<fu::risc5_pause_t>,    //
 #endif
 #endif // FU_WITH_ASM_YIELDS_
 #endif // FU_ENABLE_NUMA
@@ -113,11 +119,20 @@ struct pool_variants_t {
 #endif
 #endif
 #if FU_ENABLE_NUMA
+        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::standard_yield_t>>) {
+            capabilities_ = fu::capability_compute_domain_k | fu::capability_numa_aware_k;
+        }
         else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::standard_yield_t>>) {
             capabilities_ = fu::capability_numa_aware_k;
         }
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
+        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::x86_pause_t>>) {
+            capabilities_ = fu::capability_x86_pause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
+        }
+        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::x86_tpause_t>>) {
+            capabilities_ = fu::capability_x86_tpause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
+        }
         else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::x86_pause_t>>) {
             capabilities_ = fu::capability_x86_pause_k | fu::capability_numa_aware_k;
         }
@@ -126,6 +141,13 @@ struct pool_variants_t {
         }
 #endif
 #if FU_DETECT_ARCH_ARM64_
+        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::arm64_yield_t>>) {
+            capabilities_ =
+                fu::capability_arm64_yield_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
+        }
+        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::arm64_wfet_t>>) {
+            capabilities_ = fu::capability_arm64_wfet_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
+        }
         else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::arm64_yield_t>>) {
             capabilities_ = fu::capability_arm64_yield_k | fu::capability_numa_aware_k;
         }
@@ -134,6 +156,10 @@ struct pool_variants_t {
         }
 #endif
 #if FU_DETECT_ARCH_RISC5_
+        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::risc5_pause_t>>) {
+            capabilities_ =
+                fu::capability_risc5_pause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
+        }
         else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::risc5_pause_t>>) {
             capabilities_ = fu::capability_risc5_pause_k | fu::capability_numa_aware_k;
         }
@@ -182,8 +208,32 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
     }
 #if FU_ENABLE_NUMA
     else {
-        // ? NUMA-aware pools
-        if (variants.capabilities_ == fu::capability_numa_aware_k) {
+        // ? Single-compute_domain pool pinned to one NUMA node, with its best busy-wait yield
+        if (variants.capabilities_ & fu::capability_compute_domain_k) {
+#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ARCH_X86_64_
+            if (variants.capabilities_ & fu::capability_x86_tpause_k)
+                return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::x86_tpause_t> *>(variants.storage_));
+            if (variants.capabilities_ & fu::capability_x86_pause_k)
+                return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::x86_pause_t> *>(variants.storage_));
+#endif
+#if FU_DETECT_ARCH_ARM64_
+            if (variants.capabilities_ & fu::capability_arm64_wfet_k)
+                return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::arm64_wfet_t> *>(variants.storage_));
+            if (variants.capabilities_ & fu::capability_arm64_yield_k)
+                return visitor(
+                    *reinterpret_cast<fu::linux_compute_domain_pool<fu::arm64_yield_t> *>(variants.storage_));
+#endif
+#if FU_DETECT_ARCH_RISC5_
+            if (variants.capabilities_ & fu::capability_risc5_pause_k)
+                return visitor(
+                    *reinterpret_cast<fu::linux_compute_domain_pool<fu::risc5_pause_t> *>(variants.storage_));
+#endif
+#endif
+            return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::standard_yield_t> *>(variants.storage_));
+        }
+        // ? NUMA-aware distributed pools spanning all nodes
+        else if (variants.capabilities_ == fu::capability_numa_aware_k) {
             return visitor(*reinterpret_cast<fu::linux_distributed_pool<fu::standard_yield_t> *>(variants.storage_));
         }
 #if FU_WITH_ASM_YIELDS_
@@ -215,18 +265,27 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
     return visitor(*reinterpret_cast<fu::basic_pool<thread_allocator_t, fu::standard_yield_t> *>(variants.storage_));
 }
 
+// ? Trait matching any yield specialization of the single-compute_domain pool
+template <typename pool_type_>
+struct is_compute_domain_pool : std::false_type {};
+#if FU_ENABLE_NUMA
+template <typename yield_type_>
+struct is_compute_domain_pool<fu::linux_compute_domain_pool<yield_type_>> : std::true_type {};
+#endif
+
 struct opaque_pool_t {
     pool_variants_t variants;
-    fu_lambda_context_t current_context; /// Current context for the unsafe callbacks
-    fu_for_threads_t current_callback;   /// Current callback for the unsafe callbacks
+    fu_lambda_context_t current_context; // ? Current context for the unsafe callbacks
+    fu_for_threads_t current_callback;   // ? Current callback for the unsafe callbacks
+    size_t compute_domain_index {0};     // ? Target compute domain for a spawn-on pool, else 0
 
     template <typename pool_type_, typename... args_types_>
     opaque_pool_t(std::in_place_type_t<pool_type_> inplace, args_types_ &&...args) noexcept
         : variants(inplace, std::forward<args_types_>(args)...), current_context(nullptr), current_callback(nullptr) {}
 
     /** @brief A shim to redirect unsafe callbacks to the current context. */
-    void operator()(fu::colocated_thread_t pinned) const noexcept {
-        current_callback(current_context, pinned.thread, pinned.colocation);
+    void operator()(fu::local_thread_t pinned) const noexcept {
+        current_callback(current_context, pinned.thread, pinned.compute_domain);
     }
 };
 
@@ -272,7 +331,7 @@ extern "C" {
 int fu_version_major(void) { return FORKUNION_VERSION_MAJOR; }
 int fu_version_minor(void) { return FORKUNION_VERSION_MINOR; }
 int fu_version_patch(void) { return FORKUNION_VERSION_PATCH; }
-int fu_enabled_numa(void) { return FU_ENABLE_NUMA; }
+int fu_numa_enabled(void) { return FU_ENABLE_NUMA; }
 
 #pragma region - Metadata
 
@@ -290,35 +349,89 @@ size_t fu_count_logical_cores(void) {
 #endif
 }
 
-size_t fu_count_colocations(void) {
+size_t fu_count_compute_domains(void) {
 #if FU_ENABLE_NUMA
     if (!globals_initialize()) return 0;
-    return global_numa_topology.nodes_count();
+    return global_numa_topology.compute_domains_count();
 #else
     return 1;
 #endif
 }
 
-size_t fu_count_numa_nodes(void) {
+size_t fu_count_memory_domains(void) {
 #if FU_ENABLE_NUMA
     if (!globals_initialize()) return 0;
-    return global_numa_topology.nodes_count();
+    return global_numa_topology.memory_domains_count();
 #else
     return 1;
 #endif
 }
 
-size_t fu_count_quality_levels(void) {
+size_t fu_count_compute_levels(void) {
+#if FU_ENABLE_NUMA
     if (!globals_initialize()) return 0;
-    return 1; // TODO: One day I'll get some of those weird CPUs to do this
+    return global_numa_topology.compute_levels_count();
+#else
+    return 1;
+#endif
 }
 
-size_t fu_volume_any_pages(void) { return fu::get_ram_total_volume(); }
-
-size_t fu_volume_huge_pages_in(FU_MAYBE_UNUSED_ size_t numa_node_index) {
+size_t fu_compute_level_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
 #if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
+    return global_numa_topology.compute_domain_at(compute_domain_index).compute_level;
+#else
+    return 0;
+#endif
+}
+
+size_t fu_memory_level_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (memory_domain_index >= global_numa_topology.memory_domains_count()) return 0;
+    return 0; // ? All memory is one tier until HBM/CXL tier harvesting lands
+#else
+    return 0;
+#endif
+}
+
+size_t fu_local_memory_of(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    return global_numa_topology.local_memory_of(compute_domain_index);
+#else
+    return 0;
+#endif
+}
+
+size_t fu_memory_distance(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    return global_numa_topology.distance(compute_domain_index, memory_domain_index);
+#else
+    return compute_domain_index == 0 && memory_domain_index == 0 ? 10 : 0;
+#endif
+}
+
+size_t fu_volume_ram(void) { return fu::get_ram_total_volume(); }
+
+size_t fu_volume_ram_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (memory_domain_index >= global_numa_topology.nodes_count()) return 0;
+    return global_numa_topology.node(memory_domain_index).memory_size;
+#else
+    return memory_domain_index == 0 ? fu::get_ram_total_volume() : 0;
+#endif
+}
+
+size_t fu_volume_huge_pages_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (memory_domain_index >= global_numa_topology.nodes_count()) return 0;
     size_t total_volume = 0;
-    auto const &node = global_numa_topology.node(numa_node_index);
+    auto const &node = global_numa_topology.node(memory_domain_index);
     for (auto const &page_size : node.page_sizes) total_volume += page_size.bytes_per_page * page_size.free_pages;
     return total_volume;
 #else
@@ -326,15 +439,40 @@ size_t fu_volume_huge_pages_in(FU_MAYBE_UNUSED_ size_t numa_node_index) {
 #endif
 }
 
-size_t fu_volume_any_pages_in(FU_MAYBE_UNUSED_ size_t numa_node_index) {
+size_t fu_volume_huge_pages(void) {
 #if FU_ENABLE_NUMA
     if (!globals_initialize()) return 0;
-    if (numa_node_index >= global_numa_topology.nodes_count()) return 0;
-
-    auto const &node = global_numa_topology.node(numa_node_index);
-    return node.memory_size;
+    size_t total_volume = 0;
+    for (size_t memory_domain = 0; memory_domain < global_numa_topology.nodes_count(); ++memory_domain)
+        total_volume += fu_volume_huge_pages_in(memory_domain);
+    return total_volume;
 #else
-    return fu::get_ram_total_volume();
+    return 0;
+#endif
+}
+
+size_t fu_count_huge_pages_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (memory_domain_index >= global_numa_topology.nodes_count()) return 0;
+    size_t total_pages = 0;
+    auto const &node = global_numa_topology.node(memory_domain_index);
+    for (auto const &page_size : node.page_sizes) total_pages += page_size.free_pages;
+    return total_pages;
+#else
+    return 0;
+#endif
+}
+
+size_t fu_count_huge_pages(void) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    size_t total_pages = 0;
+    for (size_t memory_domain = 0; memory_domain < global_numa_topology.nodes_count(); ++memory_domain)
+        total_pages += fu_count_huge_pages_in(memory_domain);
+    return total_pages;
+#else
+    return 0;
 #endif
 }
 
@@ -342,12 +480,12 @@ size_t fu_volume_any_pages_in(FU_MAYBE_UNUSED_ size_t numa_node_index) {
 
 #pragma region - Memory
 
-void *fu_allocate_at_least(                                        //
-    FU_MAYBE_UNUSED_ size_t numa_node_index, size_t minimum_bytes, //
+void *fu_allocate_at_least_in(                                         //
+    FU_MAYBE_UNUSED_ size_t memory_domain_index, size_t minimum_bytes, //
     size_t *allocated_bytes, size_t *bytes_per_page) {
 
 #if FU_ENABLE_NUMA
-    auto const &node = global_numa_topology.node(numa_node_index);
+    auto const &node = global_numa_topology.node(memory_domain_index);
     fu::linux_numa_allocator_t allocator(node.node_id);
     auto result = allocator.allocate_at_least(minimum_bytes);
     if (!result) return nullptr;
@@ -363,10 +501,10 @@ void *fu_allocate_at_least(                                        //
 #endif
 }
 
-void *fu_allocate(FU_MAYBE_UNUSED_ size_t numa_node_index, size_t bytes) {
+void *fu_allocate_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, size_t bytes) {
 
 #if FU_ENABLE_NUMA
-    auto const &node = global_numa_topology.node(numa_node_index);
+    auto const &node = global_numa_topology.node(memory_domain_index);
     fu::linux_numa_allocator_t allocator(node.node_id);
     return allocator.allocate(bytes);
 #else
@@ -374,9 +512,9 @@ void *fu_allocate(FU_MAYBE_UNUSED_ size_t numa_node_index, size_t bytes) {
 #endif
 }
 
-void fu_free(FU_MAYBE_UNUSED_ size_t numa_node_index, void *pointer, FU_MAYBE_UNUSED_ size_t bytes) {
+void fu_free_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, void *pointer, FU_MAYBE_UNUSED_ size_t bytes) {
 #if FU_ENABLE_NUMA
-    auto const &node = global_numa_topology.node(numa_node_index);
+    auto const &node = global_numa_topology.node(memory_domain_index);
     fu::linux_numa_allocator_t allocator(node.node_id);
     allocator.deallocate(reinterpret_cast<char *>(pointer), bytes);
 #else
@@ -502,6 +640,79 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
     return reinterpret_cast<fu_pool_t *>(opaque);
 }
 
+inline opaque_pool_t *upcast_pool(fu_pool_t *pool) noexcept; // ? Defined below, used by `fu_pool_spawn_on`
+
+fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, FU_MAYBE_UNUSED_ size_t compute_domain_index, size_t threads,
+                           fu_caller_exclusivity_t c_exclusivity) {
+    assert(pool != nullptr);
+    assert(c_exclusivity == fu_caller_inclusive_k || c_exclusivity == fu_caller_exclusive_k);
+    opaque_pool_t *opaque = upcast_pool(pool);
+    auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
+
+#if FU_ENABLE_NUMA
+    if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
+
+    // `fu_pool_new` builds a distributed pool for the whole machine; rebuild it in place as a
+    // single `linux_compute_domain_pool` bound to this compute domain, then spawn it there.
+    visit(
+        [](auto &variant) {
+            using variant_t = std::remove_reference_t<decltype(variant)>;
+            variant.terminate();
+            variant.~variant_t();
+        },
+        opaque->variants);
+
+#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ARCH_X86_64_
+    if (global_capabilities & fu::capability_x86_tpause_k)
+        opaque->variants.construct<fu::linux_compute_domain_pool<fu::x86_tpause_t>>("forkunion");
+    else if (global_capabilities & fu::capability_x86_pause_k)
+        opaque->variants.construct<fu::linux_compute_domain_pool<fu::x86_pause_t>>("forkunion");
+    else
+#endif
+#if FU_DETECT_ARCH_ARM64_
+        if (global_capabilities & fu::capability_arm64_wfet_k)
+        opaque->variants.construct<fu::linux_compute_domain_pool<fu::arm64_wfet_t>>("forkunion");
+    else if (global_capabilities & fu::capability_arm64_yield_k)
+        opaque->variants.construct<fu::linux_compute_domain_pool<fu::arm64_yield_t>>("forkunion");
+    else
+#endif
+#if FU_DETECT_ARCH_RISC5_
+        if (global_capabilities & fu::capability_risc5_pause_k)
+        opaque->variants.construct<fu::linux_compute_domain_pool<fu::risc5_pause_t>>("forkunion");
+    else
+#endif
+#endif // FU_WITH_ASM_YIELDS_
+        opaque->variants.construct<fu::linux_compute_domain_pool<fu::standard_yield_t>>("forkunion");
+
+    opaque->compute_domain_index = compute_domain_index;
+    return visit(
+        [&](auto &variant) -> fu_bool_t {
+            using variant_t = std::remove_reference_t<decltype(variant)>;
+            if constexpr (is_compute_domain_pool<variant_t>::value)
+                return variant.try_spawn(global_numa_topology.compute_domain_at(compute_domain_index), threads,
+                                         exclusivity);
+            else
+                return 0;
+        },
+        opaque->variants);
+#else
+    // Without NUMA there is a single compute domain - spawning on it is spawning everywhere.
+    if (compute_domain_index != 0) return 0;
+    return visit([&](auto &variant) -> fu_bool_t { return variant.try_spawn(threads, exclusivity); }, opaque->variants);
+#endif
+}
+
+size_t fu_count_logical_cores_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
+    return global_numa_topology.compute_domain_at(compute_domain_index).core_count;
+#else
+    return compute_domain_index == 0 ? std::thread::hardware_concurrency() : 0;
+#endif
+}
+
 /** @brief Safely cast `fu_pool_t*` to `opaque_pool_t*` avoiding alignment violation warnings. */
 inline opaque_pool_t *upcast_pool(fu_pool_t *pool) noexcept {
     return std::launder(reinterpret_cast<opaque_pool_t *>(pool));
@@ -523,7 +734,21 @@ fu_bool_t fu_pool_spawn(fu_pool_t *pool, size_t threads, fu_caller_exclusivity_t
     assert(c_exclusivity == fu_caller_inclusive_k || c_exclusivity == fu_caller_exclusive_k);
     opaque_pool_t *opaque = upcast_pool(pool);
     auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
-    return visit([=](auto &variant) { return variant.try_spawn(threads, exclusivity); }, opaque->variants);
+    return visit(
+        [&](auto &variant) -> fu_bool_t {
+            using variant_t = std::remove_reference_t<decltype(variant)>;
+#if FU_ENABLE_NUMA
+            // A compute-domain pool binds to a specific compute domain rather than a bare thread count.
+            if constexpr (is_compute_domain_pool<variant_t>::value) {
+                if (opaque->compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
+                return variant.try_spawn(global_numa_topology.compute_domain_at(opaque->compute_domain_index), threads,
+                                         exclusivity);
+            }
+            else
+#endif
+                return variant.try_spawn(threads, exclusivity);
+        },
+        opaque->variants);
 }
 
 void fu_pool_sleep(fu_pool_t *pool, size_t micros) {
@@ -549,10 +774,10 @@ fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t *pool) {
         opaque->variants);
 }
 
-size_t fu_pool_count_colocations(fu_pool_t *pool) {
+size_t fu_pool_count_compute_domains(fu_pool_t *pool) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
-    return visit([](auto &variant) { return variant.colocations_count(); }, opaque->variants);
+    return visit([](auto &variant) { return variant.compute_domains_count(); }, opaque->variants);
 }
 
 size_t fu_pool_count_threads(fu_pool_t *pool) {
@@ -561,16 +786,16 @@ size_t fu_pool_count_threads(fu_pool_t *pool) {
     return visit([](auto &variant) { return variant.threads_count(); }, opaque->variants);
 }
 
-size_t fu_pool_count_threads_in(fu_pool_t *pool, size_t colocation_index) {
+size_t fu_pool_count_threads_in(fu_pool_t *pool, size_t compute_domain_index) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
-    return visit([=](auto &variant) { return variant.threads_count(colocation_index); }, opaque->variants);
+    return visit([=](auto &variant) { return variant.threads_count(compute_domain_index); }, opaque->variants);
 }
 
-size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, size_t colocation_index) {
+size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, size_t compute_domain_index) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
-    return visit([=](auto &variant) { return variant.thread_local_index(global_thread_index, colocation_index); },
+    return visit([=](auto &variant) { return variant.thread_local_index(global_thread_index, compute_domain_index); },
                  opaque->variants);
 }
 
@@ -583,8 +808,8 @@ void fu_pool_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_c
     opaque_pool_t *opaque = upcast_pool(pool);
     visit(
         [&](auto &variant) {
-            variant.for_threads([=](fu::colocated_thread_t pinned) noexcept { //
-                callback(context, pinned.thread, pinned.colocation);
+            variant.for_threads([=](fu::local_thread_t pinned) noexcept { //
+                callback(context, pinned.thread, pinned.compute_domain);
             });
         },
         opaque->variants);
@@ -595,8 +820,8 @@ void fu_pool_for_n(fu_pool_t *pool, size_t n, fu_for_prongs_t callback, fu_lambd
     opaque_pool_t *opaque = upcast_pool(pool);
     visit(
         [&](auto &variant) {
-            variant.for_n(n, [=](fu::colocated_prong_t prong) noexcept { //
-                callback(context, prong.task, prong.thread, prong.colocation);
+            variant.for_n(n, [=](fu::local_prong_t prong) noexcept { //
+                callback(context, prong.task, prong.thread, prong.compute_domain);
             });
         },
         opaque->variants);
@@ -607,8 +832,8 @@ void fu_pool_for_n_dynamic(fu_pool_t *pool, size_t n, fu_for_prongs_t callback, 
     opaque_pool_t *opaque = upcast_pool(pool);
     visit(
         [&](auto &variant) {
-            variant.for_n_dynamic(n, [=](fu::colocated_prong_t prong) noexcept { //
-                callback(context, prong.task, prong.thread, prong.colocation);
+            variant.for_n_dynamic(n, [=](fu::local_prong_t prong) noexcept { //
+                callback(context, prong.task, prong.thread, prong.compute_domain);
             });
         },
         opaque->variants);
@@ -619,8 +844,8 @@ void fu_pool_for_slices(fu_pool_t *pool, size_t n, fu_for_slices_t callback, fu_
     opaque_pool_t *opaque = upcast_pool(pool);
     visit(
         [&](auto &variant) {
-            variant.for_slices(n, [=](fu::colocated_prong_t prong, std::size_t count) noexcept { //
-                callback(context, prong.task, count, prong.thread, prong.colocation);
+            variant.for_slices(n, [=](fu::local_prong_t prong, std::size_t count) noexcept { //
+                callback(context, prong.task, count, prong.thread, prong.compute_domain);
             });
         },
         opaque->variants);

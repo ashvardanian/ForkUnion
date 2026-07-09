@@ -45,7 +45,7 @@ On `caller_inclusive_k` pools the calling thread owes one slice of the work, whi
 The same rule shapes the RAII guard returned by `for_threads` and the `for_n` family: on exclusive pools the work starts at the guard's construction, while on inclusive pools it runs at `join` or destruction.
 
 On Linux, in C++, given the maturity and flexibility of the HPC ecosystem, it provides [NUMA extensions](#non-uniform-memory-access-numa).
-That includes the `linux_colocated_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory on a specific NUMA node.
+That includes the `linux_compute_domain_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory on a specific NUMA node.
 Those are out-of-the-box compatible with the higher-level APIs.
 Most interestingly, for Big Data applications, a higher-level `distributed_pool` class will address and balance the work across all NUMA nodes.
 
@@ -71,8 +71,8 @@ A minimal example may look like this:
 ```rust
 use forkunion as fu;
 let mut pool = fu::spawn(2);
-pool.for_threads(|thread_index, colocation_index| {
-    println!("Hello from thread # {} on colocation # {}", thread_index + 1, colocation_index + 1);
+pool.for_threads(|thread_index, compute_domain_index| {
+    println!("Hello from thread # {} on compute domain # {}", thread_index + 1, compute_domain_index + 1);
 });
 ```
 
@@ -211,7 +211,7 @@ pub fn main() !void {
 
     // Execute work on each thread (OpenMP-style parallel)
     pool.forThreads(struct {
-        fn work(thread_idx: usize, colocation_idx: usize) void {
+        fn work(thread_idx: usize, compute_domain_idx: usize) void {
             std.debug.print("Thread {}\n", .{thread_idx});
         }
     }.work, {});
@@ -252,9 +252,9 @@ A minimal C example:
 #include <stdio.h>      // printf
 #include <forkunion.h> // fu_pool_t, fu_pool_new, fu_pool_spawn
 
-void hello_callback(void *context, size_t thread, size_t colocation) {
+void hello_callback(void *context, size_t thread, size_t compute_domain) {
     (void)context;
-    printf("Hello from thread %zu (colocation %zu)\n", thread, colocation);
+    printf("Hello from thread %zu (compute_domain %zu)\n", thread, compute_domain);
 }
 
 int main(void) {
@@ -276,8 +276,8 @@ struct task_context {
     size_t size;
 };
 
-void process_task(void *ctx, size_t task, size_t thread, size_t colocation) {
-    (void)thread; (void)colocation;
+void process_task(void *ctx, size_t task, size_t thread, size_t compute_domain) {
+    (void)thread; (void)compute_domain;
     struct task_context *context = (struct task_context *)ctx;
     context->data[task] = task * 2;
 }
@@ -312,8 +312,8 @@ int main(void) {
     atomic_size_t counter = 0;
 
     // GCC nested function - captures 'counter' from enclosing scope
-    void nested_callback(void *ctx, size_t task, size_t thread, size_t colocation) {
-        (void)ctx; (void)thread; (void)colocation;
+    void nested_callback(void *ctx, size_t task, size_t thread, size_t compute_domain) {
+        (void)ctx; (void)thread; (void)compute_domain;
         atomic_fetch_add(&counter, 1);
     }
 
@@ -341,8 +341,8 @@ typedef void (^task_block_t)(void *, size_t, size_t, size_t);
 
 struct block_wrapper { task_block_t block; };
 
-void block_wrapper_fn(void *ctx, size_t task, size_t thread, size_t colocation) {
-    ((struct block_wrapper *)ctx)->block(NULL, task, thread, colocation);
+void block_wrapper_fn(void *ctx, size_t task, size_t thread, size_t compute_domain) {
+    ((struct block_wrapper *)ctx)->block(NULL, task, thread, compute_domain);
 }
 
 int main(void) {
@@ -508,9 +508,9 @@ search_result_t search(std::span<float, dimensions> query) {
         (first_half.size() + second_half.size()) / dimensions;
 
     auto slices = distributed_pool.for_slices(total_vectors,
-        [&](fu::colocated_prong<> first, std::size_t count) noexcept {
+        [&](fu::local_prong<> first, std::size_t count) noexcept {
 
-        bool const in_second = first.colocation != 0;
+        bool const in_second = first.compute_domain != 0;
         auto const &shard = in_second ? second_half : first_half;
         std::size_t const shard_base = in_second ? first_half.size() / dimensions : 0;
         std::size_t const local_begin = first.task - shard_base;
@@ -535,7 +535,7 @@ search_result_t search(std::span<float, dimensions> query) {
 ```
 
 In a dream world, we would call `distributed_pool.for_n`, but there is no clean way to make the scheduling processes aware of the data distribution in an arbitrary application, so that's left to the user.
-The `for_slices` helper provides colocated metadata (`fu::colocated_prong`) that lets you pick the right shard of data based on the NUMA node, while keeping scheduling inside the distributed pool.
+The `for_slices` helper provides compute_domain metadata (`fu::local_prong`) that lets you pick the right shard of data based on the NUMA node, while keeping scheduling inside the distributed pool.
 For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns an always-odd generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
 
 ### Efficient Busy Waiting

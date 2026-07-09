@@ -23,7 +23,7 @@ template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t,
 template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
 
 #if FU_ENABLE_NUMA
-template struct fu::linux_colocated_pool<>;
+template struct fu::linux_compute_domain_pool<>;
 template struct fu::linux_distributed_pool<>;
 #endif
 
@@ -94,9 +94,9 @@ struct make_pool_t {
 
 #if FU_ENABLE_NUMA
 static fu::numa_topology_t numa_topology;
-struct make_linux_colocated_pool_t {
-    fu::linux_colocated_pool_t construct() const noexcept { return fu::linux_colocated_pool_t("forkunion"); }
-    fu::numa_node_t scope(std::size_t = 0) const noexcept { return numa_topology.node(0); }
+struct make_linux_compute_domain_pool_t {
+    fu::linux_compute_domain_pool_t construct() const noexcept { return fu::linux_compute_domain_pool_t("forkunion"); }
+    fu::compute_domain_t scope(std::size_t = 0) const noexcept { return numa_topology.compute_domain_at(0); }
 };
 struct make_linux_distributed_pool_t {
     fu::linux_distributed_pool_t construct() const noexcept { return fu::linux_distributed_pool_t("forkunion"); }
@@ -665,21 +665,21 @@ int main(void) {
         {"`terminate` and re-spawn", test_mixed_restart<true>},                  //
 #if FU_ENABLE_NUMA
         // Uniform Memory Access (UMA) tests for threads pinned to the same NUMA node
-        {"UMA `try_spawn` normal", test_try_spawn_success<make_linux_colocated_pool_t>},
-        {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_linux_colocated_pool_t>},
-        {"UMA `for_threads` dispatch", test_for_threads<make_linux_colocated_pool_t>},
-        {"UMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_linux_colocated_pool_t>},
-        {"UMA `generation` polling", test_generation_polling<make_linux_colocated_pool_t>},
-        {"UMA `broadcast_join` lifecycle", test_guard_lifecycle<make_linux_colocated_pool_t>},
-        {"UMA `generation` inclusive contract", test_generation_inclusive<make_linux_colocated_pool_t>},
-        {"UMA `generation` stress", test_generation_stress<make_linux_colocated_pool_t>},
-        {"UMA `caller_exclusive_k` calls", test_exclusivity<make_linux_colocated_pool_t>},
-        {"UMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_linux_colocated_pool_t>},
-        {"UMA `for_n` static scheduling", test_for_n<make_linux_colocated_pool_t>},
-        {"UMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_linux_colocated_pool_t>},
-        {"UMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_linux_colocated_pool_t>},
-        {"UMA `terminate` avoided", test_mixed_restart<false, make_linux_colocated_pool_t>},
-        {"UMA `terminate` and re-spawn", test_mixed_restart<true, make_linux_colocated_pool_t>},
+        {"UMA `try_spawn` normal", test_try_spawn_success<make_linux_compute_domain_pool_t>},
+        {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_linux_compute_domain_pool_t>},
+        {"UMA `for_threads` dispatch", test_for_threads<make_linux_compute_domain_pool_t>},
+        {"UMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_linux_compute_domain_pool_t>},
+        {"UMA `generation` polling", test_generation_polling<make_linux_compute_domain_pool_t>},
+        {"UMA `broadcast_join` lifecycle", test_guard_lifecycle<make_linux_compute_domain_pool_t>},
+        {"UMA `generation` inclusive contract", test_generation_inclusive<make_linux_compute_domain_pool_t>},
+        {"UMA `generation` stress", test_generation_stress<make_linux_compute_domain_pool_t>},
+        {"UMA `caller_exclusive_k` calls", test_exclusivity<make_linux_compute_domain_pool_t>},
+        {"UMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_linux_compute_domain_pool_t>},
+        {"UMA `for_n` static scheduling", test_for_n<make_linux_compute_domain_pool_t>},
+        {"UMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_linux_compute_domain_pool_t>},
+        {"UMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_linux_compute_domain_pool_t>},
+        {"UMA `terminate` avoided", test_mixed_restart<false, make_linux_compute_domain_pool_t>},
+        {"UMA `terminate` and re-spawn", test_mixed_restart<true, make_linux_compute_domain_pool_t>},
         // Non-Uniform Memory Access (NUMA) tests for threads addressing all NUMA nodes
         {"NUMA `try_spawn` normal", test_try_spawn_success<make_linux_distributed_pool_t>},
         {"NUMA `caller_exclusivity` query", test_caller_exclusivity_query<make_linux_distributed_pool_t>},

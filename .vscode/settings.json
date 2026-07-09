@@ -29,7 +29,7 @@
         "cntfrq",
         "cntvct",
         "codegen",
-        "colocations",
+        "compute_domains",
         "combinators",
         "comptime",
         "Condvar",

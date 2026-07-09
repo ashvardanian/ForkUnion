@@ -23,10 +23,10 @@
  *          return EXIT_FAILURE;
  *
  *      pool.for_n(argc, [=](auto prong) noexcept {
- *          auto [task_index, thread_index, colocation_index] = prong;
+ *          auto [task_index, thread_index, compute_domain_index] = prong;
  *          std::printf(
- *              "Printing argument # %zu (of %zu) from thread # %zu at colocation # %zu: %s\n",
- *              task_index, argc, thread_index, colocation_index, argv[task_index]);
+ *              "Printing argument # %zu (of %zu) from thread # %zu at compute_domain # %zu: %s\n",
+ *              task_index, argc, thread_index, compute_domain_index, argv[task_index]);
  *      });
  *      return EXIT_SUCCESS;
  *  }
@@ -43,7 +43,7 @@
  *  On Linux, when NUMA and PThreads are available, the library can also leverage @b NUMA-aware
  *  memory allocations and pin threads to specific physical cores to increase memory locality.
  *  It should reduce memory access latency by around 35% on average, compared to remote accesses.
- *  @sa `numa_topology_t`, `linux_colocated_pool_t`, `linux_distributed_pool_t`.
+ *  @sa `numa_topology_t`, `linux_compute_domain_pool_t`, `linux_distributed_pool_t`.
  *
  *  On heterogeneous chips, cores with a different @b "Quality-of-Service" (QoS) may be combined.
  *  A typical example is laptop/desktop chips, having 1 NUMA node, but 3 tiers of CPU cores:
@@ -289,6 +289,9 @@ enum capabilities_t : unsigned int {
     capability_arm64_wfet_k = 1 << 4,  // ? AArch64 with `WFET` support
     capability_risc5_pause_k = 1 << 5, // ? RISC-V
 
+    // Pool-topology capabilities:
+    capability_compute_domain_k = 1 << 6, // ? Pinned to a single {NUMA node + QoS level} compute_domain
+
     // RAM-specific capabilities:
     capability_numa_aware_k = 1 << 10,             // ? NUMA-aware memory allocations
     capability_huge_pages_k = 1 << 11,             // ? Reducing TLB pressure with huge pages
@@ -390,59 +393,59 @@ using prong_t = prong<>; // ? Default prong type with `std::size_t` indices
  *  @brief A "prong" - is a tip of a "fork" - pinning "task" to a "thread" and "memory" location.
  */
 template <typename index_type_ = std::size_t>
-struct colocated_prong {
+struct local_prong {
     using index_t = index_type_;
-    using task_index_t = index_t;       // ? A.k.a. "task index" in [0, prongs_count)
-    using thread_index_t = index_t;     // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using colocation_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "colocation ID"
+    using task_index_t = index_t;           // ? A.k.a. "task index" in [0, prongs_count)
+    using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
+    using compute_domain_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "compute_domain ID"
 
     task_index_t task {0};
     thread_index_t thread {0};
-    colocation_index_t colocation {0};
+    compute_domain_index_t compute_domain {0};
 
-    constexpr colocated_prong() noexcept = default;
-    constexpr colocated_prong(colocated_prong &&) noexcept = default;
-    constexpr colocated_prong(colocated_prong const &) noexcept = default;
-    constexpr colocated_prong &operator=(colocated_prong const &) noexcept = default;
-    constexpr colocated_prong &operator=(colocated_prong &&) noexcept = default;
+    constexpr local_prong() noexcept = default;
+    constexpr local_prong(local_prong &&) noexcept = default;
+    constexpr local_prong(local_prong const &) noexcept = default;
+    constexpr local_prong &operator=(local_prong const &) noexcept = default;
+    constexpr local_prong &operator=(local_prong &&) noexcept = default;
 
-    explicit colocated_prong(task_index_t task_index, thread_index_t thread_index,
-                             colocation_index_t colocation_index) noexcept
-        : task(task_index), thread(thread_index), colocation(colocation_index) {}
+    explicit local_prong(task_index_t task_index, thread_index_t thread_index,
+                         compute_domain_index_t compute_domain_index) noexcept
+        : task(task_index), thread(thread_index), compute_domain(compute_domain_index) {}
 
-    colocated_prong(prong<index_t> const &prong) noexcept : task(prong.task), thread(prong.thread), colocation(0) {}
+    local_prong(prong<index_t> const &prong) noexcept : task(prong.task), thread(prong.thread), compute_domain(0) {}
 
     inline operator task_index_t() const noexcept { return task; }
     inline operator prong<index_t>() const noexcept { return prong<index_t> {task, thread}; }
 };
 
-using colocated_prong_t = colocated_prong<>; // ? Default prong type with `std::size_t` indices
+using local_prong_t = local_prong<>; // ? Default prong type with `std::size_t` indices
 
 /**
  *  @brief Describes a thread ID pinned to a specific NUMA node or QoS level.
  */
 template <typename index_type_ = std::size_t>
-struct colocated_thread {
+struct local_thread {
     using index_t = index_type_;
-    using thread_index_t = index_t;     // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using colocation_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "colocation ID"
+    using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
+    using compute_domain_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "compute_domain ID"
 
     thread_index_t thread {0};
-    colocation_index_t colocation {0};
+    compute_domain_index_t compute_domain {0};
 
-    constexpr colocated_thread() noexcept = default;
-    constexpr colocated_thread(colocated_thread &&) noexcept = default;
-    constexpr colocated_thread(colocated_thread const &) noexcept = default;
-    constexpr colocated_thread &operator=(colocated_thread const &) noexcept = default;
-    constexpr colocated_thread &operator=(colocated_thread &&) noexcept = default;
+    constexpr local_thread() noexcept = default;
+    constexpr local_thread(local_thread &&) noexcept = default;
+    constexpr local_thread(local_thread const &) noexcept = default;
+    constexpr local_thread &operator=(local_thread const &) noexcept = default;
+    constexpr local_thread &operator=(local_thread &&) noexcept = default;
 
-    colocated_thread(thread_index_t thread_index, colocation_index_t colocation_index = 0) noexcept
-        : thread(thread_index), colocation(colocation_index) {}
+    local_thread(thread_index_t thread_index, compute_domain_index_t compute_domain_index = 0) noexcept
+        : thread(thread_index), compute_domain(compute_domain_index) {}
 
     inline operator thread_index_t() const noexcept { return thread; }
 };
 
-using colocated_thread_t = colocated_thread<>; // ? Default prong type with `std::size_t` indices
+using local_thread_t = local_thread<>; // ? Default prong type with `std::size_t` indices
 
 /**
  *  @brief Back-ports the C++ 23 `std::allocation_result`. Unlike STL, also contains the page size.
@@ -925,7 +928,7 @@ constexpr bool can_be_for_thread_callback() noexcept {
     using fork_t = fork_type_;
     using index_t = index_type_;
 #if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, colocated_thread<index_t>> ||
+    return std::is_nothrow_invocable_r_v<void, fork_t, local_thread<index_t>> ||
            std::is_nothrow_invocable_r_v<void, fork_t, index_t>;
 #else
     return true;
@@ -937,7 +940,7 @@ constexpr bool can_be_for_task_callback() noexcept {
     using fork_t = fork_type_;
     using index_t = index_type_;
 #if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, colocated_prong<index_t>> ||
+    return std::is_nothrow_invocable_r_v<void, fork_t, local_prong<index_t>> ||
            std::is_nothrow_invocable_r_v<void, fork_t, prong<index_t>> ||
            std::is_nothrow_invocable_r_v<void, fork_t, index_t>;
 #else
@@ -950,7 +953,7 @@ constexpr bool can_be_for_slice_callback() noexcept {
     using fork_t = fork_type_;
     using index_t = index_type_;
 #if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, colocated_prong<index_t>, index_t> ||
+    return std::is_nothrow_invocable_r_v<void, fork_t, local_prong<index_t>, index_t> ||
            std::is_nothrow_invocable_r_v<void, fork_t, prong<index_t>, index_t> ||
            std::is_nothrow_invocable_r_v<void, fork_t, index_t, index_t>;
 #else
@@ -1092,11 +1095,11 @@ class basic_pool {
     using generation_t = epoch_index_t; // ? A.k.a. token returned from `unsafe_for_threads`; always odd
     // ! With small index types (like the `fu8_t`/`fu16_t` debug configs) a worker stalled across
     // ! exactly 2^bits epochs would alias its `last_epoch` - astronomically unlikely at `size_t`.
-    using thread_index_t = index_t;     // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using colocation_index_t = index_t; // ? A.k.a. "NUMA node ID" in [0, numa_nodes_count)
+    using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
+    using compute_domain_index_t = index_t; // ? A.k.a. "NUMA node ID" in [0, numa_nodes_count)
     using indexed_split_t = indexed_split<index_t>;
     using prong_t = prong<index_t>;
-    using colocated_thread_t = colocated_thread<index_t>;
+    using local_thread_t = local_thread<index_t>;
 
     using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, thread_index_t); // ? Wraps lambda's `operator()`
@@ -1147,7 +1150,7 @@ class basic_pool {
 
     /**
      *  @brief Returns the first thread index in the thread-pool.
-     *  @retval 0 as this pool isn't intended for colocated/distributed topologies.
+     *  @retval 0 as this pool isn't intended for compute_domain/distributed topologies.
      */
     constexpr thread_index_t first_thread() const noexcept { return 0; }
 
@@ -1459,34 +1462,34 @@ class basic_pool {
 
 #pragma endregion Indexed Task Scheduling
 
-#pragma region Colocations Compatibility
+#pragma region ComputeDomains Compatibility
 
     /**
      *  @brief Number of individual sub-pool with the same NUMA-locality and QoS.
      *  @retval 1 constant for compatibility.
      */
-    constexpr index_t colocations_count() const noexcept { return 1; }
+    constexpr index_t compute_domains_count() const noexcept { return 1; }
 
     /**
-     *  @brief Returns the number of threads in one NUMA-specific local @b colocation.
-     *  @return Same value as `threads_count()`, as we only support one colocation.
+     *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
+     *  @return Same value as `threads_count()`, as we only support one compute_domain.
      */
-    thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t colocation_index) const noexcept {
-        assert(colocation_index == 0 && "Only one colocation is supported");
+    thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+        assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return threads_count();
     }
 
     /**
-     *  @brief Converts a @p `global_thread_index` to a local thread index within a @b colocation.
-     *  @return Same value as `global_thread_index`, as we only support one colocation.
+     *  @brief Converts a @p `global_thread_index` to a local thread index within a @b compute_domain.
+     *  @return Same value as `global_thread_index`, as we only support one compute_domain.
      */
     constexpr thread_index_t thread_local_index(thread_index_t global_thread_index,
-                                                FU_MAYBE_UNUSED_ index_t colocation_index) const noexcept {
-        assert(colocation_index == 0 && "Only one colocation is supported");
+                                                FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+        assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return global_thread_index;
     }
 
-#pragma endregion Colocations Compatibility
+#pragma endregion ComputeDomains Compatibility
 
   private:
     void _reset_fork() noexcept {
@@ -1502,7 +1505,7 @@ class basic_pool {
     template <typename fork_type_>
     static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, thread_index_t thread_index) noexcept {
         fork_type_ &lambda_object = *static_cast<fork_type_ *>(punned_lambda_pointer);
-        lambda_object(colocated_thread_t {thread_index, 0});
+        lambda_object(local_thread_t {thread_index, 0});
     }
 
     /**
@@ -1863,6 +1866,37 @@ FU_MAYBE_UNUSED_ static inline numa_socket_id_t get_socket_id_for_core(
 }
 
 /**
+ *  @brief Fetches the scheduler capacity of a CPU core, used to separate QoS classes.
+ *  @retval A capacity value where larger means more performant, or 0 if unavailable.
+ *
+ *  Reads `/sys/devices/system/cpu/cpuN/cpu_capacity`, which the kernel populates from the
+ *  Energy Model on ARM @b big.LITTLE/DynamIQ and from ITMT/Thread-Director on Intel @b hybrid
+ *  chips (performance cores report ~1024, efficiency cores less). A return of 0 means the core
+ *  is homogeneous or the kernel does not expose capacities - the whole node is then one class.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t get_capacity_for_core(FU_MAYBE_UNUSED_ numa_core_id_t core_id) noexcept {
+
+    std::size_t capacity = 0;
+
+#if defined(__linux__)
+    char capacity_path[256];
+    int path_result = std::snprintf(          //
+        capacity_path, sizeof(capacity_path), //
+        "/sys/devices/system/cpu/cpu%d/cpu_capacity", core_id);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(capacity_path)) return 0; // ? Path too long
+
+    FILE *capacity_file = ::fopen(capacity_path, "r");
+    if (!capacity_file) return 0; // ? Homogeneous cores or unsupported kernel
+
+    unsigned long long parsed = 0;
+    if (::fscanf(capacity_file, "%llu", &parsed) == 1) capacity = static_cast<std::size_t>(parsed);
+    ::fclose(capacity_file);
+#endif
+
+    return capacity;
+}
+
+/**
  *  @brief Fetches the RAM page size in bytes.
  *  @retval The size of a memory page in bytes, typically 4096 on most systems.
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
@@ -2159,6 +2193,25 @@ struct numa_node {
 
 using numa_node_t = numa_node<>;
 
+/**
+ *  @brief One bindable cluster of cores sharing a QoS class and locality - the compute axis.
+ *  @sa `numa_node` is the memory axis; a `numa_topology` exposes both plus their affinity.
+ *
+ *  A compute domain is a contiguous run of same-capacity cores within a single NUMA node. It is
+ *  what a pool binds to and the index a worker callback receives. Several compute domains may map
+ *  to one memory domain (performance and efficiency cores sharing a memory controller), which is
+ *  why compute and memory are separate axes rather than a single "colocation" cell.
+ */
+struct compute_domain {
+    numa_node_id_t node_id {-1};                   // ? The NUMA node these cores live on
+    std::size_t memory_domain_index {0};           // ? Index of the local memory domain (this node)
+    std::size_t compute_level {0};                 // ? QoS ordinal, sorted least-to-most performant
+    numa_core_id_t const *first_core_id {nullptr}; // ? Pointer to the first core ID in this domain
+    std::size_t core_count {0};                    // ? Number of cores in this domain
+};
+
+using compute_domain_t = compute_domain;
+
 template <typename value_type_, typename comparator_type_ = std::less<value_type_>>
 void bubble_sort(value_type_ *array, std::size_t size, comparator_type_ comp = {}) noexcept {
     assert(array != nullptr && "Array must not be null");
@@ -2180,24 +2233,32 @@ struct numa_topology {
     using allocator_t = allocator_type_;
     using cores_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<int>;
     using nodes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<numa_node_t>;
+    using domains_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<compute_domain_t>;
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
 
   private:
     allocator_t allocator_ {};
-    numa_node_t *nodes_ {nullptr};
-    numa_core_id_t *node_core_ids_ {nullptr}; // ? Unsigned integers in [0, threads_count), grouped by NUMA node
-    std::size_t nodes_count_ {0};             // ? Number of NUMA nodes
-    std::size_t cores_count_ {0};             // ? Total number of cores in all nodes
+    numa_node_t *nodes_ {nullptr};                // ? Memory domains (one per NUMA node)
+    numa_core_id_t *node_core_ids_ {nullptr};     // ? Core IDs in [0, threads_count), grouped by node then QoS
+    compute_domain_t *compute_domains_ {nullptr}; // ? Compute domains (same-QoS core runs within a node)
+    std::size_t nodes_count_ {0};                 // ? Number of memory domains / NUMA nodes
+    std::size_t cores_count_ {0};                 // ? Total number of cores in all nodes
+    std::size_t compute_domains_count_ {0};       // ? Number of compute domains
+    std::size_t compute_levels_count_ {1};        // ? Number of distinct QoS classes (>= 1)
 
   public:
     constexpr numa_topology() noexcept = default;
     numa_topology(numa_topology &&o) noexcept
         : allocator_(std::move(o.allocator_)), nodes_(o.nodes_), node_core_ids_(o.node_core_ids_),
-          nodes_count_(o.nodes_count_), cores_count_(o.cores_count_) {
+          compute_domains_(o.compute_domains_), nodes_count_(o.nodes_count_), cores_count_(o.cores_count_),
+          compute_domains_count_(o.compute_domains_count_), compute_levels_count_(o.compute_levels_count_) {
         o.nodes_ = nullptr;
         o.node_core_ids_ = nullptr;
+        o.compute_domains_ = nullptr;
         o.nodes_count_ = 0;
         o.cores_count_ = 0;
+        o.compute_domains_count_ = 0;
+        o.compute_levels_count_ = 1;
     }
 
     numa_topology &operator=(numa_topology &&other) noexcept {
@@ -2206,8 +2267,11 @@ struct numa_topology {
             allocator_ = std::move(other.allocator_);
             nodes_ = std::exchange(other.nodes_, nullptr);
             node_core_ids_ = std::exchange(other.node_core_ids_, nullptr);
+            compute_domains_ = std::exchange(other.compute_domains_, nullptr);
             nodes_count_ = std::exchange(other.nodes_count_, 0);
             cores_count_ = std::exchange(other.cores_count_, 0);
+            compute_domains_count_ = std::exchange(other.compute_domains_count_, 0);
+            compute_levels_count_ = std::exchange(other.compute_levels_count_, 1);
         }
         return *this;
     }
@@ -2220,20 +2284,61 @@ struct numa_topology {
     void reset() noexcept {
         cores_allocator_t cores_alloc {allocator_};
         nodes_allocator_t nodes_alloc {allocator_};
+        domains_allocator_t domains_alloc {allocator_};
 
         if (node_core_ids_) cores_alloc.deallocate(node_core_ids_, cores_count_);
         if (nodes_) nodes_alloc.deallocate(nodes_, nodes_count_);
+        if (compute_domains_) domains_alloc.deallocate(compute_domains_, cores_count_);
 
         nodes_ = nullptr;
         node_core_ids_ = nullptr;
-        nodes_count_ = cores_count_ = 0;
+        compute_domains_ = nullptr;
+        nodes_count_ = cores_count_ = compute_domains_count_ = 0;
+        compute_levels_count_ = 1;
     }
 
+    /** @brief Number of memory domains (one per NUMA node). @sa `compute_domains_count`. */
     std::size_t nodes_count() const noexcept { return nodes_count_; }
+    std::size_t memory_domains_count() const noexcept { return nodes_count_; }
     std::size_t threads_count() const noexcept { return cores_count_; }
+
+    /** @brief The memory domain at @p node_index, in [0, `memory_domains_count()`). */
     numa_node_t const &node(std::size_t const node_index) const noexcept {
         assert(node_index < nodes_count_ && "Node ID is out of bounds");
         return nodes_[node_index];
+    }
+    numa_node_t const &memory_domain(std::size_t const memory_domain_index) const noexcept {
+        return node(memory_domain_index);
+    }
+
+    /** @brief Number of compute domains (one per same-QoS core run within a node). */
+    std::size_t compute_domains_count() const noexcept { return compute_domains_count_; }
+    /** @brief Number of distinct QoS classes across all compute domains (>= 1). */
+    std::size_t compute_levels_count() const noexcept { return compute_levels_count_; }
+
+    /** @brief The compute domain at @p compute_domain_index, in [0, `compute_domains_count()`). */
+    compute_domain_t const &compute_domain_at(std::size_t const compute_domain_index) const noexcept {
+        assert(compute_domain_index < compute_domains_count_ && "Compute domain ID is out of bounds");
+        return compute_domains_[compute_domain_index];
+    }
+
+    /** @brief The memory domain nearest a compute domain (its NUMA node); 0 if out of range. */
+    std::size_t local_memory_of(std::size_t const compute_domain_index) const noexcept {
+        if (compute_domain_index >= compute_domains_count_) return 0;
+        return compute_domains_[compute_domain_index].memory_domain_index;
+    }
+
+    /** @brief Relative access distance from a compute domain to a memory domain (10 = local). */
+    std::size_t distance(std::size_t const compute_domain_index, std::size_t const memory_domain_index) const noexcept {
+        if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= nodes_count_) return 0;
+#if FU_ENABLE_NUMA
+        numa_node_id_t const from = compute_domains_[compute_domain_index].node_id;
+        numa_node_id_t const to = nodes_[memory_domain_index].node_id;
+        int const numa_dist = ::numa_distance(from, to);
+        return numa_dist > 0 ? static_cast<std::size_t>(numa_dist) : (from == to ? 10u : 20u);
+#else
+        return compute_domains_[compute_domain_index].memory_domain_index == memory_domain_index ? 10u : 20u;
+#endif
     }
 
     /**
@@ -2246,11 +2351,13 @@ struct numa_topology {
         struct bitmask *numa_mask = nullptr;
         numa_node_t *nodes_ptr = nullptr;
         numa_core_id_t *core_ids_ptr = nullptr;
+        compute_domain_t *domains_ptr = nullptr;
         numa_node_id_t max_numa_node_id = -1;
 
         // Allocators must be visible to the cleanup path
         nodes_allocator_t nodes_alloc {allocator_};
         cores_allocator_t cores_alloc {allocator_};
+        domains_allocator_t domains_alloc {allocator_};
 
         // These counters are reused in the failure handler
         std::size_t fetched_nodes = 0, fetched_cores = 0;
@@ -2275,10 +2382,11 @@ struct numa_topology {
         }
         if (fetched_nodes == 0) goto failed_harvest; // ! Zero nodes is not a valid state
 
-        // Second pass - allocate
+        // Second pass - allocate. At most one compute domain per core (fully heterogeneous node).
         nodes_ptr = nodes_alloc.allocate(fetched_nodes);
         core_ids_ptr = cores_alloc.allocate(fetched_cores);
-        if (!nodes_ptr || !core_ids_ptr) goto failed_harvest; // ! Allocation failed
+        domains_ptr = domains_alloc.allocate(fetched_cores);
+        if (!nodes_ptr || !core_ids_ptr || !domains_ptr) goto failed_harvest; // ! Allocation failed
 
         // Populate
         for (numa_node_id_t node_id = 0, core_index = 0, node_index = 0; node_id <= max_numa_node_id; ++node_id) {
@@ -2319,11 +2427,68 @@ struct numa_topology {
             return a.first_core_id[0] < b.first_core_id[0];                       // ? Sort by first core ID
         });
 
+        // Split each memory domain's cores into compute domains by QoS class. We sort each node's
+        // cores by scheduler capacity, then cut the sorted run at every capacity change. Cores
+        // within a `numa_node` slice are mutable here - `first_core_id` still bounds the slice.
+        {
+            std::size_t domains_written = 0;
+            for (std::size_t node_index = 0; node_index < nodes_count_; ++node_index) {
+                numa_node_t &node = nodes_[node_index];
+                numa_core_id_t *node_cores = const_cast<numa_core_id_t *>(node.first_core_id);
+
+                // Ascending capacity groups efficiency cores before performance cores.
+                bubble_sort(node_cores, node.core_count, [](numa_core_id_t const &a, numa_core_id_t const &b) noexcept {
+                    return get_capacity_for_core(a) < get_capacity_for_core(b);
+                });
+
+                std::size_t run_begin = 0;
+                for (std::size_t core = 1; core <= node.core_count; ++core) {
+                    bool const at_end = core == node.core_count;
+                    bool const capacity_changed = !at_end && get_capacity_for_core(node_cores[core]) !=
+                                                                 get_capacity_for_core(node_cores[run_begin]);
+                    if (!at_end && !capacity_changed) continue;
+
+                    compute_domain_t &domain = domains_ptr[domains_written++];
+                    domain.node_id = node.node_id;
+                    domain.memory_domain_index = node_index;
+                    domain.compute_level = get_capacity_for_core(node_cores[run_begin]); // ? Raw capacity, ranked below
+                    domain.first_core_id = node_cores + run_begin;
+                    domain.core_count = core - run_begin;
+                    run_begin = core;
+                }
+            }
+
+            // Re-rank the raw capacities into dense QoS ordinals, sorted least-to-most performant.
+            std::size_t distinct_capacities = 0;
+            for (std::size_t i = 0; i < domains_written; ++i) {
+                bool seen = false;
+                for (std::size_t j = 0; j < i; ++j)
+                    if (domains_ptr[j].compute_level == domains_ptr[i].compute_level) seen = true;
+                if (!seen) distinct_capacities += 1;
+            }
+            for (std::size_t i = 0; i < domains_written; ++i) {
+                std::size_t rank = 0;
+                for (std::size_t j = 0; j < domains_written; ++j)
+                    if (domains_ptr[j].compute_level < domains_ptr[i].compute_level) {
+                        bool counted = false;
+                        for (std::size_t k = 0; k < j; ++k)
+                            if (domains_ptr[k].compute_level == domains_ptr[j].compute_level) counted = true;
+                        if (!counted) rank += 1;
+                    }
+                domains_ptr[i].compute_level = rank;
+            }
+
+            compute_domains_ = domains_ptr;
+            compute_domains_count_ = domains_written;
+            compute_levels_count_ = distinct_capacities ? distinct_capacities : 1;
+        }
+
         return true;
 
     failed_harvest:
         if (nodes_ptr) nodes_alloc.deallocate(nodes_ptr, fetched_nodes);
         if (core_ids_ptr) cores_alloc.deallocate(core_ids_ptr, fetched_cores);
+        if (domains_ptr) domains_alloc.deallocate(domains_ptr, fetched_cores);
         if (numa_mask) ::numa_free_cpumask(numa_mask);
 #endif // FU_ENABLE_NUMA
         return false;
@@ -2345,36 +2510,48 @@ struct numa_topology {
         // Prepare scratch
         nodes_allocator_t nodes_alloc {allocator_};
         cores_allocator_t cores_alloc {allocator_};
+        domains_allocator_t domains_alloc {allocator_};
 
         numa_node_t *scratch_nodes = nullptr;
         numa_core_id_t *scratch_core_ids = nullptr;
+        compute_domain_t *scratch_domains = nullptr;
         if (other.nodes_count_) {
             scratch_nodes = nodes_alloc.allocate(other.nodes_count_);
             if (!scratch_nodes) return false; // ! OOM
         }
         if (other.cores_count_) {
             scratch_core_ids = cores_alloc.allocate(other.cores_count_);
-            if (!scratch_core_ids) {
+            scratch_domains = domains_alloc.allocate(other.cores_count_);
+            if (!scratch_core_ids || !scratch_domains) {
                 if (scratch_nodes) nodes_alloc.deallocate(scratch_nodes, other.nodes_count_);
+                if (scratch_core_ids) cores_alloc.deallocate(scratch_core_ids, other.cores_count_);
+                if (scratch_domains) domains_alloc.deallocate(scratch_domains, other.cores_count_);
                 return false; // ! OOM
             }
         }
 
-        // Deep copy
+        // Deep copy, re-basing every `first_core_id` into our own core-id block
         if (other.cores_count_ > 0)
             std::memcpy(scratch_core_ids, other.node_core_ids_, other.cores_count_ * sizeof(numa_core_id_t));
         for (std::size_t i = 0; i < other.nodes_count_; ++i) {
             scratch_nodes[i] = other.nodes_[i];
-            // Re-base `first_core_id` so it points into our own core-id block
             std::ptrdiff_t const offset = other.nodes_[i].first_core_id - other.node_core_ids_;
             scratch_nodes[i].first_core_id = scratch_core_ids + offset;
+        }
+        for (std::size_t i = 0; i < other.compute_domains_count_; ++i) {
+            scratch_domains[i] = other.compute_domains_[i];
+            std::ptrdiff_t const offset = other.compute_domains_[i].first_core_id - other.node_core_ids_;
+            scratch_domains[i].first_core_id = scratch_core_ids + offset;
         }
 
         reset(); // ? Free old buffers
         nodes_ = scratch_nodes;
         node_core_ids_ = scratch_core_ids;
+        compute_domains_ = scratch_domains;
         nodes_count_ = other.nodes_count_;
         cores_count_ = other.cores_count_;
+        compute_domains_count_ = other.compute_domains_count_;
+        compute_levels_count_ = other.compute_levels_count_;
         return true;
     }
 };
@@ -2598,7 +2775,7 @@ using linux_numa_allocator_t = linux_numa_allocator<>;
 #if FU_ENABLE_NUMA
 
 /**
- *  @brief Used inside `linux_colocated_pool` to describe a pinned thread.
+ *  @brief Used inside `linux_compute_domain_pool` to describe a pinned thread.
  *
  *  On Linux, we can advise the scheduler on the importance of certain execution threads.
  *  For that we need to know the thread IDs - `pid_t`, which is not the same as `pthread_t`,
@@ -2617,7 +2794,7 @@ struct alignas(default_alignment_k) numa_pthread_t {
     qos_level_t qos_level {-1}; // TODO: Populate from VFS, if available
 };
 
-#pragma region - Linux Colocated Pool
+#pragma region - Linux ComputeDomain Pool
 
 /**
  *  @brief A Linux-only thread-pool pinned to one NUMA node and same QoS level physical cores.
@@ -2643,7 +2820,7 @@ struct alignas(default_alignment_k) numa_pthread_t {
  *  ordering rules - is identical to `basic_pool`; @sa @ref pool_concurrency_model.
  */
 template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ = default_alignment_k>
-struct linux_colocated_pool {
+struct linux_compute_domain_pool {
 
   public:
     using allocator_t = linux_numa_allocator_t;
@@ -2656,11 +2833,11 @@ struct linux_colocated_pool {
     using epoch_index_t = index_t;      // ? A.k.a. number of previous API calls in [0, UINT_MAX)
     using generation_t = epoch_index_t; // ? A.k.a. token returned from `unsafe_for_threads`
     using thread_index_t = index_t;     // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using colocated_thread_t = colocated_thread<thread_index_t>;
-    using prong_t = colocated_prong<index_t>;
+    using local_thread_t = local_thread<thread_index_t>;
+    using prong_t = local_prong<index_t>;
 
-    using punned_fork_context_t = void *;                                     // ? Pointer to the on-stack lambda
-    using trampoline_t = void (*)(punned_fork_context_t, colocated_thread_t); // ? Wraps lambda's `operator()`
+    using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
+    using trampoline_t = void (*)(punned_fork_context_t, local_thread_t); // ? Wraps lambda's `operator()`
 
     using micro_yield_traits_t = yield_traits<micro_yield_t, thread_index_t>;
     static_assert(micro_yield_traits_t::valid, "Yield must be invocable w/out args or with a thread index");
@@ -2686,7 +2863,7 @@ struct linux_colocated_pool {
     using char16_name_t = char[16];    // ? Fixed-size thread name buffer, for POSIX thread naming
     char16_name_t name_ {};            // ? Thread name buffer, for POSIX thread naming
     numa_node_id_t numa_node_id_ {-1}; // ? Unique NUMA node ID, in [0, numa_max_node())
-    index_t colocation_index_ {0};     // ? Unique {NUMA node + QoS level} colocation ID, defined externally
+    index_t compute_domain_index_ {0}; // ? Unique {NUMA node + QoS level} compute_domain ID, defined externally
     numa_pin_granularity_t pin_granularity_ {numa_pin_to_core_k};
 
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
@@ -2700,26 +2877,26 @@ struct linux_colocated_pool {
     alignas(alignment_k) std::atomic<index_t> dynamic_progress_ {0}; // ? Only used in `for_n_dynamic`
 
   public:
-    linux_colocated_pool(linux_colocated_pool &&) = delete;
-    linux_colocated_pool(linux_colocated_pool const &) = delete;
-    linux_colocated_pool &operator=(linux_colocated_pool &&) = delete;
-    linux_colocated_pool &operator=(linux_colocated_pool const &) = delete;
+    linux_compute_domain_pool(linux_compute_domain_pool &&) = delete;
+    linux_compute_domain_pool(linux_compute_domain_pool const &) = delete;
+    linux_compute_domain_pool &operator=(linux_compute_domain_pool &&) = delete;
+    linux_compute_domain_pool &operator=(linux_compute_domain_pool const &) = delete;
 
-    explicit linux_colocated_pool(char const *name = "forkunion") noexcept {
+    explicit linux_compute_domain_pool(char const *name = "forkunion") noexcept {
         // Accept NULL or empty names by falling back to a sensible default
         char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::strncpy(name_, effective_name, sizeof(name_) - 1);
         name_[sizeof(name_) - 1] = '\0';
     }
 
-    ~linux_colocated_pool() noexcept { terminate(); }
+    ~linux_compute_domain_pool() noexcept { terminate(); }
 
     /**
      *  @brief Estimates the amount of memory managed by this pool handle and internal structures.
      *  @note This API is @b not synchronized.
      */
     std::size_t memory_usage() const noexcept {
-        return sizeof(linux_colocated_pool) + threads_count() * sizeof(numa_pthread_t);
+        return sizeof(linux_compute_domain_pool) + threads_count() * sizeof(numa_pthread_t);
     }
 
     /** @brief Checks if the thread-pool's core synchronization points are lock-free. */
@@ -2733,11 +2910,11 @@ struct linux_colocated_pool {
     numa_node_id_t numa_node_id() const noexcept { return numa_node_id_; }
 
     /**
-     *  @brief Returns the colocation index of this thread-pool.
-     *  @retval 0 if the thread-pool is not initialized or the colocation index is unknown.
+     *  @brief Returns the compute_domain index of this thread-pool.
+     *  @retval 0 if the thread-pool is not initialized or the compute_domain index is unknown.
      *  @note This API is @b not synchronized.
      */
-    index_t colocation_index() const noexcept { return colocation_index_; }
+    index_t compute_domain_index() const noexcept { return compute_domain_index_; }
 
     /**
      *  @brief Returns the first thread index in the thread-pool.
@@ -2773,8 +2950,9 @@ struct linux_colocated_pool {
      *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
      *  @sa Other overloads of `try_spawn` that allow to specify the number of threads.
      */
-    bool try_spawn(numa_node_t const &node, caller_exclusivity_t const exclusivity = caller_inclusive_k) noexcept {
-        return try_spawn(node, node.core_count, exclusivity);
+    bool try_spawn(compute_domain_t const &domain,
+                   caller_exclusivity_t const exclusivity = caller_inclusive_k) noexcept {
+        return try_spawn(domain, domain.core_count, exclusivity);
     }
 
     /**
@@ -2784,14 +2962,14 @@ struct linux_colocated_pool {
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
      *  @param[in] pin_granularity How to pin the threads to the NUMA node?
      *  @param[in] first_thread The index of the first thread to start from, defaults to 0.
-     *  @param[in] colocation_index A unique index for the {NUMA node + QoS level} colocation.
+     *  @param[in] compute_domain_index A unique index for the {NUMA node + QoS level} compute_domain.
      *  @retval false if the number of threads is zero or if spawning has failed.
      *  @retval true if the thread-pool was created successfully, started, and is ready to use.
      *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
      *
      *  @section Over- and Under-subscribing Cores and Pinning
      *
-     *  We may accept @p threads different from the @p node.core_count, which allows us to:
+     *  We may accept @p threads different from the @p domain.core_count, which allows us to:
      *  - over-subscribe the cores, i.e. use more threads than cores available on the NUMA node.
      *  - under-subscribe the cores, i.e. use fewer threads than cores available on the NUMA node.
      *
@@ -2799,16 +2977,16 @@ struct linux_colocated_pool {
      *  You'd be better off using exactly the number of cores available on the NUMA node and pinning
      *  them to individual cores with @b `numa_pin_to_core_k` granularity.
      */
-    bool try_spawn(numa_node_t const &node, thread_index_t const threads,
+    bool try_spawn(compute_domain_t const &domain, thread_index_t const threads,
                    caller_exclusivity_t const exclusivity = caller_inclusive_k,
                    numa_pin_granularity_t const pin_granularity = numa_pin_to_core_k,
-                   thread_index_t const first_thread = 0, index_t const colocation_index = 0) noexcept {
+                   thread_index_t const first_thread = 0, index_t const compute_domain_index = 0) noexcept {
 
         if (threads == 0) return false;          // ! Can't have zero threads working on something
         if (pthreads_.size() != 0) return false; // ! Already initialized
 
         // Allocate the thread pool of `numa_pthread_t` objects
-        allocator_ = linux_numa_allocator_t {node.node_id};
+        allocator_ = linux_numa_allocator_t {domain.node_id};
         numa_pthread_allocator_t pthread_allocator {allocator_};
         unique_padded_buffer<numa_pthread_t, numa_pthread_allocator_t> pthreads {pthread_allocator};
         if (!pthreads.try_resize(threads)) return false; // ! Allocation failed
@@ -2822,9 +3000,9 @@ struct linux_colocated_pool {
         // state variables that will be used in the `_posix_worker_loop` function.
         pthreads_ = std::move(pthreads);
         first_thread_ = first_thread;
-        colocation_index_ = colocation_index;
+        compute_domain_index_ = compute_domain_index;
         exclusivity_ = exclusivity;
-        numa_node_id_ = node.node_id;
+        numa_node_id_ = domain.node_id;
         pin_granularity_ = pin_granularity;
         auto reset_on_failure = [&]() noexcept {
             pthreads_ = {};
@@ -2872,9 +3050,9 @@ struct linux_colocated_pool {
         // Name all of the threads
         char16_name_t name;
         for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
-            fill_thread_name(                                    //
-                name, name_,                                     //
-                static_cast<std::size_t>(node.first_core_id[i]), //
+            fill_thread_name(                                      //
+                name, name_,                                       //
+                static_cast<std::size_t>(domain.first_core_id[i]), //
                 static_cast<std::size_t>(max_possible_cores));
             pthread_t naming_pthread_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
             FU_MAYBE_UNUSED_ int naming_result = ::pthread_setname_np(naming_pthread_handle, name);
@@ -2887,7 +3065,7 @@ struct linux_colocated_pool {
             // Configure a mask for each thread, pinning it to a specific core
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
                 // Assign to a core in a round-robin fashion
-                numa_core_id_t cpu = node.first_core_id[i % node.core_count];
+                numa_core_id_t cpu = domain.first_core_id[i % domain.core_count];
                 assert(cpu >= 0 && "Invalid CPU core ID");
                 CPU_ZERO_S(cpu_set_size, cpu_set_ptr);
                 CPU_SET_S(cpu, cpu_set_size, cpu_set_ptr);
@@ -2903,12 +3081,12 @@ struct linux_colocated_pool {
         else {
             // Configure one mask that will be shared by all threads
             CPU_ZERO_S(cpu_set_size, cpu_set_ptr);
-            for (std::size_t i = 0; i < node.core_count; ++i) {
-                numa_core_id_t cpu = node.first_core_id[i];
+            for (std::size_t i = 0; i < domain.core_count; ++i) {
+                numa_core_id_t cpu = domain.first_core_id[i];
                 assert(cpu >= 0 && "Invalid CPU core ID");
                 CPU_SET_S(cpu, cpu_set_size, cpu_set_ptr);
             }
-            assert(static_cast<std::size_t>(CPU_COUNT_S(cpu_set_size, cpu_set_ptr)) == node.core_count &&
+            assert(static_cast<std::size_t>(CPU_COUNT_S(cpu_set_size, cpu_set_ptr)) == domain.core_count &&
                    "The CPU set must match the number of cores in the NUMA node");
 
             // Assign the same mask to all threads
@@ -2935,7 +3113,7 @@ struct linux_colocated_pool {
      */
     template <typename fork_type_>
     FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
-    broadcast_join<linux_colocated_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
+    broadcast_join<linux_compute_domain_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
         return {*this, std::forward<fork_type_>(fork)};
     }
 
@@ -3015,7 +3193,7 @@ struct linux_colocated_pool {
         // and count it down exactly like a worker thread would.
         bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
         if (use_caller_thread) {
-            fork_trampoline_(fork_state_, colocated_thread_t {static_cast<thread_index_t>(0), colocation_index_});
+            fork_trampoline_(fork_state_, local_thread_t {static_cast<thread_index_t>(0), compute_domain_index_});
             thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
             assert(before_decrement > 0 && "The contributor count must include the caller");
 
@@ -3125,7 +3303,7 @@ struct linux_colocated_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
-    broadcast_join<linux_colocated_pool, invoke_for_slices<fork_type_, index_t>> //
+    broadcast_join<linux_compute_domain_pool, invoke_for_slices<fork_type_, index_t>> //
         for_slices(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
@@ -3143,7 +3321,7 @@ struct linux_colocated_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
-    broadcast_join<linux_colocated_pool, invoke_for_n<fork_type_, index_t>> //
+    broadcast_join<linux_compute_domain_pool, invoke_for_n<fork_type_, index_t>> //
         for_n(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
@@ -3157,7 +3335,7 @@ struct linux_colocated_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
-    broadcast_join<linux_colocated_pool, invoke_for_n_dynamic<fork_type_, index_t>> //
+    broadcast_join<linux_compute_domain_pool, invoke_for_n_dynamic<fork_type_, index_t>> //
         for_n_dynamic(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {n, threads_count(), dynamic_progress_, std::forward<fork_type_>(fork)}};
@@ -3165,30 +3343,32 @@ struct linux_colocated_pool {
 
 #pragma endregion Indexed Task Scheduling
 
-#pragma region Colocations Compatibility
+#pragma region ComputeDomains Compatibility
 
     /**
      *  @brief Number of individual sub-pool with the same NUMA-locality and QoS.
      *  @retval 1 constant for compatibility.
      */
-    constexpr index_t colocations_count() const noexcept { return 1; }
+    constexpr index_t compute_domains_count() const noexcept { return 1; }
 
     /**
-     *  @brief Returns the number of threads in one NUMA-specific local @b colocation.
-     *  @retval Same value as `threads_count()`, as we only support one colocation.
+     *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
+     *  @retval Same value as `threads_count()`, as we only support one compute_domain.
      */
-    thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t colocation_index) const noexcept { return threads_count(); }
+    thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+        return threads_count();
+    }
 
     /**
-     *  @brief Converts a @p `global_thread_index` to a local thread index within a @b colocation.
-     *  @retval Same value as @p `global_thread_index`, as we only support one colocation.
+     *  @brief Converts a @p `global_thread_index` to a local thread index within a @b compute_domain.
+     *  @retval Same value as @p `global_thread_index`, as we only support one compute_domain.
      */
     constexpr thread_index_t thread_local_index(thread_index_t global_thread_index,
-                                                FU_MAYBE_UNUSED_ index_t colocation_index = 0) const noexcept {
+                                                FU_MAYBE_UNUSED_ index_t compute_domain_index = 0) const noexcept {
         return global_thread_index;
     }
 
-#pragma endregion Colocations Compatibility
+#pragma endregion ComputeDomains Compatibility
 
   private:
     void _reset_fork() noexcept {
@@ -3217,14 +3397,13 @@ struct linux_colocated_pool {
      *  @param[in] prong The index of the thread & task index packed together.
      */
     template <typename fork_type_>
-    static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer,
-                                colocated_thread_t colocated_thread) noexcept {
+    static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, local_thread_t local_thread) noexcept {
         fork_type_ &lambda_object = *static_cast<fork_type_ *>(punned_lambda_pointer);
-        lambda_object(colocated_thread);
+        lambda_object(local_thread);
     }
 
     static void *_posix_worker_loop(void *arg) noexcept {
-        linux_colocated_pool *pool = static_cast<linux_colocated_pool *>(arg);
+        linux_compute_domain_pool *pool = static_cast<linux_compute_domain_pool *>(arg);
 
         // Following section untile the main `while` loop may introduce race conditions,
         // so spin-loop for a bit until the pool is ready.
@@ -3279,7 +3458,7 @@ struct linux_colocated_pool {
             // Odd epochs are dispatches, even epochs are completions — skip even
             if (new_epoch & 1) {
                 pool->fork_trampoline_(pool->fork_state_,
-                                       colocated_thread_t {global_thread_index, pool->colocation_index_});
+                                       local_thread_t {global_thread_index, pool->compute_domain_index_});
 
                 // ! The decrement must come after the task is executed. The `acq_rel`
                 // ! ordering chains every contributor's writes into the last one, so the
@@ -3327,13 +3506,13 @@ struct linux_colocated_pool {
     }
 };
 
-#pragma endregion - Linux Colocated Pool
+#pragma endregion - Linux ComputeDomain Pool
 
 #pragma region - Linux Pool
 
 /**
  *  @brief Wraps the metadata needed for `for_slices` APIs for `broadcast_join` compatibility.
- *  @note Similar to `invoke_for_slices`, but dynamically determines the threads' colocation.
+ *  @note Similar to `invoke_for_slices`, but dynamically determines the threads' compute_domain.
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_distributed_for_slices {
@@ -3349,14 +3528,14 @@ class invoke_distributed_for_slices {
     void operator()(index_type_ const thread) const noexcept {
         indexed_range<index_type_> const range = split_[thread];
         if (range.count == 0) return; // ? No work for this thread
-        index_type_ const colocation = pool_.thread_colocation(thread);
-        fork_(colocated_prong<index_type_> {range.first, thread, colocation}, range.count);
+        index_type_ const compute_domain = pool_.thread_compute_domain(thread);
+        fork_(local_prong<index_type_> {range.first, thread, compute_domain}, range.count);
     }
 };
 
 /**
  *  @brief Wraps the metadata needed for `for_n` APIs for `broadcast_join` compatibility.
- *  @note Similar to `invoke_for_n`, but dynamically determines the threads' colocation.
+ *  @note Similar to `invoke_for_n`, but dynamically determines the threads' compute_domain.
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_distributed_for_n {
@@ -3370,25 +3549,25 @@ class invoke_distributed_for_n {
 
     void operator()(index_type_ const thread) const noexcept {
         indexed_range<index_type_> const range = split_[thread];
-        index_type_ const colocation = pool_.thread_colocation(thread);
+        index_type_ const compute_domain = pool_.thread_compute_domain(thread);
         for (index_type_ i = 0; i < range.count; ++i)
-            fork_(colocated_prong<index_type_> {static_cast<index_type_>(range.first + i), thread, colocation});
+            fork_(local_prong<index_type_> {static_cast<index_type_>(range.first + i), thread, compute_domain});
     }
 };
 
 /**
  *  @brief Wraps the metadata needed for `for_n_dynamic` APIs for `broadcast_join` compatibility.
- *  @note Similar to `invoke_for_n_dynamic`, but dynamically determines the threads' colocation.
+ *  @note Similar to `invoke_for_n_dynamic`, but dynamically determines the threads' compute_domain.
  *
  *  @section Scheduling Logic
  *
  *  Assuming the latency of accessing an atomic variable on a remote NUMA node is high, this "invoker"
  *  performs work-stealing in a different way. Let's say we receive N tasks and we have T threads
- *  across C colocations. Each colocation takes (N/C) tasks and splits them between (T/C) threads.
+ *  across C compute_domains. Each compute_domain takes (N/C) tasks and splits them between (T/C) threads.
  *  Once threads in one pool saturate their local (N/C) tasks, they start looping through other
- *  colocations and stealing tasks from them, until all tasks are completed.
+ *  compute_domains and stealing tasks from them, until all tasks are completed.
  *
- *  The hardest decision there is to how to chose the next "non-native" colocation to steal from.
+ *  The hardest decision there is to how to chose the next "non-native" compute_domain to steal from.
  *  Linear probing will produce unbalanced contention. A tree-like probing will produce a more balanced
  *  outcome.
  */
@@ -3403,43 +3582,43 @@ class invoke_distributed_for_n_dynamic {
     invoke_distributed_for_n_dynamic(pool_type_ &pool, index_type_ n, fork_type_ &&fork) noexcept
         : pool_(pool), n_(n), fork_(std::forward<fork_type_>(fork)) {
 
-        // Reset the local progress to zero in each colocation
-        index_type_ const colocations_count = pool_.colocations_count();
-        for (index_type_ i = 0; i < colocations_count; ++i)
+        // Reset the local progress to zero in each compute_domain
+        index_type_ const compute_domains_count = pool_.compute_domains_count();
+        for (index_type_ i = 0; i < compute_domains_count; ++i)
             pool_.unsafe_dynamic_progress_ref(i).store(0, std::memory_order_release);
     }
 
     void operator()(index_type_ const thread) noexcept {
-        index_type_ const colocations_count = pool_.colocations_count();
-        assert(colocations_count > 0 && "There must be at least one colocation");
+        index_type_ const compute_domains_count = pool_.compute_domains_count();
+        assert(compute_domains_count > 0 && "There must be at least one compute_domain");
 
-        // In each colocations part, take one static prong per thread, if present.
-        indexed_split<index_type_> split_between_colocations(n_, colocations_count);
-        index_type_ const native_colocation = pool_.thread_colocation(thread);
+        // In each compute_domains part, take one static prong per thread, if present.
+        indexed_split<index_type_> split_between_compute_domains(n_, compute_domains_count);
+        index_type_ const native_compute_domain = pool_.thread_compute_domain(thread);
         {
-            index_type_ const threads_local = pool_.threads_count(native_colocation);
-            indexed_range<index_type_> const range_local = split_between_colocations[native_colocation];
+            index_type_ const threads_local = pool_.threads_count(native_compute_domain);
+            indexed_range<index_type_> const range_local = split_between_compute_domains[native_compute_domain];
             index_type_ const n_local = range_local.count;
             index_type_ const n_local_dynamic = n_local > threads_local ? n_local - threads_local : 0;
 
             // Run (up to) one static prong on the current thread
-            index_type_ const thread_local_index = pool_.thread_local_index(thread, native_colocation);
+            index_type_ const thread_local_index = pool_.thread_local_index(thread, native_compute_domain);
             index_type_ const one_static_prong_index = static_cast<index_type_>(n_local_dynamic + thread_local_index);
-            colocated_prong<index_type_> prong( //
-                static_cast<index_type_>(range_local.first + one_static_prong_index), thread, native_colocation);
+            local_prong<index_type_> prong( //
+                static_cast<index_type_>(range_local.first + one_static_prong_index), thread, native_compute_domain);
             if (one_static_prong_index < n_local) fork_(prong);
         }
 
-        coprime_permutation_range<index_type_> probing_strategy(0, colocations_count, thread);
+        coprime_permutation_range<index_type_> probing_strategy(0, compute_domains_count, thread);
         auto probe_iterator = probing_strategy.begin();
 
-        // Next we will probe every colocation:
-        index_type_ colocations_remaining = colocations_count;
-        index_type_ current_colocation = native_colocation;
-        while (colocations_remaining) {
-            index_type_ const threads_local = pool_.threads_count(current_colocation);
-            std::atomic<index_type_> &local_progress = pool_.unsafe_dynamic_progress_ref(current_colocation);
-            indexed_range<index_type_> const range_local = split_between_colocations[current_colocation];
+        // Next we will probe every compute_domain:
+        index_type_ compute_domains_remaining = compute_domains_count;
+        index_type_ current_compute_domain = native_compute_domain;
+        while (compute_domains_remaining) {
+            index_type_ const threads_local = pool_.threads_count(current_compute_domain);
+            std::atomic<index_type_> &local_progress = pool_.unsafe_dynamic_progress_ref(current_compute_domain);
+            indexed_range<index_type_> const range_local = split_between_compute_domains[current_compute_domain];
             index_type_ const n_local = range_local.count;
             index_type_ const n_local_dynamic = n_local > threads_local ? n_local - threads_local : 0;
 
@@ -3448,26 +3627,26 @@ class invoke_distributed_for_n_dynamic {
                 index_type_ prong_local_offset = local_progress.fetch_add(1, std::memory_order_relaxed);
                 bool const beyond_last_prong = prong_local_offset >= n_local_dynamic;
                 if (beyond_last_prong) break;
-                colocated_prong<index_type_> prong(range_local.first + prong_local_offset, thread, current_colocation);
+                local_prong<index_type_> prong(range_local.first + prong_local_offset, thread, current_compute_domain);
                 fork_(prong);
             }
 
-            // Now pick some other colocation to probe.
-            colocations_remaining--;
-            if (colocations_remaining) {
-                do { ++probe_iterator; } while (*probe_iterator == native_colocation); // At most 2 iterations
-                current_colocation = *probe_iterator;
+            // Now pick some other compute_domain to probe.
+            compute_domains_remaining--;
+            if (compute_domains_remaining) {
+                do { ++probe_iterator; } while (*probe_iterator == native_compute_domain); // At most 2 iterations
+                current_compute_domain = *probe_iterator;
             }
         }
     }
 };
 
 /**
- *  @brief A Linux-only pool over all distributed "thread colocations", NUMA nodes, and QoS levels.
+ *  @brief A Linux-only pool over all distributed "thread compute_domains", NUMA nodes, and QoS levels.
  *
  *  Differs from the `basic_pool` template in the following ways:
  *  - constructor API: receives the NUMA nodes topology, & a name for threads.
- *  - implementation of `try_spawn`: redirects to individual `linux_colocated_pool` instances.
+ *  - implementation of `try_spawn`: redirects to individual `linux_compute_domain_pool` instances.
  *
  *  Many of the parallel ops benefit from having some minimal amount of @b "scratch-space" that
  *  can be used as an output buffer for partial results, before they can be aggregated from the
@@ -3480,17 +3659,17 @@ class invoke_distributed_for_n_dynamic {
 template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ = default_alignment_k>
 struct linux_distributed_pool {
 
-    using linux_colocated_pool_t = linux_colocated_pool<micro_yield_type_, alignment_>;
+    using linux_compute_domain_pool_t = linux_compute_domain_pool<micro_yield_type_, alignment_>;
     using numa_topology_t = numa_topology<>;
 
     using allocator_t = linux_numa_allocator_t;
-    using micro_yield_t = typename linux_colocated_pool_t::micro_yield_t;
-    using index_t = typename linux_colocated_pool_t::index_t;
-    using epoch_index_t = typename linux_colocated_pool_t::epoch_index_t;
+    using micro_yield_t = typename linux_compute_domain_pool_t::micro_yield_t;
+    using index_t = typename linux_compute_domain_pool_t::index_t;
+    using epoch_index_t = typename linux_compute_domain_pool_t::epoch_index_t;
     using generation_t = epoch_index_t;
-    using thread_index_t = typename linux_colocated_pool_t::thread_index_t;
-    static constexpr std::size_t alignment_k = linux_colocated_pool_t::alignment_k;
-    using prong_t = colocated_prong<index_t>;
+    using thread_index_t = typename linux_compute_domain_pool_t::thread_index_t;
+    static constexpr std::size_t alignment_k = linux_compute_domain_pool_t::alignment_k;
+    using prong_t = local_prong<index_t>;
 
   private:
     numa_topology_t topology_ {};
@@ -3498,20 +3677,20 @@ struct linux_distributed_pool {
     thread_index_t threads_count_ {0};
     caller_exclusivity_t exclusivity_ {caller_inclusive_k}; // ? Whether the caller thread is included in the count
 
-    struct colocation_t {
-        alignas(alignment_k) linux_colocated_pool_t pool {};
+    struct compute_domain_cell_t {
+        alignas(alignment_k) linux_compute_domain_pool_t pool {};
     };
 
-    using unique_colocation_buffer_t = unique_padded_buffer<colocation_t, linux_numa_allocator_t>;
-    using colocations_t = unique_padded_buffer<unique_colocation_buffer_t, linux_numa_allocator_t>;
+    using unique_domain_cell_buffer_t = unique_padded_buffer<compute_domain_cell_t, linux_numa_allocator_t>;
+    using compute_domain_cells_t = unique_padded_buffer<unique_domain_cell_buffer_t, linux_numa_allocator_t>;
     /**
      *  @brief A heap allocated array of individual thread pools.
      *
-     *  Similar to a @b `std::vector<std::unique_ptr<linux_colocated_pool_t>>`, but with each colocation placed
-     *  on its own NUMA node, and with a custom allocator. All the entries are sorted/grouped by the colocation
+     *  Similar to a @b `std::vector<std::unique_ptr<linux_compute_domain_pool_t>>`, but with each compute_domain placed
+     *  on its own NUMA node, and with a custom allocator. All the entries are sorted/grouped by the compute_domain
      *  index in ascending order, and the first one always contains the current thread.
      */
-    colocations_t colocations_ {};
+    compute_domain_cells_t compute_domain_cells_ {};
 
   public:
     linux_distributed_pool(linux_distributed_pool &&) = delete;
@@ -3535,7 +3714,7 @@ struct linux_distributed_pool {
      *  @note Only valid after the `try_spawn` call.
      */
     bool is_lock_free() const noexcept {
-        return colocations_ && colocations_[0] && colocations_[0].only().pool.is_lock_free();
+        return compute_domain_cells_ && compute_domain_cells_[0] && compute_domain_cells_[0].only().pool.is_lock_free();
     }
 
     /**
@@ -3550,7 +3729,8 @@ struct linux_distributed_pool {
      */
     std::size_t memory_usage() const noexcept {
         std::size_t total_bytes = sizeof(linux_distributed_pool);
-        for (std::size_t i = 0; i < colocations_.size(); ++i) total_bytes += colocations_[i].only().pool.memory_usage();
+        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
+            total_bytes += compute_domain_cells_[i].only().pool.memory_usage();
         return total_bytes;
     }
 
@@ -3622,63 +3802,66 @@ struct linux_distributed_pool {
         numa_topology_t new_topology;
         if (!new_topology.try_assign(topology)) return false; // ! Copy-construction failed
 
-        // We are going to place the control structures on the first NUMA node,
-        // and pin the caller thread to it as well.
-        numa_node_t const &first_node = new_topology.node(0);
-        numa_node_id_t const first_node_id = first_node.node_id; // ? Typically zero
-        linux_numa_allocator_t allocator {first_node_id};
-        index_t const colocations_count = std::min(new_topology.nodes_count(), threads);
+        // Place the control structures on the first compute domain, pinning the caller there too.
+        // We spawn one sub-pool per compute domain (a same-QoS core run), not per NUMA node, so
+        // performance and efficiency cores on one node become separate, independently pinned pools.
+        compute_domain_t const &first_domain = new_topology.compute_domain_at(0);
+        linux_numa_allocator_t allocator {first_domain.node_id};
+        index_t const compute_domain_cells_count = std::min(new_topology.compute_domains_count(), threads);
 
-        colocations_t colocations(allocator);
-        if (!colocations.try_resize(colocations_count)) return false; // ! Allocation failed
+        compute_domain_cells_t compute_domain_cells(allocator);
+        if (!compute_domain_cells.try_resize(compute_domain_cells_count)) return false; // ! Allocation failed
 
-        // Now allocate each "local pool" on its own NUMA node
-        for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index) {
-            numa_node_t const &node = new_topology.node(colocation_index);
-            numa_node_id_t const node_id = node.node_id;
+        // Allocate each sub-pool on its own compute domain's NUMA node
+        for (index_t compute_domain_index = 0; compute_domain_index < compute_domain_cells_count;
+             ++compute_domain_index) {
+            numa_node_id_t const node_id = new_topology.compute_domain_at(compute_domain_index).node_id;
             linux_numa_allocator_t node_allocator {node_id};
-            unique_colocation_buffer_t colocation_padded_buffer(node_allocator);
-            colocation_padded_buffer.try_resize(1);
-            colocations[colocation_index] = std::move(colocation_padded_buffer);
+            unique_domain_cell_buffer_t domain_cell_buffer(node_allocator);
+            domain_cell_buffer.try_resize(1);
+            compute_domain_cells[compute_domain_index] = std::move(domain_cell_buffer);
         }
 
         auto reset_on_failure = [&]() noexcept {
-            for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index) {
-                if (colocations[colocation_index].size() == 0) continue; // ? No pool allocated
-                colocations[colocation_index].only().pool.terminate();   // ? Stop the pool if it was started
+            for (index_t compute_domain_index = 0; compute_domain_index < compute_domain_cells_count;
+                 ++compute_domain_index) {
+                if (compute_domain_cells[compute_domain_index].size() == 0) continue; // ? No pool allocated
+                compute_domain_cells[compute_domain_index].only().pool.terminate(); // ? Stop the pool if it was started
             }
         };
 
         // If any one of the allocations failed, we need to clean up
-        for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index) {
-            if (colocations[colocation_index].size() == 1) continue;
+        for (index_t compute_domain_index = 0; compute_domain_index < compute_domain_cells_count;
+             ++compute_domain_index) {
+            if (compute_domain_cells[compute_domain_index].size() == 1) continue;
             reset_on_failure();
             return false; // ! Allocation failed
         }
 
-        // Every NUMA pool is allocated separately
+        // Every compute-domain pool is spawned separately
         // - the first one may be "inclusive".
         // - others are always "exclusive" to the caller thread.
-        indexed_split<thread_index_t> threads_per_node(threads, colocations_count);
-        if (!colocations[0].only().pool.try_spawn(first_node, threads_per_node[0].count, exclusivity, pin_granularity,
-                                                  0, 0)) {
+        indexed_split<thread_index_t> threads_per_domain(threads, compute_domain_cells_count);
+        if (!compute_domain_cells[0].only().pool.try_spawn(first_domain, threads_per_domain[0].count, exclusivity,
+                                                           pin_granularity, 0, 0)) {
             reset_on_failure();
             return false; // ! Spawning failed
         }
 
-        for (index_t colocation_index = 1; colocation_index < colocations_count; ++colocation_index) {
-            numa_node_t const &node = new_topology.node(colocation_index);
-            colocation_t &colocation = colocations[colocation_index].only();
-            if (!colocation.pool.try_spawn(node, threads_per_node[colocation_index].count, caller_exclusive_k,
-                                           pin_granularity, threads_per_node[colocation_index].first,
-                                           colocation_index)) {
+        for (index_t compute_domain_index = 1; compute_domain_index < compute_domain_cells_count;
+             ++compute_domain_index) {
+            compute_domain_t const &domain = new_topology.compute_domain_at(compute_domain_index);
+            compute_domain_cell_t &cell = compute_domain_cells[compute_domain_index].only();
+            if (!cell.pool.try_spawn(domain, threads_per_domain[compute_domain_index].count, caller_exclusive_k,
+                                     pin_granularity, threads_per_domain[compute_domain_index].first,
+                                     compute_domain_index)) {
                 reset_on_failure();
                 return false; // ! Spawning failed
             }
         }
 
         topology_ = std::move(new_topology);
-        colocations_ = std::move(colocations);
+        compute_domain_cells_ = std::move(compute_domain_cells);
         threads_count_ = threads;
         exclusivity_ = exclusivity;
         return true;
@@ -3706,22 +3889,22 @@ struct linux_distributed_pool {
     template <typename fork_type_>
     FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
-        assert(colocations_ && "Thread pools must be initialized before broadcasting");
+        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
 
         // Submit to every thread pool. All sub-pool epochs advance in lockstep as long as
         // every dispatch goes through this wrapper - never dispatch to a sub-pool directly.
         generation_t last_sub_generation {};
-        for (std::size_t i = 1; i < colocations_.size(); ++i)
-            last_sub_generation = colocations_[i].only().pool.unsafe_for_threads(fork);
-        generation_t const generation = colocations_[0].only().pool.unsafe_for_threads(fork);
-        assert((colocations_.size() == 1 || last_sub_generation == generation) &&
-               "Colocated sub-pools must advance in generation lockstep");
+        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
+            last_sub_generation = compute_domain_cells_[i].only().pool.unsafe_for_threads(fork);
+        generation_t const generation = compute_domain_cells_[0].only().pool.unsafe_for_threads(fork);
+        assert((compute_domain_cells_.size() == 1 || last_sub_generation == generation) &&
+               "ComputeDomain sub-pools must advance in generation lockstep");
         (void)last_sub_generation;
         return generation;
     }
 
     /**
-     *  @brief Returns true if the generation identified by @p generation has completed on all colocations.
+     *  @brief Returns true if the generation identified by @p generation has completed on all compute_domain_cells.
      *  @note A `true` result synchronizes with all contributors: their writes are visible.
      *
      *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join`
@@ -3729,8 +3912,8 @@ struct linux_distributed_pool {
      *  reserved for `caller_exclusive_k` pools.
      */
     bool is_complete(generation_t generation) const noexcept {
-        for (std::size_t i = 0; i < colocations_.size(); ++i)
-            if (!colocations_[i].only().pool.is_complete(generation)) return false;
+        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
+            if (!compute_domain_cells_[i].only().pool.is_complete(generation)) return false;
         return true;
     }
 
@@ -3740,21 +3923,23 @@ struct linux_distributed_pool {
      *  Idempotent: returns immediately for already-joined or stale generations.
      */
     void unsafe_join(generation_t generation) noexcept {
-        assert(colocations_ && "Thread pools must be initialized before broadcasting");
+        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
 
-        // Join the caller-hosting colocation first: on inclusive pools its slice runs here
-        // and overlaps the remote colocations' completion instead of waiting behind them.
-        colocations_[0].only().pool.unsafe_join(generation);
-        for (std::size_t i = 1; i < colocations_.size(); ++i) colocations_[i].only().pool.unsafe_join(generation);
+        // Join the caller-hosting compute_domain first: on inclusive pools its slice runs here
+        // and overlaps the remote compute_domain_cells' completion instead of waiting behind them.
+        compute_domain_cells_[0].only().pool.unsafe_join(generation);
+        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
+            compute_domain_cells_[i].only().pool.unsafe_join(generation);
     }
 
     /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
     void unsafe_join() noexcept {
-        assert(colocations_ && "Thread pools must be initialized before broadcasting");
+        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
 
-        // Wait for everyone to finish, starting from the caller-hosting colocation
-        colocations_[0].only().pool.unsafe_join();
-        for (std::size_t i = 1; i < colocations_.size(); ++i) colocations_[i].only().pool.unsafe_join();
+        // Wait for everyone to finish, starting from the caller-hosting compute_domain
+        compute_domain_cells_[0].only().pool.unsafe_join();
+        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
+            compute_domain_cells_[i].only().pool.unsafe_join();
     }
 
 #pragma endregion Core API
@@ -3774,10 +3959,10 @@ struct linux_distributed_pool {
      *  - when you want to @b restart with a different number of threads.
      */
     void terminate() noexcept {
-        if (!colocations_) return; // ? Uninitialized
-        for (std::size_t i = 0; i < colocations_.size(); ++i) colocations_[i].only().pool.terminate();
+        if (!compute_domain_cells_) return; // ? Uninitialized
+        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i) compute_domain_cells_[i].only().pool.terminate();
 
-        colocations_ = {};
+        compute_domain_cells_ = {};
         threads_count_ = 0;
         exclusivity_ = caller_inclusive_k;
     }
@@ -3796,8 +3981,8 @@ struct linux_distributed_pool {
      */
     void sleep(std::size_t wake_up_periodicity_micros) noexcept {
         assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
-        for (std::size_t i = 0; i < colocations_.size(); ++i)
-            colocations_[i].only().pool.sleep(wake_up_periodicity_micros);
+        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
+            compute_domain_cells_[i].only().pool.sleep(wake_up_periodicity_micros);
     }
 
     /** @brief Helper function to create a spin mutex with same yield characteristics. */
@@ -3856,60 +4041,60 @@ struct linux_distributed_pool {
 
 #pragma endregion Indexed Task Scheduling
 
-#pragma region Colocations Compatibility
+#pragma region ComputeDomains Compatibility
 
     /**
-     *  @brief Number of individual sub-pool with the same NUMA-locality and QoS.
+     *  @brief Number of compute domains this pool spans (one pinned sub-pool each).
      */
-    index_t colocations_count() const noexcept { return colocations_.size(); }
+    index_t compute_domains_count() const noexcept { return compute_domain_cells_.size(); }
 
     /**
-     *  @brief Returns the number of threads in one NUMA-specific local @b colocation.
+     *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
      *  @retval 0 if the thread-pool is not initialized, 1 if only the main thread is used.
      *  @note This API is @b not synchronized and doesn't check for out-of-bounds access.
      */
-    thread_index_t threads_count(index_t colocation) const noexcept {
-        assert(colocations_ && "Local pools must be initialized");
-        assert(colocation < colocations_.size() && "Local pool index out of bounds");
-        return colocations_[colocation].only().pool.threads_count();
+    thread_index_t threads_count(index_t compute_domain) const noexcept {
+        assert(compute_domain_cells_ && "Local pools must be initialized");
+        assert(compute_domain < compute_domain_cells_.size() && "Local pool index out of bounds");
+        return compute_domain_cells_[compute_domain].only().pool.threads_count();
     }
 
     /**
-     *  @brief Converts a @p `global_thread_index` to a local thread index within a @b colocation.
+     *  @brief Converts a @p `global_thread_index` to a local thread index within a @b compute_domain.
      *  @retval 0 if the thread-pool is not initialized, 1 if only the main thread is used.
      *  @note This API is @b not synchronized and doesn't check for out-of-bounds access.
      */
-    thread_index_t thread_local_index(thread_index_t global_thread_index, index_t colocation) const noexcept {
-        assert(colocations_ && "Local pools must be initialized");
-        assert(colocation < colocations_.size() && "Local pool index out of bounds");
-        return global_thread_index - colocations_[colocation].only().pool.first_thread();
+    thread_index_t thread_local_index(thread_index_t global_thread_index, index_t compute_domain) const noexcept {
+        assert(compute_domain_cells_ && "Local pools must be initialized");
+        assert(compute_domain < compute_domain_cells_.size() && "Local pool index out of bounds");
+        return global_thread_index - compute_domain_cells_[compute_domain].only().pool.first_thread();
     }
 
-    index_t thread_colocation(thread_index_t global_thread_index) const noexcept {
-        index_t colocation_index = 0;
-        for (; colocation_index < colocations_.size(); ++colocation_index) {
-            colocation_t const &colocation = colocations_[colocation_index].only();
-            if (global_thread_index < colocation.pool.first_thread()) continue;
-            if (global_thread_index < colocation.pool.first_thread() + colocation.pool.threads_count())
-                return colocation_index;
+    index_t thread_compute_domain(thread_index_t global_thread_index) const noexcept {
+        index_t compute_domain_index = 0;
+        for (; compute_domain_index < compute_domain_cells_.size(); ++compute_domain_index) {
+            compute_domain_cell_t const &compute_domain = compute_domain_cells_[compute_domain_index].only();
+            if (global_thread_index < compute_domain.pool.first_thread()) continue;
+            if (global_thread_index < compute_domain.pool.first_thread() + compute_domain.pool.threads_count())
+                return compute_domain_index;
         }
-        return colocation_index; // ? Not found
+        return compute_domain_index; // ? Not found
     }
 
-    std::atomic<index_t> &unsafe_dynamic_progress_ref(index_t colocation) noexcept {
-        return colocations_[colocation].only().pool.unsafe_dynamic_progress_ref();
+    std::atomic<index_t> &unsafe_dynamic_progress_ref(index_t compute_domain) noexcept {
+        return compute_domain_cells_[compute_domain].only().pool.unsafe_dynamic_progress_ref();
     }
 
-#pragma endregion Colocations Compatibility
+#pragma endregion ComputeDomains Compatibility
 };
 
-using linux_colocated_pool_t = linux_colocated_pool<>;
+using linux_compute_domain_pool_t = linux_compute_domain_pool<>;
 using linux_distributed_pool_t = linux_distributed_pool<>;
 
 #if FU_DETECT_CONCEPTS_
-static_assert(is_unsafe_pool<basic_pool_t> && is_unsafe_pool<linux_colocated_pool_t>,
+static_assert(is_unsafe_pool<basic_pool_t> && is_unsafe_pool<linux_compute_domain_pool_t>,
               "These thread pools must be flexible and support unsafe operations");
-static_assert(is_pool<basic_pool_t> && is_pool<linux_colocated_pool_t> && is_pool<linux_distributed_pool_t>,
+static_assert(is_pool<basic_pool_t> && is_pool<linux_compute_domain_pool_t> && is_pool<linux_distributed_pool_t>,
               "These thread pools must be fully compatible with the high-level APIs");
 #endif // FU_DETECT_CONCEPTS_
 

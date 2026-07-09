@@ -205,14 +205,14 @@ void iteration_forkunion_numa_static(linux_distributed_pool_t &pool, body_t *_FU
                                      vector3_t *_FU_RESTRICT forces, std::size_t n,
                                      body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
-    using colocated_prong_t = typename linux_distributed_pool_t::prong_t;
+    using local_prong_t = typename linux_distributed_pool_t::prong_t;
 
     // This is a quadratic complexity all-to-all interaction, and it's not clear how
     // it can "shard" to take advantage of NUMA locality, especially for a small `n` world.
     // Still, at least we can replicate the body positions onto every node just once per iteration,
     // to reduce the number of remote accesses, even if they are cached.
     pool.for_threads([&](auto thread_index) noexcept {
-        std::size_t const numa_node_index = pool.thread_colocation(thread_index);
+        std::size_t const numa_node_index = pool.thread_compute_domain(thread_index);
         std::size_t const threads_next_to_numa_node = pool.threads_count(numa_node_index);
         std::size_t const thread_local_index = pool.thread_local_index(thread_index, numa_node_index);
 
@@ -224,8 +224,8 @@ void iteration_forkunion_numa_static(linux_distributed_pool_t &pool, body_t *_FU
             n_subrange.count * sizeof(body_t));
     });
 
-    pool.for_n(n, [&](colocated_prong_t prong) noexcept {
-        std::size_t const numa_node_index = prong.colocation;
+    pool.for_n(n, [&](local_prong_t prong) noexcept {
+        std::size_t const numa_node_index = prong.compute_domain;
         body_t const *numa_bodies = bodies_numa_copies[numa_node_index];
         body_t const body_i = numa_bodies[prong.task];
 
@@ -240,11 +240,11 @@ void iteration_forkunion_numa_dynamic(linux_distributed_pool_t &pool, body_t *_F
                                       vector3_t *_FU_RESTRICT forces, std::size_t n,
                                       body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
-    using colocated_prong_t = typename linux_distributed_pool_t::prong_t;
+    using local_prong_t = typename linux_distributed_pool_t::prong_t;
 
     // This expressions is same as in `iteration_forkunion_numa_static` static version:
     pool.for_threads([&](auto thread_index) noexcept {
-        std::size_t const numa_node_index = pool.thread_colocation(thread_index);
+        std::size_t const numa_node_index = pool.thread_compute_domain(thread_index);
         std::size_t const threads_next_to_numa_node = pool.threads_count(numa_node_index);
         std::size_t const thread_local_index = pool.thread_local_index(thread_index, numa_node_index);
 
@@ -257,8 +257,8 @@ void iteration_forkunion_numa_dynamic(linux_distributed_pool_t &pool, body_t *_F
     });
 
     // The rest only differs in the `for_n_dynamic` usage over `for_n`:
-    pool.for_n_dynamic(n, [&](colocated_prong_t prong) noexcept {
-        std::size_t const numa_node_index = prong.colocation;
+    pool.for_n_dynamic(n, [&](local_prong_t prong) noexcept {
+        std::size_t const numa_node_index = prong.compute_domain;
         body_t const *numa_bodies = bodies_numa_copies[numa_node_index];
         body_t const body_i = numa_bodies[prong.task];
 
@@ -354,8 +354,7 @@ int main(void) {
             std::fprintf(stderr, "Failed to spawn thread pool\n");
             return EXIT_FAILURE;
         }
-        for (std::size_t i = 0; i < iterations; ++i)
-            iteration_forkunion_dynamic(pool, bodies.data(), forces.data(), n);
+        for (std::size_t i = 0; i < iterations; ++i) iteration_forkunion_dynamic(pool, bodies.data(), forces.data(), n);
         return EXIT_SUCCESS;
     }
 

@@ -317,7 +317,7 @@ pub type SpinMutex<T> = BasicSpinMutex<T, true>;
 /// A `Prong` represents a single unit of work that connects:
 /// - A **task** (what work to do) - identified by `task_index`  
 /// - A **thread** (which CPU thread is executing it) - identified by `thread_index`
-/// - A **colocation** (which NUMA node/QoS level it's running on) - identified by `colocation_index`
+/// - A **compute_domain** (which NUMA node/QoS level it's running on) - identified by `compute_domain_index`
 ///
 /// This metadata is essential for NUMA-aware algorithms, debugging parallel execution,
 /// and understanding load distribution across the thread pool.
@@ -327,8 +327,8 @@ pub struct Prong {
     pub task_index: usize,
     /// The physical thread executing this task (0-based)  
     pub thread_index: usize,
-    /// The colocation group this thread belongs to (NUMA node + QoS level)
-    pub colocation_index: usize,
+    /// The compute_domain group this thread belongs to (NUMA node + QoS level)
+    pub compute_domain_index: usize,
 }
 
 /// Error types that can occur during thread pool operations.
@@ -366,31 +366,63 @@ extern "C" {
     fn fu_version_major() -> c_int;
     fn fu_version_minor() -> c_int;
     fn fu_version_patch() -> c_int;
-    fn fu_enabled_numa() -> c_int;
+    fn fu_numa_enabled() -> c_int;
     fn fu_capabilities_string() -> *const c_char;
 
-    // Systems metadata
+    // Compute topology
     fn fu_count_logical_cores() -> usize;
-    fn fu_count_colocations() -> usize;
-    fn fu_count_numa_nodes() -> usize;
-    fn fu_count_quality_levels() -> usize;
-    fn fu_volume_any_pages() -> usize;
+    fn fu_count_compute_domains() -> usize;
+    fn fu_count_compute_levels() -> usize;
+    fn fu_count_logical_cores_in(compute_domain_index: usize) -> usize;
+    fn fu_compute_level_in(compute_domain_index: usize) -> usize;
 
-    // Core thread pool operations
+    // Memory topology
+    fn fu_count_memory_domains() -> usize;
+    fn fu_memory_level_in(memory_domain_index: usize) -> usize;
+    fn fu_volume_ram() -> usize;
+    fn fu_volume_ram_in(memory_domain_index: usize) -> usize;
+    fn fu_volume_huge_pages() -> usize;
+    fn fu_volume_huge_pages_in(memory_domain_index: usize) -> usize;
+    fn fu_count_huge_pages() -> usize;
+    fn fu_count_huge_pages_in(memory_domain_index: usize) -> usize;
+
+    // Affinity
+    fn fu_local_memory_of(compute_domain_index: usize) -> usize;
+    fn fu_memory_distance(compute_domain_index: usize, memory_domain_index: usize) -> usize;
+
+    // Allocation
+    fn fu_allocate_in(memory_domain_index: usize, bytes: usize) -> *mut c_void;
+    fn fu_allocate_at_least_in(
+        memory_domain_index: usize,
+        minimum_bytes: usize,
+        allocated_bytes: *mut usize,
+        bytes_per_page: *mut usize,
+    ) -> *mut c_void;
+    fn fu_free_in(memory_domain_index: usize, pointer: *mut c_void, bytes: usize);
+
+    // Pool lifecycle & introspection
     fn fu_pool_new(name: *const c_char) -> *mut c_void;
     fn fu_pool_delete(pool: *mut c_void);
     fn fu_pool_spawn(pool: *mut c_void, threads: usize, exclusivity: c_int) -> c_int;
+    fn fu_pool_spawn_on(
+        pool: *mut c_void,
+        compute_domain_index: usize,
+        threads: usize,
+        exclusivity: c_int,
+    ) -> c_int;
     fn fu_pool_terminate(pool: *mut c_void);
+    fn fu_pool_sleep(pool: *mut c_void, micros: usize);
     fn fu_pool_caller_exclusivity(pool: *mut c_void) -> c_int;
     fn fu_pool_count_threads(pool: *mut c_void) -> usize;
-    fn fu_pool_count_colocations(pool: *mut c_void) -> usize;
-    fn fu_pool_count_threads_in(pool: *mut c_void, colocation_index: usize) -> usize;
+    fn fu_pool_count_compute_domains(pool: *mut c_void) -> usize;
+    fn fu_pool_count_threads_in(pool: *mut c_void, compute_domain_index: usize) -> usize;
     fn fu_pool_locate_thread_in(
         pool: *mut c_void,
         global_thread_index: usize,
-        colocation_index: usize,
+        compute_domain_index: usize,
     ) -> usize;
 
+    // Parallel dispatch
     #[allow(dead_code)]
     fn fu_pool_for_threads(
         pool: *mut c_void,
@@ -416,28 +448,14 @@ extern "C" {
         context: *mut c_void,
     );
 
-    // Advanced control flow
+    // Generation tokens
     fn fu_pool_unsafe_for_threads(
         pool: *mut c_void,
         callback: extern "C" fn(*mut c_void, usize, usize),
         context: *mut c_void,
     ) -> usize;
-    fn fu_pool_unsafe_join(pool: *mut c_void, generation: usize);
     fn fu_pool_is_complete(pool: *mut c_void, generation: usize) -> c_int;
-    fn fu_pool_sleep(pool: *mut c_void, micros: usize);
-
-    // Memory management and NUMA
-    fn fu_allocate_at_least(
-        numa_node_index: usize,
-        minimum_bytes: usize,
-        allocated_bytes: *mut usize,
-        bytes_per_page: *mut usize,
-    ) -> *mut c_void;
-    fn fu_allocate(numa_node_index: usize, bytes: usize) -> *mut c_void;
-    fn fu_free(numa_node_index: usize, pointer: *mut c_void, bytes: usize);
-    fn fu_volume_huge_pages_in(numa_node_index: usize) -> usize;
-    fn fu_volume_any_pages_in(numa_node_index: usize) -> usize;
-
+    fn fu_pool_unsafe_join(pool: *mut c_void, generation: usize);
 }
 
 /// Returns a string describing available platform capabilities.
@@ -458,9 +476,34 @@ pub fn capabilities_string_ptr() -> *const c_char {
     unsafe { fu_capabilities_string() }
 }
 
-/// Returns the total volume of any pages (huge or regular) available across all NUMA nodes.
-pub fn volume_any_pages() -> usize {
-    unsafe { fu_volume_any_pages() }
+/// Returns the total RAM volume (bytes) across all compute_domains, regardless of page size.
+pub fn volume_ram() -> usize {
+    unsafe { fu_volume_ram() }
+}
+
+/// Returns the RAM volume (bytes) local to a given compute_domain (0 if out of range).
+pub fn volume_ram_in(compute_domain_index: usize) -> usize {
+    unsafe { fu_volume_ram_in(compute_domain_index) }
+}
+
+/// Returns the total huge-page volume (bytes) across all compute_domains.
+pub fn volume_huge_pages() -> usize {
+    unsafe { fu_volume_huge_pages() }
+}
+
+/// Returns the huge-page volume (bytes) available on a given compute_domain (0 if out of range).
+pub fn volume_huge_pages_in(compute_domain_index: usize) -> usize {
+    unsafe { fu_volume_huge_pages_in(compute_domain_index) }
+}
+
+/// Returns the total number of free huge pages across all compute_domains.
+pub fn count_huge_pages() -> usize {
+    unsafe { fu_count_huge_pages() }
+}
+
+/// Returns the number of free huge pages on a given compute_domain (0 if out of range).
+pub fn count_huge_pages_in(compute_domain_index: usize) -> usize {
+    unsafe { fu_count_huge_pages_in(compute_domain_index) }
 }
 
 /// Returns the number of logical CPU cores available on the system.
@@ -469,13 +512,13 @@ pub fn count_logical_cores() -> usize {
 }
 
 /// Returns the number of NUMA nodes available on the system.
-pub fn count_numa_nodes() -> usize {
-    unsafe { fu_count_numa_nodes() }
+pub fn count_memory_domains() -> usize {
+    unsafe { fu_count_memory_domains() }
 }
 
-/// Returns the number of distinct thread colocations available.
+/// Returns the number of distinct thread compute_domains available.
 ///
-/// A "colocation" represents a group of threads that share the same:
+/// A "compute_domain" represents a group of threads that share the same:
 /// - **NUMA memory domain** - threads with fast local memory access
 /// - **Quality-of-Service level** - P-cores vs E-cores on heterogeneous CPUs  
 /// - **Cache hierarchy** - threads sharing L3 cache
@@ -485,8 +528,36 @@ pub fn count_numa_nodes() -> usize {
 /// - `1` on most desktop, laptop, or IoT platforms with unified memory
 /// - `2-8` on typical dual-socket servers or heterogeneous mobile chips
 /// - `4-32` on high-end cloud servers with multiple sockets
-pub fn count_colocations() -> usize {
-    unsafe { fu_count_colocations() }
+pub fn count_compute_domains() -> usize {
+    unsafe { fu_count_compute_domains() }
+}
+
+/// Returns the number of logical cores backing a given compute domain.
+///
+/// Zero if `compute_domain_index` is out of range. Use it to size a per-compute-domain pool
+/// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
+pub fn count_logical_cores_in(compute_domain_index: usize) -> usize {
+    unsafe { fu_count_logical_cores_in(compute_domain_index) }
+}
+
+/// Returns the performance level of a compute domain (higher = more performant).
+pub fn compute_level_in(compute_domain_index: usize) -> usize {
+    unsafe { fu_compute_level_in(compute_domain_index) }
+}
+
+/// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
+pub fn memory_level_in(memory_domain_index: usize) -> usize {
+    unsafe { fu_memory_level_in(memory_domain_index) }
+}
+
+/// Returns the memory domain nearest a given compute domain (its local allocation target).
+pub fn local_memory_of(compute_domain_index: usize) -> usize {
+    unsafe { fu_local_memory_of(compute_domain_index) }
+}
+
+/// Returns the relative access distance from a compute domain to a memory domain (10 = local).
+pub fn memory_distance(compute_domain_index: usize, memory_domain_index: usize) -> usize {
+    unsafe { fu_memory_distance(compute_domain_index, memory_domain_index) }
 }
 
 /// Defines whether the calling thread participates in task execution.
@@ -499,13 +570,13 @@ pub enum CallerExclusivity {
 }
 
 /// Returns the number of distinct Quality-of-Service levels.
-pub fn count_quality_levels() -> usize {
-    unsafe { fu_count_quality_levels() }
+pub fn count_compute_levels() -> usize {
+    unsafe { fu_count_compute_levels() }
 }
 
 /// Returns true if NUMA support was compiled into the library.
 pub fn numa_enabled() -> bool {
-    unsafe { fu_enabled_numa() != 0 }
+    unsafe { fu_numa_enabled() != 0 }
 }
 
 /// Returns the major version number of the ForkUnion library.
@@ -558,8 +629,8 @@ pub fn version() -> (usize, usize, usize) {
 /// let mut pool = spawn(4);
 ///
 /// // Execute work on each thread
-/// pool.for_threads(&|thread_index, colocation_index| {
-///     println!("Thread {} on colocation {}", thread_index, colocation_index);
+/// pool.for_threads(&|thread_index, compute_domain_index| {
+///     println!("Thread {} on compute_domain {}", thread_index, compute_domain_index);
 /// });
 ///
 /// // Distribute 1000 tasks across threads
@@ -630,6 +701,47 @@ impl ThreadPool {
         }
     }
 
+    /// Spawns a pool pinned to a single compute_domain (one NUMA node + QoS level).
+    ///
+    /// The pool's threads and NUMA-local allocations stay on `compute_domain_index`, in
+    /// `0..count_compute_domains()`. Spawn one such pool per compute domain and coordinate them
+    /// from a single thread with the generation-token API (`for_threads` guards or the
+    /// raw `unsafe_for_threads`/`is_complete`/`unsafe_join`). On builds without NUMA,
+    /// only compute domain 0 is valid.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use forkunion::*;
+    /// // One pool per compute domain, sized to that domain's core count.
+    /// let pools: Vec<ThreadPool> = (0..count_compute_domains())
+    ///     .map(|c| ThreadPool::try_spawn_on(c, count_logical_cores_in(c).max(1), CallerExclusivity::Exclusive).unwrap())
+    ///     .collect();
+    /// assert_eq!(pools.len(), count_compute_domains());
+    /// ```
+    pub fn try_spawn_on(
+        compute_domain_index: usize,
+        threads: usize,
+        exclusivity: CallerExclusivity,
+    ) -> Result<Self, Error> {
+        if threads == 0 {
+            return Err(Error::InvalidParameter);
+        }
+        unsafe {
+            let inner = fu_pool_new(core::ptr::null());
+            if inner.is_null() {
+                return Err(Error::CreationFailed);
+            }
+            let success =
+                fu_pool_spawn_on(inner, compute_domain_index, threads, exclusivity as c_int);
+            if success == 0 {
+                fu_pool_delete(inner);
+                return Err(Error::SpawnFailed);
+            }
+            Ok(Self { inner })
+        }
+    }
+
     /// Returns whether the calling thread participates in the workload.
     ///
     /// Queries the pool directly rather than caching, so it stays correct across
@@ -691,22 +803,22 @@ impl ThreadPool {
         unsafe { fu_pool_count_threads(self.inner) }
     }
 
-    /// Returns the number of thread colocations in the pool.
+    /// Returns the number of thread compute_domains in the pool.
     ///
-    /// Colocations group threads by NUMA domain, QoS level, and cache hierarchy.
+    /// ComputeDomains group threads by NUMA domain, QoS level, and cache hierarchy.
     /// This information is useful for NUMA-aware load balancing and memory allocation.
-    pub fn colocations(&self) -> usize {
-        unsafe { fu_pool_count_colocations(self.inner) }
+    pub fn compute_domains(&self) -> usize {
+        unsafe { fu_pool_count_compute_domains(self.inner) }
     }
 
-    /// Returns the number of threads in a specific colocation.
+    /// Returns the number of threads in a specific compute_domain.
     ///
     /// This method is useful for NUMA-aware load balancing, allowing you to understand
-    /// how many threads are available in each colocation group.
+    /// how many threads are available in each compute_domain group.
     ///
     /// # Arguments
     ///
-    /// * `colocation_index` - The colocation to query (0-based)
+    /// * `compute_domain_index` - The compute_domain to query (0-based)
     ///
     /// # Examples
     ///
@@ -714,33 +826,37 @@ impl ThreadPool {
     /// use forkunion::*;
     ///
     /// let pool = spawn(8);
-    /// let total_colocations = pool.colocations();
+    /// let total_compute_domains = pool.compute_domains();
     ///
-    /// for colocation_index in 0..total_colocations {
-    ///     let thread_count = pool.count_threads_in(colocation_index);
-    ///     println!("Colocation {} has {} threads", colocation_index, thread_count);
+    /// for compute_domain_index in 0..total_compute_domains {
+    ///     let thread_count = pool.count_threads_in(compute_domain_index);
+    ///     println!("ComputeDomain {} has {} threads", compute_domain_index, thread_count);
     /// }
     /// ```
-    pub fn count_threads_in(&self, colocation_index: usize) -> usize {
-        unsafe { fu_pool_count_threads_in(self.inner, colocation_index) }
+    pub fn count_threads_in(&self, compute_domain_index: usize) -> usize {
+        unsafe { fu_pool_count_threads_in(self.inner, compute_domain_index) }
     }
 
-    /// Converts a global thread index to a local thread index within a colocation.
+    /// Converts a global thread index to a local thread index within a compute_domain.
     ///
     /// This is useful for distributed thread pools where threads are grouped into
-    /// colocations (NUMA nodes or QoS levels). The local index can be used for
-    /// per-colocation data structures or algorithms.
+    /// compute_domains (NUMA nodes or QoS levels). The local index can be used for
+    /// per-compute_domain data structures or algorithms.
     ///
     /// # Arguments
     ///
     /// * `global_thread_index` - The global thread index to convert
-    /// * `colocation_index` - The colocation to get the local index for
+    /// * `compute_domain_index` - The compute_domain to get the local index for
     ///
     /// # Returns
     ///
-    /// The local thread index within the specified colocation.
-    pub fn locate_thread_in(&self, global_thread_index: usize, colocation_index: usize) -> usize {
-        unsafe { fu_pool_locate_thread_in(self.inner, global_thread_index, colocation_index) }
+    /// The local thread index within the specified compute_domain.
+    pub fn locate_thread_in(
+        &self,
+        global_thread_index: usize,
+        compute_domain_index: usize,
+    ) -> usize {
+        unsafe { fu_pool_locate_thread_in(self.inner, global_thread_index, compute_domain_index) }
     }
 
     /// Transitions worker threads to a power-saving sleep state.
@@ -797,7 +913,7 @@ impl ThreadPool {
     /// # Arguments
     ///
     /// * `function` - Closure reference executed on each thread, receiving
-    ///   `(thread_index, colocation_index)`; borrowed for the guard's lifetime.
+    ///   `(thread_index, compute_domain_index)`; borrowed for the guard's lifetime.
     ///
     /// # Examples
     ///
@@ -805,8 +921,8 @@ impl ThreadPool {
     /// use forkunion::*;
     ///
     /// let mut pool = spawn(4);
-    /// pool.for_threads(&|thread_index, colocation_index| {
-    ///     println!("Thread {} on colocation {}", thread_index, colocation_index);
+    /// pool.for_threads(&|thread_index, compute_domain_index| {
+    ///     println!("Thread {} on compute_domain {}", thread_index, compute_domain_index);
     /// })
     /// .join();
     /// ```
@@ -815,6 +931,79 @@ impl ThreadPool {
         F: Fn(usize, usize) + Sync,
     {
         BroadcastJoin::new(self, function)
+    }
+
+    /// Runs `function` on every thread and blocks until all of them finish.
+    ///
+    /// The ergonomic common case: unlike [`for_threads`](Self::for_threads), this takes
+    /// the closure **by value** and joins internally, so there is no `&` binding or guard
+    /// to manage. Reach for `for_threads` only when you want to overlap the caller's own
+    /// work with the pool and poll [`BroadcastJoin::is_complete`] before joining.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use forkunion::*;
+    /// let mut pool = spawn(4);
+    /// let counter = std::sync::atomic::AtomicUsize::new(0);
+    /// pool.broadcast(|_thread_index, _compute_domain_index| {
+    ///     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    /// });
+    /// assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), pool.threads());
+    /// ```
+    pub fn broadcast<F>(&mut self, function: F)
+    where
+        F: Fn(usize, usize) + Sync,
+    {
+        // `function` lives on this frame for the whole dispatch-and-join, so the borrow
+        // handed to the pool cannot dangle - and `join` runs before it drops.
+        BroadcastJoin::new(self, &function).join();
+    }
+
+    /// Splits `data` into one contiguous chunk per thread and runs `function` on each in
+    /// parallel, blocking until all threads finish.
+    ///
+    /// Each thread receives an **exclusive** `&mut` sub-slice, so no interior mutability,
+    /// `Mutex`, or raw pointers are needed at the call site: the chunks partition `data`
+    /// and therefore never alias, and the synchronous join keeps every borrow inside
+    /// `data`'s lifetime. This is the safe replacement for hand-rolled [`SafePtr`] scatter.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use forkunion::*;
+    /// let mut pool = spawn(4);
+    /// let mut data = vec![0u64; 1000];
+    /// pool.for_slices_mut(&mut data, |_thread_index, chunk| {
+    ///     for value in chunk {
+    ///         *value += 1;
+    ///     }
+    /// });
+    /// assert!(data.iter().all(|&value| value == 1));
+    /// ```
+    pub fn for_slices_mut<T, F>(&mut self, data: &mut [T], function: F)
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Sync,
+    {
+        let threads = self.threads();
+        let split = IndexedSplit::new(data.len(), threads);
+        let base = SafePtr::new(data.as_mut_ptr()); // ? `Sync` wrapper for the disjoint scatter
+        let function = &function;
+        let scatter = move |thread_index: usize, _compute_domain_index: usize| {
+            let range = split.get(thread_index);
+            // SAFETY: `split.get` returns disjoint, in-bounds ranges per thread index, so
+            // no two threads observe overlapping elements; the pool joins before `data`'s
+            // borrow ends, keeping the sub-slice valid for the whole call.
+            let chunk = unsafe {
+                core::slice::from_raw_parts_mut(
+                    base.get_mut_at(range.start),
+                    range.end - range.start,
+                )
+            };
+            function(thread_index, chunk);
+        };
+        BroadcastJoin::new(self, &scatter).join();
     }
 
     /// Dispatches `callback` on every thread without blocking, returning the generation token.
@@ -1058,7 +1247,7 @@ impl Drop for AllocationResult {
             // Use unaligned pointer/size if this was an over-aligned allocation
             let ptr = self.overaligned_ptr.unwrap_or(self.ptr);
             let bytes = self.overaligned_bytes.unwrap_or(self.allocated_bytes);
-            fu_free(self.numa_node, ptr.as_ptr() as *mut c_void, bytes);
+            fu_free_in(self.numa_node, ptr.as_ptr() as *mut c_void, bytes);
         }
     }
 }
@@ -1112,14 +1301,14 @@ impl PinnedAllocator {
     /// let allocator = PinnedAllocator::new(0).expect("NUMA node 0 should be available");
     ///
     /// // Check if a specific NUMA node exists
-    /// let numa_count = count_numa_nodes();
+    /// let numa_count = count_memory_domains();
     /// if numa_count > 1 {
     ///     let allocator2 = PinnedAllocator::new(1).expect("NUMA node 1 should be available");
     ///     println!("Created allocator for NUMA node: {}", allocator2.numa_node());
     /// }
     /// ```
     pub fn new(numa_node: usize) -> Option<Self> {
-        if numa_node >= count_numa_nodes() {
+        if numa_node >= count_memory_domains() {
             return None;
         }
 
@@ -1137,8 +1326,8 @@ impl PinnedAllocator {
     }
 
     /// Returns the volume of any pages (huge or regular) available on this allocator's NUMA node.
-    pub fn volume_any_pages(&self) -> usize {
-        unsafe { fu_volume_any_pages_in(self.numa_node) }
+    pub fn volume_ram(&self) -> usize {
+        unsafe { fu_volume_ram_in(self.numa_node) }
     }
 
     /// Allocates memory with at least the requested size on this allocator's NUMA node.
@@ -1181,7 +1370,7 @@ impl PinnedAllocator {
         let mut bytes_per_page = 0usize;
 
         unsafe {
-            let ptr = fu_allocate_at_least(
+            let ptr = fu_allocate_at_least_in(
                 self.numa_node,
                 minimum_bytes,
                 &mut allocated_bytes as *mut usize,
@@ -1238,7 +1427,7 @@ impl PinnedAllocator {
         }
 
         unsafe {
-            let ptr = fu_allocate(self.numa_node, bytes);
+            let ptr = fu_allocate_in(self.numa_node, bytes);
 
             if ptr.is_null() {
                 return None;
@@ -1369,7 +1558,7 @@ impl PinnedAllocator {
 /// assert_eq!(allocation.numa_node(), 0);
 ///
 /// // For more control, create specific NUMA allocators
-/// let numa_count = count_numa_nodes();
+/// let numa_count = count_memory_domains();
 /// println!("System has {} NUMA nodes available", numa_count);
 ///
 /// if numa_count > 1 {
@@ -1385,7 +1574,7 @@ pub fn default_numa_allocator() -> Option<PinnedAllocator> {
 /// A Vec-like container that uses NUMA-aware pinned memory allocation.
 ///
 /// `PinnedVec<T>` provides a dynamic array that allocates memory on a specific
-/// NUMA node, which should correspond to a `colocation_index` for optimal
+/// NUMA node, which should correspond to a `compute_domain_index` for optimal
 /// performance with `ThreadPool`. It automatically manages growth and shrinkage.
 ///
 /// # Examples
@@ -1982,7 +2171,7 @@ unsafe impl<T: Sync> Sync for PinnedVec<T> {}
 /// rr_vec.fill(42, &mut pool);
 /// ```
 pub struct RoundRobinVec<T> {
-    colocations: PinnedVec<PinnedVec<T>>,
+    compute_domains: PinnedVec<PinnedVec<T>>,
     total_length: usize,
     total_capacity: usize,
 }
@@ -2000,32 +2189,33 @@ impl<T> RoundRobinVec<T> {
     /// use forkunion::*;
     ///
     /// let rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
-    /// assert_eq!(rr_vec.colocations_count(), count_colocations());
+    /// assert_eq!(rr_vec.compute_domains_count(), count_compute_domains());
     /// ```
     pub fn new() -> Option<Self> {
-        let colocations_count = count_colocations();
-        if colocations_count == 0 {
+        let compute_domains_count = count_compute_domains();
+        if compute_domains_count == 0 {
             return None;
         }
 
         // Use the first NUMA node to allocate the container
         let container_allocator = PinnedAllocator::new(0)?;
-        let mut colocations = PinnedVec::with_capacity_in(container_allocator, colocations_count)?;
+        let mut compute_domains =
+            PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
 
         // Create a PinnedVec for each NUMA node
-        for colocation_index in 0..colocations_count {
-            let allocator = PinnedAllocator::new(colocation_index)?;
+        for compute_domain_index in 0..compute_domains_count {
+            let allocator = PinnedAllocator::new(compute_domain_index)?;
             let vec = PinnedVec::new_in(allocator);
-            colocations.push(vec).ok()?;
+            compute_domains.push(vec).ok()?;
         }
 
         let mut total_capacity = 0;
-        for i in 0..colocations.len() {
-            total_capacity += colocations[i].capacity();
+        for i in 0..compute_domains.len() {
+            total_capacity += compute_domains[i].capacity();
         }
 
         Some(Self {
-            colocations,
+            compute_domains,
             total_length: 0,
             total_capacity,
         })
@@ -2046,71 +2236,72 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let rr_vec = RoundRobinVec::<i32>::with_capacity_per_colocation(1000)
+    /// let rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(1000)
     ///     .expect("Failed to create RoundRobinVec");
     ///
-    /// for i in 0..rr_vec.colocations_count() {
+    /// for i in 0..rr_vec.compute_domains_count() {
     ///     assert_eq!(rr_vec.capacity_at(i), 1000);
     /// }
     /// ```
-    pub fn with_capacity_per_colocation(capacity_per_colocation: usize) -> Option<Self> {
-        let colocations_count = count_colocations();
-        if colocations_count == 0 {
+    pub fn with_capacity_per_compute_domain(capacity_per_compute_domain: usize) -> Option<Self> {
+        let compute_domains_count = count_compute_domains();
+        if compute_domains_count == 0 {
             return None;
         }
 
         // Use the first NUMA node to allocate the container
         let container_allocator = PinnedAllocator::new(0)?;
-        let mut colocations = PinnedVec::with_capacity_in(container_allocator, colocations_count)?;
+        let mut compute_domains =
+            PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
 
         // Create a PinnedVec with capacity for each NUMA node
-        for colocation_index in 0..colocations_count {
-            let allocator = PinnedAllocator::new(colocation_index)?;
-            let vec = PinnedVec::with_capacity_in(allocator, capacity_per_colocation)?;
-            colocations.push(vec).ok()?;
+        for compute_domain_index in 0..compute_domains_count {
+            let allocator = PinnedAllocator::new(compute_domain_index)?;
+            let vec = PinnedVec::with_capacity_in(allocator, capacity_per_compute_domain)?;
+            compute_domains.push(vec).ok()?;
         }
 
         let mut total_capacity = 0;
-        for i in 0..colocations.len() {
-            total_capacity += colocations[i].capacity();
+        for i in 0..compute_domains.len() {
+            total_capacity += compute_domains[i].capacity();
         }
 
         Some(Self {
-            colocations,
+            compute_domains,
             total_length: 0,
             total_capacity,
         })
     }
 
-    /// Returns the number of colocations (and thus the number of `PinnedVec`s).
-    pub fn colocations_count(&self) -> usize {
-        self.colocations.len()
+    /// Returns the number of compute_domains (and thus the number of `PinnedVec`s).
+    pub fn compute_domains_count(&self) -> usize {
+        self.compute_domains.len()
     }
 
-    /// Returns the length of the vector at the specified colocation.
+    /// Returns the length of the vector at the specified compute_domain.
     ///
     /// # Arguments
     ///
-    /// * `colocation_index` - The colocation index
+    /// * `compute_domain_index` - The compute_domain index
     ///
     /// # Returns
     ///
-    /// The length of the vector at the specified colocation, or 0 if the node doesn't exist.
-    pub fn len_at(&self, colocation_index: usize) -> usize {
-        self.colocations[colocation_index].len()
+    /// The length of the vector at the specified compute_domain, or 0 if the node doesn't exist.
+    pub fn len_at(&self, compute_domain_index: usize) -> usize {
+        self.compute_domains[compute_domain_index].len()
     }
 
-    /// Returns the capacity of the vector at the specified colocation.
+    /// Returns the capacity of the vector at the specified compute_domain.
     ///
     /// # Arguments
     ///
-    /// * `colocation_index` - The colocation index
+    /// * `compute_domain_index` - The compute_domain index
     ///
     /// # Returns
     ///
-    /// The capacity of the vector at the specified colocation, or 0 if the node doesn't exist.
-    pub fn capacity_at(&self, colocation_index: usize) -> usize {
-        self.colocations[colocation_index].capacity()
+    /// The capacity of the vector at the specified compute_domain, or 0 if the node doesn't exist.
+    pub fn capacity_at(&self, compute_domain_index: usize) -> usize {
+        self.compute_domains[compute_domain_index].capacity()
     }
 
     /// Returns the total length across all NUMA nodes.
@@ -2128,30 +2319,33 @@ impl<T> RoundRobinVec<T> {
         self.total_length == 0
     }
 
-    /// Gets a reference to the `PinnedVec` at the specified colocation.
+    /// Gets a reference to the `PinnedVec` at the specified compute_domain.
     ///
     /// # Arguments
     ///
-    /// * `colocation_index` - The colocation index
+    /// * `compute_domain_index` - The compute_domain index
     ///
     /// # Returns
     ///
-    /// A reference to the `PinnedVec` at the specified colocation, or `None` if the node doesn't exist.
-    pub fn get_colocation(&self, colocation_index: usize) -> Option<&PinnedVec<T>> {
-        self.colocations.get(colocation_index)
+    /// A reference to the `PinnedVec` at the specified compute_domain, or `None` if the node doesn't exist.
+    pub fn get_compute_domain(&self, compute_domain_index: usize) -> Option<&PinnedVec<T>> {
+        self.compute_domains.get(compute_domain_index)
     }
 
-    /// Gets a mutable reference to the `PinnedVec` at the specified colocation.
+    /// Gets a mutable reference to the `PinnedVec` at the specified compute_domain.
     ///
     /// # Arguments
     ///
-    /// * `colocation_index` - The colocation index
+    /// * `compute_domain_index` - The compute_domain index
     ///
     /// # Returns
     ///
-    /// A mutable reference to the `PinnedVec` at the specified colocation, or `None` if the node doesn't exist.
-    pub fn get_colocation_mut(&mut self, colocation_index: usize) -> Option<&mut PinnedVec<T>> {
-        self.colocations.get_mut(colocation_index)
+    /// A mutable reference to the `PinnedVec` at the specified compute_domain, or `None` if the node doesn't exist.
+    pub fn get_compute_domain_mut(
+        &mut self,
+        compute_domain_index: usize,
+    ) -> Option<&mut PinnedVec<T>> {
+        self.compute_domains.get_mut(compute_domain_index)
     }
 
     /// Accesses an element at a global `index` using round-robin distribution.
@@ -2178,15 +2372,17 @@ impl<T> RoundRobinVec<T> {
     /// }
     /// ```
     pub fn get(&self, index: usize) -> Option<&T> {
-        if self.colocations.is_empty() {
+        if self.compute_domains.is_empty() {
             return None;
         }
 
-        let colocations_count = self.colocations.len();
-        let colocation_index = index % colocations_count;
-        let local_index = index / colocations_count;
+        let compute_domains_count = self.compute_domains.len();
+        let compute_domain_index = index % compute_domains_count;
+        let local_index = index / compute_domains_count;
 
-        self.colocations.get(colocation_index)?.get(local_index)
+        self.compute_domains
+            .get(compute_domain_index)?
+            .get(local_index)
     }
 
     /// Mutably accesses an element at a global `index` using round-robin distribution.
@@ -2201,16 +2397,16 @@ impl<T> RoundRobinVec<T> {
     ///
     /// A mutable reference to the element, or `None` if the index is out of bounds.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        if self.colocations.is_empty() {
+        if self.compute_domains.is_empty() {
             return None;
         }
 
-        let colocations_count = self.colocations.len();
-        let colocation_index = index % colocations_count;
-        let local_index = index / colocations_count;
+        let compute_domains_count = self.compute_domains.len();
+        let compute_domain_index = index % compute_domains_count;
+        let local_index = index / compute_domains_count;
 
-        self.colocations
-            .get_mut(colocation_index)?
+        self.compute_domains
+            .get_mut(compute_domain_index)?
             .get_mut(local_index)
     }
 
@@ -2235,13 +2431,13 @@ impl<T> RoundRobinVec<T> {
     /// assert_eq!(rr_vec.len(), 1);
     /// ```
     pub fn push(&mut self, value: T) -> Result<(), &'static str> {
-        if self.colocations.is_empty() {
+        if self.compute_domains.is_empty() {
             return Err("No NUMA nodes available");
         }
 
         // Use round-robin distribution based on current total length
-        let target_colocation = self.total_length % self.colocations.len();
-        let result = self.colocations[target_colocation].push(value);
+        let target_compute_domain = self.total_length % self.compute_domains.len();
+        let result = self.compute_domains[target_compute_domain].push(value);
 
         if result.is_ok() {
             self.total_length += 1;
@@ -2310,8 +2506,8 @@ impl<T> RoundRobinVec<T> {
         }
 
         // Pop from the last inserted position (reverse round-robin)
-        let target_colocation = (self.total_length - 1) % self.colocations.len();
-        let result = self.colocations[target_colocation].pop();
+        let target_compute_domain = (self.total_length - 1) % self.compute_domains.len();
+        let result = self.compute_domains[target_compute_domain].pop();
 
         if result.is_some() {
             self.total_length -= 1;
@@ -2333,8 +2529,8 @@ impl<T> RoundRobinVec<T> {
     /// # Returns
     ///
     /// The global index where this element would be accessed via `get(global_index)`.
-    pub fn local_to_global_index(&self, colocation_index: usize, local_index: usize) -> usize {
-        local_index * self.colocations_count() + colocation_index
+    pub fn local_to_global_index(&self, compute_domain_index: usize, local_index: usize) -> usize {
+        local_index * self.compute_domains_count() + compute_domain_index
     }
 
     /// Converts a global round-robin index to the NUMA node and local index.
@@ -2347,12 +2543,12 @@ impl<T> RoundRobinVec<T> {
     ///
     /// # Returns
     ///
-    /// A tuple of (colocation_index, local_index) where the element is stored.
+    /// A tuple of (compute_domain_index, local_index) where the element is stored.
     pub fn global_to_local_index(&self, global_index: usize) -> (usize, usize) {
-        let colocations_count = self.colocations_count();
-        let colocation_index = global_index % colocations_count;
-        let local_index = global_index / colocations_count;
-        (colocation_index, local_index)
+        let compute_domains_count = self.compute_domains_count();
+        let compute_domain_index = global_index % compute_domains_count;
+        let local_index = global_index / compute_domains_count;
+        (compute_domain_index, local_index)
     }
 
     /// Fills all vectors across all NUMA nodes with copies of the given value,
@@ -2369,12 +2565,12 @@ impl<T> RoundRobinVec<T> {
     /// use forkunion::*;
     ///
     /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_colocation(1000)
+    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(1000)
     ///     .expect("Failed to create RoundRobinVec");
     ///
     /// // Resize all vectors to have some elements
-    /// for i in 0..rr_vec.colocations_count() {
-    ///     rr_vec.get_colocation_mut(i).unwrap().resize(100, 0).expect("Failed to resize");
+    /// for i in 0..rr_vec.compute_domains_count() {
+    ///     rr_vec.get_compute_domain_mut(i).unwrap().resize(100, 0).expect("Failed to resize");
     /// }
     ///
     /// // Fill all vectors with the value 42
@@ -2384,21 +2580,21 @@ impl<T> RoundRobinVec<T> {
     where
         T: Clone + Send + Sync,
     {
-        let colocations_count = self.colocations_count();
-        let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
+        let compute_domains_count = self.compute_domains_count();
+        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
-            if colocation_index >= colocations_count {
+        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
+            if compute_domain_index >= compute_domains_count {
                 return;
             }
 
-            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
             let pool = pool_ptr.get_mut();
 
-            let threads_in_colocation = pool.count_threads_in(colocation_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
-            let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
+            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
+            let split = IndexedSplit::new(node_vec.len(), threads_in_compute_domain);
             let range = split.get(thread_local_index);
 
             // Fill the assigned range of this thread
@@ -2425,12 +2621,12 @@ impl<T> RoundRobinVec<T> {
     /// use forkunion::*;
     ///
     /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_colocation(1000)
+    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(1000)
     ///     .expect("Failed to create RoundRobinVec");
     ///
     /// // Resize all vectors to have some elements
-    /// for i in 0..rr_vec.colocations_count() {
-    ///     rr_vec.get_colocation_mut(i).unwrap().resize(100, 0).expect("Failed to resize");
+    /// for i in 0..rr_vec.compute_domains_count() {
+    ///     rr_vec.get_compute_domain_mut(i).unwrap().resize(100, 0).expect("Failed to resize");
     /// }
     ///
     /// // Fill all vectors with random values
@@ -2441,23 +2637,23 @@ impl<T> RoundRobinVec<T> {
         F: FnMut() -> T + Send + Sync,
         T: Send + Sync,
     {
-        let colocations_count = self.colocations_count();
-        let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
+        let compute_domains_count = self.compute_domains_count();
+        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
         let f_ptr = SafePtr(&mut f as *mut F);
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
-            if colocation_index >= colocations_count {
+        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
+            if compute_domain_index >= compute_domains_count {
                 return;
             }
 
-            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
             let f_ref = f_ptr.get_mut();
             let pool = pool_ptr.get_mut();
 
-            let threads_in_colocation = pool.count_threads_in(colocation_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
-            let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
+            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
+            let split = IndexedSplit::new(node_vec.len(), threads_in_compute_domain);
             let range = split.get(thread_local_index);
 
             // Fill the assigned range of this thread
@@ -2476,21 +2672,21 @@ impl<T> RoundRobinVec<T> {
     ///
     /// * `pool` - The thread pool to use for parallel execution
     pub fn clear(&mut self, pool: &mut ThreadPool) {
-        let colocations_count = self.colocations_count();
-        let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
+        let compute_domains_count = self.compute_domains_count();
+        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
-            if colocation_index >= colocations_count {
+        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
+            if compute_domain_index >= compute_domains_count {
                 return;
             }
 
-            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
             let pool = pool_ptr.get_mut();
 
-            let threads_in_colocation = pool.count_threads_in(colocation_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
-            let split = IndexedSplit::new(node_vec.len(), threads_in_colocation);
+            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
+            let split = IndexedSplit::new(node_vec.len(), threads_in_compute_domain);
             let range = split.get(thread_local_index);
 
             // Drop elements in the assigned range
@@ -2504,8 +2700,8 @@ impl<T> RoundRobinVec<T> {
         pool.for_threads(&broadcast_function);
 
         // Reset lengths of individual vectors after parallel dropping
-        for i in 0..self.colocations.len() {
-            self.colocations[i].len = 0;
+        for i in 0..self.compute_domains.len() {
+            self.compute_domains[i].len = 0;
         }
         self.total_length = 0;
     }
@@ -2531,16 +2727,16 @@ impl<T> RoundRobinVec<T> {
     where
         T: Clone + Send + Sync,
     {
-        let colocations_count = self.colocations_count();
-        if colocations_count == 0 {
+        let compute_domains_count = self.compute_domains_count();
+        if compute_domains_count == 0 {
             return Err("No NUMA nodes available");
         }
 
         // Calculate how many elements each NUMA node should have
-        let elements_per_node = new_len / colocations_count;
-        let extra_elements = new_len % colocations_count;
+        let elements_per_node = new_len / compute_domains_count;
+        let extra_elements = new_len % compute_domains_count;
 
-        // Helper to calculate target length for a colocation
+        // Helper to calculate target length for a compute_domain
         let node_len = |col_idx: usize| -> usize {
             if col_idx < extra_elements {
                 elements_per_node + 1
@@ -2550,38 +2746,38 @@ impl<T> RoundRobinVec<T> {
         };
 
         // Step 1: Centrally handle reallocation for each NUMA node
-        for i in 0..colocations_count {
+        for i in 0..compute_domains_count {
             let target_len = node_len(i);
-            let current_len = self.colocations[i].len();
+            let current_len = self.compute_domains[i].len();
             if target_len > current_len {
-                self.colocations[i].reserve(target_len - current_len)?;
+                self.compute_domains[i].reserve(target_len - current_len)?;
             }
         }
 
         // Step 2: Parallel construction/destruction of elements using IndexedSplit
-        let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
+        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
-            if colocation_index >= colocations_count {
+        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
+            if compute_domain_index >= compute_domains_count {
                 return;
             }
 
-            let node_vec = safe_ptr.get_mut_at(colocation_index);
+            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
             let pool = pool_ptr.get_mut();
-            let target_len = node_len(colocation_index);
+            let target_len = node_len(compute_domain_index);
             let current_len = node_vec.len();
             if target_len == current_len {
                 return;
             }
 
-            let threads_in_colocation = pool.count_threads_in(colocation_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, colocation_index);
+            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
+            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
 
             if target_len > current_len {
                 // Growing: construct new elements in parallel
                 let new_elements = target_len - current_len;
-                let split = IndexedSplit::new(new_elements, threads_in_colocation);
+                let split = IndexedSplit::new(new_elements, threads_in_compute_domain);
                 let range = split.get(thread_local_index);
 
                 unsafe {
@@ -2593,7 +2789,7 @@ impl<T> RoundRobinVec<T> {
             } else {
                 // Shrinking: drop elements in parallel
                 let elements_to_drop = current_len - target_len;
-                let split = IndexedSplit::new(elements_to_drop, threads_in_colocation);
+                let split = IndexedSplit::new(elements_to_drop, threads_in_compute_domain);
                 let range = split.get(thread_local_index);
 
                 unsafe {
@@ -2607,8 +2803,8 @@ impl<T> RoundRobinVec<T> {
         pool.for_threads(&broadcast_function);
 
         // Step 3: Update lengths after parallel operations
-        for i in 0..colocations_count {
-            self.colocations[i].len = node_len(i);
+        for i in 0..compute_domains_count {
+            self.compute_domains[i].len = node_len(i);
         }
 
         self.total_length = new_len;
@@ -3451,7 +3647,7 @@ where
 }
 
 // Convenience methods using NUMA-aware RoundRobinVec for scratch buffers
-// Each colocation gets its own CacheAligned accumulator pinned to local NUMA node!
+// Each compute_domain gets its own CacheAligned accumulator pinned to local NUMA node!
 impl<'pool, I, S> ParallelRunner<'pool, I, S>
 where
     I: ParallelIterator,
@@ -3460,7 +3656,7 @@ where
     /// Parallel reduction with NUMA-aware scratch allocation.
     ///
     /// Automatically allocates cache-aligned scratch buffers on each NUMA node
-    /// using `RoundRobinVec`. Each colocation gets one `CacheAligned<T>` accumulator
+    /// using `RoundRobinVec`. Each compute_domain gets one `CacheAligned<T>` accumulator
     /// pinned to its local memory - threads access local NUMA memory!
     ///
     /// Nearly identical to Rayon's reduce API, just requires explicit pool.
@@ -3494,7 +3690,7 @@ where
         let threads = self.pool.threads();
 
         // Create cache-aligned scratch: one CacheAligned<T> per thread
-        // Note: Using PinnedVec per colocation for true NUMA-awareness would be ideal,
+        // Note: Using PinnedVec per compute_domain for true NUMA-awareness would be ideal,
         // but for simplicity we use a contiguous allocation here. The OS will still
         // tend to place this on the NUMA node of the allocating thread.
         let mut scratch = PinnedVec::with_capacity_in(
@@ -3954,18 +4150,18 @@ where
 }
 
 pub struct ParallelRoundRobin<'a, T> {
-    colocations_ptr: SyncConstPtr<PinnedVec<T>>,
-    colocations_len: usize,
+    compute_domains_ptr: SyncConstPtr<PinnedVec<T>>,
+    compute_domains_len: usize,
     total_len: usize,
     _marker: PhantomData<&'a [T]>,
 }
 
 impl<'a, T> ParallelRoundRobin<'a, T> {
     fn new(vec: &'a RoundRobinVec<T>) -> Self {
-        let slice = vec.colocations.as_slice();
+        let slice = vec.compute_domains.as_slice();
         Self {
-            colocations_ptr: SyncConstPtr::new(slice.as_ptr()),
-            colocations_len: slice.len(),
+            compute_domains_ptr: SyncConstPtr::new(slice.as_ptr()),
+            compute_domains_len: slice.len(),
             total_len: vec.total_length,
             _marker: PhantomData,
         }
@@ -3987,20 +4183,20 @@ where
         S: ParallelSchedule,
         F: Fn(Self::Item, Prong) + Sync,
     {
-        if self.total_len == 0 || self.colocations_len == 0 {
+        if self.total_len == 0 || self.compute_domains_len == 0 {
             return;
         }
 
-        let colocations_ptr = self.colocations_ptr;
-        let colocations_len = self.colocations_len;
+        let compute_domains_ptr = self.compute_domains_ptr;
+        let compute_domains_len = self.compute_domains_len;
         let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         schedule.dispatch(pool, self.total_len, move |prong| {
             let index = prong.task_index;
-            let colocation_index = index % colocations_len;
-            let local_index = index / colocations_len;
-            let base = colocations_ptr.as_ptr();
-            let colocation = unsafe { &*base.add(colocation_index) };
-            let slice = colocation.as_slice();
+            let compute_domain_index = index % compute_domains_len;
+            let local_index = index / compute_domains_len;
+            let base = compute_domains_ptr.as_ptr();
+            let compute_domain = unsafe { &*base.add(compute_domain_index) };
+            let slice = compute_domain.as_slice();
             let item = unsafe { slice.get_unchecked(local_index) };
             let func = unsafe { &*consumer_ptr.as_ptr() };
             func(item, prong);
@@ -4009,18 +4205,18 @@ where
 }
 
 pub struct ParallelRoundRobinMut<'a, T> {
-    colocations_ptr: SyncConstPtr<PinnedVec<T>>,
-    colocations_len: usize,
+    compute_domains_ptr: SyncConstPtr<PinnedVec<T>>,
+    compute_domains_len: usize,
     total_len: usize,
     _marker: PhantomData<&'a mut [T]>,
 }
 
 impl<'a, T> ParallelRoundRobinMut<'a, T> {
     fn new(vec: &'a mut RoundRobinVec<T>) -> Self {
-        let slice = vec.colocations.as_slice();
+        let slice = vec.compute_domains.as_slice();
         Self {
-            colocations_ptr: SyncConstPtr::new(slice.as_ptr()),
-            colocations_len: slice.len(),
+            compute_domains_ptr: SyncConstPtr::new(slice.as_ptr()),
+            compute_domains_len: slice.len(),
             total_len: vec.total_length,
             _marker: PhantomData,
         }
@@ -4042,20 +4238,20 @@ where
         S: ParallelSchedule,
         F: Fn(Self::Item, Prong) + Sync,
     {
-        if self.total_len == 0 || self.colocations_len == 0 {
+        if self.total_len == 0 || self.compute_domains_len == 0 {
             return;
         }
 
-        let colocations_ptr = self.colocations_ptr;
-        let colocations_len = self.colocations_len;
+        let compute_domains_ptr = self.compute_domains_ptr;
+        let compute_domains_len = self.compute_domains_len;
         let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         schedule.dispatch(pool, self.total_len, move |prong| {
             let index = prong.task_index;
-            let colocation_index = index % colocations_len;
-            let local_index = index / colocations_len;
-            let base = colocations_ptr.as_ptr();
-            let colocation = unsafe { &*base.add(colocation_index) };
-            let base_ptr = colocation.sync_ptr();
+            let compute_domain_index = index % compute_domains_len;
+            let local_index = index / compute_domains_len;
+            let base = compute_domains_ptr.as_ptr();
+            let compute_domain = unsafe { &*base.add(compute_domain_index) };
+            let base_ptr = compute_domain.sync_ptr();
             let raw = unsafe { base_ptr.get(local_index) };
             let item = unsafe { &mut *raw };
             let func = unsafe { &*consumer_ptr.as_ptr() };
@@ -4143,12 +4339,12 @@ where
         extern "C" fn trampoline<F>(
             context: *mut c_void,
             thread_index: usize,
-            colocation_index: usize,
+            compute_domain_index: usize,
         ) where
             F: Fn(usize, usize) + Sync,
         {
             let function = unsafe { &*(context as *const F) };
-            function(thread_index, colocation_index);
+            function(thread_index, compute_domain_index);
         }
 
         unsafe {
@@ -4218,7 +4414,7 @@ where
             ctx: *mut c_void,
             task_index: usize,
             thread_index: usize,
-            colocation_index: usize,
+            compute_domain_index: usize,
         ) where
             F: Fn(Prong) + Sync,
         {
@@ -4226,7 +4422,7 @@ where
             f(Prong {
                 task_index,
                 thread_index,
-                colocation_index,
+                compute_domain_index,
             });
         }
 
@@ -4256,7 +4452,7 @@ where
             ctx: *mut c_void,
             task_index: usize,
             thread_index: usize,
-            colocation_index: usize,
+            compute_domain_index: usize,
         ) where
             F: Fn(Prong) + Sync,
         {
@@ -4264,7 +4460,7 @@ where
             f(Prong {
                 task_index,
                 thread_index,
-                colocation_index,
+                compute_domain_index,
             });
         }
 
@@ -4295,7 +4491,7 @@ where
             first_index: usize,
             count: usize,
             thread_index: usize,
-            colocation_index: usize,
+            compute_domain_index: usize,
         ) where
             F: Fn(Prong, usize) + Sync,
         {
@@ -4304,7 +4500,7 @@ where
                 Prong {
                     task_index: first_index,
                     thread_index,
-                    colocation_index,
+                    compute_domain_index,
                 },
                 count,
             );
@@ -4449,11 +4645,13 @@ mod tests {
     #[test]
     fn system_info() {
         let cores = count_logical_cores();
-        let numa = count_numa_nodes();
-        let colocations = count_colocations();
-        let qos = count_quality_levels();
+        let numa = count_memory_domains();
+        let compute_domains = count_compute_domains();
+        let qos = count_compute_levels();
 
-        std::println!("Cores: {cores}, NUMA: {numa}, Colocations: {colocations}, QoS: {qos}");
+        std::println!(
+            "Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}"
+        );
         assert!(cores > 0);
     }
 
@@ -4461,7 +4659,7 @@ mod tests {
     fn spawn_and_basic_info() {
         let pool = spawn(2);
         assert_eq!(pool.threads(), 2);
-        assert!(pool.colocations() > 0);
+        assert!(pool.compute_domains() > 0);
     }
 
     #[test]
@@ -4480,6 +4678,36 @@ mod tests {
     }
 
     #[test]
+    fn per_compute_domain_pools() {
+        // One pool per compute_domain, each pinned to its node; drive them from this thread.
+        let compute_domains = count_compute_domains();
+        assert!(compute_domains >= 1);
+
+        let mut pools: Vec<ThreadPool> = (0..compute_domains)
+            .map(|c| {
+                let cores = count_logical_cores_in(c).max(1);
+                ThreadPool::try_spawn_on(c, cores, CallerExclusivity::Exclusive)
+                    .expect("failed to spawn per-compute_domain pool")
+            })
+            .collect();
+
+        // Each pinned pool independently runs work across its own threads.
+        for pool in &mut pools {
+            let counter = AtomicUsize::new(0);
+            pool.broadcast(|_thread_index, _compute_domain_index| {
+                counter.fetch_add(1, Ordering::Relaxed);
+            });
+            assert_eq!(counter.load(Ordering::Relaxed), pool.threads());
+        }
+
+        // Out-of-range compute_domain must fail cleanly, not panic.
+        assert!(
+            ThreadPool::try_spawn_on(compute_domains + 100, 2, CallerExclusivity::Exclusive)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn for_threads_dispatch() {
         let count_threads = hw_threads();
         let mut pool = spawn(count_threads);
@@ -4489,7 +4717,7 @@ mod tests {
         let visited_ref = Arc::clone(&visited);
 
         {
-            let broadcast_function = move |thread_index: usize, _colocation: usize| {
+            let broadcast_function = move |thread_index: usize, _compute_domain: usize| {
                 if thread_index < visited_ref.len() {
                     visited_ref[thread_index].store(true, Ordering::Relaxed);
                 }
@@ -4501,6 +4729,39 @@ mod tests {
             assert!(
                 flag.load(Ordering::Relaxed),
                 "thread {i} never reached the callback"
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_owns_and_blocks() {
+        let mut pool = spawn(hw_threads());
+        let counter = AtomicUsize::new(0);
+        // Owned closure, no `&` and no guard - borrows `counter` from this frame safely.
+        pool.broadcast(|_thread_index, _compute_domain_index| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(counter.load(Ordering::Relaxed), pool.threads());
+    }
+
+    #[test]
+    fn for_slices_mut_partitions_disjointly() {
+        let mut pool = spawn(hw_threads());
+        let total = 10_000usize;
+        let mut data: Vec<usize> = (0..total).collect();
+
+        // Each thread squares its own exclusive chunk - no SafePtr, no Mutex.
+        pool.for_slices_mut(&mut data, |_thread_index, chunk| {
+            for value in chunk {
+                *value *= *value;
+            }
+        });
+
+        for (index, &value) in data.iter().enumerate() {
+            assert_eq!(
+                value,
+                index * index,
+                "element {index} not processed exactly once"
             );
         }
     }
@@ -4606,7 +4867,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
-        let broadcast_function = move |_thread_index: usize, _colocation: usize| {
+        let broadcast_function = move |_thread_index: usize, _compute_domain: usize| {
             counter_ref.fetch_add(1, Ordering::Relaxed);
         };
         let mut operation = pool.for_threads(&broadcast_function);
@@ -4636,7 +4897,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
-        let broadcast_function = move |_thread_index: usize, _colocation: usize| {
+        let broadcast_function = move |_thread_index: usize, _compute_domain: usize| {
             counter_ref.fetch_add(1, Ordering::Relaxed);
         };
         let mut operation = pool.for_threads(&broadcast_function);
@@ -4658,7 +4919,7 @@ mod tests {
 
     #[test]
     fn pinned_allocator_creation() {
-        let numa_count = count_numa_nodes();
+        let numa_count = count_memory_domains();
         assert!(numa_count > 0, "System should have at least one NUMA node");
 
         // Test valid NUMA node
@@ -4918,7 +5179,7 @@ mod tests {
     fn round_robin_parallel_mut() {
         let mut pool = spawn(hw_threads());
         let mut rr_vec =
-            RoundRobinVec::<usize>::with_capacity_per_colocation(8).expect("round robin vec");
+            RoundRobinVec::<usize>::with_capacity_per_compute_domain(8).expect("round robin vec");
 
         // Populate evenly
         for value in 0..32 {
@@ -5016,7 +5277,7 @@ mod tests {
 
     #[test]
     fn pinned_vec_invalid_numa_node() {
-        let numa_count = count_numa_nodes();
+        let numa_count = count_memory_domains();
         let allocator = PinnedAllocator::new(numa_count + 1);
         assert!(allocator.is_none());
     }
@@ -5412,10 +5673,10 @@ mod tests {
         let visited_b: Vec<AtomicBool> =
             (0..count_threads).map(|_| AtomicBool::new(false)).collect();
 
-        let work_a = |thread_index: usize, _colocation: usize| {
+        let work_a = |thread_index: usize, _compute_domain: usize| {
             visited_a[thread_index].store(true, Ordering::Relaxed);
         };
-        let work_b = |thread_index: usize, _colocation: usize| {
+        let work_b = |thread_index: usize, _compute_domain: usize| {
             visited_b[thread_index].store(true, Ordering::Relaxed);
         };
 
@@ -5464,7 +5725,7 @@ mod tests {
         extern "C" fn trampoline(
             context: *mut c_void,
             _thread_index: usize,
-            _colocation_index: usize,
+            _compute_domain_index: usize,
         ) {
             let counter = unsafe { &*(context as *const AtomicUsize) };
             counter.fetch_add(1, Ordering::Relaxed);
