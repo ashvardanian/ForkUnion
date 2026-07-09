@@ -56,7 +56,7 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libomp-dev
+          sudo apt install -y cmake build-essential libomp-dev libnuma-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
@@ -81,6 +81,13 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Test Zig
+        run: zig build test
 
   test_ubuntu_clang:
     name: Ubuntu (Clang)
@@ -159,6 +166,13 @@ jobs:
       - name: Test Rust
         run: cargo test
 
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Test Zig
+        run: zig build test
+
   test_macos_llvm_versions:
     name: macOS LLVM Versions
     runs-on: macos-15
@@ -228,6 +242,13 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Test Zig
+        run: zig build test
 
   test_windows_msvc_matrix:
     name: Windows MSVC Versions

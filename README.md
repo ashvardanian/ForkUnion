@@ -35,8 +35,14 @@ For additional flow control and tuning, following helpers are available:
 
 - `sleep(microseconds)` - for longer naps,
 - `terminate` - to kill the threads before the destructor is called,
-- `unsafe_for_threads` - to broadcast a callback without blocking,
-- `unsafe_join` - to block until the completion of the current broadcast.
+- `unsafe_for_threads` - to broadcast a callback without blocking, returning a generation token,
+- `unsafe_join` - to block until the completion of a broadcasted generation.
+- `is_complete` - to poll a generation token for completion without blocking,
+
+Every dispatch is identified by an always-odd `generation` token.
+On `caller_exclusive_k` pools you can dispatch, overlap your own work, poll `is_complete`, and join - the classic poll-then-join pattern.
+On `caller_inclusive_k` pools the calling thread owes one slice of the work, which only runs inside `unsafe_join`, so completion can't be reached by polling alone.
+The same rule shapes the RAII guard returned by `for_threads` and the `for_n` family: on exclusive pools the work starts at the guard's construction, while on inclusive pools it runs at `join` or destruction.
 
 On Linux, in C++, given the maturity and flexibility of the HPC ecosystem, it provides [NUMA extensions](#non-uniform-memory-access-numa).
 That includes the `linux_colocated_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory on a specific NUMA node.
@@ -530,7 +536,7 @@ search_result_t search(std::span<float, dimensions> query) {
 
 In a dream world, we would call `distributed_pool.for_n`, but there is no clean way to make the scheduling processes aware of the data distribution in an arbitrary application, so that's left to the user.
 The `for_slices` helper provides colocated metadata (`fu::colocated_prong`) that lets you pick the right shard of data based on the NUMA node, while keeping scheduling inside the distributed pool.
-For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls, like `unsafe_for_threads` and `unsafe_join`.
+For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns an always-odd generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
 
 ### Efficient Busy Waiting
 

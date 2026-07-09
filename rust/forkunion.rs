@@ -381,6 +381,7 @@ extern "C" {
     fn fu_pool_delete(pool: *mut c_void);
     fn fu_pool_spawn(pool: *mut c_void, threads: usize, exclusivity: c_int) -> c_int;
     fn fu_pool_terminate(pool: *mut c_void);
+    fn fu_pool_caller_exclusivity(pool: *mut c_void) -> c_int;
     fn fu_pool_count_threads(pool: *mut c_void) -> usize;
     fn fu_pool_count_colocations(pool: *mut c_void) -> usize;
     fn fu_pool_count_threads_in(pool: *mut c_void, colocation_index: usize) -> usize;
@@ -420,8 +421,9 @@ extern "C" {
         pool: *mut c_void,
         callback: extern "C" fn(*mut c_void, usize, usize),
         context: *mut c_void,
-    );
-    fn fu_pool_unsafe_join(pool: *mut c_void);
+    ) -> usize;
+    fn fu_pool_unsafe_join(pool: *mut c_void, generation: usize);
+    fn fu_pool_is_complete(pool: *mut c_void, generation: usize) -> c_int;
     fn fu_pool_sleep(pool: *mut c_void, micros: usize);
 
     // Memory management and NUMA
@@ -556,7 +558,7 @@ pub fn version() -> (usize, usize, usize) {
 /// let mut pool = spawn(4);
 ///
 /// // Execute work on each thread
-/// pool.for_threads(|thread_index, colocation_index| {
+/// pool.for_threads(&|thread_index, colocation_index| {
 ///     println!("Thread {} on colocation {}", thread_index, colocation_index);
 /// });
 ///
@@ -569,6 +571,14 @@ pub fn version() -> (usize, usize, usize) {
 /// ```
 ///
 /// See also helper functions like `for_each_prong_mut` for data processing.
+///
+/// # Generation Tokens
+///
+/// Every dispatch is identified by an always-odd `usize` generation token. The safe
+/// `for_threads` API wraps it inside a [`BroadcastJoin`] guard: on `Exclusive` pools the
+/// work starts at construction and can be polled with `is_complete`; on `Inclusive` pools
+/// it runs at `join`/`Drop`, where the calling thread contributes its own slice. Raw
+/// token-level access is available through the `unsafe_for_threads`/`unsafe_join` pair.
 pub struct ThreadPool {
     inner: *mut c_void,
 }
@@ -617,6 +627,17 @@ impl ThreadPool {
             }
 
             Ok(Self { inner })
+        }
+    }
+
+    /// Returns whether the calling thread participates in the workload.
+    ///
+    /// Queries the pool directly rather than caching, so it stays correct across
+    /// `terminate` and re-spawning with a different exclusivity.
+    pub fn caller_exclusivity(&self) -> CallerExclusivity {
+        match unsafe { fu_pool_caller_exclusivity(self.inner) } {
+            0 => CallerExclusivity::Inclusive,
+            _ => CallerExclusivity::Exclusive,
         }
     }
     /// Creates a new thread pool with the specified number of threads.
@@ -765,14 +786,18 @@ impl ThreadPool {
         }
     }
 
-    /// Executes a function on each thread of the pool, returning a closure object.
+    /// Executes a function on each thread of the pool, returning a [`BroadcastJoin`] guard.
     ///
-    /// This operation provides explicit control over broadcast and join phases,
-    /// allowing you to start work on threads and then wait for completion separately.
+    /// The guard's lifecycle is keyed on the pool's exclusivity:
+    /// - `CallerExclusivity::Exclusive`: the work is dispatched immediately at construction;
+    ///   the caller can overlap its own work, poll `is_complete`, and `join` (or drop) waits.
+    /// - `CallerExclusivity::Inclusive`: the dispatch is deferred to `join` (or drop), where
+    ///   the calling thread contributes its own slice - a deferred blocking call.
     ///
     /// # Arguments
     ///
-    /// * `function` - Closure to execute on each thread, receiving (thread_index, colocation_index)
+    /// * `function` - Closure reference executed on each thread, receiving
+    ///   `(thread_index, colocation_index)`; borrowed for the guard's lifetime.
     ///
     /// # Examples
     ///
@@ -780,23 +805,56 @@ impl ThreadPool {
     /// use forkunion::*;
     ///
     /// let mut pool = spawn(4);
-    ///
-    /// {
-    ///     let _op = pool.for_threads(|thread_index, colocation_index| {
-    ///         println!("Thread {} on colocation {}", thread_index, colocation_index);
-    ///         // Simulate some work
-    ///         for i in 0..1000 {
-    ///             std::hint::black_box(i * thread_index);
-    ///         }
-    ///     });
-    ///     // Work executes when _op is dropped
-    /// }
+    /// pool.for_threads(&|thread_index, colocation_index| {
+    ///     println!("Thread {} on colocation {}", thread_index, colocation_index);
+    /// })
+    /// .join();
     /// ```
-    pub fn for_threads<F>(&mut self, function: F) -> ForThreadsOperation<'_, F>
+    pub fn for_threads<'fork, F>(&mut self, function: &'fork F) -> BroadcastJoin<'_, 'fork, F>
     where
         F: Fn(usize, usize) + Sync,
     {
-        ForThreadsOperation::new(self, function)
+        BroadcastJoin::new(self, function)
+    }
+
+    /// Dispatches `callback` on every thread without blocking, returning the generation token.
+    ///
+    /// This is the raw C-ABI mirror for building custom orchestration; prefer the safe
+    /// [`BroadcastJoin`] guard returned by `for_threads`.
+    ///
+    /// # Safety
+    ///
+    /// - Only one thread may operate the pool at a time, and only one dispatch may be in
+    ///   flight: `unsafe_join` must complete before the next dispatch or pool destruction.
+    /// - `callback` and `context` must remain valid until `unsafe_join` returns.
+    pub unsafe fn unsafe_for_threads(
+        &self,
+        callback: extern "C" fn(*mut c_void, usize, usize),
+        context: *mut c_void,
+    ) -> usize {
+        fu_pool_unsafe_for_threads(self.inner, callback, context)
+    }
+
+    /// Returns true if the given generation has completed on all threads.
+    ///
+    /// A `true` result also guarantees visibility of every contributor's writes. On
+    /// `Inclusive` pools this can only turn `true` once `unsafe_join` contributes the
+    /// calling thread's slice, so the poll-then-join pattern is reserved for
+    /// `Exclusive` pools.
+    pub fn is_complete(&self, generation: usize) -> bool {
+        unsafe { fu_pool_is_complete(self.inner, generation) != 0 }
+    }
+
+    /// Blocks until the given generation completes; idempotent for joined generations.
+    ///
+    /// On `Inclusive` pools this also executes the calling thread's slice of the work.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the thread operating the pool, with the dispatched callback
+    /// and context still valid.
+    pub unsafe fn unsafe_join(&self, generation: usize) {
+        fu_pool_unsafe_join(self.inner, generation)
     }
 
     /// Distributes `n` similar duration calls between threads by individual indices.
@@ -2330,7 +2388,7 @@ impl<T> RoundRobinVec<T> {
         let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        pool.for_threads(move |thread_index, colocation_index| {
+        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
             if colocation_index >= colocations_count {
                 return;
             }
@@ -2349,7 +2407,8 @@ impl<T> RoundRobinVec<T> {
                     *element = value.clone();
                 }
             }
-        });
+        };
+        pool.for_threads(&broadcast_function);
     }
 
     /// Fills all vectors across all NUMA nodes with values generated by calling
@@ -2387,7 +2446,7 @@ impl<T> RoundRobinVec<T> {
         let f_ptr = SafePtr(&mut f as *mut F);
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        pool.for_threads(move |thread_index, colocation_index| {
+        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
             if colocation_index >= colocations_count {
                 return;
             }
@@ -2407,7 +2466,8 @@ impl<T> RoundRobinVec<T> {
                     *element = f_ref();
                 }
             }
-        });
+        };
+        pool.for_threads(&broadcast_function);
     }
 
     /// Clears all vectors across all NUMA nodes, using the thread pool for parallel execution.
@@ -2420,7 +2480,7 @@ impl<T> RoundRobinVec<T> {
         let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        pool.for_threads(move |thread_index, colocation_index| {
+        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
             if colocation_index >= colocations_count {
                 return;
             }
@@ -2440,7 +2500,8 @@ impl<T> RoundRobinVec<T> {
                     core::ptr::drop_in_place(ptr.add(idx));
                 }
             }
-        });
+        };
+        pool.for_threads(&broadcast_function);
 
         // Reset lengths of individual vectors after parallel dropping
         for i in 0..self.colocations.len() {
@@ -2501,7 +2562,7 @@ impl<T> RoundRobinVec<T> {
         let safe_ptr = SafePtr(self.colocations.as_mut_ptr());
         let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
 
-        pool.for_threads(move |thread_index, colocation_index| {
+        let broadcast_function = move |thread_index: usize, colocation_index: usize| {
             if colocation_index >= colocations_count {
                 return;
             }
@@ -2542,7 +2603,8 @@ impl<T> RoundRobinVec<T> {
                     }
                 }
             }
-        });
+        };
+        pool.for_threads(&broadcast_function);
 
         // Step 3: Update lengths after parallel operations
         for i in 0..colocations_count {
@@ -4034,70 +4096,101 @@ pub mod prelude {
     };
 }
 
-/// Operation object for parallel thread execution with explicit broadcast/join control.
-pub struct ForThreadsOperation<'a, F>
+/// A synchronization guard that waits for all threads to finish the broadcasted closure.
+///
+/// The lifecycle is keyed on the pool's exclusivity:
+/// - On `CallerExclusivity::Exclusive` pools the closure is dispatched at **construction**:
+///   the workers start immediately, the caller can overlap its own work, poll
+///   `is_complete`, and `join` (or `Drop`) waits for completion.
+/// - On `CallerExclusivity::Inclusive` pools the dispatch is deferred to **join** (or
+///   `Drop`), where the calling thread contributes its own slice of the work.
+///
+/// The closure is borrowed rather than owned, so its address stays stable while worker
+/// threads hold a pointer to it, and the guard itself remains freely movable.
+pub struct BroadcastJoin<'pool, 'fork, F>
 where
     F: Fn(usize, usize) + Sync,
 {
-    pool: &'a mut ThreadPool,
-    function: F,
-    did_broadcast: bool,
+    pool: &'pool mut ThreadPool,
+    function: &'fork F,
+    generation: Option<usize>, // ? Real tokens are odd; `None` means "not yet dispatched"
     did_join: bool,
 }
 
-impl<'a, F> ForThreadsOperation<'a, F>
+impl<'pool, 'fork, F> BroadcastJoin<'pool, 'fork, F>
 where
     F: Fn(usize, usize) + Sync,
 {
-    /// Create a new ForThreadsOperation (internal use by ThreadPool)
-    pub(crate) fn new(pool: &'a mut ThreadPool, function: F) -> Self {
-        Self {
+    /// Create a new BroadcastJoin (internal use by ThreadPool)
+    pub(crate) fn new(pool: &'pool mut ThreadPool, function: &'fork F) -> Self {
+        let mut operation = Self {
             pool,
             function,
-            did_broadcast: false,
+            generation: None,
             did_join: false,
+        };
+        if operation.pool.caller_exclusivity() == CallerExclusivity::Exclusive {
+            operation.dispatch();
         }
+        operation
     }
 
-    /// Broadcast the work to all threads without waiting for completion.
-    /// This is safe to call multiple times - subsequent calls are no-ops.
-    pub fn broadcast(&mut self) {
-        if self.did_broadcast {
-            return; // No need to broadcast again
+    fn dispatch(&mut self) {
+        if self.generation.is_some() {
+            return; // No need to dispatch again
         }
 
-        extern "C" fn trampoline<F>(ctx: *mut c_void, thread_index: usize, colocation_index: usize)
-        where
+        extern "C" fn trampoline<F>(
+            context: *mut c_void,
+            thread_index: usize,
+            colocation_index: usize,
+        ) where
             F: Fn(usize, usize) + Sync,
         {
-            let f = unsafe { &*(ctx as *const F) };
-            f(thread_index, colocation_index);
+            let function = unsafe { &*(context as *const F) };
+            function(thread_index, colocation_index);
         }
 
         unsafe {
-            let ctx = &self.function as *const F as *mut c_void;
-            fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, ctx);
-            self.did_broadcast = true;
+            let context = self.function as *const F as *mut c_void;
+            let generation = fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, context);
+            self.generation = Some(generation);
+        }
+    }
+
+    /// The generation token of this broadcast; always odd once dispatched.
+    pub fn generation(&self) -> Option<usize> {
+        self.generation
+    }
+
+    /// True once the dispatched generation has fully completed on all threads.
+    ///
+    /// A `true` result also guarantees visibility of every contributor's writes. On
+    /// `Inclusive` pools this can only turn `true` once `join` contributes the calling
+    /// thread's slice, so the poll-then-join pattern is reserved for `Exclusive` pools.
+    pub fn is_complete(&self) -> bool {
+        match self.generation {
+            Some(generation) => unsafe { fu_pool_is_complete(self.pool.inner, generation) != 0 },
+            None => false,
         }
     }
 
     /// Wait for all threads to complete their work.
-    /// If broadcast() hasn't been called yet, this will call it first.
+    /// On `Inclusive` pools this dispatches the work first and contributes the caller's slice.
+    /// Idempotent - subsequent calls are no-ops.
     pub fn join(&mut self) {
-        if !self.did_broadcast {
-            self.broadcast();
-        }
+        self.dispatch();
         if self.did_join {
             return; // No need to join again
         }
         unsafe {
-            fu_pool_unsafe_join(self.pool.inner);
-            self.did_join = true;
+            fu_pool_unsafe_join(self.pool.inner, self.generation.unwrap());
         }
+        self.did_join = true;
     }
 }
 
-impl<'a, F> Drop for ForThreadsOperation<'a, F>
+impl<F> Drop for BroadcastJoin<'_, '_, F>
 where
     F: Fn(usize, usize) + Sync,
 {
@@ -4338,8 +4431,6 @@ mod tests {
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::thread;
-    use std::time::Duration;
     use std::vec;
     use std::vec::Vec;
 
@@ -4374,6 +4465,21 @@ mod tests {
     }
 
     #[test]
+    fn caller_exclusivity_query() {
+        // The pool is the single source of truth, queried live (not cached).
+        let inclusive =
+            ThreadPool::try_spawn_with_exclusivity(2, CallerExclusivity::Inclusive).unwrap();
+        assert_eq!(inclusive.caller_exclusivity(), CallerExclusivity::Inclusive);
+
+        let exclusive =
+            ThreadPool::try_spawn_with_exclusivity(2, CallerExclusivity::Exclusive).unwrap();
+        assert_eq!(exclusive.caller_exclusivity(), CallerExclusivity::Exclusive);
+
+        // The default `spawn` is inclusive
+        assert_eq!(spawn(2).caller_exclusivity(), CallerExclusivity::Inclusive);
+    }
+
+    #[test]
     fn for_threads_dispatch() {
         let count_threads = hw_threads();
         let mut pool = spawn(count_threads);
@@ -4383,11 +4489,12 @@ mod tests {
         let visited_ref = Arc::clone(&visited);
 
         {
-            let _op = pool.for_threads(move |thread_index, _colocation| {
+            let broadcast_function = move |thread_index: usize, _colocation: usize| {
                 if thread_index < visited_ref.len() {
                     visited_ref[thread_index].store(true, Ordering::Relaxed);
                 }
-            });
+            };
+            let _operation = pool.for_threads(&broadcast_function);
         } // Operation executes in destructor
 
         for (i, flag) in visited.iter().enumerate() {
@@ -4491,39 +4598,61 @@ mod tests {
     }
 
     #[test]
-    fn explicit_broadcast_join() {
-        let mut pool = spawn(4);
+    fn guard_lifecycle_exclusive() {
+        // On exclusive pools the work is dispatched at guard construction:
+        // the caller can overlap its own work and poll `is_complete`.
+        let mut pool = ThreadPool::try_spawn_with_exclusivity(4, CallerExclusivity::Exclusive)
+            .expect("Failed to create exclusive thread pool");
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
-        let mut operation = pool.for_threads(move |_thread_index, _colocation| {
+        let broadcast_function = move |_thread_index: usize, _colocation: usize| {
             counter_ref.fetch_add(1, Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(10)); // Simulate work
-        });
+        };
+        let mut operation = pool.for_threads(&broadcast_function);
+        assert!(
+            operation.generation().is_some(),
+            "Exclusive pools dispatch at construction"
+        );
+        assert_eq!(
+            operation.generation().unwrap() & 1,
+            1,
+            "Generation tokens are always odd"
+        );
 
-        // Broadcast work to threads but don't wait yet
-        operation.broadcast();
-
-        // Do some other work while threads are running
-        thread::sleep(Duration::from_millis(5));
-
-        // Now wait for completion
+        // Poll until the workers are done, then join
+        while !operation.is_complete() {
+            core::hint::spin_loop();
+        }
         operation.join();
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 
     #[test]
-    fn join_without_explicit_broadcast() {
+    fn guard_lifecycle_inclusive() {
+        // On inclusive pools the dispatch is deferred to `join`, where the
+        // calling thread contributes its own slice.
         let mut pool = spawn(4);
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
-        let mut operation = pool.for_threads(move |_thread_index, _colocation| {
+        let broadcast_function = move |_thread_index: usize, _colocation: usize| {
             counter_ref.fetch_add(1, Ordering::Relaxed);
-        });
+        };
+        let mut operation = pool.for_threads(&broadcast_function);
+        assert!(
+            operation.generation().is_none(),
+            "Inclusive pools defer dispatch to join"
+        );
+        assert!(!operation.is_complete());
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "No work must start before join"
+        );
 
-        // Join without calling broadcast first - should work
         operation.join();
+        assert!(operation.is_complete());
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 
@@ -5264,5 +5393,92 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err >= 500 && err < 1000);
+    }
+
+    #[test]
+    fn generation_multi_pool_polling() {
+        // Polling before join is the caller-exclusive pattern: on inclusive pools the
+        // caller owes a slice that only runs inside `join`, so `is_complete` stays false.
+        let count_threads = hw_threads();
+        let mut pool_a =
+            ThreadPool::try_spawn_with_exclusivity(count_threads, CallerExclusivity::Exclusive)
+                .expect("Failed to create pool_a");
+        let mut pool_b =
+            ThreadPool::try_spawn_with_exclusivity(count_threads, CallerExclusivity::Exclusive)
+                .expect("Failed to create pool_b");
+
+        let visited_a: Vec<AtomicBool> =
+            (0..count_threads).map(|_| AtomicBool::new(false)).collect();
+        let visited_b: Vec<AtomicBool> =
+            (0..count_threads).map(|_| AtomicBool::new(false)).collect();
+
+        let work_a = |thread_index: usize, _colocation: usize| {
+            visited_a[thread_index].store(true, Ordering::Relaxed);
+        };
+        let work_b = |thread_index: usize, _colocation: usize| {
+            visited_b[thread_index].store(true, Ordering::Relaxed);
+        };
+
+        // Both guards dispatch at construction on exclusive pools - no explicit broadcast
+        let operation_a = pool_a.for_threads(&work_a);
+        let operation_b = pool_b.for_threads(&work_b);
+
+        // Poll both pools until complete
+        let mut a_done = false;
+        let mut b_done = false;
+        while !a_done || !b_done {
+            if !a_done {
+                a_done = operation_a.is_complete();
+            }
+            if !b_done {
+                b_done = operation_b.is_complete();
+            }
+        }
+
+        drop(operation_a); // Drop joins
+        drop(operation_b);
+
+        for i in 0..count_threads {
+            assert!(
+                visited_a[i].load(Ordering::Relaxed),
+                "Thread {i} in pool_a not visited"
+            );
+            assert!(
+                visited_b[i].load(Ordering::Relaxed),
+                "Thread {i} in pool_b not visited"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_raw_unsafe_api() {
+        // The raw C-ABI mirror: an `unsafe_for_threads` dispatch returning an odd token,
+        // polled with the safe `is_complete`, and joined with `unsafe_join`.
+        let count_threads = hw_threads();
+        let pool =
+            ThreadPool::try_spawn_with_exclusivity(count_threads, CallerExclusivity::Exclusive)
+                .expect("Failed to create exclusive thread pool");
+
+        let counter = AtomicUsize::new(0);
+
+        extern "C" fn trampoline(
+            context: *mut c_void,
+            _thread_index: usize,
+            _colocation_index: usize,
+        ) {
+            let counter = unsafe { &*(context as *const AtomicUsize) };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let generation = unsafe {
+            pool.unsafe_for_threads(trampoline, &counter as *const AtomicUsize as *mut c_void)
+        };
+        assert_eq!(generation & 1, 1, "Generation tokens are always odd");
+
+        while !pool.is_complete(generation) {
+            core::hint::spin_loop();
+        }
+        unsafe { pool.unsafe_join(generation) };
+        assert_eq!(counter.load(Ordering::Relaxed), count_threads);
     }
 }

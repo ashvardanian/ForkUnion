@@ -71,6 +71,66 @@ static bool test_for_threads(void) {
     return result;
 }
 
+static bool test_caller_exclusivity_query(void) {
+    fu_pool_t *pool = fu_pool_new("test_exclusivity");
+    if (!pool) return false;
+
+    size_t threads = fu_count_logical_cores();
+    if (threads == 0) threads = 4;
+
+    /* The pool is the single source of truth, even after a re-spawn with a different mode. */
+    bool result = true;
+    if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) result = false;
+    else if (fu_pool_caller_exclusivity(pool) != fu_caller_inclusive_k)
+        result = false;
+    else {
+        fu_pool_terminate(pool);
+        if (!fu_pool_spawn(pool, threads, fu_caller_exclusive_k)) result = false;
+        else if (fu_pool_caller_exclusivity(pool) != fu_caller_exclusive_k)
+            result = false;
+    }
+
+    fu_pool_delete(pool);
+    return result;
+}
+
+static bool test_generation_polling(void) {
+    fu_pool_t *pool = fu_pool_new("test_generation");
+    if (!pool) return false;
+
+    size_t threads = fu_count_logical_cores();
+    if (threads == 0) threads = 4;
+
+    /* Polling before join is the caller-exclusive pattern: no caller slice is owed. */
+    if (!fu_pool_spawn(pool, threads, fu_caller_exclusive_k)) {
+        fu_pool_delete(pool);
+        return false;
+    }
+
+    size_t threads_count = fu_pool_count_threads(pool);
+    atomic_bool *visited = calloc(threads_count, sizeof(atomic_bool));
+    struct for_threads_context context = {.visited = visited};
+
+    fu_generation_t generation = fu_pool_unsafe_for_threads(pool, for_threads_callback, &context);
+
+    bool result = true;
+    if ((generation & 1u) == 0) result = false; /* Tokens are always odd */
+    else {
+        while (!fu_pool_is_complete(pool, generation)) { /* Spin until the workers finish */
+        }
+        fu_pool_unsafe_join(pool, generation);
+        for (size_t i = 0; i < threads_count; ++i)
+            if (!atomic_load(&visited[i])) {
+                result = false;
+                break;
+            }
+    }
+
+    free(visited);
+    fu_pool_delete(pool);
+    return result;
+}
+
 /* Context for uncomfortable input size test */
 struct uncomfortable_context {
     size_t input_size;
@@ -372,7 +432,9 @@ int main(void) {
     } const unit_tests[] = {
         {"`try_spawn` zero threads", test_try_spawn_zero},
         {"`try_spawn` normal", test_try_spawn_success},
+        {"`caller_exclusivity` query", test_caller_exclusivity_query},
         {"`for_threads` dispatch", test_for_threads},
+        {"`generation` polling", test_generation_polling},
         {"`for_n` for uncomfortable input size", test_uncomfortable_input_size},
         {"`for_n` static scheduling", test_for_n},
         {"`for_n_dynamic` dynamic scheduling", test_for_n_dynamic},

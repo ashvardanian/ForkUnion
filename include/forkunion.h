@@ -434,6 +434,22 @@ void fu_pool_sleep(fu_pool_t *pool, size_t micros);
 void fu_pool_terminate(fu_pool_t *pool);
 
 /**
+ *  @brief Returns whether the calling thread participates in task execution.
+ *  @param[in] pool Thread pool handle, must not be NULL and initialized.
+ *  @retval `fu_caller_inclusive_k` if the calling thread contributes a slice of the work.
+ *  @retval `fu_caller_exclusive_k` if the calling thread only coordinates.
+ *  @note This API is @b not synchronized.
+ *
+ *  This reflects the exclusivity passed to the most recent `fu_pool_spawn` - the pool
+ *  itself is the single source of truth, so this stays correct across `fu_pool_terminate`
+ *  and re-spawning with a different mode. It also determines the completion contract:
+ *  on `fu_caller_inclusive_k` pools the caller owes a slice that only runs inside
+ *  `fu_pool_unsafe_join`, so `fu_pool_is_complete` cannot be reached by polling alone.
+ *  @sa `fu_pool_spawn` for setting the mode, `fu_pool_is_complete` for the polling contract.
+ */
+fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t *pool);
+
+/**
  *  @brief Returns the number of distinct thread colocations in the pool.
  *  @param[in] pool Thread pool handle, must not be NULL.
  *  @retval 0 if the pool is not initialized.
@@ -639,13 +655,22 @@ void fu_pool_for_slices(fu_pool_t *pool, size_t n, fu_for_slices_t callback, fu_
 
 #pragma endregion - Primary API
 
-#pragma region - Unsafe API
+#pragma region - Flexible API
+
+/**
+ *  @brief Token identifying one dispatch on one pool; always an @b odd number.
+ *
+ *  Every generation advances the pool's internal epoch by exactly two: once at dispatch
+ *  and once when the last contributor finishes. Odd epochs are in-flight, even are idle.
+ */
+typedef size_t fu_generation_t;
 
 /**
  *  @brief Executes a callback in parallel on all threads without blocking.
  *  @param[in] pool Thread pool handle, must not be NULL and initialized.
  *  @param[in] callback Function to execute on each thread, must not be NULL.
  *  @param[in] context User-defined context passed to the callback, may be NULL.
+ *  @return A generation token identifying this dispatch, to pass to `fu_pool_unsafe_join`.
  *  @note This API returns immediately without waiting for completion.
  *
  *  This is the non-blocking variant of `fu_pool_for_threads`. The function
@@ -660,50 +685,56 @@ void fu_pool_for_slices(fu_pool_t *pool, size_t n, fu_for_slices_t callback, fu_
  *  - Must ensure callback and context remain valid until join completes
  *  - Cannot call other pool operations until current operation finishes
  *
- *  The "unsafe" designation indicates:
- *  - No automatic lifetime management of callback/context
- *  - No protection against concurrent pool operations
- *  - Manual synchronization responsibility
+ *  On `fu_caller_inclusive_k` pools the calling thread owes one slice of the work,
+ *  which only runs inside `fu_pool_unsafe_join` - so the pool can't reach completion
+ *  until the caller joins.
  *
  *  @code{.c}
- *  fu_pool_unsafe_for_threads(pool, my_callback, my_context);  // Start parallel work
- *  prepare_next_batch();                                       // Do other work while tasks execute
- *  fu_pool_unsafe_join(pool);                                  // Wait for completion before proceeding
+ *  fu_generation_t generation = fu_pool_unsafe_for_threads(pool, my_callback, my_context);
+ *  prepare_next_batch();
+ *  fu_pool_unsafe_join(pool, generation);
  *  @endcode
  *  @sa `fu_pool_unsafe_join` for synchronization, `fu_pool_for_threads` for blocking variant.
  */
-void fu_pool_unsafe_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_context_t context);
+fu_generation_t fu_pool_unsafe_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_context_t context);
 
 /**
- *  @brief Blocks the calling thread until the current parallel operation completes.
+ *  @brief Returns whether the given generation has completed.
  *  @param[in] pool Thread pool handle, must not be NULL and initialized.
- *  @note This API must be called after the `fu_pool_unsafe_for_threads` operation.
+ *  @param[in] generation The generation token returned by `fu_pool_unsafe_for_threads`.
+ *  @return Non-zero if complete, zero if threads are still working.
+ *  @note This is a non-blocking check that can be used for polling.
+ *
+ *  A non-zero result also guarantees the visibility of every contributor's writes.
+ *  On `fu_caller_inclusive_k` pools this can only turn non-zero once `fu_pool_unsafe_join`
+ *  contributes the calling thread's slice: the poll-then-join pattern below is reserved
+ *  for `fu_caller_exclusive_k` pools.
+ */
+fu_bool_t fu_pool_is_complete(fu_pool_t *pool, fu_generation_t generation);
+
+/**
+ *  @brief Blocks the calling thread until the given generation completes.
+ *  @param[in] pool Thread pool handle, must not be NULL and initialized.
+ *  @param[in] generation The generation token returned by `fu_pool_unsafe_for_threads`.
  *
  *  This function provides the synchronization point for all non-blocking pool
  *  operations. It ensures that:
- *  - All worker threads complete their current tasks
+ *  - All contributors complete their slices, including the calling thread's own
+ *    slice on `fu_caller_inclusive_k` pools, which is executed here
  *  - Memory writes from worker threads are visible to the calling thread
  *  - The pool is ready for the next operation
  *
- *  Synchronization behavior:
- *  - If `fu_caller_inclusive_k` was used: executes the calling thread's portion first
- *  - Waits for all worker threads using efficient busy-waiting
- *  - Provides full memory synchronization (acquire-release semantics)
- *
- *  This function is mandatory after any `unsafe_` operation and before:
- *  - Starting a new parallel operation
- *  - Calling `fu_pool_terminate` or `fu_pool_delete`
- *  - Accessing results produced by the parallel operation
+ *  The call is idempotent: joining an already-joined or stale generation returns
+ *  immediately.
  *
  *  @code{.c}
- *  fu_pool_unsafe_for_n(pool, count, process_data, context);
- *  setup_next_iteration(void);
- *  fu_pool_unsafe_join(pool);
- *  use_processed_data(void);
+ *  fu_generation_t generation = fu_pool_unsafe_for_threads(pool, my_callback, my_context);
+ *  while (!fu_pool_is_complete(pool, generation)) { do_other_work(); } // ! Exclusive pools only
+ *  fu_pool_unsafe_join(pool, generation);
  *  @endcode
  *  @sa `fu_pool_unsafe_for_threads` for the entry point, `fu_pool_for_threads` for blocking execution.
  */
-void fu_pool_unsafe_join(fu_pool_t *pool);
+void fu_pool_unsafe_join(fu_pool_t *pool, fu_generation_t generation);
 
 #pragma endregion - Flexible API
 

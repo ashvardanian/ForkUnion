@@ -49,6 +49,7 @@ const c = struct {
     extern fn fu_pool_delete(pool: *anyopaque) void;
     extern fn fu_pool_spawn(pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
     extern fn fu_pool_terminate(pool: *anyopaque) void;
+    extern fn fu_pool_caller_exclusivity(pool: *anyopaque) c_int;
     extern fn fu_pool_count_threads(pool: *anyopaque) usize;
     extern fn fu_pool_count_colocations(pool: *anyopaque) usize;
     extern fn fu_pool_count_threads_in(pool: *anyopaque, colocation_index: usize) usize;
@@ -82,8 +83,9 @@ const c = struct {
         pool: *anyopaque,
         callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
         context: ?*anyopaque,
-    ) void;
-    extern fn fu_pool_unsafe_join(pool: *anyopaque) void;
+    ) usize;
+    extern fn fu_pool_is_complete(pool: *anyopaque, generation: usize) c_int;
+    extern fn fu_pool_unsafe_join(pool: *anyopaque, generation: usize) void;
     extern fn fu_pool_sleep(pool: *anyopaque, micros: usize) void;
 
     extern fn fu_allocate_at_least(
@@ -396,6 +398,14 @@ pub const Pool = struct {
         return c.fu_pool_count_threads(self.handle);
     }
 
+    /// Returns whether the calling thread participates in the workload.
+    ///
+    /// Queries the pool directly rather than caching, so it stays correct across
+    /// `terminate` and re-spawning with a different exclusivity.
+    pub fn callerExclusivity(self: *const Pool) CallerExclusivity {
+        return @enumFromInt(c.fu_pool_caller_exclusivity(self.handle));
+    }
+
     /// Returns the number of colocations in the pool
     pub fn colocations(self: *const Pool) usize {
         return c.fu_pool_count_colocations(self.handle);
@@ -422,20 +432,43 @@ pub const Pool = struct {
     }
 
     /// Executes a callback on all threads (blocking)
-    /// Note: context parameter exists for API uniformity but is not passed to the callback
+    ///
+    /// The callback function signature must match the context type:
+    /// - If context is `void`: `fn(usize, usize) void`
+    /// - If context is type `T`: `fn(usize, usize, T) void`
     pub fn forThreads(
         self: *const Pool,
-        comptime func: fn (usize, usize) void,
+        comptime func: anytype,
         context: anytype,
     ) void {
-        _ = context; // Not used - kept for API consistency with forN/forNDynamic/forSlices
-        const Wrapper = struct {
-            fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
-                func(thread_idx, colocation_idx);
-            }
-        };
+        const Context = @TypeOf(context);
 
-        c.fu_pool_for_threads(self.handle, Wrapper.callback, null);
+        // Validate function signature at compile time
+        const expected_type = if (Context == void)
+            fn (usize, usize) void
+        else
+            fn (usize, usize, Context) void;
+
+        if (@TypeOf(func) != expected_type) {
+            @compileError("Function signature must be: " ++ @typeName(expected_type));
+        }
+
+        if (Context == void) {
+            const Wrapper = struct {
+                fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
+                    func(thread_idx, colocation_idx);
+                }
+            };
+            c.fu_pool_for_threads(self.handle, Wrapper.callback, null);
+        } else {
+            const Wrapper = struct {
+                fn callback(ctx: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
+                    const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
+                    func(thread_idx, colocation_idx, typed_ctx.*);
+                }
+            };
+            c.fu_pool_for_threads(self.handle, Wrapper.callback, @ptrCast(@constCast(&context)));
+        }
     }
 
     /// Distributes N tasks across threads with static scheduling (blocking)
@@ -475,7 +508,7 @@ pub const Pool = struct {
                         .thread_index = thread_idx,
                         .colocation_index = colocation_idx,
                     };
-                    func(prong, {});
+                    func(prong);
                 }
             };
             c.fu_pool_for_n(self.handle, n, Wrapper.callback, null);
@@ -539,7 +572,7 @@ pub const Pool = struct {
                         .thread_index = thread_idx,
                         .colocation_index = colocation_idx,
                     };
-                    func(prong, {});
+                    func(prong);
                 }
             };
             c.fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, null);
@@ -634,25 +667,72 @@ pub const Pool = struct {
         }
     }
 
-    /// Executes callback on all threads without blocking (unsafe)
+    /// Executes callback on all threads without blocking (unsafe).
+    /// Returns an always-odd generation token to pass to `isComplete` or `unsafeJoin`.
+    ///
+    /// The callback function signature must match the context type:
+    /// - If context is `void`: `fn(usize, usize) void`
+    /// - Otherwise context must be a pointer (like `*const T`), received as-is:
+    ///   `fn(usize, usize, @TypeOf(context)) void`
+    ///
+    /// Unlike the blocking `forThreads`, this call returns while worker threads may
+    /// still be running, so the context can't be copied into this stack frame: it must
+    /// be a caller-owned pointer whose pointee outlives `unsafeJoin`.
     pub fn unsafeForThreads(
         self: *const Pool,
-        comptime func: fn (usize, usize) void,
+        comptime func: anytype,
         context: anytype,
-    ) void {
-        _ = context; // Not used - kept for API consistency
-        const Wrapper = struct {
-            fn callback(_: ?*anyopaque, thread_idx: usize, colocation_idx: usize) callconv(.c) void {
-                func(thread_idx, colocation_idx);
-            }
-        };
+    ) usize {
+        const Context = @TypeOf(context);
 
-        c.fu_pool_unsafe_for_threads(self.handle, Wrapper.callback, null);
+        if (Context == void) {
+            // Validate function signature at compile time
+            const expected_type = fn (usize, usize) void;
+            if (@TypeOf(func) != expected_type) {
+                @compileError("Function signature must be: " ++ @typeName(expected_type));
+            }
+            const Wrapper = struct {
+                fn callback(_: ?*anyopaque, thread_index: usize, colocation_index: usize) callconv(.c) void {
+                    func(thread_index, colocation_index);
+                }
+            };
+            return c.fu_pool_unsafe_for_threads(self.handle, Wrapper.callback, null);
+        } else {
+            // The dispatch returns before the workers finish, so a by-value context
+            // would dangle - require a caller-owned pointer instead.
+            if (@typeInfo(Context) != .pointer)
+                @compileError("Non-blocking dispatch requires a pointer context (like `&my_context`) " ++
+                    "whose pointee outlives `unsafeJoin`; got: " ++ @typeName(Context));
+
+            // Validate function signature at compile time
+            const expected_type = fn (usize, usize, Context) void;
+            if (@TypeOf(func) != expected_type) {
+                @compileError("Function signature must be: " ++ @typeName(expected_type));
+            }
+            const Wrapper = struct {
+                fn callback(erased_context: ?*anyopaque, thread_index: usize, colocation_index: usize) callconv(.c) void {
+                    const typed_context: Context = @ptrCast(@alignCast(erased_context));
+                    func(thread_index, colocation_index, typed_context);
+                }
+            };
+            return c.fu_pool_unsafe_for_threads(self.handle, Wrapper.callback, @ptrCast(@constCast(context)));
+        }
     }
 
-    /// Blocks until current parallel operation completes (unsafe)
-    pub fn unsafeJoin(self: *const Pool) void {
-        c.fu_pool_unsafe_join(self.handle);
+    /// Returns true if the given generation has completed.
+    ///
+    /// A `true` result also guarantees visibility of every contributor's writes. On
+    /// caller-inclusive pools this can only turn `true` once `unsafeJoin` contributes
+    /// the calling thread's slice, so poll-then-join is reserved for exclusive pools.
+    pub fn isComplete(self: *const Pool, generation: usize) bool {
+        return c.fu_pool_is_complete(self.handle, generation) != 0;
+    }
+
+    /// Blocks until the given generation completes (unsafe).
+    /// On caller-inclusive pools this also executes the calling thread's slice.
+    /// Idempotent: joining an already-joined generation returns immediately.
+    pub fn unsafeJoin(self: *const Pool, generation: usize) void {
+        c.fu_pool_unsafe_join(self.handle, generation);
     }
 };
 
@@ -679,7 +759,7 @@ test "system metadata" {
     try std.testing.expect(cores > 0);
 
     const numa = countNumaNodes();
-    try std.testing.expect(numa >= 0);
+    try std.testing.expect(numa > 0);
 
     const colocs = countColocations();
     try std.testing.expect(colocs > 0);
@@ -690,7 +770,19 @@ test "pool creation and destruction" {
     var pool = try Pool.init(2, .inclusive);
     defer pool.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), pool.threads());
+    try std.testing.expectEqual(2, pool.threads());
+}
+
+test "caller exclusivity query" {
+    std.debug.print("Running test: caller exclusivity query\n", .{});
+    // The pool is the single source of truth, queried live (not cached).
+    var inclusive = try Pool.init(2, .inclusive);
+    defer inclusive.deinit();
+    try std.testing.expectEqual(CallerExclusivity.inclusive, inclusive.callerExclusivity());
+
+    var exclusive = try Pool.init(2, .exclusive);
+    defer exclusive.deinit();
+    try std.testing.expectEqual(CallerExclusivity.exclusive, exclusive.callerExclusivity());
 }
 
 test "named pool creation" {
@@ -698,7 +790,7 @@ test "named pool creation" {
     var pool = try Pool.initNamed(null, 2, .inclusive);
     defer pool.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), pool.threads());
+    try std.testing.expectEqual(2, pool.threads());
 }
 
 test "for_threads execution" {
@@ -706,27 +798,24 @@ test "for_threads execution" {
     var pool = try Pool.init(4, .inclusive);
     defer pool.deinit();
 
-    const State = struct {
-        var visited: [4]std.atomic.Value(bool) = [_]std.atomic.Value(bool){
-            std.atomic.Value(bool).init(false),
-            std.atomic.Value(bool).init(false),
-            std.atomic.Value(bool).init(false),
-            std.atomic.Value(bool).init(false),
-        };
+    var visited = [_]std.atomic.Value(bool){std.atomic.Value(bool).init(false)} ** 4;
 
-        fn worker(thread_idx: usize, colocation_idx: usize) void {
-            _ = colocation_idx;
-            if (thread_idx < 4) {
-                visited[thread_idx].store(true, .release);
-            }
-        }
+    const Context = struct {
+        visited_ptr: *[4]std.atomic.Value(bool),
     };
 
-    pool.forThreads(State.worker, {});
+    pool.forThreads(struct {
+        fn worker(thread_idx: usize, colocation_idx: usize, ctx: Context) void {
+            _ = colocation_idx;
+            if (thread_idx < 4) {
+                ctx.visited_ptr[thread_idx].store(true, .release);
+            }
+        }
+    }.worker, Context{ .visited_ptr = &visited });
 
     // Verify all threads executed
     for (0..4) |i| {
-        try std.testing.expect(State.visited[i].load(.acquire));
+        try std.testing.expect(visited[i].load(.acquire));
     }
 }
 
@@ -771,7 +860,7 @@ test "for_n_dynamic work stealing" {
         }
     }.worker, Context{ .counter_ptr = &counter });
 
-    try std.testing.expectEqual(@as(usize, 100), counter.load(.acquire));
+    try std.testing.expectEqual(100, counter.load(.acquire));
 }
 
 test "for_slices execution" {
@@ -800,7 +889,7 @@ test "for_slices execution" {
     }.worker, Context{ .data_ptr = &data, .total_ptr = &total });
 
     // Verify all elements were processed
-    try std.testing.expectEqual(@as(usize, 1000), total.load(.acquire));
+    try std.testing.expectEqual(1000, total.load(.acquire));
     for (0..1000) |i| {
         try std.testing.expectEqual(@as(i32, @intCast(i)), data[i]);
     }
@@ -814,7 +903,7 @@ test "NUMA allocation" {
     defer allocation.free();
 
     try std.testing.expect(allocation.allocated_bytes >= 1024);
-    try std.testing.expectEqual(@as(usize, 0), allocation.numa_node);
+    try std.testing.expectEqual(0, allocation.numa_node);
 
     // Write to memory to ensure it's usable
     const slice = allocation.asSlice();
@@ -833,22 +922,108 @@ test "NUMA allocator integrates with std collections" {
     var list = try std.ArrayList(u64).initCapacity(allocator, 0);
     defer list.deinit(allocator);
     try list.appendSlice(allocator, &[_]u64{ 1, 2, 3, 4, 5 });
-    try std.testing.expectEqual(@as(usize, 5), list.items.len);
-    try std.testing.expectEqual(@as(u64, 3), list.items[2]);
+    try std.testing.expectEqual(5, list.items.len);
+    try std.testing.expectEqual(3, list.items[2]);
 
     var map = std.AutoHashMap(u32, u32).init(allocator);
     defer map.deinit();
     try map.put(10, 100);
     try map.put(20, 200);
     try map.put(30, 300);
-    try std.testing.expectEqual(@as(usize, 3), map.count());
-    try std.testing.expectEqual(@as(u32, 200), map.get(20).?);
+    try std.testing.expectEqual(3, map.count());
+    try std.testing.expectEqual(200, map.get(20).?);
 
     var buf = try allocator.alloc(u8, 128);
     defer allocator.free(buf);
     @memset(buf, 0xAB);
 
     buf = try allocator.realloc(buf, 512);
-    try std.testing.expectEqual(@as(usize, 512), buf.len);
-    try std.testing.expectEqual(@as(u8, 0xAB), buf[0]);
+    try std.testing.expectEqual(512, buf.len);
+    try std.testing.expectEqual(0xAB, buf[0]);
+}
+
+test "for_n void context" {
+    std.debug.print("Running test: for_n void context\n", .{});
+    var pool = try Pool.init(4, .inclusive);
+    defer pool.deinit();
+
+    var counter = std.atomic.Value(usize).init(0);
+
+    // Use a wrapper struct to capture the pointer via comptime closure
+    const S = struct {
+        var counter_ptr: *std.atomic.Value(usize) = undefined;
+        fn worker(prong: Prong) void {
+            _ = prong;
+            _ = counter_ptr.fetchAdd(1, .monotonic);
+        }
+    };
+    S.counter_ptr = &counter;
+
+    pool.forN(50, S.worker, {});
+
+    try std.testing.expectEqual(50, counter.load(.acquire));
+}
+
+test "unsafe_for_threads and join" {
+    std.debug.print("Running test: unsafe_for_threads and join\n", .{});
+    var pool = try Pool.init(4, .inclusive);
+    defer pool.deinit();
+
+    var counter = std.atomic.Value(usize).init(0);
+
+    const Context = struct {
+        counter_ptr: *std.atomic.Value(usize),
+    };
+
+    // The context must be a caller-owned pointer: the dispatch returns while
+    // worker threads are still reading through it, until `unsafeJoin` completes.
+    const context = Context{ .counter_ptr = &counter };
+    const generation = pool.unsafeForThreads(struct {
+        fn worker(thread_index: usize, colocation_index: usize, worker_context: *const Context) void {
+            _ = thread_index;
+            _ = colocation_index;
+            _ = worker_context.counter_ptr.fetchAdd(1, .monotonic);
+        }
+    }.worker, &context);
+
+    // Generation tokens are always odd
+    try std.testing.expect(generation & 1 == 1);
+    pool.unsafeJoin(generation);
+
+    // After join, isComplete must be true
+    try std.testing.expect(pool.isComplete(generation));
+
+    // All 4 threads should have executed, the caller included
+    try std.testing.expectEqual(4, counter.load(.acquire));
+}
+
+test "generation polling on exclusive pool" {
+    std.debug.print("Running test: generation polling on exclusive pool\n", .{});
+    var pool = try Pool.init(4, .exclusive);
+    defer pool.deinit();
+
+    var counter = std.atomic.Value(usize).init(0);
+
+    const Context = struct {
+        counter_ptr: *std.atomic.Value(usize),
+    };
+
+    const context = Context{ .counter_ptr = &counter };
+    const generation = pool.unsafeForThreads(struct {
+        fn worker(thread_index: usize, colocation_index: usize, worker_context: *const Context) void {
+            _ = thread_index;
+            _ = colocation_index;
+            _ = worker_context.counter_ptr.fetchAdd(1, .monotonic);
+        }
+    }.worker, &context);
+
+    // On exclusive pools the caller owes no slice, so polling alone reaches completion
+    try std.testing.expect(generation & 1 == 1);
+    while (!pool.isComplete(generation)) {
+        std.atomic.spinLoopHint();
+    }
+    pool.unsafeJoin(generation);
+
+    // All 4 worker threads should have executed
+    try std.testing.expectEqual(4, counter.load(.acquire));
 }

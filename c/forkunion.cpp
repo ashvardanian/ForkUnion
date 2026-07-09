@@ -538,6 +538,17 @@ void fu_pool_terminate(fu_pool_t *pool) {
     visit([](auto &variant) { variant.terminate(); }, opaque->variants);
 }
 
+fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t *pool) {
+    assert(pool != nullptr);
+    opaque_pool_t *opaque = upcast_pool(pool);
+    return visit(
+        [](auto &variant) {
+            return variant.caller_exclusivity() == fu::caller_inclusive_k ? fu_caller_inclusive_k
+                                                                          : fu_caller_exclusive_k;
+        },
+        opaque->variants);
+}
+
 size_t fu_pool_count_colocations(fu_pool_t *pool) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
@@ -619,19 +630,38 @@ void fu_pool_for_slices(fu_pool_t *pool, size_t n, fu_for_slices_t callback, fu_
 
 #pragma region - Flexible API
 
-void fu_pool_unsafe_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_context_t context) {
+fu_generation_t fu_pool_unsafe_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_context_t context) {
     assert(pool != nullptr && callback != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
     opaque->current_context = context;
     opaque->current_callback = callback;
-    visit([&](auto &variant) { variant.unsafe_for_threads(*opaque); }, opaque->variants);
+    return visit([&](auto &variant) -> fu_generation_t { return variant.unsafe_for_threads(*opaque); },
+                 opaque->variants);
 }
 
-void fu_pool_unsafe_join(fu_pool_t *pool) {
+fu_bool_t fu_pool_is_complete(fu_pool_t *pool, fu_generation_t generation) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
-    assert(opaque->current_context != nullptr);
-    visit([](auto &variant) { variant.unsafe_join(); }, opaque->variants);
+    return visit(
+        [generation](auto &variant) -> fu_bool_t {
+            return variant.is_complete(
+                       static_cast<typename std::remove_reference_t<decltype(variant)>::generation_t>(generation))
+                       ? 1
+                       : 0;
+        },
+        opaque->variants);
+}
+
+void fu_pool_unsafe_join(fu_pool_t *pool, fu_generation_t generation) {
+    assert(pool != nullptr);
+    opaque_pool_t *opaque = upcast_pool(pool);
+    if (opaque->current_callback == nullptr) return; // ? Idempotent: nothing is in flight
+    visit(
+        [generation](auto &variant) {
+            variant.unsafe_join(
+                static_cast<typename std::remove_reference_t<decltype(variant)>::generation_t>(generation));
+        },
+        opaque->variants);
     opaque->current_context = nullptr;
     opaque->current_callback = nullptr;
 }

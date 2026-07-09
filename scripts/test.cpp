@@ -117,6 +117,22 @@ static bool test_try_spawn_success() noexcept {
     return true;
 }
 
+/** @brief The pool is the single source of truth for exclusivity, even across re-spawns. */
+template <typename make_pool_type_ = make_pool_t>
+static bool test_caller_exclusivity_query() noexcept {
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+
+    if (!pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
+    if (pool.caller_exclusivity() != fu::caller_inclusive_k) return false;
+
+    // Re-spawn with the opposite mode: the query must follow, not a stale cache
+    pool.terminate();
+    if (!pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+    if (pool.caller_exclusivity() != fu::caller_exclusive_k) return false;
+    return true;
+}
+
 /** @brief Make sure that `for_threads` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static bool test_for_threads() noexcept {
@@ -155,6 +171,161 @@ static bool test_unsafe_for_threads() noexcept {
     return true;
 }
 
+/** @brief Tests generation token polling with two caller-exclusive pools. */
+template <typename make_pool_type_ = make_pool_t>
+static bool test_generation_polling() noexcept {
+
+    auto maker = make_pool_type_ {};
+    auto pool_a = maker.construct();
+    auto pool_b = maker.construct();
+
+    // Polling before join is the caller-exclusive pattern: on inclusive pools the
+    // caller owes a slice that only runs inside `unsafe_join`.
+    if (!pool_a.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+    if (!pool_b.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+
+    std::vector<std::atomic<bool>> visited_a(pool_a.threads_count());
+    std::vector<std::atomic<bool>> visited_b(pool_b.threads_count());
+
+    auto work_a = [&](std::size_t const thread_index) noexcept {
+        visited_a[thread_index].store(true, std::memory_order_relaxed);
+    };
+    auto work_b = [&](std::size_t const thread_index) noexcept {
+        visited_b[thread_index].store(true, std::memory_order_relaxed);
+    };
+
+    // Drive one pool through the raw token API and the other through the RAII guard
+    auto generation_a = pool_a.unsafe_for_threads(work_a);
+    auto broadcast_b = pool_b.for_threads(work_b); // ? Dispatches at construction: exclusive pool
+    if ((generation_a & 1u) == 0) return false;    // ? Tokens are always odd
+    if ((broadcast_b.generation() & 1u) == 0) return false;
+
+    // Poll both pools until complete
+    bool a_done = false, b_done = false;
+    while (!a_done || !b_done) {
+        if (!a_done) a_done = pool_a.is_complete(generation_a);
+        if (!b_done) b_done = broadcast_b.is_complete();
+    }
+
+    pool_a.unsafe_join(generation_a);
+    broadcast_b.join();
+
+    for (std::size_t i = 0; i < pool_a.threads_count(); ++i)
+        if (!visited_a[i]) return false;
+    for (std::size_t i = 0; i < pool_b.threads_count(); ++i)
+        if (!visited_b[i]) return false;
+    return true;
+}
+
+/** @brief Verifies guard timing: dispatch at construction on exclusive pools, at join on inclusive. */
+template <typename make_pool_type_ = make_pool_t>
+static bool test_guard_lifecycle() noexcept {
+
+    auto maker = make_pool_type_ {};
+
+    // On exclusive pools the work starts at construction, before `join`:
+    {
+        auto pool = maker.construct();
+        if (!pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+
+        std::atomic<std::size_t> visited_count {0};
+        auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
+        auto broadcast = pool.for_threads(count_visits);
+        if (broadcast.generation() == 0) return false;        // ? Must be dispatched at construction
+        if ((broadcast.generation() & 1u) == 0) return false; // ? Tokens are always odd
+        while (!broadcast.is_complete()) {}                   // ? Wait without joining
+        if (visited_count.load(std::memory_order_relaxed) != pool.threads_count()) return false;
+        broadcast.join();
+    }
+
+    // On inclusive pools no work may start before `join`:
+    {
+        auto pool = maker.construct();
+        if (!pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
+
+        std::atomic<std::size_t> visited_count {0};
+        auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
+        auto broadcast = pool.for_threads(count_visits);
+        if (broadcast.generation() != 0) return false; // ? Must be deferred to join
+        if (broadcast.is_complete()) return false;
+        if (visited_count.load(std::memory_order_relaxed) != 0) return false;
+        broadcast.join();
+        if (!broadcast.is_complete()) return false;
+        if (visited_count.load(std::memory_order_relaxed) != pool.threads_count()) return false;
+    }
+    return true;
+}
+
+/** @brief Covers the caller-as-contributor protocol on inclusive pools. */
+template <typename make_pool_type_ = make_pool_t>
+static bool test_generation_inclusive() noexcept {
+
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    if (!pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
+
+    std::vector<std::atomic<bool>> visited(pool.threads_count());
+    auto mark_visited = [&](std::size_t const thread_index) noexcept {
+        visited[thread_index].store(true, std::memory_order_relaxed);
+    };
+
+    auto generation = pool.unsafe_for_threads(mark_visited);
+    if ((generation & 1u) == 0) return false;       // ? Tokens are always odd
+    if (pool.is_complete(generation)) return false; // ? Impossible before the caller's slice
+    pool.unsafe_join(generation);                   // ? Runs the caller's slice, then waits
+    if (!pool.is_complete(generation)) return false;
+    for (std::size_t i = 0; i < pool.threads_count(); ++i)
+        if (!visited[i]) return false;
+    pool.unsafe_join(generation); // ? Idempotent: double-join must be a no-op
+    return true;
+}
+
+/** @brief Degenerate single-thread inclusive pool: the caller is the only contributor. */
+static bool test_generation_single_thread() noexcept {
+    fu::basic_pool_t pool;
+    if (!pool.try_spawn(1)) return false; // ? Default is caller-inclusive: zero workers
+
+    std::atomic<bool> visited {false};
+    auto mark_visited = [&](std::size_t) noexcept { visited.store(true, std::memory_order_relaxed); };
+
+    auto generation = pool.unsafe_for_threads(mark_visited);
+    if ((generation & 1u) == 0) return false;
+    if (pool.is_complete(generation)) return false; // ? Nothing can complete before the caller's slice
+    pool.unsafe_join(generation);                   // ? The caller both runs and signals completion
+    if (!pool.is_complete(generation)) return false;
+    return visited.load(std::memory_order_relaxed);
+}
+
+/** @brief Hammers the dispatch/join race window with tight iterations on exclusive pools. */
+template <typename make_pool_type_ = make_pool_t>
+static bool test_generation_stress() noexcept {
+
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    auto polled_pool = maker.construct();
+    if (!pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+    if (!polled_pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+
+    std::atomic<std::size_t> counter {0};
+    auto count_up = [&](std::size_t) noexcept { counter.fetch_add(1, std::memory_order_relaxed); };
+
+    // A second in-flight pool is polled between iterations to stress `is_complete`
+    auto polled_generation = polled_pool.unsafe_for_threads(count_up);
+
+    constexpr std::size_t iterations_k = 10000;
+    for (std::size_t iteration = 0; iteration < iterations_k; ++iteration) {
+        auto generation = pool.unsafe_for_threads(count_up);
+        if ((generation & 1u) == 0) return false; // ? The old dispatch/completion race made these even
+        (void)polled_pool.is_complete(polled_generation);
+        pool.unsafe_join(generation);
+        if (!pool.is_complete(generation)) return false;
+    }
+    polled_pool.unsafe_join(polled_generation);
+
+    std::size_t const expected = pool.threads_count() * iterations_k + polled_pool.threads_count();
+    return counter.load(std::memory_order_relaxed) == expected;
+}
+
 /** @brief Shows how to control multiple thread-pools from the same main thread. */
 template <typename make_pool_type_ = make_pool_t>
 static bool test_exclusivity() noexcept {
@@ -182,9 +353,10 @@ static bool test_exclusivity() noexcept {
 
         // Repeat the same logic a few times and check for correctness:
         for (std::size_t iteration = 0; iteration < 3; ++iteration) {
-            auto join_second = second_pool.for_threads(do_second);
-            first_pool.for_threads(do_first);
-            join_second.join();
+            auto second_generation = second_pool.unsafe_for_threads(do_second);
+            auto first_generation = first_pool.unsafe_for_threads(do_first);
+            first_pool.unsafe_join(first_generation); // ? Contributes the caller's slice: inclusive pool
+            second_pool.unsafe_join(second_generation);
 
             // Validate:
             for (std::size_t i = 0; i < total_size; ++i)
@@ -476,8 +648,14 @@ int main(void) {
         // Actual thread-pools
         {"`try_spawn` zero threads", test_try_spawn_zero},                       //
         {"`try_spawn` normal", test_try_spawn_success},                          //
+        {"`caller_exclusivity` query", test_caller_exclusivity_query},           //
         {"`for_threads` dispatch", test_for_threads},                            //
         {"`unsafe_for_threads` dispatch", test_unsafe_for_threads},              //
+        {"`generation` polling", test_generation_polling},                       //
+        {"`broadcast_join` lifecycle", test_guard_lifecycle},                    //
+        {"`generation` inclusive contract", test_generation_inclusive},          //
+        {"`generation` single-thread pool", test_generation_single_thread},      //
+        {"`generation` stress", test_generation_stress},                         //
         {"`caller_exclusive_k` calls", test_exclusivity},                        //
         {"`for_n` for uncomfortable input size", test_uncomfortable_input_size}, //
         {"`for_n` static scheduling", test_for_n},                               //
@@ -488,8 +666,13 @@ int main(void) {
 #if FU_ENABLE_NUMA
         // Uniform Memory Access (UMA) tests for threads pinned to the same NUMA node
         {"UMA `try_spawn` normal", test_try_spawn_success<make_linux_colocated_pool_t>},
+        {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_linux_colocated_pool_t>},
         {"UMA `for_threads` dispatch", test_for_threads<make_linux_colocated_pool_t>},
         {"UMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_linux_colocated_pool_t>},
+        {"UMA `generation` polling", test_generation_polling<make_linux_colocated_pool_t>},
+        {"UMA `broadcast_join` lifecycle", test_guard_lifecycle<make_linux_colocated_pool_t>},
+        {"UMA `generation` inclusive contract", test_generation_inclusive<make_linux_colocated_pool_t>},
+        {"UMA `generation` stress", test_generation_stress<make_linux_colocated_pool_t>},
         {"UMA `caller_exclusive_k` calls", test_exclusivity<make_linux_colocated_pool_t>},
         {"UMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_linux_colocated_pool_t>},
         {"UMA `for_n` static scheduling", test_for_n<make_linux_colocated_pool_t>},
@@ -499,8 +682,13 @@ int main(void) {
         {"UMA `terminate` and re-spawn", test_mixed_restart<true, make_linux_colocated_pool_t>},
         // Non-Uniform Memory Access (NUMA) tests for threads addressing all NUMA nodes
         {"NUMA `try_spawn` normal", test_try_spawn_success<make_linux_distributed_pool_t>},
+        {"NUMA `caller_exclusivity` query", test_caller_exclusivity_query<make_linux_distributed_pool_t>},
         {"NUMA `for_threads` dispatch", test_for_threads<make_linux_distributed_pool_t>},
         {"NUMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_linux_distributed_pool_t>},
+        {"NUMA `generation` polling", test_generation_polling<make_linux_distributed_pool_t>},
+        {"NUMA `broadcast_join` lifecycle", test_guard_lifecycle<make_linux_distributed_pool_t>},
+        {"NUMA `generation` inclusive contract", test_generation_inclusive<make_linux_distributed_pool_t>},
+        {"NUMA `generation` stress", test_generation_stress<make_linux_distributed_pool_t>},
         {"NUMA `caller_exclusive_k` calls", test_exclusivity<make_linux_distributed_pool_t>},
         {"NUMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_linux_distributed_pool_t>},
         {"NUMA `for_n` static scheduling", test_for_n<make_linux_distributed_pool_t>},

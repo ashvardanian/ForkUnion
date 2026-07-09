@@ -1,7 +1,7 @@
 .{
     .name = .forkunion,
     .version = "2.3.0",
-    .fingerprint = 0xc31742f3e89a27c7,
+    .fingerprint = 0x3cdd441be686cfc7,
     .minimum_zig_version = "0.15.0",
     .paths = .{
         "build.zig",
