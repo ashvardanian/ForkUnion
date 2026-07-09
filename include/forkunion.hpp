@@ -2338,11 +2338,32 @@ struct compute_domain {
     std::size_t memory_domain_index {0};
     /** @brief QoS ordinal, sorted least-to-most performant. */
     std::size_t compute_level {0};
+    /**
+     *  @brief Relative throughput of @b one core here; `capacity_unknown_k` when unavailable.
+     *  @sa `compute_level` is a dense ordinal for grouping - never divide by it.
+     *
+     *  Unlike `compute_level`, this is a magnitude, so it may be summed and divided. Where the
+     *  kernel publishes a per-core rating - such as the Linux scheduler's `cpu_capacity`, scaled so
+     *  the fastest core present reads 1024 - it lands here. Platforms that rank cores without
+     *  quantifying them leave this unknown, and callers weigh domains by `core_count` instead.
+     */
+    std::size_t capacity {0};
+    /**
+     *  @brief Bytes of the deepest cache private to this domain's cores; 0 when unknown.
+     *
+     *  Sizes a cache-resident chunk, which is a different question from how many chunks a domain
+     *  should receive - cores of equal throughput may back onto very differently sized caches, so
+     *  neither number can be derived from the other. Shared by every core in the domain.
+     */
+    std::size_t cache_bytes {0};
     /** @brief Pointer to the first core ID in this domain. */
     numa_core_id_t const *first_core_id {nullptr};
     /** @brief Number of cores in this domain. */
     std::size_t core_count {0};
 };
+
+/** @brief Sentinel for `compute_domain::capacity` when the platform exposes no per-core throughput. */
+static constexpr std::size_t capacity_unknown_k = 0;
 
 using compute_domain_t = compute_domain;
 
@@ -2670,6 +2691,9 @@ struct numa_topology {
                     domain.memory_domain_index = node_index;
                     domain.compute_level = core_capacities[static_cast<std::size_t>(
                         node_cores[run_begin])]; // ? Raw capacity, ranked below
+                    // ! Keep the raw magnitude too - `compute_level` is about to collapse into an ordinal.
+                    domain.capacity = core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
+                    domain.cache_bytes = 0; // ? Not yet read from `sys/devices/system/cpu/cpu*/cache`
                     domain.first_core_id = node_cores + run_begin;
                     domain.core_count = core - run_begin;
                     run_begin = core;
@@ -2723,10 +2747,19 @@ struct numa_topology {
      *  @retval false if the machine reports no logical CPUs or an allocation failed.
      *
      *  Apple Silicon is one UMA memory domain shared by every core, so we build a single memory
-     *  domain and one compute domain per `hw.perflevelN` cluster - performance cores (`hw.perflevel0`)
-     *  taking the highest compute level, efficiency cores below. Thread affinity on macOS is advisory
-     *  (`thread_policy_set` hints, not hard pinning), so `spawn_on` reports these domains but the
-     *  kernel may still migrate work across levels - to tune on real hardware.
+     *  domain. The compute axis is cut twice: first by `hw.perflevelN`, then by `cpusperl2` within
+     *  each level, because a performance level may span several L2 clusters that share no cache.
+     *  A compute domain is cores sharing a QoS class @b and locality, so the cluster is the unit.
+     *  Domains from one level all carry that level's `compute_level`; `hw.perflevel0` ranks highest.
+     *
+     *  Performance levels rank cores without rating them, and the parts they distinguish need not
+     *  differ in clock - some pair equal scalar throughput with unequal cache. So `capacity` stays
+     *  `capacity_unknown_k` and only `cache_bytes` is populated; weighting work by the level ordinal
+     *  would hand a wide-cache cluster more tasks than it can necessarily retire any faster.
+     *
+     *  @note macOS exposes no hard pinning - `thread_policy_set(THREAD_AFFINITY_POLICY)` returns
+     *        `KERN_NOT_SUPPORTED` on arm64, and QoS classes are the only placement lever. These
+     *        domains are therefore descriptive: `spawn_on` reports them, the kernel still migrates.
      */
     bool try_harvest_apple() noexcept {
         std::size_t const total_cores = sysctl_uint("hw.logicalcpu");
@@ -2734,7 +2767,7 @@ struct numa_topology {
         std::size_t const memory_size = sysctl_uint("hw.memsize");
         std::size_t const levels = sysctl_uint("hw.nperflevels");
 
-        // Count the non-empty performance levels so each becomes one compute domain.
+        // Count the non-empty performance levels so each becomes one compute level.
         std::size_t nonempty_levels = 0;
         for (std::size_t level = 0; level < levels; ++level) {
             char name[64];
@@ -2767,9 +2800,9 @@ struct numa_topology {
         node.first_core_id = core_ids_ptr;
         node.core_count = total_cores;
 
-        // One compute domain per non-empty level. Apple lists cores fastest-level first, so the first
-        // domain (`hw.perflevel0`, the performance cores) takes the highest compute level.
-        std::size_t core_offset = 0, domains_written = 0;
+        // One compute domain per L2 cluster. Apple lists cores fastest-level first, so `hw.perflevel0`
+        // takes the highest compute level; every cluster carved out of it repeats that same level.
+        std::size_t core_offset = 0, domains_written = 0, levels_written = 0;
         for (std::size_t level = 0; level < levels && core_offset < total_cores; ++level) {
             char name[64];
             std::snprintf(name, sizeof(name), "hw.perflevel%zu.logicalcpu", level);
@@ -2777,14 +2810,30 @@ struct numa_topology {
             if (level_cores == 0) continue;
             if (core_offset + level_cores > total_cores) level_cores = total_cores - core_offset;
 
-            compute_domain_t &domain = domains_ptr[domains_written];
-            domain.node_id = 0;
-            domain.memory_domain_index = 0;
-            domain.compute_level = nonempty_levels - 1 - domains_written; // ? perflevel0 (fastest) ranks highest
-            domain.first_core_id = core_ids_ptr + core_offset;
-            domain.core_count = level_cores;
+            std::snprintf(name, sizeof(name), "hw.perflevel%zu.l2cachesize", level);
+            std::size_t const level_cache_bytes = sysctl_uint(name);
+            std::snprintf(name, sizeof(name), "hw.perflevel%zu.cpusperl2", level);
+            std::size_t cores_per_cluster = sysctl_uint(name);
+            // ? A level with no `cpusperl2` is one undivided cluster, not zero-sized ones.
+            if (cores_per_cluster == 0 || cores_per_cluster > level_cores) cores_per_cluster = level_cores;
+
+            std::size_t const level_rank = nonempty_levels - 1 - levels_written;
+            for (std::size_t cut = 0; cut < level_cores; cut += cores_per_cluster) {
+                std::size_t const cluster_cores = (level_cores - cut) < cores_per_cluster //
+                                                      ? (level_cores - cut)
+                                                      : cores_per_cluster;
+                compute_domain_t &domain = domains_ptr[domains_written];
+                domain.node_id = 0;
+                domain.memory_domain_index = 0;
+                domain.compute_level = level_rank; // ? Sibling clusters share their level's rank
+                domain.capacity = capacity_unknown_k;
+                domain.cache_bytes = level_cache_bytes; // ? L2 is private to the cluster, shared within it
+                domain.first_core_id = core_ids_ptr + core_offset + cut;
+                domain.core_count = cluster_cores;
+                domains_written += 1;
+            }
             core_offset += level_cores;
-            domains_written += 1;
+            levels_written += 1;
         }
 
         // Fallback: no perflevel data - one compute domain over every core.
@@ -2793,9 +2842,12 @@ struct numa_topology {
             domain.node_id = 0;
             domain.memory_domain_index = 0;
             domain.compute_level = 0;
+            domain.capacity = capacity_unknown_k;
+            domain.cache_bytes = 0;
             domain.first_core_id = core_ids_ptr;
             domain.core_count = total_cores;
             domains_written = 1;
+            levels_written = 1;
         }
 
         reset(); // ? Free any prior state before committing
@@ -2805,7 +2857,7 @@ struct numa_topology {
         nodes_count_ = 1;
         cores_count_ = total_cores;
         compute_domains_count_ = domains_written;
-        compute_levels_count_ = domains_written;
+        compute_levels_count_ = levels_written; // ! Several clusters may share one level - not `domains_written`
         memory_levels_count_ = 1;
         return true;
     }

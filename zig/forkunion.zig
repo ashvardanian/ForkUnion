@@ -44,9 +44,12 @@ const c = struct {
     extern fn fu_count_compute_levels() usize;
     extern fn fu_count_logical_cores_in(compute_domain_index: usize) usize;
     extern fn fu_compute_level_in(compute_domain_index: usize) usize;
+    extern fn fu_compute_capacity_in(compute_domain_index: usize) usize;
+    extern fn fu_compute_cache_bytes_in(compute_domain_index: usize) usize;
 
     // Memory topology
     extern fn fu_count_memory_domains() usize;
+    extern fn fu_count_memory_levels() usize;
     extern fn fu_memory_level_in(memory_domain_index: usize) usize;
     extern fn fu_volume_ram() usize;
     extern fn fu_volume_ram_in(memory_domain_index: usize) usize;
@@ -216,39 +219,64 @@ pub fn memoryLatency(compute_domain_index: usize, memory_domain_index: usize) us
     return c.fu_memory_latency(compute_domain_index, memory_domain_index);
 }
 
-/// Returns the number of distinct Quality-of-Service levels
-pub fn countComputeClasses() usize {
+/// Returns the number of distinct Quality-of-Service levels.
+///
+/// May be smaller than `countComputeDomains`, as several domains can share one level - equally-fast
+/// cores may still be split across cache clusters, or across NUMA nodes.
+pub fn countComputeLevels() usize {
     return c.fu_count_compute_levels();
 }
 
-/// Returns the total RAM volume (bytes) across all compute_domains, regardless of page size.
+/// Returns the number of distinct memory tiers, the memory-axis twin of `countComputeLevels`.
+pub fn countMemoryLevels() usize {
+    return c.fu_count_memory_levels();
+}
+
+/// Returns the relative throughput of one core in a compute domain (0 if unknown).
+///
+/// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present. Weight
+/// work by this - `computeLevelIn` is a dense ordinal and must never be divided by. Platforms that
+/// rank cores without rating them report 0; weigh by core count instead.
+pub fn computeCapacityIn(compute_domain_index: usize) usize {
+    return c.fu_compute_capacity_in(compute_domain_index);
+}
+
+/// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
+///
+/// Sizes a cache-resident chunk, a different question from how many chunks a domain deserves -
+/// domains of equal throughput may back onto very differently sized caches.
+pub fn computeCacheBytesIn(compute_domain_index: usize) usize {
+    return c.fu_compute_cache_bytes_in(compute_domain_index);
+}
+
+/// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
 pub fn volumeRam() usize {
     return c.fu_volume_ram();
 }
 
-/// Returns the RAM volume (bytes) local to a given compute_domain (0 if out of range).
-pub fn volumeRamIn(compute_domain_index: usize) usize {
-    return c.fu_volume_ram_in(compute_domain_index);
+/// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+pub fn volumeRamIn(memory_domain_index: usize) usize {
+    return c.fu_volume_ram_in(memory_domain_index);
 }
 
-/// Returns the total huge-page volume (bytes) across all compute_domains.
+/// Returns the total huge-page volume (bytes) across all memory domains.
 pub fn volumeHugePages() usize {
     return c.fu_volume_huge_pages();
 }
 
-/// Returns the huge-page volume (bytes) available on a given compute_domain (0 if out of range).
-pub fn volumeHugePagesIn(compute_domain_index: usize) usize {
-    return c.fu_volume_huge_pages_in(compute_domain_index);
+/// Returns the huge-page volume (bytes) available in a given memory domain (0 if out of range).
+pub fn volumeHugePagesIn(memory_domain_index: usize) usize {
+    return c.fu_volume_huge_pages_in(memory_domain_index);
 }
 
-/// Returns the total number of free huge pages across all compute_domains.
+/// Returns the total number of free huge pages across all memory domains.
 pub fn countHugePages() usize {
     return c.fu_count_huge_pages();
 }
 
-/// Returns the number of free huge pages on a given compute_domain (0 if out of range).
-pub fn countHugePagesIn(compute_domain_index: usize) usize {
-    return c.fu_count_huge_pages_in(compute_domain_index);
+/// Returns the number of free huge pages in a given memory domain (0 if out of range).
+pub fn countHugePagesIn(memory_domain_index: usize) usize {
+    return c.fu_count_huge_pages_in(memory_domain_index);
 }
 
 /// NUMA-aware memory allocation result

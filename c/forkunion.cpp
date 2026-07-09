@@ -386,6 +386,35 @@ size_t fu_compute_level_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
 #endif
 }
 
+size_t fu_compute_capacity_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
+    return global_numa_topology.compute_domain_at(compute_domain_index).capacity;
+#else
+    return 0; // ? No per-core throughput without a harvested topology
+#endif
+}
+
+size_t fu_compute_cache_bytes_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
+    return global_numa_topology.compute_domain_at(compute_domain_index).cache_bytes;
+#else
+    return 0;
+#endif
+}
+
+size_t fu_count_memory_levels(void) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    return global_numa_topology.memory_levels_count();
+#else
+    return 1; // ? One uniform tier, mirroring `fu_count_compute_levels`
+#endif
+}
+
 size_t fu_memory_level_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
 #if FU_ENABLE_NUMA
     if (!globals_initialize()) return 0;

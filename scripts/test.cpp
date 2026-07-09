@@ -608,6 +608,60 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
 }
 
 /**
+ *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
+ *
+ *  Deliberately @b not gated on `FU_ENABLE_NUMA`: some platforms harvest a topology without
+ *  compiling the NUMA pools, so gating this on the pools leaves their harvest wholly untested.
+ *  A host with no harvest at all reports `false` and is skipped rather than failed - the absence
+ *  of a topology is not a broken topology.
+ */
+static bool test_topology_invariants() noexcept {
+    fu::numa_topology_t topology;
+    if (!topology.try_harvest()) return true; // ? No harvest on this host; nothing to check
+
+    std::size_t const compute_domains = topology.compute_domains_count();
+    std::size_t const memory_domains = topology.memory_domains_count();
+    std::size_t const compute_levels = topology.compute_levels_count();
+    std::size_t const memory_levels = topology.memory_levels_count();
+    if (compute_domains == 0 || memory_domains == 0) return false;
+    if (compute_levels == 0 || memory_levels == 0) return false;
+
+    // Levels are dense ranks over domains, so they can never outnumber the domains they rank.
+    if (compute_levels > compute_domains) return false;
+    if (memory_levels > memory_domains) return false;
+
+    // Levels are a *dense* rank, so each of [0, levels) must be claimed by at least one domain.
+    // Merely staying in range is too weak - it would accept a count inflated past the distinct levels.
+    std::vector<bool> compute_level_seen(compute_levels, false);
+    std::vector<bool> memory_level_seen(memory_levels, false);
+
+    std::size_t cores_across_domains = 0;
+    for (std::size_t i = 0; i < compute_domains; ++i) {
+        fu::compute_domain_t const &domain = topology.compute_domain_at(i);
+        if (domain.core_count == 0 || domain.first_core_id == nullptr) return false;
+        if (domain.compute_level >= compute_levels) return false;
+        if (domain.memory_domain_index >= memory_domains) return false;
+        compute_level_seen[domain.compute_level] = true;
+        cores_across_domains += domain.core_count;
+    }
+    // Every core must belong to exactly one compute domain.
+    if (cores_across_domains != topology.threads_count()) return false;
+
+    for (std::size_t i = 0; i < memory_domains; ++i) {
+        std::size_t const level = topology.memory_domain(i).memory_level;
+        if (level >= memory_levels) return false;
+        memory_level_seen[level] = true;
+    }
+
+    for (std::size_t level = 0; level < compute_levels; ++level)
+        if (!compute_level_seen[level]) return false; // ? An unclaimed rank means the count is inflated
+    for (std::size_t level = 0; level < memory_levels; ++level)
+        if (!memory_level_seen[level]) return false;
+
+    return true;
+}
+
+/**
  *  @brief Enhanced NUMA topology logging function using the logger class.
  */
 void log_numa_topology() noexcept {
@@ -645,6 +699,8 @@ int main(void) {
         // Helpers
         {"`indexed_split` helpers", test_indexed_split},            //
         {"`coprime_permutation` ranges", test_coprime_permutation}, //
+        // Hardware topology, on every host that reports one
+        {"`numa_topology` invariants", test_topology_invariants}, //
         // Actual thread-pools
         {"`try_spawn` zero threads", test_try_spawn_zero},                       //
         {"`try_spawn` normal", test_try_spawn_success},                          //

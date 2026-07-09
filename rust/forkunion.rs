@@ -375,9 +375,12 @@ extern "C" {
     fn fu_count_compute_levels() -> usize;
     fn fu_count_logical_cores_in(compute_domain_index: usize) -> usize;
     fn fu_compute_level_in(compute_domain_index: usize) -> usize;
+    fn fu_compute_capacity_in(compute_domain_index: usize) -> usize;
+    fn fu_compute_cache_bytes_in(compute_domain_index: usize) -> usize;
 
     // Memory topology
     fn fu_count_memory_domains() -> usize;
+    fn fu_count_memory_levels() -> usize;
     fn fu_memory_level_in(memory_domain_index: usize) -> usize;
     fn fu_volume_ram() -> usize;
     fn fu_volume_ram_in(memory_domain_index: usize) -> usize;
@@ -478,34 +481,34 @@ pub fn capabilities_string_ptr() -> *const c_char {
     unsafe { fu_capabilities_string() }
 }
 
-/// Returns the total RAM volume (bytes) across all compute_domains, regardless of page size.
+/// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
 pub fn volume_ram() -> usize {
     unsafe { fu_volume_ram() }
 }
 
-/// Returns the RAM volume (bytes) local to a given compute_domain (0 if out of range).
-pub fn volume_ram_in(compute_domain_index: usize) -> usize {
-    unsafe { fu_volume_ram_in(compute_domain_index) }
+/// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+pub fn volume_ram_in(memory_domain_index: usize) -> usize {
+    unsafe { fu_volume_ram_in(memory_domain_index) }
 }
 
-/// Returns the total huge-page volume (bytes) across all compute_domains.
+/// Returns the total huge-page volume (bytes) across all memory domains.
 pub fn volume_huge_pages() -> usize {
     unsafe { fu_volume_huge_pages() }
 }
 
-/// Returns the huge-page volume (bytes) available on a given compute_domain (0 if out of range).
-pub fn volume_huge_pages_in(compute_domain_index: usize) -> usize {
-    unsafe { fu_volume_huge_pages_in(compute_domain_index) }
+/// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
+pub fn volume_huge_pages_in(memory_domain_index: usize) -> usize {
+    unsafe { fu_volume_huge_pages_in(memory_domain_index) }
 }
 
-/// Returns the total number of free huge pages across all compute_domains.
+/// Returns the total number of free huge pages across all memory domains.
 pub fn count_huge_pages() -> usize {
     unsafe { fu_count_huge_pages() }
 }
 
-/// Returns the number of free huge pages on a given compute_domain (0 if out of range).
-pub fn count_huge_pages_in(compute_domain_index: usize) -> usize {
-    unsafe { fu_count_huge_pages_in(compute_domain_index) }
+/// Returns the number of free huge pages in a given memory domain (0 if out of range).
+pub fn count_huge_pages_in(memory_domain_index: usize) -> usize {
+    unsafe { fu_count_huge_pages_in(memory_domain_index) }
 }
 
 /// Returns the number of logical CPU cores available on the system.
@@ -582,8 +585,36 @@ pub enum CallerExclusivity {
 }
 
 /// Returns the number of distinct Quality-of-Service levels.
+///
+/// May be smaller than [`count_compute_domains`], as several domains can share one level -
+/// equally-fast cores may still be split across cache clusters, or across NUMA nodes.
 pub fn count_compute_levels() -> usize {
     unsafe { fu_count_compute_levels() }
+}
+
+/// Returns the number of distinct memory tiers, the memory-axis twin of [`count_compute_levels`].
+///
+/// Reports 1 on single-tier systems, and 2+ where HBM, DDR, and CXL are mixed.
+pub fn count_memory_levels() -> usize {
+    unsafe { fu_count_memory_levels() }
+}
+
+/// Returns the relative throughput of one core in a compute domain (0 if unknown).
+///
+/// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present.
+/// This is the number to weight work by - [`compute_level_in`] is a dense ordinal and must
+/// never be divided by. Platforms that rank cores without rating them report 0 here; fall back
+/// to [`count_threads_in`](ThreadPool::count_threads_in) when they do.
+pub fn compute_capacity_in(compute_domain_index: usize) -> usize {
+    unsafe { fu_compute_capacity_in(compute_domain_index) }
+}
+
+/// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
+///
+/// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
+/// deserves - domains of equal throughput may back onto very differently sized caches.
+pub fn compute_cache_bytes_in(compute_domain_index: usize) -> usize {
+    unsafe { fu_compute_cache_bytes_in(compute_domain_index) }
 }
 
 /// Returns true if NUMA support was compiled into the library.
@@ -4762,6 +4793,35 @@ mod tests {
             "Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}"
         );
         assert!(cores > 0);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn topology_axes() {
+        let compute_domains = count_compute_domains();
+        let compute_levels = count_compute_levels();
+        let memory_domains = count_memory_domains();
+        let memory_levels = count_memory_levels();
+        assert!(compute_domains > 0 && memory_domains > 0);
+
+        // Levels are dense ranks over domains, so they can never outnumber them.
+        assert!(compute_levels <= compute_domains);
+        assert!(memory_levels <= memory_domains);
+
+        for domain in 0..compute_domains {
+            assert!(compute_level_in(domain) < compute_levels.max(1));
+            assert!(local_memory_of(domain) < memory_domains);
+            // Capacity and cache are magnitudes, unknown as 0 - never negative, never asserted nonzero.
+            let _capacity = compute_capacity_in(domain);
+            let _cache_bytes = compute_cache_bytes_in(domain);
+        }
+        for domain in 0..memory_domains {
+            assert!(memory_level_in(domain) < memory_levels.max(1));
+        }
+
+        // Out-of-range indices must saturate to 0 rather than trap or read past the topology.
+        assert_eq!(compute_capacity_in(compute_domains + 64), 0);
+        assert_eq!(compute_cache_bytes_in(compute_domains + 64), 0);
     }
 
     #[cfg_attr(miri, ignore)]

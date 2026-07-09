@@ -226,9 +226,35 @@ size_t fu_compute_level_in(size_t compute_domain_index);
 /**
  *  @brief Returns the number of distinct compute performance levels across all compute domains.
  *  @retval 0 if unsupported, 1 on homogeneous cores, 2-3 with heterogeneous cores (P/E, big.LITTLE).
+ *  @note May be smaller than `fu_count_compute_domains()` - several domains can share one level,
+ *  as when equally-fast cores are split across cache clusters, or across NUMA nodes.
  *  @sa `fu_compute_level_in`.
  */
 size_t fu_count_compute_levels(void);
+
+/**
+ *  @brief Returns the relative throughput of @b one core in a given compute domain.
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @retval A magnitude on the Linux `cpu_capacity` scale (1024 = fastest core present), or 0 when
+ *  the index is out of range or the platform publishes no per-core throughput rating.
+ *
+ *  This is the number to weight work by; `fu_compute_level_in` is a dense ordinal and must never be
+ *  divided by. When this reports 0, weigh compute domains by `fu_count_logical_cores_in` instead.
+ *  @sa `fu_compute_level_in`, `fu_count_logical_cores_in`.
+ */
+size_t fu_compute_capacity_in(size_t compute_domain_index);
+
+/**
+ *  @brief Returns the bytes of deepest cache private to a given compute domain's cores.
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @retval Cache bytes shared within the domain, or 0 if the index is out of range or unknown.
+ *
+ *  Sizes a cache-resident chunk - a different question from how @b many chunks a domain deserves.
+ *  Domains may sustain identical throughput yet back onto very differently sized caches, so neither
+ *  number can be inferred from the other.
+ *  @sa `fu_compute_capacity_in`.
+ */
+size_t fu_compute_cache_bytes_in(size_t compute_domain_index);
 
 /**
  *  @brief Returns the number of memory domains (distinct allocation targets).
@@ -254,6 +280,14 @@ size_t fu_count_memory_domains(void);
  *  @sa `fu_count_memory_domains`, `fu_volume_ram_in`.
  */
 size_t fu_memory_level_in(size_t memory_domain_index);
+
+/**
+ *  @brief Returns the number of distinct memory tiers across all memory domains.
+ *  @retval 0 if unsupported, 1 on single-tier systems, 2+ when HBM / DDR / CXL are mixed.
+ *  @note The memory-axis twin of `fu_count_compute_levels`; several memory domains may share a tier.
+ *  @sa `fu_memory_level_in`, `fu_count_memory_domains`.
+ */
+size_t fu_count_memory_levels(void);
 
 /**
  *  @brief Returns the memory domain nearest to a given compute domain.

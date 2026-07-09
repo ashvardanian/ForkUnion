@@ -111,6 +111,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
+Free functions report the [hardware topology](#hardware-topology), to size and place work:
+
+```rust
+for domain in 0..fu::count_compute_domains() {
+    println!("domain {domain}: {} cores, level {}, allocate on memory domain {}",
+        fu::count_logical_cores_in(domain), fu::compute_level_in(domain),
+        fu::local_memory_of(domain));
+}
+```
+
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
 For convenience Rayon-style parallel iterators pull the `prelude` module and [check out related examples](#rayon-style-parallel-iterators).
 
@@ -226,6 +236,18 @@ pub fn main() !void {
 }
 ```
 
+Top-level functions report the [hardware topology](#hardware-topology), to size and place work:
+
+```zig
+var domain: usize = 0;
+while (domain < fu.countComputeDomains()) : (domain += 1) {
+    std.debug.print("domain {d}: {d} cores, level {d}, allocate on memory domain {d}\n", .{
+        domain,                      fu.countLogicalCoresIn(domain),
+        fu.computeLevelIn(domain),   fu.localMemoryOf(domain),
+    });
+}
+```
+
 Unlike `std.Thread.Pool` task queue for async work, ForkUnion is designed for __data parallelism__
 and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
 
@@ -250,7 +272,7 @@ A minimal C example:
 
 ```c
 #include <stdio.h>      // printf
-#include <forkunion.h> // fu_pool_t, fu_pool_new, fu_pool_spawn
+#include <forkunion.h>  // fu_pool_t, fu_pool_new, fu_pool_spawn
 
 void hello_callback(void *context, size_t thread, size_t compute_domain) {
     (void)context;
@@ -265,6 +287,16 @@ int main(void) {
     fu_pool_for_threads(pool, hello_callback, NULL);
     fu_pool_delete(pool);
     return 0;
+}
+```
+
+The `fu_`-prefixed functions report the [hardware topology](#hardware-topology), to size and place work:
+
+```c
+for (size_t domain = 0; domain < fu_count_compute_domains(); ++domain) {
+    printf("domain %zu: %zu cores, level %zu, allocate on memory domain %zu\n",
+           domain, fu_count_logical_cores_in(domain), fu_compute_level_in(domain),
+           fu_local_memory_of(domain));
 }
 ```
 
@@ -436,6 +468,36 @@ But in reality, on most x86 machines, [depending on the BIOS "spatial prefetcher
 Because of these rules, padding hot variables to 128 bytes is a conservative but often sensible defensive measure adopted by Folly's `cacheline_align` and Java's `jdk.internal.vm.annotation.Contended`. ￼
 
 ## Pro Tips
+
+### Hardware Topology
+
+A machine is described along two independent axes.
+A __compute domain__ is a bindable group of cores sharing a Quality-of-Service class _and_ locality — it is what a pool spawns onto, and the index a worker callback receives.
+A __memory domain__ is a bank of memory with its own capacity and access cost — it is what the allocator targets, may be _cpuless_ like a CXL expander, and may serve several compute domains at once.
+The axes stay separate because they don't line up: performance and efficiency cores often share one memory controller, and equally-fast cores are often split across cache clusters or sockets.
+
+Each axis carries a __level__, a dense ordinal grouping domains of like performance.
+Levels can be fewer than domains, since several domains may share one, and the two axes count in opposite directions — each following the convention of the hardware source it reads.
+Compute levels grow with performance, as the scheduler ranks big cores above little ones; memory levels grow with _distance_, as the kernel's memory tiering places HBM below DDR and CXL above.
+
+|                   | Compute axis            | Memory axis            |
+| ----------------- | ----------------------- | ---------------------- |
+| Count domains     | `count_compute_domains` | `count_memory_domains` |
+| Count levels      | `count_compute_levels`  | `count_memory_levels`  |
+| Level of a domain | `compute_level_in`      | `memory_level_in`      |
+| Faster means      | __higher__              | __lower__              |
+
+Names are spelled here as in Rust; C prefixes them with `fu_`, and Zig spells them in camelCase.
+
+Beyond the level ordinals, two magnitudes describe a compute domain, both best-effort.
+`compute_capacity_in` forwards the kernel's own rating of a core, read from `/sys/devices/system/cpu/cpuN/cpu_capacity`, normalized so the fastest core on the machine reads 1024.
+That file is published by the kernel's `arch_topology` driver, so it is dependable on `arm64` and absent elsewhere — expect 0 on x86, on Windows, and on Apple.
+`compute_cache_bytes_in` reports the deepest cache private to a domain's cores, and is likewise unavailable on most hosts today.
+Domains of identical throughput can sit behind very differently sized caches, so neither value follows from the other.
+Treat both as hints, present only where the hardware volunteers them, and never as a number a program requires.
+
+Finally, `local_memory_of` bridges the axes, naming the memory domain a given compute domain should allocate from.
+Where no topology is harvested, every query degrades to a single compute domain and a single memory domain rather than failing, so these loops need no conditional compilation.
 
 ### Non-Uniform Memory Access (NUMA)
 
@@ -631,9 +693,9 @@ let product = (&data[..])
     .into_par_iter()
     .with_pool(&mut pool)
     .reduce(
-        || 1u64,                     // initial value
-        |acc, value, _| *acc *= *value,  // fold function
-        |a, b| a * b                 // combine function
+        || 1u64,                        // initial value
+        |acc, value, _| *acc *= *value, // fold function
+        |a, b| a * b                    // combine function
     );
 ```
 
