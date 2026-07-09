@@ -2210,7 +2210,7 @@ unsafe impl<T: Sync> Sync for PinnedVec<T> {}
 /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
 ///
 /// // Fill all vectors across all NUMA nodes with the same value
-/// rr_vec.fill(42, &mut pool);
+/// rr_vec.fill(&mut pool, 42);
 /// ```
 pub struct RoundRobinVec<T> {
     compute_domains: PinnedVec<PinnedVec<T>>,
@@ -2593,13 +2593,84 @@ impl<T> RoundRobinVec<T> {
         (compute_domain_index, local_index)
     }
 
+    /// Splits each compute domain's slots across that domain's own threads and runs `function`
+    /// on every thread, so each page is written by a core that is local to it.
+    ///
+    /// `split_len(domain)` says how many slots to divide among the threads of `domain`, and
+    /// `function(domain, base, range)` receives that domain's base pointer plus this thread's
+    /// range within it. The ranges of a domain partition `split_len(domain)` and never overlap,
+    /// so the slots handed to different threads cannot alias.
+    ///
+    /// The closures are shared by reference, never by `&mut`, which is what keeps a stateful
+    /// closure from racing itself across threads.
+    fn for_each_domain_chunk<L, F>(&mut self, pool: &mut ThreadPool, split_len: L, function: F)
+    where
+        L: Fn(usize, usize) -> usize + Sync,
+        F: Fn(usize, usize, &SyncMutPtr<T>, core::ops::Range<usize>) + Sync,
+    {
+        let compute_domains_count = self.compute_domains_count();
+        if compute_domains_count == 0 {
+            return;
+        }
+
+        let domains = SyncConstPtr::new(self.compute_domains.as_slice().as_ptr());
+        let split_len = &split_len;
+        let function = &function;
+
+        pool.scope(|scope| {
+            scope.broadcast(|thread_index, compute_domain_index| {
+                if compute_domain_index >= compute_domains_count {
+                    return;
+                }
+                // SAFETY: `compute_domains` outlives the join and is never resized here; this
+                // reads only the domain's length and base pointer.
+                let domain_vec = unsafe { &*domains.as_ptr().add(compute_domain_index) };
+                let current_len = domain_vec.len();
+                let base = domain_vec.sync_ptr();
+
+                let threads_here = scope.count_threads_in(compute_domain_index);
+                let local_thread = scope.locate_thread_in(thread_index, compute_domain_index);
+                let split =
+                    IndexedSplit::new(split_len(compute_domain_index, current_len), threads_here);
+                let range = split.get(local_thread);
+                if range.is_empty() {
+                    return;
+                }
+                function(compute_domain_index, current_len, &base, range);
+            });
+        });
+
+        // A pool need not reach every compute domain - it may hold fewer threads than there are
+        // domains, or be pinned to a subset. Those domains still belong to us, and skipping them
+        // would leave slots unconstructed while `len` claims otherwise, so the caller sweeps them.
+        // Domains past the pool's own count have no threads by definition, and asking the pool
+        // about them would read past its thread map.
+        let pool_domains_count = pool.compute_domains();
+        for compute_domain_index in 0..compute_domains_count {
+            let covered = compute_domain_index < pool_domains_count
+                && pool.count_threads_in(compute_domain_index) != 0;
+            if covered {
+                continue;
+            }
+            // SAFETY: the broadcast has joined, so this thread is the only one touching `domains`.
+            let domain_vec = unsafe { &*domains.as_ptr().add(compute_domain_index) };
+            let current_len = domain_vec.len();
+            let base = domain_vec.sync_ptr();
+            let range = 0..split_len(compute_domain_index, current_len);
+            if range.is_empty() {
+                continue;
+            }
+            function(compute_domain_index, current_len, &base, range);
+        }
+    }
+
     /// Fills all vectors across all NUMA nodes with copies of the given value,
     /// using the thread pool for parallel execution.
     ///
     /// # Arguments
     ///
-    /// * `value` - The value to fill all vectors with
     /// * `pool` - The thread pool to use for parallel execution
+    /// * `value` - The value to fill all vectors with
     ///
     /// # Examples
     ///
@@ -2616,46 +2687,37 @@ impl<T> RoundRobinVec<T> {
     /// }
     ///
     /// // Fill all vectors with the value 42
-    /// rr_vec.fill(42, &mut pool);
+    /// rr_vec.fill(&mut pool, 42);
     /// ```
-    pub fn fill(&mut self, value: T, pool: &mut ThreadPool)
+    pub fn fill(&mut self, pool: &mut ThreadPool, value: T)
     where
         T: Clone + Send + Sync,
     {
-        let compute_domains_count = self.compute_domains_count();
-        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
-        let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
-
-        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
-            if compute_domain_index >= compute_domains_count {
-                return;
-            }
-
-            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
-            let pool = pool_ptr.get_mut();
-
-            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
-            let split = IndexedSplit::new(node_vec.len(), threads_in_compute_domain);
-            let range = split.get(thread_local_index);
-
-            // Fill the assigned range of this thread
-            for idx in range {
-                if let Some(element) = node_vec.get_mut(idx) {
-                    *element = value.clone();
+        let value = &value;
+        self.for_each_domain_chunk(
+            pool,
+            |_domain, current_len| current_len,
+            |_domain, _current_len, base, range| {
+                // SAFETY: the ranges of a domain partition its initialized slots, so the writes
+                // are disjoint and every slot already holds a value to drop.
+                for local_index in range {
+                    unsafe { *base.get(local_index) = value.clone() };
                 }
-            }
-        };
-        pool.for_threads(&broadcast_function);
+            },
+        );
     }
 
     /// Fills all vectors across all NUMA nodes with values generated by calling
-    /// a closure repeatedly, using the thread pool for parallel execution.
+    /// a closure once per slot, using the thread pool for parallel execution.
+    ///
+    /// The closure is `Fn`, not `FnMut`: every thread calls it concurrently, so it cannot own
+    /// mutable state. Reach for [`RoundRobinVec::fill_with_index`] when each slot needs a
+    /// distinct, reproducible value.
     ///
     /// # Arguments
     ///
-    /// * `f` - A closure that generates values to fill the vectors with
     /// * `pool` - The thread pool to use for parallel execution
+    /// * `f` - A closure that generates values to fill the vectors with
     ///
     /// # Examples
     ///
@@ -2672,40 +2734,68 @@ impl<T> RoundRobinVec<T> {
     /// }
     ///
     /// // Fill all vectors with random values
-    /// rr_vec.fill_with(|| rand::random::<i32>(), &mut pool);
+    /// rr_vec.fill_with(&mut pool, || rand::random::<i32>());
     /// ```
-    pub fn fill_with<F>(&mut self, mut f: F, pool: &mut ThreadPool)
+    pub fn fill_with<F>(&mut self, pool: &mut ThreadPool, f: F)
     where
-        F: FnMut() -> T + Send + Sync,
+        F: Fn() -> T + Sync,
+        T: Send + Sync,
+    {
+        let f = &f;
+        self.for_each_domain_chunk(
+            pool,
+            |_domain, current_len| current_len,
+            |_domain, _current_len, base, range| {
+                // SAFETY: disjoint, in-bounds, initialized slots - see `fill`.
+                for local_index in range {
+                    unsafe { *base.get(local_index) = f() };
+                }
+            },
+        );
+    }
+
+    /// Fills every slot with `f(global_index)`, where `global_index` is the same round-robin
+    /// index accepted by [`RoundRobinVec::get`].
+    ///
+    /// Because each slot is a pure function of its index, the contents are reproducible
+    /// regardless of the thread count or the domain layout - which is what makes a seeded
+    /// fill portable across machines.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The thread pool to use for parallel execution
+    /// * `f` - A closure mapping a global index to the value stored at that index
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use forkunion::*;
+    ///
+    /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
+    /// let mut rr_vec = RoundRobinVec::<usize>::new().expect("Failed to create RoundRobinVec");
+    /// rr_vec.resize(&mut pool, 100, 0).expect("Failed to resize");
+    ///
+    /// rr_vec.fill_with_index(&mut pool, |index| index * 2);
+    /// assert_eq!(*rr_vec.get(7).unwrap(), 14);
+    /// ```
+    pub fn fill_with_index<F>(&mut self, pool: &mut ThreadPool, f: F)
+    where
+        F: Fn(usize) -> T + Sync,
         T: Send + Sync,
     {
         let compute_domains_count = self.compute_domains_count();
-        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
-        let f_ptr = SafePtr(&mut f as *mut F);
-        let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
-
-        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
-            if compute_domain_index >= compute_domains_count {
-                return;
-            }
-
-            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
-            let f_ref = f_ptr.get_mut();
-            let pool = pool_ptr.get_mut();
-
-            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
-            let split = IndexedSplit::new(node_vec.len(), threads_in_compute_domain);
-            let range = split.get(thread_local_index);
-
-            // Fill the assigned range of this thread
-            for idx in range {
-                if let Some(element) = node_vec.get_mut(idx) {
-                    *element = f_ref();
+        let f = &f;
+        self.for_each_domain_chunk(
+            pool,
+            |_domain, current_len| current_len,
+            |domain, _current_len, base, range| {
+                // SAFETY: disjoint, in-bounds, initialized slots - see `fill`.
+                for local_index in range {
+                    let global_index = local_index * compute_domains_count + domain;
+                    unsafe { *base.get(local_index) = f(global_index) };
                 }
-            }
-        };
-        pool.for_threads(&broadcast_function);
+            },
+        );
     }
 
     /// Clears all vectors across all NUMA nodes, using the thread pool for parallel execution.
@@ -2713,33 +2803,21 @@ impl<T> RoundRobinVec<T> {
     /// # Arguments
     ///
     /// * `pool` - The thread pool to use for parallel execution
-    pub fn clear(&mut self, pool: &mut ThreadPool) {
-        let compute_domains_count = self.compute_domains_count();
-        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
-        let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
-
-        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
-            if compute_domain_index >= compute_domains_count {
-                return;
-            }
-
-            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
-            let pool = pool_ptr.get_mut();
-
-            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
-            let split = IndexedSplit::new(node_vec.len(), threads_in_compute_domain);
-            let range = split.get(thread_local_index);
-
-            // Drop elements in the assigned range
-            unsafe {
-                let ptr = node_vec.as_mut_ptr();
-                for idx in range {
-                    core::ptr::drop_in_place(ptr.add(idx));
+    pub fn clear(&mut self, pool: &mut ThreadPool)
+    where
+        T: Send,
+    {
+        self.for_each_domain_chunk(
+            pool,
+            |_domain, current_len| current_len,
+            |_domain, _current_len, base, range| {
+                // SAFETY: the ranges of a domain partition its live elements, so each element is
+                // dropped exactly once, and no two threads touch the same slot.
+                for local_index in range {
+                    unsafe { core::ptr::drop_in_place(base.get(local_index)) };
                 }
-            }
-        };
-        pool.for_threads(&broadcast_function);
+            },
+        );
 
         // Reset lengths of individual vectors after parallel dropping
         for i in 0..self.compute_domains.len() {
@@ -2762,9 +2840,9 @@ impl<T> RoundRobinVec<T> {
     /// Returns an error if any vector fails to resize.
     pub fn resize(
         &mut self,
+        pool: &mut ThreadPool,
         new_len: usize,
         value: T,
-        pool: &mut ThreadPool,
     ) -> Result<(), &'static str>
     where
         T: Clone + Send + Sync,
@@ -2774,17 +2852,12 @@ impl<T> RoundRobinVec<T> {
             return Err("No NUMA nodes available");
         }
 
-        // Calculate how many elements each NUMA node should have
+        // Calculate how many elements each NUMA node should have. Captures two integers by
+        // value, so it stays `Copy` - and therefore `Sync` - without borrowing `self`.
         let elements_per_node = new_len / compute_domains_count;
         let extra_elements = new_len % compute_domains_count;
-
-        // Helper to calculate target length for a compute_domain
-        let node_len = |col_idx: usize| -> usize {
-            if col_idx < extra_elements {
-                elements_per_node + 1
-            } else {
-                elements_per_node
-            }
+        let node_len = move |domain: usize| -> usize {
+            elements_per_node + usize::from(domain < extra_elements)
         };
 
         // Step 1: Centrally handle reallocation for each NUMA node
@@ -2796,53 +2869,26 @@ impl<T> RoundRobinVec<T> {
             }
         }
 
-        // Step 2: Parallel construction/destruction of elements using IndexedSplit
-        let safe_ptr = SafePtr(self.compute_domains.as_mut_ptr());
-        let pool_ptr = SafePtr(pool as *const ThreadPool as *mut ThreadPool);
-
-        let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
-            if compute_domain_index >= compute_domains_count {
-                return;
-            }
-
-            let node_vec = safe_ptr.get_mut_at(compute_domain_index);
-            let pool = pool_ptr.get_mut();
-            let target_len = node_len(compute_domain_index);
-            let current_len = node_vec.len();
-            if target_len == current_len {
-                return;
-            }
-
-            let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
-            let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
-
-            if target_len > current_len {
-                // Growing: construct new elements in parallel
-                let new_elements = target_len - current_len;
-                let split = IndexedSplit::new(new_elements, threads_in_compute_domain);
-                let range = split.get(thread_local_index);
-
-                unsafe {
-                    let ptr = node_vec.as_mut_ptr();
+        // Step 2: Parallel construction/destruction of the elements that differ
+        let value = &value;
+        self.for_each_domain_chunk(
+            pool,
+            |domain, current_len| node_len(domain).abs_diff(current_len),
+            |domain, current_len, base, range| {
+                let target_len = node_len(domain);
+                if target_len > current_len {
+                    // Growing: construct new elements in parallel, into uninitialized slots
                     for i in range {
-                        core::ptr::write(ptr.add(current_len + i), value.clone());
+                        unsafe { core::ptr::write(base.get(current_len + i), value.clone()) };
+                    }
+                } else {
+                    // Shrinking: drop the surplus elements in parallel
+                    for i in range {
+                        unsafe { core::ptr::drop_in_place(base.get(target_len + i)) };
                     }
                 }
-            } else {
-                // Shrinking: drop elements in parallel
-                let elements_to_drop = current_len - target_len;
-                let split = IndexedSplit::new(elements_to_drop, threads_in_compute_domain);
-                let range = split.get(thread_local_index);
-
-                unsafe {
-                    let ptr = node_vec.as_mut_ptr();
-                    for i in range {
-                        core::ptr::drop_in_place(ptr.add(target_len + i));
-                    }
-                }
-            }
-        };
-        pool.for_threads(&broadcast_function);
+            },
+        );
 
         // Step 3: Update lengths after parallel operations
         for i in 0..compute_domains_count {
@@ -5334,6 +5380,45 @@ mod tests {
         for index in 0..rr_vec.len() {
             assert_eq!(rr_vec.get(index), Some(&(index + 1)));
         }
+    }
+
+    /// Every slot is a pure function of its global index, so the contents may not depend on how
+    /// many threads filled them. The predecessor of `fill_with` shared one `&mut FnMut` across
+    /// every thread, and a stateful closure lost most of its increments to the race.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn round_robin_fill_with_index_is_deterministic() {
+        for threads in [1usize, 3, 17] {
+            let mut pool = spawn(threads);
+            let mut rr_vec = RoundRobinVec::<usize>::new().expect("round robin vec");
+            rr_vec.resize(&mut pool, 1000, 0).expect("resize");
+
+            rr_vec.fill_with_index(&mut pool, |index| index * 3 + 1);
+
+            assert_eq!(rr_vec.len(), 1000);
+            for index in 0..rr_vec.len() {
+                assert_eq!(
+                    rr_vec.get(index),
+                    Some(&(index * 3 + 1)),
+                    "threads={threads}"
+                );
+            }
+        }
+    }
+
+    /// `fill_with` writes every live slot exactly once, leaving no element untouched.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn round_robin_fill_with_covers_every_slot() {
+        let mut pool = spawn(hw_threads());
+        let mut rr_vec = RoundRobinVec::<usize>::new().expect("round robin vec");
+        rr_vec.resize(&mut pool, 500, 0).expect("resize");
+
+        rr_vec.fill_with(&mut pool, || 7);
+        assert!((0..rr_vec.len()).all(|index| rr_vec.get(index) == Some(&7)));
+
+        rr_vec.fill(&mut pool, 9);
+        assert!((0..rr_vec.len()).all(|index| rr_vec.get(index) == Some(&9)));
     }
 
     #[cfg_attr(miri, ignore)]

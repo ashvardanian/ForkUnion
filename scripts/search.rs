@@ -95,21 +95,19 @@ fn create_distributed_embeddings(
     // Initialize with zero vectors first, then fill with random data
     let zero_embedding = [bf16::from_f32(0.0); EMBEDDING_DIMENSIONS];
     distributed_vec
-        .resize(total_vectors, zero_embedding, pool)
+        .resize(pool, total_vectors, zero_embedding)
         .ok()?;
 
-    // Fill with random data using parallel fill_with
-    distributed_vec.fill_with(
-        || {
-            let mut rng = rng();
-            let mut embedding = [bf16::from_f32(0.0); EMBEDDING_DIMENSIONS];
-            for (_dim, item) in embedding.iter_mut().enumerate().take(EMBEDDING_DIMENSIONS) {
-                *item = bf16::from_f32(rng.random_range(-1.0..1.0));
-            }
-            embedding
-        },
-        pool,
-    );
+    // Fill with random data using parallel fill_with. The closure is `Fn`, so it owns no state
+    // the threads could race on - each call builds its own generator.
+    distributed_vec.fill_with(pool, || {
+        let mut rng = rng();
+        let mut embedding = [bf16::from_f32(0.0); EMBEDDING_DIMENSIONS];
+        for (_dim, item) in embedding.iter_mut().enumerate().take(EMBEDDING_DIMENSIONS) {
+            *item = bf16::from_f32(rng.random_range(-1.0..1.0));
+        }
+        embedding
+    });
 
     println!(
         "Successfully created {} vectors across {} compute_domains",
