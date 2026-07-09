@@ -312,22 +312,22 @@ impl<'a, T, const PAUSE: bool> Drop for BasicSpinMutexGuard<'a, T, PAUSE> {
 /// ```
 pub type SpinMutex<T> = BasicSpinMutex<T, true>;
 
-/// A "prong" - the tip of a "fork" - pinning a "task" to a "thread" and "memory" location.
+/// A "prong" - the tip of a "fork" - pinning a "task" to a "thread" within a "compute domain".
 ///
 /// A `Prong` represents a single unit of work that connects:
-/// - A **task** (what work to do) - identified by `task_index`  
+/// - A **task** (what work to do) - identified by `task_index`
 /// - A **thread** (which CPU thread is executing it) - identified by `thread_index`
-/// - A **compute_domain** (which NUMA node/QoS level it's running on) - identified by `compute_domain_index`
+/// - A **compute domain** (the same-QoS core cluster it runs on) - identified by `compute_domain_index`
 ///
-/// This metadata is essential for NUMA-aware algorithms, debugging parallel execution,
+/// This metadata is essential for topology-aware algorithms, debugging parallel execution,
 /// and understanding load distribution across the thread pool.
 #[derive(Copy, Clone, Debug)]
 pub struct Prong {
     /// The logical index of the task being processed (0-based)
     pub task_index: usize,
-    /// The physical thread executing this task (0-based)  
+    /// The physical thread executing this task (0-based)
     pub thread_index: usize,
-    /// The compute_domain group this thread belongs to (NUMA node + QoS level)
+    /// The compute domain this thread belongs to (a same-QoS core cluster within a memory domain)
     pub compute_domain_index: usize,
 }
 

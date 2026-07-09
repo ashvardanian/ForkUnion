@@ -54,7 +54,7 @@
 #include <limits> // `std::numeric_limits`
 
 // Clang generally defines `_OPENMP` when OpenMP, but compiling it is
-/// tricky and the header may not be available.
+// tricky and the header may not be available.
 #if defined(_OPENMP)
 #if __has_include(<omp.h>)
 #include <omp.h>
