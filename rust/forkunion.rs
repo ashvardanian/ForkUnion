@@ -389,6 +389,8 @@ extern "C" {
     // Affinity
     fn fu_local_memory_of(compute_domain_index: usize) -> usize;
     fn fu_memory_distance(compute_domain_index: usize, memory_domain_index: usize) -> usize;
+    fn fu_memory_bandwidth(compute_domain_index: usize, memory_domain_index: usize) -> usize;
+    fn fu_memory_latency(compute_domain_index: usize, memory_domain_index: usize) -> usize;
 
     // Allocation
     fn fu_allocate_in(memory_domain_index: usize, bytes: usize) -> *mut c_void;
@@ -558,6 +560,16 @@ pub fn local_memory_of(compute_domain_index: usize) -> usize {
 /// Returns the relative access distance from a compute domain to a memory domain (10 = local).
 pub fn memory_distance(compute_domain_index: usize, memory_domain_index: usize) -> usize {
     unsafe { fu_memory_distance(compute_domain_index, memory_domain_index) }
+}
+
+/// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
+pub fn memory_bandwidth(compute_domain_index: usize, memory_domain_index: usize) -> usize {
+    unsafe { fu_memory_bandwidth(compute_domain_index, memory_domain_index) }
+}
+
+/// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
+pub fn memory_latency(compute_domain_index: usize, memory_domain_index: usize) -> usize {
+    unsafe { fu_memory_latency(compute_domain_index, memory_domain_index) }
 }
 
 /// Defines whether the calling thread participates in task execution.

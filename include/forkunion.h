@@ -274,10 +274,29 @@ size_t fu_local_memory_of(size_t compute_domain_index);
  *  @retval A relative distance where @b 10 means local (SLIT convention); larger is farther;
  *  0 means unknown or an out-of-range index.
  *
- *  A scalar summary of the (initiator -> target) cost. Per-edge bandwidth/latency is a later layer.
- *  @sa `fu_local_memory_of`.
+ *  A scalar summary of the (initiator -> target) cost. Per-edge bandwidth and latency come from
+ *  `fu_memory_bandwidth` and `fu_memory_latency`.
+ *  @sa `fu_local_memory_of`, `fu_memory_bandwidth`, `fu_memory_latency`.
  */
 size_t fu_memory_distance(size_t compute_domain_index, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the HMAT read bandwidth from a compute domain to a memory domain.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @retval Peak read bandwidth in MB/s, or 0 when the machine exposes no ACPI HMAT table.
+ *  @sa `fu_memory_latency`, `fu_memory_distance`.
+ */
+size_t fu_memory_bandwidth(size_t compute_domain_index, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the HMAT read latency from a compute domain to a memory domain.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @retval Read latency in nanoseconds, or 0 when the machine exposes no ACPI HMAT table.
+ *  @sa `fu_memory_bandwidth`, `fu_memory_distance`.
+ */
+size_t fu_memory_latency(size_t compute_domain_index, size_t memory_domain_index);
 
 /**
  *  @brief Returns the total RAM volume (bytes) across all memory domains.

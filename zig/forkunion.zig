@@ -58,6 +58,8 @@ const c = struct {
     // Affinity
     extern fn fu_local_memory_of(compute_domain_index: usize) usize;
     extern fn fu_memory_distance(compute_domain_index: usize, memory_domain_index: usize) usize;
+    extern fn fu_memory_bandwidth(compute_domain_index: usize, memory_domain_index: usize) usize;
+    extern fn fu_memory_latency(compute_domain_index: usize, memory_domain_index: usize) usize;
 
     // Allocation
     extern fn fu_allocate_in(memory_domain_index: usize, bytes: usize) ?*anyopaque;
@@ -202,6 +204,16 @@ pub fn localMemoryOf(compute_domain_index: usize) usize {
 /// Returns the relative access distance from a compute domain to a memory domain (10 = local).
 pub fn memoryDistance(compute_domain_index: usize, memory_domain_index: usize) usize {
     return c.fu_memory_distance(compute_domain_index, memory_domain_index);
+}
+
+/// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
+pub fn memoryBandwidth(compute_domain_index: usize, memory_domain_index: usize) usize {
+    return c.fu_memory_bandwidth(compute_domain_index, memory_domain_index);
+}
+
+/// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
+pub fn memoryLatency(compute_domain_index: usize, memory_domain_index: usize) usize {
+    return c.fu_memory_latency(compute_domain_index, memory_domain_index);
 }
 
 /// Returns the number of distinct Quality-of-Service levels

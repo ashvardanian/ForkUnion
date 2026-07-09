@@ -390,7 +390,7 @@ size_t fu_memory_level_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
 #if FU_ENABLE_NUMA
     if (!globals_initialize()) return 0;
     if (memory_domain_index >= global_numa_topology.memory_domains_count()) return 0;
-    return 0; // ? All memory is one tier until HBM/CXL tier harvesting lands
+    return global_numa_topology.memory_domain(memory_domain_index).memory_level;
 #else
     return 0;
 #endif
@@ -411,6 +411,24 @@ size_t fu_memory_distance(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE
     return global_numa_topology.distance(compute_domain_index, memory_domain_index);
 #else
     return compute_domain_index == 0 && memory_domain_index == 0 ? 10 : 0;
+#endif
+}
+
+size_t fu_memory_bandwidth(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    return global_numa_topology.memory_bandwidth(compute_domain_index, memory_domain_index);
+#else
+    return 0;
+#endif
+}
+
+size_t fu_memory_latency(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
+#if FU_ENABLE_NUMA
+    if (!globals_initialize()) return 0;
+    return global_numa_topology.memory_latency(compute_domain_index, memory_domain_index);
+#else
+    return 0;
 #endif
 }
 

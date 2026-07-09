@@ -1897,6 +1897,127 @@ FU_MAYBE_UNUSED_ static inline std::size_t get_capacity_for_core(FU_MAYBE_UNUSED
 }
 
 /**
+ *  @brief Whether @p node_id appears in a Linux range-list file such as "0", "0-3", or "0,2-4".
+ *  @sa Used to map a NUMA node onto its kernel memory tier.
+ */
+FU_MAYBE_UNUSED_ static inline bool nodelist_contains(FU_MAYBE_UNUSED_ char const *path,
+                                                      FU_MAYBE_UNUSED_ numa_node_id_t node_id) noexcept {
+#if defined(__linux__)
+    FILE *file = ::fopen(path, "r");
+    if (!file) return false;
+
+    char line[256];
+    bool found = false;
+    if (::fgets(line, sizeof(line), file)) {
+        char const *cursor = line;
+        while (*cursor) {
+            char *next = nullptr;
+            long const low = ::strtol(cursor, &next, 10);
+            if (next == cursor) break; // ? No number left to parse
+            long high = low;
+            cursor = next;
+            if (*cursor == '-') high = ::strtol(cursor + 1, &next, 10), cursor = next;
+            if (node_id >= low && node_id <= high) {
+                found = true;
+                break;
+            }
+            while (*cursor == ',' || *cursor == ' ' || *cursor == '\n') ++cursor;
+        }
+    }
+    ::fclose(file);
+    return found;
+#else
+    return false;
+#endif
+}
+
+/**
+ *  @brief Fetches the kernel memory-tier ordinal for a NUMA node, used to separate memory levels.
+ *  @retval A tier number where smaller means faster, or `numeric_limits<size_t>::max()` if unknown.
+ *
+ *  Scans `/sys/devices/virtual/memory_tiering/memory_tierN/nodelist`, which the kernel populates by
+ *  abstract distance - HBM below DRAM, CXL and persistent memory above it. When the sysfs is absent
+ *  (older kernels, no tiering) every node reports the sentinel and collapses to a single memory level.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t get_memory_tier_for_node(FU_MAYBE_UNUSED_ numa_node_id_t node_id) noexcept {
+#if FU_ENABLE_NUMA
+    DIR *dir = ::opendir("/sys/devices/virtual/memory_tiering");
+    if (!dir) return std::numeric_limits<std::size_t>::max();
+
+    std::size_t tier = std::numeric_limits<std::size_t>::max();
+    for (dirent *entry; (entry = ::readdir(dir)) != nullptr;) {
+        unsigned parsed = 0;
+        if (::sscanf(entry->d_name, "memory_tier%u", &parsed) != 1) continue;
+        char path[256];
+        int const written = std::snprintf(path, sizeof(path), //
+                                          "/sys/devices/virtual/memory_tiering/%s/nodelist", entry->d_name);
+        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(path)) continue; // ? Path too long
+        if (nodelist_contains(path, node_id)) {
+            tier = parsed;
+            break;
+        }
+    }
+    ::closedir(dir);
+    return tier;
+#else
+    return std::numeric_limits<std::size_t>::max();
+#endif
+}
+
+/**
+ *  @brief Reads one HMAT performance metric for the initiator-to-target NUMA edge, or 0 if unknown.
+ *  @param metric_name A sysfs leaf: "read_bandwidth", "write_bandwidth", "read_latency", "write_latency".
+ *  @retval Bandwidth in MB/s or latency in nanoseconds, or 0 when the machine exposes no HMAT table.
+ *
+ *  The kernel publishes per-node HMAT numbers under `access0` (nearest initiators) and `access1` (all
+ *  initiators); we take the first access class that lists @p initiator among its initiators.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t read_hmat_metric(FU_MAYBE_UNUSED_ numa_node_id_t initiator,
+                                                            FU_MAYBE_UNUSED_ numa_node_id_t target,
+                                                            FU_MAYBE_UNUSED_ char const *metric_name) noexcept {
+#if defined(__linux__)
+    for (int access_class = 0; access_class < 2; ++access_class) {
+        char initiator_path[320];
+        int written = std::snprintf(initiator_path, sizeof(initiator_path),
+                                    "/sys/devices/system/node/node%d/access%d/initiators/node%d", target, access_class,
+                                    initiator);
+        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(initiator_path)) continue;
+        if (::access(initiator_path, F_OK) != 0) continue; // ? Initiator is not in this access class
+
+        char metric_path[320];
+        written =
+            std::snprintf(metric_path, sizeof(metric_path), "/sys/devices/system/node/node%d/access%d/initiators/%s",
+                          target, access_class, metric_name);
+        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(metric_path)) continue;
+
+        FILE *file = ::fopen(metric_path, "r");
+        if (!file) continue;
+        unsigned long long parsed = 0;
+        std::size_t value = 0;
+        if (::fscanf(file, "%llu", &parsed) == 1) value = static_cast<std::size_t>(parsed);
+        ::fclose(file);
+        if (value) return value;
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+#if defined(__APPLE__)
+/**
+ *  @brief Reads an unsigned integer `sysctl` by name (e.g. "hw.nperflevels"), or 0 if unavailable.
+ *  @sa Used to harvest the Apple Silicon performance-level topology.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t sysctl_uint(char const *name) noexcept {
+    unsigned long long value = 0;
+    std::size_t length = sizeof(value);
+    if (::sysctlbyname(name, &value, &length, nullptr, 0) != 0) return 0;
+    return static_cast<std::size_t>(value);
+}
+#endif
+
+/**
  *  @brief Fetches the RAM page size in bytes.
  *  @retval The size of a memory page in bytes, typically 4096 on most systems.
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
@@ -2183,12 +2304,20 @@ template <std::size_t max_page_sizes_ = 4>
 struct numa_node {
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
 
-    numa_node_id_t node_id {-1};                       // ? Unique NUMA node ID, in [0, numa_max_node())
-    numa_socket_id_t socket_id {-1};                   // ? Physical CPU socket ID
-    std::size_t memory_size {0};                       // ? RAM volume in bytes
-    numa_core_id_t const *first_core_id {nullptr};     // ? Pointer to the first core ID in the `core_ids` array
-    std::size_t core_count {0};                        // ? Number of items in `core_ids` array
-    ram_page_settings<max_page_sizes_k> page_sizes {}; // ? Huge page sizes available on this NUMA node
+    /** @brief Unique NUMA node ID, in [0, numa_max_node()). */
+    numa_node_id_t node_id {-1};
+    /** @brief Physical CPU socket ID. */
+    numa_socket_id_t socket_id {-1};
+    /** @brief RAM volume in bytes. */
+    std::size_t memory_size {0};
+    /** @brief Memory tier ordinal, sorted fastest-to-slowest (0 = fastest). */
+    std::size_t memory_level {0};
+    /** @brief Pointer to the first core ID in the `core_ids` array. */
+    numa_core_id_t const *first_core_id {nullptr};
+    /** @brief Number of items in the `core_ids` array. */
+    std::size_t core_count {0};
+    /** @brief Huge page sizes available on this NUMA node. */
+    ram_page_settings<max_page_sizes_k> page_sizes {};
 };
 
 using numa_node_t = numa_node<>;
@@ -2203,21 +2332,58 @@ using numa_node_t = numa_node<>;
  *  why compute and memory are separate axes rather than a single "colocation" cell.
  */
 struct compute_domain {
-    numa_node_id_t node_id {-1};                   // ? The NUMA node these cores live on
-    std::size_t memory_domain_index {0};           // ? Index of the local memory domain (this node)
-    std::size_t compute_level {0};                 // ? QoS ordinal, sorted least-to-most performant
-    numa_core_id_t const *first_core_id {nullptr}; // ? Pointer to the first core ID in this domain
-    std::size_t core_count {0};                    // ? Number of cores in this domain
+    /** @brief The NUMA node these cores live on. */
+    numa_node_id_t node_id {-1};
+    /** @brief Index of the local memory domain (this node). */
+    std::size_t memory_domain_index {0};
+    /** @brief QoS ordinal, sorted least-to-most performant. */
+    std::size_t compute_level {0};
+    /** @brief Pointer to the first core ID in this domain. */
+    numa_core_id_t const *first_core_id {nullptr};
+    /** @brief Number of cores in this domain. */
+    std::size_t core_count {0};
 };
 
 using compute_domain_t = compute_domain;
 
 template <typename value_type_, typename comparator_type_ = std::less<value_type_>>
 void bubble_sort(value_type_ *array, std::size_t size, comparator_type_ comp = {}) noexcept {
+    if (size < 2) return; // ? Already sorted; also guards the `size - 1` unsigned underflow
     assert(array != nullptr && "Array must not be null");
     for (std::size_t i = 0; i < size - 1; ++i)
         for (std::size_t j = 0; j < size - i - 1; ++j)
             if (comp(array[j + 1], array[j])) std::swap(array[j], array[j + 1]);
+}
+
+/**
+ *  @brief Dense-ranks `count` items by an ascending integer key, writing each item's 0-based rank.
+ *  @return The number of distinct keys, at least 1 when `count > 0`.
+ *
+ *  `key(index)` must read a @b stable source and `assign(index, rank)` write a @b different field, so
+ *  ranking in place never corrupts a not-yet-ranked item whose key repeats. Used to turn raw CPU
+ *  capacities into compute levels and raw memory tiers into memory levels.
+ */
+template <typename key_type_, typename assign_type_>
+std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ const &assign) noexcept {
+    for (std::size_t i = 0; i < count; ++i) {
+        std::size_t rank = 0;
+        for (std::size_t j = 0; j < count; ++j)
+            if (key(j) < key(i)) {
+                bool counted = false;
+                for (std::size_t k = 0; k < j; ++k)
+                    if (key(k) == key(j)) counted = true;
+                if (!counted) rank += 1;
+            }
+        assign(i, rank);
+    }
+    std::size_t distinct = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        bool seen = false;
+        for (std::size_t j = 0; j < i; ++j)
+            if (key(j) == key(i)) seen = true;
+        if (!seen) distinct += 1;
+    }
+    return distinct ? distinct : 1;
 }
 
 /**
@@ -2234,6 +2400,7 @@ struct numa_topology {
     using cores_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<int>;
     using nodes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<numa_node_t>;
     using domains_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<compute_domain_t>;
+    using capacities_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::size_t>;
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
 
   private:
@@ -2245,13 +2412,15 @@ struct numa_topology {
     std::size_t cores_count_ {0};                 // ? Total number of cores in all nodes
     std::size_t compute_domains_count_ {0};       // ? Number of compute domains
     std::size_t compute_levels_count_ {1};        // ? Number of distinct QoS classes (>= 1)
+    std::size_t memory_levels_count_ {1};         // ? Number of distinct memory tiers (>= 1)
 
   public:
     constexpr numa_topology() noexcept = default;
     numa_topology(numa_topology &&o) noexcept
         : allocator_(std::move(o.allocator_)), nodes_(o.nodes_), node_core_ids_(o.node_core_ids_),
           compute_domains_(o.compute_domains_), nodes_count_(o.nodes_count_), cores_count_(o.cores_count_),
-          compute_domains_count_(o.compute_domains_count_), compute_levels_count_(o.compute_levels_count_) {
+          compute_domains_count_(o.compute_domains_count_), compute_levels_count_(o.compute_levels_count_),
+          memory_levels_count_(o.memory_levels_count_) {
         o.nodes_ = nullptr;
         o.node_core_ids_ = nullptr;
         o.compute_domains_ = nullptr;
@@ -2259,6 +2428,7 @@ struct numa_topology {
         o.cores_count_ = 0;
         o.compute_domains_count_ = 0;
         o.compute_levels_count_ = 1;
+        o.memory_levels_count_ = 1;
     }
 
     numa_topology &operator=(numa_topology &&other) noexcept {
@@ -2272,6 +2442,7 @@ struct numa_topology {
             cores_count_ = std::exchange(other.cores_count_, 0);
             compute_domains_count_ = std::exchange(other.compute_domains_count_, 0);
             compute_levels_count_ = std::exchange(other.compute_levels_count_, 1);
+            memory_levels_count_ = std::exchange(other.memory_levels_count_, 1);
         }
         return *this;
     }
@@ -2295,6 +2466,7 @@ struct numa_topology {
         compute_domains_ = nullptr;
         nodes_count_ = cores_count_ = compute_domains_count_ = 0;
         compute_levels_count_ = 1;
+        memory_levels_count_ = 1;
     }
 
     /** @brief Number of memory domains (one per NUMA node). @sa `compute_domains_count`. */
@@ -2315,6 +2487,8 @@ struct numa_topology {
     std::size_t compute_domains_count() const noexcept { return compute_domains_count_; }
     /** @brief Number of distinct QoS classes across all compute domains (>= 1). */
     std::size_t compute_levels_count() const noexcept { return compute_levels_count_; }
+    /** @brief Number of distinct memory tiers across all memory domains (>= 1). */
+    std::size_t memory_levels_count() const noexcept { return memory_levels_count_; }
 
     /** @brief The compute domain at @p compute_domain_index, in [0, `compute_domains_count()`). */
     compute_domain_t const &compute_domain_at(std::size_t const compute_domain_index) const noexcept {
@@ -2341,9 +2515,27 @@ struct numa_topology {
 #endif
     }
 
+    /** @brief HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown. */
+    std::size_t memory_bandwidth(std::size_t const compute_domain_index,
+                                 std::size_t const memory_domain_index) const noexcept {
+        if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= nodes_count_) return 0;
+        numa_node_id_t const from = compute_domains_[compute_domain_index].node_id;
+        numa_node_id_t const to = nodes_[memory_domain_index].node_id;
+        return read_hmat_metric(from, to, "read_bandwidth");
+    }
+
+    /** @brief HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown. */
+    std::size_t memory_latency(std::size_t const compute_domain_index,
+                               std::size_t const memory_domain_index) const noexcept {
+        if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= nodes_count_) return 0;
+        numa_node_id_t const from = compute_domains_[compute_domain_index].node_id;
+        numa_node_id_t const to = nodes_[memory_domain_index].node_id;
+        return read_hmat_metric(from, to, "read_latency");
+    }
+
     /**
-     *  @brief Harvests CPU-memory topology.
-     *  @retval false if the kernel lacks NUMA support or the harvest failed.
+     *  @brief Harvests CPU-memory topology - Linux NUMA nodes, or Apple Silicon performance levels.
+     *  @retval false if the platform lacks topology support or the harvest failed.
      *  @retval true if the harvest was successful and the topology is ready to use.
      */
     bool try_harvest() noexcept {
@@ -2352,15 +2544,17 @@ struct numa_topology {
         numa_node_t *nodes_ptr = nullptr;
         numa_core_id_t *core_ids_ptr = nullptr;
         compute_domain_t *domains_ptr = nullptr;
+        std::size_t *core_capacities = nullptr; // ? Scheduler capacity keyed by core id, cached for the QoS split
         numa_node_id_t max_numa_node_id = -1;
 
         // Allocators must be visible to the cleanup path
         nodes_allocator_t nodes_alloc {allocator_};
         cores_allocator_t cores_alloc {allocator_};
         domains_allocator_t domains_alloc {allocator_};
+        capacities_allocator_t capacities_alloc {allocator_};
 
         // These counters are reused in the failure handler
-        std::size_t fetched_nodes = 0, fetched_cores = 0;
+        std::size_t fetched_nodes = 0, fetched_cores = 0, configured_cores = 0;
 
         if (::numa_available() < 0) goto failed_harvest; // ! Linux kernel lacks NUMA support
         ::numa_node_to_cpu_update();                     // ? Reset the outdated stale state
@@ -2375,8 +2569,9 @@ struct numa_topology {
             if (::numa_node_size64(node_id, &dummy) < 0) continue; // ! Offline node
             ::numa_bitmask_clearall(numa_mask);
             if (::numa_node_to_cpus(node_id, numa_mask) < 0) continue; // ! Invalid CPU map
+            // A cpuless memory domain (HBM-flat, CXL expander, GPU HBM) reports zero cores, yet is a
+            // valid memory domain - count the node and add its (possibly zero) cores.
             std::size_t const node_cores = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
-            assert(node_cores > 0 && "Node must have at least one core");
             fetched_nodes += 1;
             fetched_cores += node_cores;
         }
@@ -2387,6 +2582,13 @@ struct numa_topology {
         core_ids_ptr = cores_alloc.allocate(fetched_cores);
         domains_ptr = domains_alloc.allocate(fetched_cores);
         if (!nodes_ptr || !core_ids_ptr || !domains_ptr) goto failed_harvest; // ! Allocation failed
+
+        // A scratch table of every configured CPU's capacity, filled once below and read by the
+        // per-node QoS split (which is O(n^2) in comparisons) instead of re-opening sysfs each time.
+        configured_cores = static_cast<std::size_t>(::numa_num_configured_cpus());
+        if (configured_cores == 0) goto failed_harvest; // ! No CPUs is not a valid state
+        core_capacities = capacities_alloc.allocate(configured_cores);
+        if (!core_capacities) goto failed_harvest; // ! Allocation failed
 
         // Populate
         for (numa_node_id_t node_id = 0, core_index = 0, node_index = 0; node_id <= max_numa_node_id; ++node_id) {
@@ -2400,8 +2602,8 @@ struct numa_topology {
             node.memory_size = static_cast<std::size_t>(memory_size);
             node.first_core_id = core_ids_ptr + core_index;
             node.core_count = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
-            assert(node.core_count > 0 && "Node is known to have at least one core");
-            node.socket_id = get_socket_id_for_core(node.first_core_id[0]);
+            // ? Cpuless memory domains have no core to query - default the socket and skip the lookup.
+            node.socket_id = node.core_count > 0 ? get_socket_id_for_core(node.first_core_id[0]) : -1;
 
             // Most likely, this will fill `core_ids_ptr` with `std::iota`-like values
             for (std::size_t bit_offset = 0; bit_offset < numa_mask->size; ++bit_offset)
@@ -2423,9 +2625,21 @@ struct numa_topology {
         // Let's sort all the nodes by their socket ID, then by number of cores, then by first core ID
         bubble_sort(nodes_, nodes_count_, [](numa_node_t const &a, numa_node_t const &b) noexcept {
             if (a.socket_id != b.socket_id) return a.socket_id < b.socket_id;
-            if (a.core_count != b.core_count) return a.core_count > b.core_count; // ? Sort by descending core count
-            return a.first_core_id[0] < b.first_core_id[0];                       // ? Sort by first core ID
+            if (a.core_count != b.core_count) return a.core_count > b.core_count;  // ? Sort by descending core count
+            numa_core_id_t const a_first = a.core_count ? a.first_core_id[0] : -1; // ? Cpuless slices are empty
+            numa_core_id_t const b_first = b.core_count ? b.first_core_id[0] : -1;
+            return a_first < b_first; // ? Sort by first core ID
         });
+
+        // Cache each harvested core's scheduler capacity once, keyed by core id. The QoS split
+        // below sorts and compares capacities repeatedly, so reading sysfs per comparison would be
+        // O(cores^2) file opens on a large node - a single pass here amortizes that to O(cores).
+        for (std::size_t i = 0; i < configured_cores; ++i) core_capacities[i] = 0;
+        for (std::size_t core_index = 0; core_index < cores_count_; ++core_index) {
+            numa_core_id_t const core_id = node_core_ids_[core_index];
+            if (static_cast<std::size_t>(core_id) < configured_cores)
+                core_capacities[static_cast<std::size_t>(core_id)] = get_capacity_for_core(core_id);
+        }
 
         // Split each memory domain's cores into compute domains by QoS class. We sort each node's
         // cores by scheduler capacity, then cut the sorted run at every capacity change. Cores
@@ -2437,21 +2651,25 @@ struct numa_topology {
                 numa_core_id_t *node_cores = const_cast<numa_core_id_t *>(node.first_core_id);
 
                 // Ascending capacity groups efficiency cores before performance cores.
-                bubble_sort(node_cores, node.core_count, [](numa_core_id_t const &a, numa_core_id_t const &b) noexcept {
-                    return get_capacity_for_core(a) < get_capacity_for_core(b);
-                });
+                bubble_sort(node_cores, node.core_count,
+                            [core_capacities](numa_core_id_t const &a, numa_core_id_t const &b) noexcept {
+                                return core_capacities[static_cast<std::size_t>(a)] <
+                                       core_capacities[static_cast<std::size_t>(b)];
+                            });
 
                 std::size_t run_begin = 0;
                 for (std::size_t core = 1; core <= node.core_count; ++core) {
                     bool const at_end = core == node.core_count;
-                    bool const capacity_changed = !at_end && get_capacity_for_core(node_cores[core]) !=
-                                                                 get_capacity_for_core(node_cores[run_begin]);
+                    bool const capacity_changed =
+                        !at_end && core_capacities[static_cast<std::size_t>(node_cores[core])] !=
+                                       core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
                     if (!at_end && !capacity_changed) continue;
 
                     compute_domain_t &domain = domains_ptr[domains_written++];
                     domain.node_id = node.node_id;
                     domain.memory_domain_index = node_index;
-                    domain.compute_level = get_capacity_for_core(node_cores[run_begin]); // ? Raw capacity, ranked below
+                    domain.compute_level = core_capacities[static_cast<std::size_t>(
+                        node_cores[run_begin])]; // ? Raw capacity, ranked below
                     domain.first_core_id = node_cores + run_begin;
                     domain.core_count = core - run_begin;
                     run_begin = core;
@@ -2459,40 +2677,139 @@ struct numa_topology {
             }
 
             // Re-rank the raw capacities into dense QoS ordinals, sorted least-to-most performant.
-            std::size_t distinct_capacities = 0;
-            for (std::size_t i = 0; i < domains_written; ++i) {
-                bool seen = false;
-                for (std::size_t j = 0; j < i; ++j)
-                    if (domains_ptr[j].compute_level == domains_ptr[i].compute_level) seen = true;
-                if (!seen) distinct_capacities += 1;
-            }
-            for (std::size_t i = 0; i < domains_written; ++i) {
-                std::size_t rank = 0;
-                for (std::size_t j = 0; j < domains_written; ++j)
-                    if (domains_ptr[j].compute_level < domains_ptr[i].compute_level) {
-                        bool counted = false;
-                        for (std::size_t k = 0; k < j; ++k)
-                            if (domains_ptr[k].compute_level == domains_ptr[j].compute_level) counted = true;
-                        if (!counted) rank += 1;
-                    }
-                domains_ptr[i].compute_level = rank;
-            }
-
             compute_domains_ = domains_ptr;
             compute_domains_count_ = domains_written;
-            compute_levels_count_ = distinct_capacities ? distinct_capacities : 1;
+            compute_levels_count_ = dense_rank(
+                domains_written,
+                [core_capacities, domains_ptr](std::size_t index) noexcept {
+                    return core_capacities[static_cast<std::size_t>(domains_ptr[index].first_core_id[0])];
+                },
+                [domains_ptr](std::size_t index, std::size_t rank) noexcept {
+                    domains_ptr[index].compute_level = rank;
+                });
         }
 
+        // Rank memory domains into dense tier ordinals, sorted fastest-to-slowest (lower = faster). Raw
+        // tiers are snapshotted into scratch so ranking in place never corrupts a repeated tier. Absent
+        // the memory-tiering sysfs, every node collapses to a single memory level.
+        if (std::size_t *raw_tiers = capacities_alloc.allocate(nodes_count_)) {
+            for (std::size_t i = 0; i < nodes_count_; ++i) raw_tiers[i] = get_memory_tier_for_node(nodes_[i].node_id);
+            memory_levels_count_ = dense_rank(
+                nodes_count_, [raw_tiers](std::size_t index) noexcept { return raw_tiers[index]; },
+                [this, raw_tiers](std::size_t index, std::size_t rank) noexcept { nodes_[index].memory_level = rank; });
+            capacities_alloc.deallocate(raw_tiers, nodes_count_);
+        }
+
+        capacities_alloc.deallocate(core_capacities, configured_cores); // ? Scratch, not part of the committed state
         return true;
 
     failed_harvest:
         if (nodes_ptr) nodes_alloc.deallocate(nodes_ptr, fetched_nodes);
         if (core_ids_ptr) cores_alloc.deallocate(core_ids_ptr, fetched_cores);
         if (domains_ptr) domains_alloc.deallocate(domains_ptr, fetched_cores);
+        if (core_capacities) capacities_alloc.deallocate(core_capacities, configured_cores);
         if (numa_mask) ::numa_free_cpumask(numa_mask);
 #endif // FU_ENABLE_NUMA
+#if defined(__APPLE__)
+        return try_harvest_apple();
+#else
         return false;
+#endif
     }
+
+#if defined(__APPLE__)
+    /**
+     *  @brief Harvests the Apple Silicon topology from `sysctl` performance levels.
+     *  @retval false if the machine reports no logical CPUs or an allocation failed.
+     *
+     *  Apple Silicon is one UMA memory domain shared by every core, so we build a single memory
+     *  domain and one compute domain per `hw.perflevelN` cluster - performance cores (`hw.perflevel0`)
+     *  taking the highest compute level, efficiency cores below. Thread affinity on macOS is advisory
+     *  (`thread_policy_set` hints, not hard pinning), so `spawn_on` reports these domains but the
+     *  kernel may still migrate work across levels - to tune on real hardware.
+     */
+    bool try_harvest_apple() noexcept {
+        std::size_t const total_cores = sysctl_uint("hw.logicalcpu");
+        if (total_cores == 0) return false;
+        std::size_t const memory_size = sysctl_uint("hw.memsize");
+        std::size_t const levels = sysctl_uint("hw.nperflevels");
+
+        // Count the non-empty performance levels so each becomes one compute domain.
+        std::size_t nonempty_levels = 0;
+        for (std::size_t level = 0; level < levels; ++level) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "hw.perflevel%zu.logicalcpu", level);
+            if (sysctl_uint(name)) nonempty_levels += 1;
+        }
+        if (nonempty_levels == 0) nonempty_levels = 1; // ? One level covering every core
+
+        nodes_allocator_t nodes_alloc {allocator_};
+        cores_allocator_t cores_alloc {allocator_};
+        domains_allocator_t domains_alloc {allocator_};
+
+        // `compute_domains_` is sized to `cores_count_` across the class (at most one domain per core).
+        numa_node_t *nodes_ptr = nodes_alloc.allocate(1);
+        numa_core_id_t *core_ids_ptr = cores_alloc.allocate(total_cores);
+        compute_domain_t *domains_ptr = domains_alloc.allocate(total_cores);
+        if (!nodes_ptr || !core_ids_ptr || !domains_ptr) {
+            if (nodes_ptr) nodes_alloc.deallocate(nodes_ptr, 1);
+            if (core_ids_ptr) cores_alloc.deallocate(core_ids_ptr, total_cores);
+            if (domains_ptr) domains_alloc.deallocate(domains_ptr, total_cores);
+            return false;
+        }
+        for (std::size_t i = 0; i < total_cores; ++i) core_ids_ptr[i] = static_cast<numa_core_id_t>(i);
+
+        numa_node_t &node = nodes_ptr[0];
+        node.node_id = 0;
+        node.socket_id = 0;
+        node.memory_size = memory_size;
+        node.memory_level = 0;
+        node.first_core_id = core_ids_ptr;
+        node.core_count = total_cores;
+
+        // One compute domain per non-empty level. Apple lists cores fastest-level first, so the first
+        // domain (`hw.perflevel0`, the performance cores) takes the highest compute level.
+        std::size_t core_offset = 0, domains_written = 0;
+        for (std::size_t level = 0; level < levels && core_offset < total_cores; ++level) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "hw.perflevel%zu.logicalcpu", level);
+            std::size_t level_cores = sysctl_uint(name);
+            if (level_cores == 0) continue;
+            if (core_offset + level_cores > total_cores) level_cores = total_cores - core_offset;
+
+            compute_domain_t &domain = domains_ptr[domains_written];
+            domain.node_id = 0;
+            domain.memory_domain_index = 0;
+            domain.compute_level = nonempty_levels - 1 - domains_written; // ? perflevel0 (fastest) ranks highest
+            domain.first_core_id = core_ids_ptr + core_offset;
+            domain.core_count = level_cores;
+            core_offset += level_cores;
+            domains_written += 1;
+        }
+
+        // Fallback: no perflevel data - one compute domain over every core.
+        if (domains_written == 0) {
+            compute_domain_t &domain = domains_ptr[0];
+            domain.node_id = 0;
+            domain.memory_domain_index = 0;
+            domain.compute_level = 0;
+            domain.first_core_id = core_ids_ptr;
+            domain.core_count = total_cores;
+            domains_written = 1;
+        }
+
+        reset(); // ? Free any prior state before committing
+        nodes_ = nodes_ptr;
+        node_core_ids_ = core_ids_ptr;
+        compute_domains_ = domains_ptr;
+        nodes_count_ = 1;
+        cores_count_ = total_cores;
+        compute_domains_count_ = domains_written;
+        compute_levels_count_ = domains_written;
+        memory_levels_count_ = 1;
+        return true;
+    }
+#endif // defined(__APPLE__)
 
     /**
      *  @brief Copy-assigns the topology from @p other.
@@ -2552,6 +2869,7 @@ struct numa_topology {
         cores_count_ = other.cores_count_;
         compute_domains_count_ = other.compute_domains_count_;
         compute_levels_count_ = other.compute_levels_count_;
+        memory_levels_count_ = other.memory_levels_count_;
         return true;
     }
 };
@@ -4323,6 +4641,14 @@ struct log_numa_topology_t {
                 colors.bold_green(), cores_str, node.core_count, colors.reset(),        //
                 colors.yellow(), /* "Memory:" */ colors.reset(),                        //
                 colors.bold_yellow(), memory_str, colors.reset());
+
+            // Memory tier, shown only when the machine actually exposes more than one
+            if (topology.memory_levels_count() > 1)
+                pos += static_cast<std::size_t>(std::snprintf(    //
+                    line_buffer + pos, sizeof(line_buffer) - pos, //
+                    " • %sTier:%s %s%zu%s",                       //
+                    colors.blue(), /* "Tier:" */ colors.reset(),  //
+                    colors.bold_blue(), node.memory_level, colors.reset()));
 
             // Add huge pages if any exist
             auto const &page_settings = node.page_sizes;
