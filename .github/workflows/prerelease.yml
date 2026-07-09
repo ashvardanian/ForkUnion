@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3
+        uses: ashvardanian/tinysemver@v3.0.1
         with:
           verbose: "true"
           version-file: "VERSION"
@@ -89,6 +89,32 @@ jobs:
       - name: Test Zig
         run: zig build test
 
+      # Sanitizers reuse this job's compiler; restricted to the NUMA-free
+      # basic_pool, whose pinned NUMA path stalls under ThreadSanitizer.
+      - name: Build & Test under ThreadSanitizer
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          set -euxo pipefail
+          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+            -D CMAKE_C_FLAGS="-fsanitize=thread -g" -D CMAKE_CXX_FLAGS="-fsanitize=thread -g" \
+            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build build_tsan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
+          build_tsan/forkunion_test_cpp17
+          build_tsan/forkunion_test_cpp20
+          build_tsan/forkunion_test_cpp23
+      - name: Build & Test under Address+UB Sanitizer
+        run: |
+          set -euxo pipefail
+          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+            -D CMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
+            -D CMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
+            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build_asan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
+          build_asan/forkunion_test_cpp17
+          build_asan/forkunion_test_cpp20
+          build_asan/forkunion_test_cpp23
+
   test_ubuntu_clang:
     name: Ubuntu (Clang)
     runs-on: ubuntu-24.04
@@ -104,7 +130,7 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential clang libblocksruntime-dev
+          sudo apt install -y cmake build-essential clang libclang-rt-18-dev libblocksruntime-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
@@ -129,6 +155,80 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
+
+      # Sanitizers reuse this job's compiler; restricted to the NUMA-free
+      # basic_pool, whose pinned NUMA path stalls under ThreadSanitizer.
+      - name: Build & Test under ThreadSanitizer
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          set -euxo pipefail
+          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+            -D CMAKE_C_FLAGS="-fsanitize=thread -g" -D CMAKE_CXX_FLAGS="-fsanitize=thread -g" \
+            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build build_tsan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
+          build_tsan/forkunion_test_cpp17
+          build_tsan/forkunion_test_cpp20
+          build_tsan/forkunion_test_cpp23
+      - name: Build & Test under Address+UB Sanitizer
+        run: |
+          set -euxo pipefail
+          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+            -D CMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
+            -D CMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
+            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build_asan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
+          build_asan/forkunion_test_cpp17
+          build_asan/forkunion_test_cpp20
+          build_asan/forkunion_test_cpp23
+
+  test_ubuntu_arm:
+    name: Ubuntu (Arm64, NUMA)
+    # Native Arm64 is the only faithful test of the weak memory model the
+    # library targets - qemu-user does not reproduce guest memory ordering.
+    runs-on: ubuntu-24.04-arm
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build C/C++
+        run: |
+          sudo apt update
+          sudo apt install -y cmake build-essential libomp-dev libnuma-dev
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=ON
+          cmake --build build_artifacts --config RelWithDebInfo
+      - name: Test C++
+        run: |
+          set -euxo pipefail
+          build_artifacts/forkunion_test_cpp17
+          build_artifacts/forkunion_test_cpp20
+          build_artifacts/forkunion_test_cpp23
+      - name: Test C
+        run: |
+          set -euxo pipefail
+          build_artifacts/forkunion_test_c11
+          build_artifacts/forkunion_test_c_gcc_nested
+
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc -vV
+      - name: Build Rust
+        run: cargo build --features numa
+      - name: Test Rust
+        run: cargo test --features numa
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Test Zig
+        run: zig build test -Dnuma=true
 
   test_macos:
     name: macOS
@@ -179,7 +279,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        llvm: [16, 17, 18, 19, 20]
+        llvm: [17, 18, 19, 20, 21]
         config: [Debug, Release, RelWithDebInfo, MinSizeRel]
     steps:
       - name: Checkout
@@ -210,7 +310,7 @@ jobs:
 
   test_windows:
     name: Windows
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -252,6 +352,8 @@ jobs:
 
   test_windows_msvc_matrix:
     name: Windows MSVC Versions
+    # Pinned to windows-2022: this matrix exists to prove the v142 (VS 2019)
+    # toolset still compiles, and that toolset isn't guaranteed on windows-2025.
     runs-on: windows-2022
     strategy:
       fail-fast: false
