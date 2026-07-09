@@ -2592,23 +2592,26 @@ struct numa_topology {
 
         // Populate
         for (numa_node_id_t node_id = 0, core_index = 0, node_index = 0; node_id <= max_numa_node_id; ++node_id) {
-            long long memory_size;
-            if (::numa_node_size64(node_id, &memory_size) < 0) continue;
+            long long free_memory_size; // ? Only an out-parameter, the total size comes back as the return value
+            long long const total_memory_size = ::numa_node_size64(node_id, &free_memory_size);
+            if (total_memory_size < 0) continue;
             ::numa_bitmask_clearall(numa_mask);
             if (::numa_node_to_cpus(node_id, numa_mask) < 0) continue;
 
             numa_node_t &node = nodes_ptr[node_index];
             node.node_id = node_id;
-            node.memory_size = static_cast<std::size_t>(memory_size);
+            node.memory_size = static_cast<std::size_t>(total_memory_size);
             node.first_core_id = core_ids_ptr + core_index;
             node.core_count = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
-            // ? Cpuless memory domains have no core to query - default the socket and skip the lookup.
-            node.socket_id = node.core_count > 0 ? get_socket_id_for_core(node.first_core_id[0]) : -1;
 
             // Most likely, this will fill `core_ids_ptr` with `std::iota`-like values
             for (std::size_t bit_offset = 0; bit_offset < numa_mask->size; ++bit_offset)
                 if (::numa_bitmask_isbitset(numa_mask, static_cast<unsigned int>(bit_offset)))
                     core_ids_ptr[core_index++] = static_cast<numa_core_id_t>(bit_offset);
+
+            // ? Cpuless memory domains have no core to query - default the socket and skip the lookup.
+            // ! Only valid once `first_core_id` points to initialized entries, hence after the loop above
+            node.socket_id = node.core_count > 0 ? get_socket_id_for_core(node.first_core_id[0]) : -1;
 
             // Fetch Huge Page sizes for this NUMA node
             node.page_sizes.try_harvest(node_id); // ! We are not raising the failure - Huge Pages are optional
@@ -3064,12 +3067,16 @@ struct linux_numa_allocator {
         // finding the largest one that makes sense and doesn't fail.
         size_type const size_bytes = size * sizeof(value_type);
 
+        // ! Unlike `allocate_at_least`, we can't round the request up to the page boundary here:
+        // ! the matching `deallocate(p, n)` only knows `n`, so it would unmap less than we mapped.
+        // ! Huge Pages are therefore only an option for exact multiples of their size.
+
         // Try 1 GB Huge Pages, for buffers larger than 2 GB
-        if (size_bytes >= (2u * page_size_1g_k))
+        if (size_bytes >= (2u * page_size_1g_k) && size_bytes % page_size_1g_k == 0)
             if (auto result = allocate(size, page_size_1g_k); result) return result;
 
         // Try 2 MB Huge Pages, for buffers larger than 4 MB
-        if (size_bytes >= (2u * page_size_2m_k))
+        if (size_bytes >= (2u * page_size_2m_k) && size_bytes % page_size_2m_k == 0)
             if (auto result = allocate(size, page_size_2m_k); result) return result;
 
         return allocate(size, default_page_size_);

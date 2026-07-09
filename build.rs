@@ -12,9 +12,15 @@ fn main() -> Result<(), cc::Error> {
         .file("c/forkunion.cpp")
         .include("include")
         .define("FU_ENABLE_NUMA", if enable_numa { "1" } else { "0" })
-        .opt_level(2) // Optimize compiled C++ to -O2
         .flag_if_supported("-pedantic") // Only for GCC/Clang
         .warnings(false);
+
+    // Mirror Rust's `debug_assertions` onto the C++ `assert`s. Cargo only exports this as a
+    // `cfg`, and it tracks the profile's `debug-assertions` key - unlike `DEBUG`, which is
+    // debug-info and stays `true` under `[profile.release] debug = true`.
+    if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
+        build.define("NDEBUG", None);
+    }
 
     // Compile the C++ library first, so Cargo emits
     // `-lstatic=forkunion` before we add dependent libs.
