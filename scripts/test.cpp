@@ -57,6 +57,7 @@ bool test_indexed_split() noexcept {
 template <typename index_type_ = std::uint8_t>
 bool test_coprime_permutation() noexcept {
     constexpr std::size_t max_tasks = std::numeric_limits<index_type_>::max();
+    std::vector<bool> visits(max_tasks);
 
     for (std::size_t start = 0; start < max_tasks; ++start) {
         for (std::size_t end = start + 1; end < max_tasks; ++end) {
@@ -67,16 +68,23 @@ bool test_coprime_permutation() noexcept {
                 fu::coprime_permutation_range<index_type_> permutation(static_cast<index_type_>(start), range_size,
                                                                        static_cast<index_type_>(seed));
 
+                // Reset visits for each test case
+                std::fill_n(visits.begin(), max_tasks, false);
+
+                // Counting alone can't tell a permutation from a walk that revisits some values and
+                // skips others - and a walk that revisits makes a work-stealing thread drain the same
+                // victim twice, overrunning its cursor. Check that each value appears exactly once.
                 std::size_t count_matches = 0;
                 for (auto value : permutation) {
-                    if (value < start || value >= end) {
-                        return false; // Out of range
-                    }
+                    if (value < start || value >= end) return false; // Out of range
+
+                    std::size_t const offset = static_cast<std::size_t>(value) - start;
+                    if (visits[offset]) return false; // ! Revisited a value, so this is not a permutation
+
+                    visits[offset] = true;
                     count_matches++;
                 }
-                if (count_matches != range_size) {
-                    return false; // Not all values in the range were covered
-                }
+                if (count_matches != range_size) return false; // Not all values in the range were covered
             }
         }
     }
@@ -533,6 +541,54 @@ static bool test_oversubscribed_threads() noexcept {
     return counter.load() == default_parallel_tasks_k && contains_iota(visited);
 }
 
+/**
+ *  @brief Stalls one thread and checks its neighbours drain the slice it can't reach.
+ *
+ *  `for_n_dynamic` reserves a contiguous slice per thread and lets idle threads help drain the rest.
+ *  Correctness must not depend on any thread keeping up: with one thread crawling, every task still
+ *  runs, and runs @b once. The stalled thread must also end up executing fewer tasks than its own
+ *  slice held - otherwise nobody stole, and the test is silently proving nothing.
+ */
+template <typename make_pool_type_ = make_pool_t>
+static bool test_for_n_dynamic_stealing() noexcept {
+
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    if (!pool.try_spawn(maker.scope())) return false;
+
+    std::size_t const threads = pool.threads_count();
+    if (threads < 2) return true; // ? Nobody to steal from, and nobody to steal
+
+    using pool_prong_t = typename std::remove_reference<decltype(pool)>::type::prong_t;
+    constexpr std::size_t tasks_k = 8192;
+
+    std::atomic<std::size_t> total {0};
+    std::atomic<std::size_t> thread_0_runs {0};
+    std::vector<std::atomic<unsigned>> executions(tasks_k);
+    for (auto &e : executions) e.store(0, std::memory_order_relaxed);
+
+    pool.for_n_dynamic(tasks_k, [&](pool_prong_t prong) noexcept {
+        // Thread 0 crawls: a spin, not a sleep, so the pool's own yields don't mask the stall.
+        if (prong.thread == 0) {
+            volatile std::size_t sink = 0;
+            for (std::size_t i = 0; i < 200000; ++i) sink = sink + i;
+            thread_0_runs.fetch_add(1, std::memory_order_relaxed);
+        }
+        executions[prong.task].fetch_add(1, std::memory_order_relaxed);
+        total.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    if (total.load() != tasks_k) return false; // ! Some task ran twice, or never
+    for (std::size_t i = 0; i < tasks_k; ++i)
+        if (executions[i].load() != 1) return false; // ! Every task exactly once
+
+    // Thread 0's own slice - had nobody helped, it would have run all of it, plus a static prong.
+    std::size_t const dynamic_tasks = tasks_k > threads ? tasks_k - threads : 0;
+    fu::indexed_split<std::size_t> const split(dynamic_tasks, threads);
+    std::size_t const own_slice = split[0].count;
+    return thread_0_runs.load() < own_slice; // ! Nobody stole, so this test proves nothing
+}
+
 /** @brief Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
 template <bool should_restart_, typename make_pool_type_ = make_pool_t>
 static bool test_mixed_restart() noexcept {
@@ -716,6 +772,7 @@ int main(void) {
         {"`for_n` for uncomfortable input size", test_uncomfortable_input_size}, //
         {"`for_n` static scheduling", test_for_n},                               //
         {"`for_n_dynamic` dynamic scheduling", test_for_n_dynamic},              //
+        {"`for_n_dynamic` stalled thread stolen from", test_for_n_dynamic_stealing},
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads}, //
         {"`terminate` avoided", test_mixed_restart<false>},                      //
         {"`terminate` and re-spawn", test_mixed_restart<true>},                  //
@@ -733,6 +790,8 @@ int main(void) {
         {"UMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_linux_compute_domain_pool_t>},
         {"UMA `for_n` static scheduling", test_for_n<make_linux_compute_domain_pool_t>},
         {"UMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_linux_compute_domain_pool_t>},
+        {"UMA `for_n_dynamic` stalled thread stolen from",
+         test_for_n_dynamic_stealing<make_linux_compute_domain_pool_t>},
         {"UMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_linux_compute_domain_pool_t>},
         {"UMA `terminate` avoided", test_mixed_restart<false, make_linux_compute_domain_pool_t>},
         {"UMA `terminate` and re-spawn", test_mixed_restart<true, make_linux_compute_domain_pool_t>},

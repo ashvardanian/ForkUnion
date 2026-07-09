@@ -492,6 +492,21 @@ struct allocation_result {
 };
 
 /**
+ *  @brief Detects allocators exposing our @b sized `allocate_at_least`, reporting `bytes` and `pages`.
+ *
+ *  Deliberately keys on the `bytes` member rather than on the function name. C++ 23 gave
+ *  `std::allocator` an `allocate_at_least` of its own, but its `std::allocation_result` carries only
+ *  `ptr` and `count`, so probing the name alone would match it and then fail to compile on `bytes`.
+ */
+template <typename allocator_type_, typename = void>
+struct has_sized_allocate_at_least : std::false_type {};
+
+template <typename allocator_type_>
+struct has_sized_allocate_at_least<
+    allocator_type_, std::void_t<decltype(std::declval<allocator_type_ &>().allocate_at_least(std::size_t {}).bytes)>>
+    : std::true_type {};
+
+/**
  *  @brief Analogous to `std::unique_ptr<T[]>`, but designed for large padded allocations.
  *  @see https://en.cppreference.com/w/cpp/memory/unique_ptr.html
  */
@@ -569,12 +584,26 @@ class unique_padded_buffer {
         if (new_objects_count == 0) return true;
 
         std::size_t const total = new_objects_count * bytes_per_object_;
-        auto new_result = allocator_.allocate_at_least(total);
-        if (!new_result) return false;
 
-        raw_ = new_result.ptr;
+        // NUMA-aware allocators can hand back more than we asked for, and tell us how much. Plain
+        // `std::allocator` cannot, so take exactly `total` and remember that as the size to free.
+        char *raw = nullptr;
+        std::size_t bytes = 0;
+        if constexpr (has_sized_allocate_at_least<raw_allocator_t>::value) {
+            auto new_result = allocator_.allocate_at_least(total);
+            if (!new_result) return false;
+            raw = new_result.ptr;
+            bytes = new_result.bytes;
+        }
+        else {
+            raw = allocator_.allocate(total);
+            if (!raw) return false;
+            bytes = total;
+        }
+
+        raw_ = raw;
         objects_count_ = new_objects_count;
-        bytes_total_ = new_result.bytes;
+        bytes_total_ = bytes;
 
         for (std::size_t i = 0; i < objects_count_; ++i) ::new (static_cast<void *>(ptr(i))) object_t();
 
@@ -757,10 +786,14 @@ struct coprime_permutation_range {
 
         inline iterator &operator++() noexcept {
             assert(elements_left_ != 0 && "Attempting to increment an iterator beyond bounds");
-            offset_ = static_cast<index_t>(offset_ + stride_);
 
-            // Avoid modulo division by using wrap-around logic.
-            if (offset_ >= length_) offset_ = static_cast<index_t>(offset_ - length_);
+            // Avoid modulo division by using wrap-around logic. Both `offset_` and `stride_` are below
+            // `length_`, but their @b sum need not fit `index_t` - on `std::uint8_t` with a length of
+            // 253, `200 + 100` truncates to 44 rather than wrapping to 47, and the walk stops being a
+            // permutation. Subtracting first keeps every intermediate value inside the domain.
+            index_t const room_left = static_cast<index_t>(length_ - offset_); // ? Always positive
+            offset_ = stride_ < room_left ? static_cast<index_t>(offset_ + stride_)
+                                          : static_cast<index_t>(stride_ - room_left);
             --elements_left_;
             return *this;
         }
@@ -867,45 +900,103 @@ class invoke_for_n {
 };
 
 /**
+ *  @brief One thread's private cursor into its own slice of a `for_n_dynamic` dispatch.
+ *  @sa `invoke_for_n_dynamic` hands each thread a slice; idle threads drain their neighbours'.
+ *
+ *  A single shared counter serializes an entire dispatch: only one core may own its cache line at
+ *  a time, so no dispatch retires tasks faster than that line circulates. Handing every thread its
+ *  own cursor turns the common claim into an @b uncontended read-modify-write on a line nobody else
+ *  touches, which is roughly fifty times cheaper. The line is only shared once a thread runs dry and
+ *  starts helping a neighbour, which is exactly when the extra cost is worth paying.
+ *
+ *  Pad these to a full cache line - two cursors sharing a line would reintroduce the very traffic
+ *  the split exists to avoid. @sa `unique_padded_buffer`, which spaces them by the pool's alignment.
+ */
+template <typename index_type_ = std::size_t>
+struct dynamic_claim {
+    /** @brief Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
+    std::atomic<index_type_> next {0};
+    /** @brief One past this slice's last task. Written once before the dispatch, then read-only. */
+    index_type_ end {0};
+};
+
+using dynamic_claim_t = dynamic_claim<>;
+
+/**
  *  @brief Wraps the metadata needed for `for_n_dynamic` APIs for `broadcast_join` compatibility.
  *
- *  @section Scheduling Logic & Overflow Considerations
+ *  @section Scheduling Logic
+ *
+ *  Tasks are split into one contiguous slice per thread. A thread first drains its own slice, then
+ *  walks the others in a `coprime_permutation_range` order and drains theirs, one task per claim.
+ *  Claiming one task at a time is what preserves the makespan guarantee of greedy list scheduling:
+ *  a thread can never be handed a batch of tasks that turn out to be expensive, because it is never
+ *  handed a batch. Claiming from a @b private cursor is what makes that guarantee affordable.
+ *
+ *  Probing the neighbours in a coprime order rather than linearly keeps two drained threads from
+ *  descending on the same victim, which would serialize them on one line for no reason.
+ *  @sa `invoke_distributed_for_n_dynamic`, which applies the same trick one level up, across
+ *  compute domains, so a thread exhausts local work before touching a remote node's memory.
+ *
+ *  @section Overflow Considerations
  *
  *  If we run a default for-loop at 1 Billion times per second on a 64-bit machine, then every 585 years
  *  of computational time we will wrap around the `std::size_t` capacity for the `prong.task` index.
  *  In case we `n + thread >= std::size_t(-1)`, a simple condition won't be enough.
- *  Alternatively, we can make sure, that each thread can do at least one increment of `progress_`
+ *  Alternatively, we can make sure, that each thread can do at least one increment of a cursor
  *  without worrying about the overflow. The way to achieve that is to preprocess the trailing `threads`
  *  of elements externally, before entering this loop!
  *
- *  A simpler, potentially more logical implementation would keep the `progress_` as an internal atomic.
- *  That, however, places the variable on the stack of the calling thread, which may be different from the
- *  target NUMA node.
+ *  That trailing reservation also bounds the cursors. Every thread overshoots a given slice at most
+ *  once - it increments, sees `>= end`, and leaves - so a cursor tops out at `end + threads`. Since
+ *  the last slice ends at `n - threads`, no cursor can exceed `n`, whatever the index type.
  */
-template <typename fork_type_, typename index_type_>
+template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_for_n_dynamic {
+    pool_type_ &pool_; // ? Owns one padded `dynamic_claim` per thread; we never allocate
     fork_type_ fork_;
-    std::atomic<index_type_> &progress_;
     index_type_ n_;
     index_type_ threads_;
 
+    /** @brief Number of tasks handed out dynamically; the trailing `threads_` are static prongs. */
+    index_type_ dynamic_count() const noexcept { return n_ > threads_ ? static_cast<index_type_>(n_ - threads_) : 0; }
+
+    /** @brief Runs whatever is left of @p slice, whether or not we own it. */
+    void drain_(index_type_ const slice, prong<index_type_> &prong) noexcept {
+        dynamic_claim<index_type_> &claim = pool_.unsafe_dynamic_claim_ref(slice);
+        while (true) {
+            index_type_ const task = claim.next.fetch_add(1, std::memory_order_relaxed);
+            if (task >= claim.end) break; // ? Overshoots by one, and only once per thread
+            prong.task = task;
+            fork_(prong);
+        }
+    }
+
   public:
-    invoke_for_n_dynamic(index_type_ n, index_type_ threads, std::atomic<index_type_> &progress,
-                         fork_type_ &&fork) noexcept
-        : fork_(std::forward<fork_type_>(fork)), progress_(progress), n_(n), threads_(threads) {
-        progress_.store(0, std::memory_order_release);
+    invoke_for_n_dynamic(pool_type_ &pool, index_type_ n, index_type_ threads, fork_type_ &&fork) noexcept
+        : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n), threads_(threads) {
+        reset_slices_();
     }
 
     invoke_for_n_dynamic(invoke_for_n_dynamic &&other) noexcept // ? Need to manually define the `move` due to atomics
-        : fork_(std::move(other.fork_)), progress_(other.progress_), n_(other.n_), threads_(other.threads_) {
+        : pool_(other.pool_), fork_(std::move(other.fork_)), n_(other.n_), threads_(other.threads_) {
         other.n_ = 0;
-        assert(other.progress_.load(std::memory_order_acquire) == 0 && "Moving an in-progress fork is not allowed");
-        progress_.store(0, std::memory_order_release);
+        reset_slices_();
     }
 
     void operator()(index_type_ const thread) noexcept {
 
-        index_type_ const n_dynamic = n_ > threads_ ? n_ - threads_ : 0;
+        // A single-thread pool has no neighbours and keeps no cursors - just run the loop.
+        if (threads_ == 1) {
+            prong<index_type_> prong(0, thread);
+            for (index_type_ task = 0; task < n_; ++task) {
+                prong.task = task;
+                fork_(prong);
+            }
+            return;
+        }
+
+        index_type_ const n_dynamic = dynamic_count();
         assert((n_dynamic + threads_) >= n_dynamic && "Overflow detected");
 
         // Run (up to) one static prong on the current thread
@@ -913,12 +1004,26 @@ class invoke_for_n_dynamic {
         prong<index_type_> prong(one_static_prong_index, thread);
         if (one_static_prong_index < n_) fork_(prong);
 
-        // The rest can be synchronized with a trivial atomic counter
-        while (true) {
-            prong.task = progress_.fetch_add(1, std::memory_order_relaxed);
-            bool const beyond_last_prong = prong.task >= n_dynamic;
-            if (beyond_last_prong) break;
-            fork_(prong);
+        // Drain our own slice first - nobody else is touching this cache line yet
+        drain_(thread, prong);
+
+        // Then help the others, in a coprime order so drained threads don't collide on one victim
+        coprime_permutation_range<index_type_> victims(0, threads_, thread);
+        for (auto victim = victims.begin(); victim != default_sentinel_t {}; ++victim)
+            if (*victim != thread) drain_(*victim, prong);
+    }
+
+  private:
+    /** @brief Publishes one contiguous slice per thread. Runs on the caller, before the broadcast. */
+    void reset_slices_() noexcept {
+        if (threads_ <= 1) return; // ? No cursors exist on a single-thread pool
+        index_type_ const n_dynamic = dynamic_count();
+        indexed_split<index_type_> const split(n_dynamic, threads_);
+        for (index_type_ thread = 0; thread < threads_; ++thread) {
+            indexed_range<index_type_> const range = split[thread];
+            dynamic_claim<index_type_> &claim = pool_.unsafe_dynamic_claim_ref(thread);
+            claim.end = static_cast<index_type_>(range.first + range.count);
+            claim.next.store(range.first, std::memory_order_release);
         }
     }
 };
@@ -1100,6 +1205,31 @@ class basic_pool {
     using indexed_split_t = indexed_split<index_t>;
     using prong_t = prong<index_t>;
     using local_thread_t = local_thread<index_t>;
+    using claim_t = dynamic_claim<index_t>; // ? One private cursor per thread
+
+    /**
+     *  @brief Everything the pool keeps @b per @b thread, on a cache line of its own.
+     *
+     *  The claim cursor must not share a line with anything, or the dynamic scheduler reintroduces
+     *  the very coherence traffic that giving each thread a private cursor exists to remove. Rather
+     *  than allocate a second array beside `std::thread`, both live in one padded cell, so the pool
+     *  still performs exactly one allocation - in `try_spawn`, never on a dispatch path.
+     *
+     *  Cells are indexed by @b thread @b index, so on inclusive pools cell 0 belongs to the caller
+     *  and holds no `std::thread`. That costs one cell and buys `claim` and `worker` the same index.
+     *
+     *  @note Separation comes from the buffer's @b stride, not from an `alignas` on this type. A
+     *        `std::allocator` only promises `__STDCPP_DEFAULT_NEW_ALIGNMENT__`, so over-aligning the
+     *        cell would placement-new it into storage that cannot satisfy the request.
+     */
+    struct worker_cell_t {
+        claim_t claim {};
+        std::thread worker {}; // ? Default-constructed, and left so for the caller's own cell
+    };
+    static_assert(sizeof(worker_cell_t) <= alignment_k, "A worker cell must fit within one stride");
+
+    using worker_cell_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<worker_cell_t>;
+    using worker_cells_t = unique_padded_buffer<worker_cell_t, worker_cell_allocator_t>;
 
     using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, thread_index_t); // ? Wraps lambda's `operator()`
@@ -1110,7 +1240,7 @@ class basic_pool {
   private:
     // Thread-pool-specific variables:
     allocator_t allocator_ {};
-    std::thread *workers_ {nullptr};
+    worker_cells_t workers_ {}; // ? One padded cell per thread: its `std::thread` and its claim cursor
     thread_index_t threads_count_ {0};
     caller_exclusivity_t exclusivity_ {caller_inclusive_k}; // ? Whether the caller thread is included in the count
     std::size_t sleep_length_micros_ {0}; // ? How long to sleep in microseconds when waiting for tasks
@@ -1121,8 +1251,6 @@ class basic_pool {
     trampoline_t fork_trampoline_ {nullptr};     // ? Calls the lambda
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
-
-    alignas(alignment_k) std::atomic<index_t> dynamic_progress_ {0}; // ? Only used in `for_n_dynamic`
 
   public:
     basic_pool(basic_pool &&) = delete;
@@ -1137,7 +1265,7 @@ class basic_pool {
      *  @brief Estimates the amount of memory managed by this pool handle and internal structures.
      *  @note This API is @b not synchronized.
      */
-    std::size_t memory_usage() const noexcept { return sizeof(basic_pool) + threads_count() * sizeof(std::thread); }
+    std::size_t memory_usage() const noexcept { return sizeof(basic_pool) + workers_.size() * workers_.stride(); }
 
     /** @brief Checks if the thread-pool's core synchronization points are lock-free. */
     bool is_lock_free() const noexcept { return mood_.is_lock_free() && threads_to_sync_.is_lock_free(); }
@@ -1154,8 +1282,8 @@ class basic_pool {
      */
     constexpr thread_index_t first_thread() const noexcept { return 0; }
 
-    /** @brief Exposes access to the internal atomic progress counter. Use with caution. */
-    std::atomic<index_t> &unsafe_dynamic_progress_ref() noexcept { return dynamic_progress_; }
+    /** @brief Exposes a thread's private claim cursor. Use with caution. */
+    claim_t &unsafe_dynamic_claim_ref(thread_index_t const thread) noexcept { return workers_[thread].claim; }
 
 #pragma region Core API
 
@@ -1190,41 +1318,42 @@ class basic_pool {
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (threads == 1 && use_caller_thread) {
             threads_count_ = 1;
-            return true; // ! The current thread will always be used
+            return true; // ! The current thread will always be used, and allocates nothing
         }
 
-        // Allocate the thread pool
-        thread_index_t const worker_threads = threads - use_caller_thread;
-        std::thread *const workers = allocator_.allocate(worker_threads);
-        if (!workers) return false; // ! Allocation failed
+        // Allocate the thread pool: one padded cell per thread, holding its worker and its cursor.
+        // This is the pool's only allocation, and `for_n_dynamic` performs none of its own. Striding
+        // by `alignment_k` is what keeps two threads' cursors off a shared cache line.
+        worker_cells_t cells {worker_cell_allocator_t {allocator_}, alignment_k};
+        if (!cells.try_resize(threads)) return false; // ! Allocation failed
 
         // Before we start the threads, make sure we set some of the shared
         // state variables that will be used in the `_worker_loop` function.
-        workers_ = workers;
+        workers_ = std::move(cells);
         threads_count_ = threads;
         exclusivity_ = exclusivity;
         mood_.store(mood_t::grind_k, std::memory_order_release);
         auto reset_on_failure = [&]() noexcept {
-            allocator_.deallocate(workers, threads);
-            workers_ = nullptr;
+            workers_ = {}; // ? Cells are default-constructed, so no `std::thread` is joinable here
             threads_count_ = 0;
         };
 
         // Initializing the thread pool can fail for all kinds of reasons,
         // that the `std::thread` documentation describes as "implementation-defined".
         // https://en.cppreference.com/w/cpp/thread/thread/thread
+        thread_index_t const worker_threads = threads - use_caller_thread;
         auto spawn_worker = [&](thread_index_t i) noexcept -> bool {
             thread_index_t const i_with_caller = i + use_caller_thread;
 #if FU_ALLOW_UNSAFE
             try {
-                new (&workers[i]) std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+                workers_[i_with_caller].worker = std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
                 return true;
             }
             catch (...) {
                 return false;
             }
 #else
-            new (&workers[i]) std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+            workers_[i_with_caller].worker = std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
             return true;
 #endif
         };
@@ -1234,10 +1363,7 @@ class basic_pool {
 
             // ! Failed to spawn a thread, roll back everything
             mood_.store(mood_t::die_k, std::memory_order_release);
-            for (thread_index_t j = 0; j < i; ++j) {
-                workers[j].join(); // ? Wait for the thread to exit
-                workers[j].~thread();
-            }
+            for (thread_index_t j = 0; j < i; ++j) workers_[j + use_caller_thread].worker.join();
             reset_on_failure();
             return false;
         }
@@ -1364,7 +1490,7 @@ class basic_pool {
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (threads_count_ == 1 && use_caller_thread) {
             threads_count_ = 0;
-            return; // ? No worker threads to join
+            return; // ? No worker threads to join, and nothing was allocated
         }
         assert(threads_to_sync_.load(std::memory_order_seq_cst) == 0); // ! No tasks must be running
         assert((epoch_.load(std::memory_order_seq_cst) & 1u) == 0);    // ! Last dispatch must be joined
@@ -1374,17 +1500,13 @@ class basic_pool {
 
         // ... and wait for them to finish
         thread_index_t const worker_threads = threads_count_ - use_caller_thread;
-        for (thread_index_t i = 0; i != worker_threads; ++i) {
-            workers_[i].join();    // ? Wait for the thread to finish
-            workers_[i].~thread(); // ? Call destructor
-        }
+        for (thread_index_t i = 0; i != worker_threads; ++i)
+            workers_[i + use_caller_thread].worker.join(); // ? Wait for the thread to finish
 
-        // Deallocate the thread pool
-        allocator_.deallocate(workers_, worker_threads);
-
-        // Prepare for future spawns
+        // Prepare for future spawns. Joined threads are no longer joinable, so destroying the
+        // cells here runs `~thread` on quiescent objects rather than calling `std::terminate`.
         threads_count_ = 0;
-        workers_ = nullptr;
+        workers_ = {};
         _reset_fork();
         mood_.store(mood_t::grind_k, std::memory_order_relaxed);
         epoch_.store(0, std::memory_order_relaxed);
@@ -1454,10 +1576,10 @@ class basic_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
-    broadcast_join<basic_pool, invoke_for_n_dynamic<fork_type_, index_t>> //
+    broadcast_join<basic_pool, invoke_for_n_dynamic<basic_pool, fork_type_, index_t>> //
         for_n_dynamic(index_t const n, fork_type_ &&fork) noexcept {
 
-        return {*this, {n, threads_count(), dynamic_progress_, std::forward<fork_type_>(fork)}};
+        return {*this, {*this, n, threads_count(), std::forward<fork_type_>(fork)}};
     }
 
 #pragma endregion Indexed Task Scheduling
@@ -3162,6 +3284,12 @@ struct alignas(default_alignment_k) numa_pthread_t {
     std::atomic<pid_t> id {};
     numa_core_id_t core_id {-1};
     qos_level_t qos_level {-1}; // TODO: Populate from VFS, if available
+    /**
+     *  @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`.
+     *  @note Lives here, rather than in a second array, so the pool allocates once and the cursor
+     *        inherits both this record's cache-line padding and its NUMA node.
+     */
+    dynamic_claim<std::size_t> claim {};
 };
 
 #pragma region - Linux ComputeDomain Pool
@@ -3215,6 +3343,7 @@ struct linux_compute_domain_pool {
   private:
     using allocator_traits_t = std::allocator_traits<allocator_t>;
     using numa_pthread_allocator_t = typename allocator_traits_t::template rebind_alloc<numa_pthread_t>;
+    using claim_t = dynamic_claim<index_t>; // ? Lives inside each `numa_pthread_t`, so no extra array
 
     // Thread-pool-specific variables:
     allocator_t allocator_ {};
@@ -3244,7 +3373,9 @@ struct linux_compute_domain_pool {
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
-    alignas(alignment_k) std::atomic<index_t> dynamic_progress_ {0}; // ? Only used in `for_n_dynamic`
+    // ! Still the single cursor `invoke_distributed_for_n_dynamic` drains across compute domains;
+    // ! this pool's own `for_n_dynamic` uses the per-thread `dynamic_claims_` below instead.
+    alignas(alignment_k) std::atomic<index_t> dynamic_progress_ {0};
 
   public:
     linux_compute_domain_pool(linux_compute_domain_pool &&) = delete;
@@ -3293,8 +3424,11 @@ struct linux_compute_domain_pool {
      */
     thread_index_t first_thread() const noexcept { return first_thread_; }
 
-    /** @brief Exposes access to the internal atomic progress counter. Use with caution. */
+    /** @brief Exposes the cross-domain cursor drained by `invoke_distributed_for_n_dynamic`. */
     std::atomic<index_t> &unsafe_dynamic_progress_ref() noexcept { return dynamic_progress_; }
+
+    /** @brief Exposes a thread's private claim cursor, kept inside its `numa_pthread_t`. */
+    claim_t &unsafe_dynamic_claim_ref(thread_index_t const thread) noexcept { return pthreads_[thread].claim; }
 
 #pragma region Core API
 
@@ -3619,7 +3753,7 @@ struct linux_compute_domain_pool {
             assert(join_result == 0 && "Thread join failed");
         }
 
-        // Deallocate the handles and IDs
+        // Deallocate the handles, IDs, and the claim cursors they carry
         pthreads_ = {};
 
         // Unpin the caller thread if it was part of this pool and was pinned to the NUMA node.
@@ -3705,10 +3839,10 @@ struct linux_compute_domain_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
-    broadcast_join<linux_compute_domain_pool, invoke_for_n_dynamic<fork_type_, index_t>> //
+    broadcast_join<linux_compute_domain_pool, invoke_for_n_dynamic<linux_compute_domain_pool, fork_type_, index_t>> //
         for_n_dynamic(index_t const n, fork_type_ &&fork) noexcept {
 
-        return {*this, {n, threads_count(), dynamic_progress_, std::forward<fork_type_>(fork)}};
+        return {*this, {*this, n, threads_count(), std::forward<fork_type_>(fork)}};
     }
 
 #pragma endregion Indexed Task Scheduling
