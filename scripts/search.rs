@@ -130,58 +130,44 @@ fn numa_aware_search(
     // Use SpinMutex for the global best result
     let best_result = fu::SpinMutex::new(SearchResult::new(0));
 
-    // Use SafePtr for thread-safe access
-    let storage_ptr =
-        fu::SafePtr::new(storage as *const DistributedEmbeddings as *mut DistributedEmbeddings);
-    let query_ptr = fu::SafePtr::new(query as *const Embedding as *mut Embedding);
-    let pool_ptr = fu::SafePtr::new(pool as *const fu::ThreadPool as *mut fu::ThreadPool);
-    let best_result_ptr = fu::SafePtr::new(
-        &best_result as *const fu::SpinMutex<SearchResult> as *mut fu::SpinMutex<SearchResult>,
-    );
+    // A scope lets each worker borrow `storage`/`query`/`best_result` and query the pool directly,
+    // with no `SafePtr` smuggling - every dispatch joins before the scope returns.
+    pool.scope(|scope| {
+        scope.broadcast(|thread_index, compute_domain_index| {
+            // Each thread works on its own compute domain
+            if compute_domain_index < compute_domains_count {
+                let mut local_result = SearchResult::new(compute_domain_index);
 
-    // Use for_threads to ensure threads work on their compute_domain NUMA nodes
-    let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
-        let storage = storage_ptr.get_mut();
-        let query = query_ptr.get_mut();
-        let pool = pool_ptr.get_mut();
+                // Get the vectors held in this compute domain's local memory
+                if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
+                    let vectors_count = node_vectors.len();
+                    let threads_in_compute_domain = scope.count_threads_in(compute_domain_index);
+                    let thread_local_index =
+                        scope.locate_thread_in(thread_index, compute_domain_index);
 
-        // Each thread works on its compute_domain NUMA node
-        if compute_domain_index < compute_domains_count {
-            let mut local_result = SearchResult::new(compute_domain_index);
+                    // Split vectors among threads in this compute domain
+                    let split = fu::IndexedSplit::new(vectors_count, threads_in_compute_domain);
+                    let range = split.get(thread_local_index);
 
-            // Get the vectors for this NUMA node
-            if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
-                let vectors_count = node_vectors.len();
-                let threads_in_compute_domain = pool.count_threads_in(compute_domain_index);
-                let thread_local_index = pool.locate_thread_in(thread_index, compute_domain_index);
-
-                // Split vectors among threads in this compute_domain
-                let split = fu::IndexedSplit::new(vectors_count, threads_in_compute_domain);
-                let range = split.get(thread_local_index);
-
-                // Search vectors assigned to this thread
-                for local_vector_idx in range {
-                    if let Some(vector) = node_vectors.get(local_vector_idx) {
-                        let similarity = bf16::dot(query, vector).unwrap();
-                        // Convert local index to global round-robin index using the new method
-                        let global_index =
-                            storage.local_to_global_index(compute_domain_index, local_vector_idx);
-                        local_result.update_if_better(similarity, global_index);
+                    // Search vectors assigned to this thread
+                    for local_vector_idx in range {
+                        if let Some(vector) = node_vectors.get(local_vector_idx) {
+                            let similarity = bf16::dot(query, vector).unwrap();
+                            let global_index = storage
+                                .local_to_global_index(compute_domain_index, local_vector_idx);
+                            local_result.update_if_better(similarity, global_index);
+                        }
                     }
                 }
-            }
 
-            // Update global best result using SpinMutex
-            {
-                let best_mutex = best_result_ptr.get_mut();
-                let mut best = best_mutex.lock();
+                // Merge into the global best result
+                let mut best = best_result.lock();
                 if local_result.best_similarity > best.best_similarity {
                     *best = local_result;
                 }
             }
-        }
-    };
-    pool.for_threads(&broadcast_function);
+        });
+    });
 
     let result = best_result.lock();
     *result
@@ -198,55 +184,39 @@ fn worst_case_search(
     // Use SpinMutex for the global best result
     let best_result = fu::SpinMutex::new(SearchResult::new(0));
 
-    // Use SafePtr for thread-safe access
-    let storage_ptr =
-        fu::SafePtr::new(storage as *const DistributedEmbeddings as *mut DistributedEmbeddings);
-    let query_ptr = fu::SafePtr::new(query as *const Embedding as *mut Embedding);
-    let pool_ptr = fu::SafePtr::new(pool as *const fu::ThreadPool as *mut fu::ThreadPool);
-    let best_result_ptr = fu::SafePtr::new(
-        &best_result as *const fu::SpinMutex<SearchResult> as *mut fu::SpinMutex<SearchResult>,
-    );
+    // The same scope pattern, but each thread deliberately sweeps every compute domain to model the
+    // cross-domain (non-local) access pattern for comparison.
+    pool.scope(|scope| {
+        scope.broadcast(|thread_index, compute_domain_index| {
+            let mut local_result = SearchResult::new(compute_domain_index);
+            let total_threads = scope.threads();
 
-    // Use for_threads but deliberately create cross-NUMA access
-    let broadcast_function = move |thread_index: usize, compute_domain_index: usize| {
-        let mut local_result = SearchResult::new(compute_domain_index);
-        let storage = storage_ptr.get_mut();
-        let query = query_ptr.get_mut();
-        let pool = pool_ptr.get_mut();
+            for compute_domain_index in 0..compute_domains_count {
+                if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
+                    let vectors_in_node = node_vectors.len();
 
-        // Split all vectors across all threads (ignoring NUMA boundaries)
-        let total_threads: usize = pool.threads();
+                    let split = fu::IndexedSplit::new(vectors_in_node, total_threads);
+                    let range = split.get(thread_index);
 
-        for compute_domain_index in 0..compute_domains_count {
-            if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
-                let vectors_in_node = node_vectors.len();
-
-                let split = fu::IndexedSplit::new(vectors_in_node, total_threads);
-                let range = split.get(thread_index);
-
-                // Search vectors assigned to this thread, regardless of NUMA locality
-                for local_vector_idx in range {
-                    if let Some(vector) = node_vectors.get(local_vector_idx) {
-                        let similarity = bf16::dot(query, vector).unwrap();
-                        // Convert to global index for consistent comparison
-                        let global_index =
-                            storage.local_to_global_index(compute_domain_index, local_vector_idx);
-                        local_result.update_if_better(similarity, global_index);
+                    // Search vectors assigned to this thread, regardless of locality
+                    for local_vector_idx in range {
+                        if let Some(vector) = node_vectors.get(local_vector_idx) {
+                            let similarity = bf16::dot(query, vector).unwrap();
+                            let global_index = storage
+                                .local_to_global_index(compute_domain_index, local_vector_idx);
+                            local_result.update_if_better(similarity, global_index);
+                        }
                     }
                 }
             }
-        }
 
-        // Update global best result using SpinMutex
-        {
-            let best_mutex = best_result_ptr.get_mut();
-            let mut best = best_mutex.lock();
+            // Merge into the global best result
+            let mut best = best_result.lock();
             if local_result.best_similarity > best.best_similarity {
                 *best = local_result;
             }
-        }
-    };
-    pool.for_threads(&broadcast_function);
+        });
+    });
 
     let result = best_result.lock();
     *result

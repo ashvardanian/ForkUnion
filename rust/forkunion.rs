@@ -972,6 +972,36 @@ impl ThreadPool {
         BroadcastJoin::new(self, &function).join();
     }
 
+    /// Runs `body` with a [`Scope`] that can broadcast work borrowing local data and answer
+    /// read-only topology queries, joining every dispatch before returning.
+    ///
+    /// The scope holds the pool by shared reference, so a worker closure can query it
+    /// (`count_threads_in`, `locate_thread_in`) *and* borrow the same stack values the caller owns
+    /// - the borrow conflict that otherwise forces a [`SafePtr`] smuggle. Because each
+    /// [`Scope::broadcast`] blocks until it joins, those borrows can never outlive the work.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use forkunion::*;
+    /// let mut pool = spawn(4);
+    /// let counter = SpinMutex::new(0usize);
+    /// pool.scope(|scope| {
+    ///     scope.broadcast(|thread_index, compute_domain_index| {
+    ///         let _local = scope.locate_thread_in(thread_index, compute_domain_index);
+    ///         *counter.lock() += 1;
+    ///     });
+    /// });
+    /// assert_eq!(*counter.lock(), pool.threads());
+    /// ```
+    pub fn scope<F, R>(&mut self, body: F) -> R
+    where
+        F: FnOnce(&Scope) -> R,
+    {
+        let scope = Scope { pool: self };
+        body(&scope)
+    }
+
     /// Splits `data` into one contiguous chunk per thread and runs `function` on each in
     /// parallel, blocking until all threads finish.
     ///
@@ -4404,6 +4434,71 @@ where
 {
     fn drop(&mut self) {
         self.join();
+    }
+}
+
+/// A borrow-scoped handle to a thread pool, yielded by [`ThreadPool::scope`].
+///
+/// Holding the pool by shared reference is what lets a worker closure both query the pool
+/// (`count_threads_in`, `locate_thread_in`) and borrow the caller's stack data at the same time -
+/// the borrow conflict that otherwise forces a [`SafePtr`] smuggle. Every [`Scope::broadcast`]
+/// joins before returning, so those borrows are always valid.
+pub struct Scope<'pool> {
+    pool: &'pool ThreadPool,
+}
+
+impl Scope<'_> {
+    /// Total number of worker threads in the pool.
+    pub fn threads(&self) -> usize {
+        self.pool.threads()
+    }
+
+    /// Number of compute domains the pool spans.
+    pub fn compute_domains(&self) -> usize {
+        self.pool.compute_domains()
+    }
+
+    /// Number of threads pinned to the given compute domain.
+    pub fn count_threads_in(&self, compute_domain_index: usize) -> usize {
+        self.pool.count_threads_in(compute_domain_index)
+    }
+
+    /// Local index of a global thread within its compute domain.
+    pub fn locate_thread_in(
+        &self,
+        global_thread_index: usize,
+        compute_domain_index: usize,
+    ) -> usize {
+        self.pool
+            .locate_thread_in(global_thread_index, compute_domain_index)
+    }
+
+    /// Broadcasts `function` to every thread and blocks until all of them finish.
+    ///
+    /// The closure is borrowed for the dispatch and joined before this returns, so it may freely
+    /// borrow the stack data enclosing the [`ThreadPool::scope`] call.
+    pub fn broadcast<F>(&self, function: F)
+    where
+        F: Fn(usize, usize) + Sync,
+    {
+        extern "C" fn trampoline<F>(
+            context: *mut c_void,
+            thread_index: usize,
+            compute_domain_index: usize,
+        ) where
+            F: Fn(usize, usize) + Sync,
+        {
+            let function = unsafe { &*(context as *const F) };
+            function(thread_index, compute_domain_index);
+        }
+
+        // SAFETY: `function` outlives the dispatch because we join before returning, and the
+        // enclosing `scope` holds the pool by `&mut`, so no other dispatch overlaps this one.
+        unsafe {
+            let context = &function as *const F as *mut c_void;
+            let generation = self.pool.unsafe_for_threads(trampoline::<F>, context);
+            self.pool.unsafe_join(generation);
+        }
     }
 }
 
