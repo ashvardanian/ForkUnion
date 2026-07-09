@@ -82,6 +82,14 @@ jobs:
       - name: Test Rust
         run: cargo test
 
+      # Miri interprets the pure-Rust unsafe; the FFI-backed tests are
+      # `#[cfg_attr(miri, ignore)]` since Miri cannot call the C shim.
+      - name: Test Rust under Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          cargo +nightly miri setup
+          cargo +nightly miri test
+
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -155,6 +163,14 @@ jobs:
         run: cargo build
       - name: Test Rust
         run: cargo test
+
+      # Miri interprets the pure-Rust unsafe; the FFI-backed tests are
+      # `#[cfg_attr(miri, ignore)]` since Miri cannot call the C shim.
+      - name: Test Rust under Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          cargo +nightly miri setup
+          cargo +nightly miri test
 
       # Sanitizers reuse this job's compiler; restricted to the NUMA-free
       # basic_pool, whose pinned NUMA path stalls under ThreadSanitizer.

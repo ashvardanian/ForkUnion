@@ -4742,6 +4742,7 @@ mod tests {
         count_logical_cores().max(1)
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn capabilities() {
         let caps = capabilities_string();
@@ -4749,6 +4750,7 @@ mod tests {
         assert!(caps.is_some());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn system_info() {
         let cores = count_logical_cores();
@@ -4762,6 +4764,7 @@ mod tests {
         assert!(cores > 0);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn spawn_and_basic_info() {
         let pool = spawn(2);
@@ -4769,6 +4772,7 @@ mod tests {
         assert!(pool.compute_domains() > 0);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn caller_exclusivity_query() {
         // The pool is the single source of truth, queried live (not cached).
@@ -4784,6 +4788,7 @@ mod tests {
         assert_eq!(spawn(2).caller_exclusivity(), CallerExclusivity::Inclusive);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn per_compute_domain_pools() {
         // One pool per compute_domain, each pinned to its node; drive them from this thread.
@@ -4814,6 +4819,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn for_threads_dispatch() {
         let count_threads = hw_threads();
@@ -4840,6 +4846,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn broadcast_owns_and_blocks() {
         let mut pool = spawn(hw_threads());
@@ -4851,6 +4858,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), pool.threads());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn for_slices_mut_partitions_disjointly() {
         let mut pool = spawn(hw_threads());
@@ -4873,6 +4881,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn for_n_static_scheduling() {
         const EXPECTED_PARTS: usize = 1_000;
@@ -4903,6 +4912,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn for_n_dynamic_scheduling() {
         const EXPECTED_PARTS: usize = 1_000;
@@ -4933,6 +4943,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn for_each_mut() {
         const ELEMENTS: usize = 1000;
@@ -4948,6 +4959,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn closure_objects() {
         let mut pool = spawn(hw_threads());
@@ -4965,6 +4977,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 1000);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn guard_lifecycle_exclusive() {
         // On exclusive pools the work is dispatched at guard construction:
@@ -4996,6 +5009,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn guard_lifecycle_inclusive() {
         // On inclusive pools the dispatch is deferred to `join`, where the
@@ -5024,6 +5038,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_allocator_creation() {
         let numa_count = count_memory_domains();
@@ -5041,6 +5056,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn basic_allocation() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5056,6 +5072,7 @@ mod tests {
         assert_eq!(slice.len(), 1024);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn allocate_zero_bytes() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5066,6 +5083,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn allocate_at_least() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5082,6 +5100,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_creation() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5092,6 +5111,7 @@ mod tests {
         assert!(vec.is_empty());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_with_capacity() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5102,6 +5122,7 @@ mod tests {
         assert!(vec.is_empty());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_push_pop() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5125,6 +5146,7 @@ mod tests {
         assert_eq!(vec.pop(), None);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_indexing() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5143,6 +5165,7 @@ mod tests {
         assert_eq!(vec[1], 25);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_clear() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5157,6 +5180,7 @@ mod tests {
         assert!(vec.is_empty());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_insert_remove() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5179,6 +5203,7 @@ mod tests {
         assert_eq!(vec[1], 3);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_reserve() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5196,6 +5221,7 @@ mod tests {
         assert_eq!(vec.len(), 10);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_extend_from_slice() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5209,6 +5235,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn parallel_slice_static_for_each() {
         let mut pool = spawn(hw_threads());
@@ -5225,6 +5252,7 @@ mod tests {
         assert_eq!(total.load(Ordering::Relaxed), data.iter().sum());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn parallel_slice_mut_dynamic_for_each() {
         let mut pool = spawn(hw_threads());
@@ -5242,6 +5270,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn parallel_slice_zip_sum() {
         let mut pool = spawn(hw_threads());
@@ -5264,6 +5293,7 @@ mod tests {
         assert_eq!(total, expected);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn parallel_exact_iter_dispatch() {
         let mut pool = spawn(hw_threads());
@@ -5282,6 +5312,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn round_robin_parallel_mut() {
         let mut pool = spawn(hw_threads());
@@ -5305,6 +5336,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn scratch_reduction_collects_sum() {
         let mut pool = spawn(hw_threads());
@@ -5323,6 +5355,7 @@ mod tests {
         assert_eq!(total, expected);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_iterators() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5347,6 +5380,7 @@ mod tests {
         assert_eq!(vec[4], 8);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_slices() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5366,6 +5400,7 @@ mod tests {
         assert_eq!(vec[2], 99);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_growth() {
         let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
@@ -5382,6 +5417,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_invalid_memory_domain() {
         let numa_count = count_memory_domains();
@@ -5451,6 +5487,7 @@ mod tests {
         IndexedSplit::new(10, 0);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_with_scratch_sum() {
         let mut pool = spawn(hw_threads());
@@ -5470,6 +5507,7 @@ mod tests {
         assert_eq!(total.0, data.iter().sum());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_with_scratch_dynamic() {
         let mut pool = spawn(hw_threads());
@@ -5489,6 +5527,7 @@ mod tests {
         assert_eq!(total.0, data.iter().sum());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_sum() {
         let mut pool = spawn(hw_threads());
@@ -5497,6 +5536,7 @@ mod tests {
         assert_eq!(total, data.iter().sum());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_count() {
         let mut pool = spawn(hw_threads());
@@ -5505,6 +5545,7 @@ mod tests {
         assert_eq!(count, 1000);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_product() {
         let mut pool = spawn(hw_threads());
@@ -5517,6 +5558,7 @@ mod tests {
         assert_eq!(product, data.iter().product());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_empty() {
         let mut pool = spawn(hw_threads());
@@ -5530,6 +5572,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_range() {
         let mut pool = spawn(hw_threads());
@@ -5539,6 +5582,7 @@ mod tests {
 
     // Early-exit API tests
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn try_for_each_success() {
         let mut pool = spawn(hw_threads());
@@ -5550,6 +5594,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn try_for_each_early_exit() {
         let mut pool = spawn(hw_threads());
@@ -5563,6 +5608,7 @@ mod tests {
         assert!(err >= 500 && err < 1000);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn try_for_each_empty() {
         let mut pool = spawn(hw_threads());
@@ -5574,6 +5620,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn find_any_found() {
         let mut pool = spawn(hw_threads());
@@ -5585,6 +5632,7 @@ mod tests {
         assert_eq!(found, Some(&42));
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn find_any_not_found() {
         let mut pool = spawn(hw_threads());
@@ -5596,6 +5644,7 @@ mod tests {
         assert_eq!(found, None);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn find_any_empty() {
         let mut pool = spawn(hw_threads());
@@ -5607,6 +5656,7 @@ mod tests {
         assert_eq!(found, None);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn find_first_deterministic() {
         let mut pool = spawn(hw_threads());
@@ -5619,6 +5669,7 @@ mod tests {
         assert_eq!(found, Some(&100));
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn find_first_not_found() {
         let mut pool = spawn(hw_threads());
@@ -5630,6 +5681,7 @@ mod tests {
         assert_eq!(found, None);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn find_last_deterministic() {
         let mut pool = spawn(hw_threads());
@@ -5642,6 +5694,7 @@ mod tests {
         assert_eq!(found, Some(&898));
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn find_last_not_found() {
         let mut pool = spawn(hw_threads());
@@ -5653,6 +5706,7 @@ mod tests {
         assert_eq!(found, None);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn any_true() {
         let mut pool = spawn(hw_threads());
@@ -5664,6 +5718,7 @@ mod tests {
         assert!(result);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn any_false() {
         let mut pool = spawn(hw_threads());
@@ -5675,6 +5730,7 @@ mod tests {
         assert!(!result);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn any_empty() {
         let mut pool = spawn(hw_threads());
@@ -5686,6 +5742,7 @@ mod tests {
         assert!(!result);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn all_true() {
         let mut pool = spawn(hw_threads());
@@ -5697,6 +5754,7 @@ mod tests {
         assert!(result);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn all_false() {
         let mut pool = spawn(hw_threads());
@@ -5708,6 +5766,7 @@ mod tests {
         assert!(!result);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn all_empty() {
         let mut pool = spawn(hw_threads());
@@ -5719,6 +5778,7 @@ mod tests {
         assert!(result); // vacuous truth
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn try_fold_with_scratch_success() {
         let mut pool = spawn(hw_threads());
@@ -5739,6 +5799,7 @@ mod tests {
         assert_eq!(total, data.iter().sum());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn try_fold_with_scratch_early_exit() {
         let mut pool = spawn(hw_threads());
@@ -5763,6 +5824,7 @@ mod tests {
         assert!(err >= 500 && err < 1000);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn generation_multi_pool_polling() {
         // Polling before join is the caller-exclusive pattern: on inclusive pools the
@@ -5818,6 +5880,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn generation_raw_unsafe_api() {
         // The raw C-ABI mirror: an `unsafe_for_threads` dispatch returning an odd token,
