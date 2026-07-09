@@ -256,7 +256,7 @@ pub const NumaAllocation = struct {
     ptr: [*]u8,
     allocated_bytes: usize,
     bytes_per_page: usize,
-    numa_node: usize,
+    memory_domain: usize,
 
     /// Returns the allocated memory as a slice
     pub fn asSlice(self: NumaAllocation) []u8 {
@@ -265,17 +265,17 @@ pub const NumaAllocation = struct {
 
     /// Frees the NUMA allocation
     pub fn free(self: NumaAllocation) void {
-        c.fu_free_in(self.numa_node, @ptrCast(self.ptr), self.allocated_bytes);
+        c.fu_free_in(self.memory_domain, @ptrCast(self.ptr), self.allocated_bytes);
     }
 };
 
 /// Allocates memory on a specific NUMA node with optimal page size
-pub fn allocateAtLeast(numa_node_index: usize, minimum_bytes: usize) ?NumaAllocation {
+pub fn allocateAtLeast(memory_domain: usize, minimum_bytes: usize) ?NumaAllocation {
     var allocated_bytes: usize = undefined;
     var bytes_per_page: usize = undefined;
 
     const ptr = c.fu_allocate_at_least_in(
-        numa_node_index,
+        memory_domain,
         minimum_bytes,
         &allocated_bytes,
         &bytes_per_page,
@@ -285,13 +285,13 @@ pub fn allocateAtLeast(numa_node_index: usize, minimum_bytes: usize) ?NumaAlloca
         .ptr = @ptrCast(@alignCast(ptr)),
         .allocated_bytes = allocated_bytes,
         .bytes_per_page = bytes_per_page,
-        .numa_node = numa_node_index,
+        .memory_domain = memory_domain,
     };
 }
 
 /// Allocates exactly the requested bytes on a specific NUMA node
-pub fn allocate(numa_node_index: usize, bytes: usize) ?[*]u8 {
-    const ptr = c.fu_allocate_in(numa_node_index, bytes) orelse return null;
+pub fn allocate(memory_domain: usize, bytes: usize) ?[*]u8 {
+    const ptr = c.fu_allocate_in(memory_domain, bytes) orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
@@ -1009,7 +1009,7 @@ test "NUMA allocation" {
     defer allocation.free();
 
     try std.testing.expect(allocation.allocated_bytes >= 1024);
-    try std.testing.expectEqual(0, allocation.numa_node);
+    try std.testing.expectEqual(0, allocation.memory_domain);
 
     // Write to memory to ensure it's usable
     const slice = allocation.asSlice();

@@ -1188,7 +1188,7 @@ pub struct AllocationResult {
     ptr: NonNull<u8>,
     allocated_bytes: usize,
     bytes_per_page: usize,
-    numa_node: usize,
+    memory_domain: usize,
     // For over-aligned allocations, tracks the unaligned pointer/size for freeing
     overaligned_ptr: Option<NonNull<u8>>,
     overaligned_bytes: Option<usize>,
@@ -1221,8 +1221,8 @@ impl AllocationResult {
     }
 
     /// Returns the NUMA node this memory was allocated on.
-    pub fn numa_node(&self) -> usize {
-        self.numa_node
+    pub fn memory_domain(&self) -> usize {
+        self.memory_domain
     }
 
     /// Converts a typed slice into the allocation's memory space.
@@ -1259,7 +1259,7 @@ impl Drop for AllocationResult {
             // Use unaligned pointer/size if this was an over-aligned allocation
             let ptr = self.overaligned_ptr.unwrap_or(self.ptr);
             let bytes = self.overaligned_bytes.unwrap_or(self.allocated_bytes);
-            fu_free_in(self.numa_node, ptr.as_ptr() as *mut c_void, bytes);
+            fu_free_in(self.memory_domain, ptr.as_ptr() as *mut c_void, bytes);
         }
     }
 }
@@ -1286,11 +1286,11 @@ unsafe impl Sync for AllocationResult {}
 /// let memory_slice = allocation.as_slice();
 /// assert_eq!(memory_slice.len(), 1024);
 /// println!("Allocated {} bytes on NUMA node {}",
-///          allocation.allocated_bytes(), allocation.numa_node());
+///          allocation.allocated_bytes(), allocation.memory_domain());
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct PinnedAllocator {
-    numa_node: usize,
+    memory_domain: usize,
 }
 
 impl PinnedAllocator {
@@ -1298,11 +1298,11 @@ impl PinnedAllocator {
     ///
     /// # Arguments
     ///
-    /// * `numa_node` - The NUMA node index (0-based) to pin allocations to
+    /// * `memory_domain` - The memory domain index (0-based) to pin allocations to
     ///
     /// # Errors
     ///
-    /// Returns `None` if the NUMA node index is invalid (>= available NUMA nodes).
+    /// Returns `None` if the memory domain index is invalid (>= available memory domains).
     ///
     /// # Examples
     ///
@@ -1316,30 +1316,30 @@ impl PinnedAllocator {
     /// let numa_count = count_memory_domains();
     /// if numa_count > 1 {
     ///     let allocator2 = PinnedAllocator::new(1).expect("NUMA node 1 should be available");
-    ///     println!("Created allocator for NUMA node: {}", allocator2.numa_node());
+    ///     println!("Created allocator for NUMA node: {}", allocator2.memory_domain());
     /// }
     /// ```
-    pub fn new(numa_node: usize) -> Option<Self> {
-        if numa_node >= count_memory_domains() {
+    pub fn new(memory_domain: usize) -> Option<Self> {
+        if memory_domain >= count_memory_domains() {
             return None;
         }
 
-        Some(Self { numa_node })
+        Some(Self { memory_domain })
     }
 
     /// Returns the NUMA node this allocator is pinned to.
-    pub fn numa_node(&self) -> usize {
-        self.numa_node
+    pub fn memory_domain(&self) -> usize {
+        self.memory_domain
     }
 
     /// Returns the volume of huge pages available on this allocator's NUMA node.
     pub fn volume_huge_pages(&self) -> usize {
-        unsafe { fu_volume_huge_pages_in(self.numa_node) }
+        unsafe { fu_volume_huge_pages_in(self.memory_domain) }
     }
 
     /// Returns the volume of any pages (huge or regular) available on this allocator's NUMA node.
     pub fn volume_ram(&self) -> usize {
-        unsafe { fu_volume_ram_in(self.numa_node) }
+        unsafe { fu_volume_ram_in(self.memory_domain) }
     }
 
     /// Allocates memory with at least the requested size on this allocator's NUMA node.
@@ -1383,7 +1383,7 @@ impl PinnedAllocator {
 
         unsafe {
             let ptr = fu_allocate_at_least_in(
-                self.numa_node,
+                self.memory_domain,
                 minimum_bytes,
                 &mut allocated_bytes as *mut usize,
                 &mut bytes_per_page as *mut usize,
@@ -1397,7 +1397,7 @@ impl PinnedAllocator {
                 ptr: NonNull::new_unchecked(ptr as *mut u8),
                 allocated_bytes,
                 bytes_per_page,
-                numa_node: self.numa_node,
+                memory_domain: self.memory_domain,
                 overaligned_ptr: None,
                 overaligned_bytes: None,
             })
@@ -1439,7 +1439,7 @@ impl PinnedAllocator {
         }
 
         unsafe {
-            let ptr = fu_allocate_in(self.numa_node, bytes);
+            let ptr = fu_allocate_in(self.memory_domain, bytes);
 
             if ptr.is_null() {
                 return None;
@@ -1449,7 +1449,7 @@ impl PinnedAllocator {
                 ptr: NonNull::new_unchecked(ptr as *mut u8),
                 allocated_bytes: bytes,
                 bytes_per_page: 0, // Not provided by fu_allocate
-                numa_node: self.numa_node,
+                memory_domain: self.memory_domain,
                 overaligned_ptr: None,
                 overaligned_bytes: None,
             })
@@ -1567,7 +1567,7 @@ impl PinnedAllocator {
 /// let allocation = allocator.allocate(1024).expect("Failed to allocate");
 ///
 /// // The default allocator uses NUMA node 0
-/// assert_eq!(allocation.numa_node(), 0);
+/// assert_eq!(allocation.memory_domain(), 0);
 ///
 /// // For more control, create specific NUMA allocators
 /// let numa_count = count_memory_domains();
@@ -1576,7 +1576,7 @@ impl PinnedAllocator {
 /// if numa_count > 1 {
 ///     let allocator_node1 = PinnedAllocator::new(1).expect("NUMA node 1 available");
 ///     let allocation2 = allocator_node1.allocate(2048).expect("Failed to allocate on node 1");
-///     assert_eq!(allocation2.numa_node(), 1);
+///     assert_eq!(allocation2.memory_domain(), 1);
 /// }
 /// ```
 pub fn default_numa_allocator() -> Option<PinnedAllocator> {
@@ -1701,8 +1701,8 @@ impl<T> PinnedVec<T> {
     }
 
     /// Returns the NUMA node this vector's memory is allocated on.
-    pub fn numa_node(&self) -> usize {
-        self.allocator.numa_node()
+    pub fn memory_domain(&self) -> usize {
+        self.allocator.memory_domain()
     }
 
     /// Reserves capacity for at least `additional` more elements.
@@ -2362,7 +2362,7 @@ impl<T> RoundRobinVec<T> {
 
     /// Accesses an element at a global `index` using round-robin distribution.
     /// The element at global `index` is located at `local_index = index / N`
-    /// in the `PinnedVec` on `numa_node = index % N`, where `N` is the number of NUMA nodes.
+    /// in the `PinnedVec` on `memory_domain = index % N`, where `N` is the number of NUMA nodes.
     ///
     /// # Arguments
     ///
@@ -2399,7 +2399,7 @@ impl<T> RoundRobinVec<T> {
 
     /// Mutably accesses an element at a global `index` using round-robin distribution.
     /// The element at global `index` is located at `local_index = index / N`
-    /// in the `PinnedVec` on `numa_node = index % N`, where `N` is the number of NUMA nodes.
+    /// in the `PinnedVec` on `memory_domain = index % N`, where `N` is the number of NUMA nodes.
     ///
     /// # Arguments
     ///
@@ -2535,7 +2535,7 @@ impl<T> RoundRobinVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `numa_node` - The NUMA node index (0 to numa_count()-1)
+    /// * `memory_domain` - The memory domain index (0 to count_memory_domains()-1)
     /// * `local_index` - The local index within that NUMA node's `PinnedVec`
     ///
     /// # Returns
@@ -4936,7 +4936,7 @@ mod tests {
 
         // Test valid NUMA node
         let allocator = PinnedAllocator::new(0).expect("NUMA node 0 should be available");
-        assert_eq!(allocator.numa_node(), 0);
+        assert_eq!(allocator.memory_domain(), 0);
 
         // Test invalid NUMA node
         let invalid_allocator = PinnedAllocator::new(numa_count + 10);
@@ -4954,7 +4954,7 @@ mod tests {
             .expect("Failed to allocate 1024 bytes");
 
         assert_eq!(allocation.allocated_bytes(), 1024);
-        assert_eq!(allocation.numa_node(), 0);
+        assert_eq!(allocation.memory_domain(), 0);
 
         // Test that we can write to the memory
         let slice = allocation.as_slice();
@@ -4979,7 +4979,7 @@ mod tests {
             .expect("Failed to allocate at least 1000 bytes");
 
         assert!(allocation.allocated_bytes() >= 1000);
-        assert_eq!(allocation.numa_node(), 0);
+        assert_eq!(allocation.memory_domain(), 0);
 
         // bytes_per_page should be set to something reasonable
         if allocation.bytes_per_page() > 0 {
@@ -4993,7 +4993,7 @@ mod tests {
         let vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 0);
-        assert_eq!(vec.numa_node(), 0);
+        assert_eq!(vec.memory_domain(), 0);
         assert!(vec.is_empty());
     }
 
@@ -5003,7 +5003,7 @@ mod tests {
         let vec = PinnedVec::<i32>::with_capacity_in(allocator, 10).expect("Failed to create vec");
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 10);
-        assert_eq!(vec.numa_node(), 0);
+        assert_eq!(vec.memory_domain(), 0);
         assert!(vec.is_empty());
     }
 
@@ -5288,7 +5288,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_vec_invalid_numa_node() {
+    fn pinned_vec_invalid_memory_domain() {
         let numa_count = count_memory_domains();
         let allocator = PinnedAllocator::new(numa_count + 1);
         assert!(allocator.is_none());
