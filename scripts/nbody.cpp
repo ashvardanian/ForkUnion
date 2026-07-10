@@ -10,7 +10,8 @@
  *  - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static`).
  *  - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
  *
- *  The backends include: `forkunion_static`, `forkunion_dynamic`, `openmp_static`, and `openmp_dynamic`.
+ *  The backends include: `openmp_static`, `openmp_dynamic`, `forkunion_static`, `forkunion_dynamic`,
+ *  `forkunion_numa_static`, and `forkunion_numa_dynamic`.
  *  To compile and run on all cores in Linux:
  *
  *  @code{.sh}
@@ -73,7 +74,9 @@ namespace fu = ashvardanian::forkunion;
 #define _FU_RESTRICT
 #endif
 
-#pragma region - Shared Logic
+using pool_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t>;
+
+#pragma region Shared Logic
 
 static constexpr float g_const = 6.674e-11f;
 static constexpr float dt_const = 0.01f;
@@ -125,9 +128,9 @@ inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
     bi.position.z += bi.velocity.z * dt_const;
 }
 
-#pragma endregion - Shared Logic
+#pragma endregion Shared Logic
 
-#pragma region - Backends
+#pragma region Backends
 
 void iteration_openmp_static(FU_MAYBE_UNUSED_ body_t *_FU_RESTRICT bodies,
                              FU_MAYBE_UNUSED_ vector3_t *_FU_RESTRICT forces, FU_MAYBE_UNUSED_ std::size_t n) noexcept {
@@ -158,8 +161,6 @@ void iteration_openmp_dynamic(FU_MAYBE_UNUSED_ body_t *_FU_RESTRICT bodies,
 #endif
 }
 
-using pool_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t>;
-
 void iteration_forkunion_static(pool_t &pool, body_t *_FU_RESTRICT bodies, vector3_t *_FU_RESTRICT forces,
                                 std::size_t n) noexcept {
     pool.for_n(n, [=](std::size_t i) noexcept {
@@ -187,24 +188,25 @@ void iteration_forkunion_dynamic(pool_t &pool, body_t *_FU_RESTRICT bodies, vect
  *  the plain allocator and the per-node replicas collapse to one. The pool is the same either way.  */
 #if FU_WITH_NUMA_MEMORY
 using numa_bodies_allocator_t = fu::linux_numa_allocator<body_t>;
-inline numa_bodies_allocator_t make_bodies_allocator(fu::numa_node_id_t node_id) noexcept {
-    return numa_bodies_allocator_t(node_id);
+inline numa_bodies_allocator_t make_bodies_allocator(fu::memory_domain_id_t memory_domain_id) noexcept {
+    return numa_bodies_allocator_t(memory_domain_id);
 }
 #else
 using numa_bodies_allocator_t = std::allocator<body_t>;
-inline numa_bodies_allocator_t make_bodies_allocator(fu::numa_node_id_t) noexcept { return {}; }
+inline numa_bodies_allocator_t make_bodies_allocator(fu::memory_domain_id_t) noexcept { return {}; }
 #endif
 using linux_numa_bodies_t = std::vector<body_t, numa_bodies_allocator_t>;
 using distributed_pool_t = fu::distributed_pool<fu::standard_yield_t>;
 
 std::vector<linux_numa_bodies_t> make_buffers_for_forkunion_numa(distributed_pool_t &pool, std::size_t n) noexcept {
-    fu::numa_topology_t const &topology = pool.topology();
-    std::size_t const numa_nodes_count = topology.nodes_count();
+    fu::machine_topology_t const &topology = pool.topology();
+    std::size_t const numa_nodes_count = topology.memory_domains_count();
 
     std::vector<linux_numa_bodies_t> result;
     for (std::size_t i = 0; i < numa_nodes_count; ++i) {
-        fu::numa_node_id_t const node_id = topology.node(static_cast<fu::memory_domain_index_t>(i)).node_id;
-        numa_bodies_allocator_t allocator = make_bodies_allocator(node_id);
+        fu::memory_domain_id_t const memory_domain_id =
+            topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(i)).memory_domain_id;
+        numa_bodies_allocator_t allocator = make_bodies_allocator(memory_domain_id);
         linux_numa_bodies_t bodies(n, allocator);
         result.emplace_back(std::move(bodies));
     }
@@ -217,7 +219,7 @@ void iteration_forkunion_numa_static(distributed_pool_t &pool, body_t *_FU_RESTR
                                      body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
     using local_prong_t = typename distributed_pool_t::prong_t;
-    fu::numa_topology_t const &topology = pool.topology();
+    fu::machine_topology_t const &topology = pool.topology();
 
     // This is a quadratic complexity all-to-all interaction, and it's not clear how
     // it can "shard" to take advantage of NUMA locality, especially for a small `n` world.
@@ -259,7 +261,7 @@ void iteration_forkunion_numa_dynamic(distributed_pool_t &pool, body_t *_FU_REST
                                       body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
     using local_prong_t = typename distributed_pool_t::prong_t;
-    fu::numa_topology_t const &topology = pool.topology();
+    fu::machine_topology_t const &topology = pool.topology();
 
     // This expressions is same as in `iteration_forkunion_numa_static` static version:
     pool.for_threads([&](auto thread_index) noexcept {
@@ -296,7 +298,7 @@ void iteration_forkunion_numa_dynamic(distributed_pool_t &pool, body_t *_FU_REST
 
 #endif // FU_WITH_COLOCATED_POOLS
 
-#pragma endregion - Backends
+#pragma endregion Backends
 
 int main(void) {
     std::printf("Welcome to the ForkUnion N-Body simulation!\n");
@@ -329,7 +331,7 @@ int main(void) {
     std::size_t const iterations = (iterations_ull > size_max) ? size_max : static_cast<std::size_t>(iterations_ull);
     std::size_t threads = (threads_ull > size_max) ? size_max : static_cast<std::size_t>(threads_ull);
     std::string_view const backend = backend_str ? backend_str : "forkunion_static";
-    if (threads == 0) threads = fu::count_allowed_cores();
+    if (threads == 0) threads = fu::allowed_cores_count();
     if (n == 0) n = threads;
 
     // Prepare bodies and forces - 2 memory allocations
@@ -384,7 +386,7 @@ int main(void) {
     }
 
 #if FU_WITH_COLOCATED_POOLS
-    fu::numa_topology_t topology;
+    fu::machine_topology_t topology;
     if (!topology.try_harvest()) {
         std::fprintf(stderr, "Failed to harvest NUMA topology\n");
         return EXIT_FAILURE;

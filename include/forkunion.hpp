@@ -19,7 +19,7 @@
  *  int main(int argc, char *argv[]) {
  *
  *      fu::basic_pool_t pool;
- *      if (!pool.try_spawn(fu::count_allowed_cores()))
+ *      if (!pool.try_spawn(fu::allowed_cores_count()))
  *          return EXIT_FAILURE;
  *
  *      pool.for_n(argc, [=](auto prong) noexcept {
@@ -41,7 +41,7 @@
  *  On Linux, when NUMA and PThreads are available, the library can also leverage @b NUMA-aware
  *  memory allocations and pin threads to specific physical cores to increase memory locality.
  *  It should reduce memory access latency by around 35% on average, compared to remote accesses.
- *  @sa `numa_topology_t`, `colocated_pool_t`, `distributed_pool_t`.
+ *  @sa `machine_topology_t`, `colocated_pool_t`, `distributed_pool_t`.
  *
  *  On heterogeneous chips, cores with a different @b "Quality-of-Service" (QoS) may be combined.
  *  A typical example is laptop/desktop chips, having 1 NUMA node, but 3 tiers of CPU cores:
@@ -53,7 +53,7 @@
  *  On x86, Arm, and RISC-V (internally referred to as RISC5) architectures, depending on the CPU
  *  features available, the library also exposes cheaper @b "busy-waiting" mechanisms, such as
  *  `tpause`, `wfet`, & `yield` instructions.
- *  @sa `arm64_yield_t`, `arm64_wfet_t`, `x86_yield_t`, `x86_tpause_t`, `risc5_yield_t`.
+ *  @sa `arm64_yield_t`, `arm64_wfet_t`, `x86_pause_t`, `x86_tpause_t`, `risc5_pause_t`.
  *
  *  The library uses modern C++ features and requires @b C++17 or newer.
  *  Using C++20 will enable additional compile-time checks (concepts) where available.
@@ -71,7 +71,7 @@
  */
 #include "forkunion/types.hpp"        // Vocabulary: prongs, buffers, index splitting, claim cursors
 #include "forkunion/capabilities.hpp" // Yields, `cpu_capabilities`, `ram_capabilities`
-#include "forkunion/topology.hpp"     // `numa_node`, `compute_domain_t`, `numa_topology`, the harvests
+#include "forkunion/topology.hpp"     // `memory_domain`, `compute_domain_t`, `machine_topology`, the harvests
 #include "forkunion/standard.hpp"     // `basic_pool`, the portable STL thread-pool
 #include "forkunion/distributed.hpp"  // `colocated_pool`, `distributed_pool`, NUMA memory
 #include "forkunion/logging.hpp"      // Human-readable topology dumps

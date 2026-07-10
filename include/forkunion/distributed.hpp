@@ -17,32 +17,18 @@ namespace ashvardanian {
 namespace forkunion {
 
 /**
- *  @brief How tightly a spawned worker is bound to the hardware beneath it.
- *
- *  Pinning to a core keeps a thread's caches warm and its `capacity` predictable, at the cost of
- *  letting it idle while a sibling core is busy. Pinning to a node hands the kernel the whole
- *  domain to schedule within, which survives a core going offline and suits oversubscribed hosts.
- */
-enum numa_pin_granularity_t {
-    /** Bind each worker to exactly one logical core. */
-    numa_pin_to_core_k = 0,
-    /** Bind each worker to every core of its NUMA node, and let the kernel choose among them. */
-    numa_pin_to_node_k,
-};
-
-/**
- *  @brief Tries binding the given address range to a specific NUMA @p `node_id`.
+ *  @brief Tries binding the given address range to a specific NUMA @p `memory_domain_id`.
  *  @retval true if binding succeeded, false otherwise.
  */
 FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_bytes,
-                                                    numa_node_id_t node_id) noexcept {
+                                                    memory_domain_id_t memory_domain_id) noexcept {
 #if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
     // Pin the memory - that may require an extra allocation for `node_mask` on some systems
     ::nodemask_t node_mask;
     ::bitmask node_mask_as_bitset;
     node_mask_as_bitset.size = sizeof(node_mask) * 8;
     node_mask_as_bitset.maskp = &node_mask.n[0];
-    ::numa_bitmask_setbit(&node_mask_as_bitset, static_cast<unsigned int>(node_id));
+    ::numa_bitmask_setbit(&node_mask_as_bitset, static_cast<unsigned int>(memory_domain_id));
     int mbind_flags;
 #if defined(MPOL_F_STATIC_NODES)
     mbind_flags = MPOL_F_STATIC_NODES;
@@ -57,24 +43,25 @@ FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_
 #else
     fu_unused_(ptr);
     fu_unused_(size_bytes);
-    fu_unused_(node_id);
+    fu_unused_(memory_domain_id);
     return false;
 #endif // FU_WITH_NUMA_MEMORY
 }
 
 /**
- *  @brief Tries allocating uninitialized memory and binding it to a specific NUMA @p `node_id`.
+ *  @brief Tries allocating uninitialized memory and binding it to a specific NUMA @p `memory_domain_id`.
  *  @retval nullptr if allocation failed or the page size is unsupported.
  *  @retval pointer to the allocated memory on success.
  */
 FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
-                                                         numa_node_id_t node_id) noexcept {
-    assert(node_id >= 0 && "NUMA node ID must be non-negative");
+                                                         memory_domain_id_t memory_domain_id) noexcept {
+    assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
 #if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
 
     // Fast path: regular pages – let `libnuma` handle any rounding internally.
-    if (page_size_bytes == static_cast<std::size_t>(::numa_pagesize())) return ::numa_alloc_onnode(size_bytes, node_id);
+    if (page_size_bytes == static_cast<std::size_t>(::numa_pagesize()))
+        return ::numa_alloc_onnode(size_bytes, memory_domain_id);
 
 #if FU_WITH_HUGE_PAGES
 
@@ -92,7 +79,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
     void *result_ptr = ::mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
     if (result_ptr == MAP_FAILED) return nullptr; // ! Allocation failed
 
-    if (!linux_numa_bind(result_ptr, size_bytes, node_id)) {
+    if (!linux_numa_bind(result_ptr, size_bytes, memory_domain_id)) {
         ::munmap(result_ptr, size_bytes); // ? Unbind failed, clean up
         return nullptr;                   // ! Binding failed
     }
@@ -104,7 +91,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
 #else
     fu_unused_(size_bytes);
     fu_unused_(page_size_bytes);
-    fu_unused_(node_id);
+    fu_unused_(memory_domain_id);
     return nullptr;
 #endif // FU_WITH_NUMA_MEMORY
 }
@@ -139,22 +126,22 @@ struct linux_numa_allocator {
     using propagate_on_container_move_assignment = std::true_type;
 
   private:
-    /** Unique NUMA node ID, in [0, numa_max_node()). */
-    numa_node_id_t node_id_ {-1};
+    /** @brief The OS's id for the memory domain this pool allocates and runs on. */
+    memory_domain_id_t memory_domain_id_ {-1};
     /** RAM page size in bytes, typically 4 KB. */
     size_type default_page_size_ {0};
 
   public:
-    numa_node_id_t node_id() const noexcept { return node_id_; }
+    memory_domain_id_t memory_domain_id() const noexcept { return memory_domain_id_; }
     size_type default_page_size() const noexcept { return default_page_size_; }
 
     constexpr linux_numa_allocator() noexcept = default;
-    explicit constexpr linux_numa_allocator(numa_node_id_t id, size_type paging = get_ram_page_size()) noexcept
-        : node_id_(id), default_page_size_(paging) {}
+    explicit constexpr linux_numa_allocator(memory_domain_id_t id, size_type paging = ram_page_size()) noexcept
+        : memory_domain_id_(id), default_page_size_(paging) {}
 
     template <typename other_type_>
     explicit constexpr linux_numa_allocator(linux_numa_allocator<other_type_> const &o) noexcept
-        : node_id_(o.node_id()), default_page_size_(o.default_page_size()) {}
+        : memory_domain_id_(o.memory_domain_id()), default_page_size_(o.default_page_size()) {}
 
     /**
      *  @brief Allocates memory for at least `size` elements of `value_type`.
@@ -184,7 +171,7 @@ struct linux_numa_allocator {
      */
     value_type *allocate(size_type size, size_type page_size_bytes) noexcept {
         size_type const size_bytes = size * sizeof(value_type);
-        void *result_ptr = linux_numa_allocate(size_bytes, page_size_bytes, node_id_);
+        void *result_ptr = linux_numa_allocate(size_bytes, page_size_bytes, memory_domain_id_);
         if (!result_ptr) return {}; // ! Allocation failed
         return static_cast<value_type *>(result_ptr);
     }
@@ -241,12 +228,12 @@ struct linux_numa_allocator {
 
     template <typename other_type_>
     bool operator==(linux_numa_allocator<other_type_> const &o) const noexcept {
-        return node_id_ == o.node_id_ && default_page_size_ == o.default_page_size_;
+        return memory_domain_id_ == o.memory_domain_id_ && default_page_size_ == o.default_page_size_;
     }
 
     template <typename other_type_>
     bool operator!=(linux_numa_allocator<other_type_> const &o) const noexcept {
-        return node_id_ != o.node_id_ || default_page_size_ != o.default_page_size_;
+        return memory_domain_id_ != o.memory_domain_id_ || default_page_size_ != o.default_page_size_;
     }
 };
 
@@ -277,7 +264,7 @@ FU_MAYBE_UNUSED_ static inline bool windows_enable_lock_memory_privilege() noexc
 }
 
 /**
- *  @brief Allocates uninitialized memory placed on a specific NUMA @p node_id on Windows.
+ *  @brief Allocates uninitialized memory placed on a specific NUMA @p memory_domain_id on Windows.
  *  @param[in] large_pages Request `MEM_LARGE_PAGES`; the size is rounded up to `GetLargePageMinimum()`.
  *  @retval nullptr if allocation failed, the size is zero, or NUMA memory is unavailable.
  *
@@ -286,9 +273,9 @@ FU_MAYBE_UNUSED_ static inline bool windows_enable_lock_memory_privilege() noexc
  *  pages need `SeLockMemoryPrivilege` (see `windows_enable_lock_memory_privilege`) and can still fail
  *  under memory fragmentation; a caller wanting a soft failure should retry with @p large_pages false.
  */
-FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_bytes, numa_node_id_t node_id,
+FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_bytes, memory_domain_id_t memory_domain_id,
                                                            bool large_pages = false) noexcept {
-    assert(node_id >= 0 && "NUMA node ID must be non-negative");
+    assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 #if FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
     if (size_bytes == 0) return nullptr;
     DWORD allocation_type = MEM_RESERVE | MEM_COMMIT;
@@ -299,10 +286,10 @@ FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_byte
         allocation_type |= MEM_LARGE_PAGES;
     }
     return ::VirtualAllocExNuma(::GetCurrentProcess(), nullptr, size_bytes, allocation_type, PAGE_READWRITE,
-                                static_cast<DWORD>(node_id));
+                                static_cast<DWORD>(memory_domain_id));
 #else
     fu_unused_(size_bytes);
-    fu_unused_(node_id);
+    fu_unused_(memory_domain_id);
     fu_unused_(large_pages);
     return nullptr;
 #endif
@@ -334,33 +321,35 @@ struct windows_numa_allocator {
     using propagate_on_container_move_assignment = std::true_type;
 
   private:
-    numa_node_id_t node_id_ {-1};
+    memory_domain_id_t memory_domain_id_ {-1};
     size_type default_page_size_ {0};
     bool large_pages_ {false};
 
   public:
-    numa_node_id_t node_id() const noexcept { return node_id_; }
+    memory_domain_id_t memory_domain_id() const noexcept { return memory_domain_id_; }
     size_type default_page_size() const noexcept { return default_page_size_; }
     bool large_pages() const noexcept { return large_pages_; }
 
     constexpr windows_numa_allocator() noexcept = default;
-    explicit windows_numa_allocator(numa_node_id_t id, size_type paging = get_ram_page_size(),
+    explicit windows_numa_allocator(memory_domain_id_t id, size_type paging = ram_page_size(),
                                     bool large_pages = false) noexcept
-        : node_id_(id), default_page_size_(paging), large_pages_(large_pages) {}
+        : memory_domain_id_(id), default_page_size_(paging), large_pages_(large_pages) {}
 
     template <typename other_type_>
     explicit constexpr windows_numa_allocator(windows_numa_allocator<other_type_> const &o) noexcept
-        : node_id_(o.node_id()), default_page_size_(o.default_page_size()), large_pages_(o.large_pages()) {}
+        : memory_domain_id_(o.memory_domain_id()), default_page_size_(o.default_page_size()),
+          large_pages_(o.large_pages()) {}
 
     value_type *allocate(size_type size) noexcept {
-        return static_cast<value_type *>(windows_numa_allocate(size * sizeof(value_type), node_id_, large_pages_));
+        return static_cast<value_type *>(
+            windows_numa_allocate(size * sizeof(value_type), memory_domain_id_, large_pages_));
     }
 
     void deallocate(value_type *p, size_type) noexcept { windows_numa_free(p); }
 
     template <typename other_type_>
     bool operator==(windows_numa_allocator<other_type_> const &o) const noexcept {
-        return node_id_ == o.node_id() && default_page_size_ == o.default_page_size() &&
+        return memory_domain_id_ == o.memory_domain_id() && default_page_size_ == o.default_page_size() &&
                large_pages_ == o.large_pages();
     }
     template <typename other_type_>
@@ -376,9 +365,9 @@ using windows_numa_allocator_t = windows_numa_allocator<>;
  *  @sa Selected as `colocated_pool::allocator_t` so the pool's own state lands on its node.
  */
 #if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
-using numa_allocator_t = linux_numa_allocator_t;
+using memory_domain_allocator_t = linux_numa_allocator_t;
 #elif FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
-using numa_allocator_t = windows_numa_allocator_t;
+using memory_domain_allocator_t = windows_numa_allocator_t;
 #endif
 
 #if FU_WITH_COLOCATED_POOLS
@@ -388,7 +377,7 @@ using numa_allocator_t = windows_numa_allocator_t;
  *  @note Linux's `clock_nanosleep` lets us name the clock; Darwin only has `nanosleep`, whose clock
  *        is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
  */
-FU_MAYBE_UNUSED_ static inline void nap_for_micros(FU_MAYBE_UNUSED_ std::size_t const micros) noexcept {
+FU_MAYBE_UNUSED_ static inline void sleep_for_micros(FU_MAYBE_UNUSED_ std::size_t const micros) noexcept {
 #if FU_ON_WINDOWS
     // Reached only after the pool is told to `sleep` to save power, where the docs promise latency is
     // irrelevant - so a millisecond-granular `Sleep` (rounded up) is enough, and spares us the per-nap
@@ -403,84 +392,19 @@ FU_MAYBE_UNUSED_ static inline void nap_for_micros(FU_MAYBE_UNUSED_ std::size_t 
 #endif
 }
 
-/** @brief The OS thread handle a `colocated_pool` stores, joins, and pins - one per worker. */
-#if FU_ON_WINDOWS
-using native_thread_t = HANDLE; // ? From `CreateThread`; identity is tracked by thread id, not this
-#else
-using native_thread_t = pthread_t;
-#endif
-
 /**
- *  @brief Confines @p thread to @p cores, where the kernel allows it.
- *  @retval false when the platform exposes no thread placement, which is @b not an error.
+ *  @brief How tightly a spawned worker is bound to the hardware beneath it.
  *
- *  Linux hands out a `cpu_set_t` and honours it. Windows addresses a core by (processor group, bit),
- *  packed into each `numa_core_id_t`; a compute domain lives within one group, so its cores share one
- *  `GROUP_AFFINITY`. Apple Silicon answers `KERN_NOT_SUPPORTED` to `thread_policy_set` - measured, not
- *  assumed - and offers only a Quality-of-Service class, chosen at creation. So a pool there partitions
- *  the @b work by domain and lets the scheduler place the @b threads.
+ *  Pinning to a core keeps a thread's caches warm and its `capacity` predictable, at the cost of
+ *  letting it idle while a sibling core is busy. Pinning to a node hands the kernel the whole
+ *  domain to schedule within, which survives a core going offline and suits oversubscribed hosts.
  */
-FU_MAYBE_UNUSED_ static inline bool pin_thread_to_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
-                                                        FU_MAYBE_UNUSED_ numa_core_id_t const *cores,
-                                                        FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
-#if FU_ON_WINDOWS
-    if (count == 0) return false;
-    // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them.
-    // The group of the first core sets the group; cores from any other group are ignored (they cannot
-    // be expressed in a single mask, and a domain never spans groups).
-    GROUP_AFFINITY affinity = {};
-    affinity.Group = win_core_group(cores[0]);
-    for (std::size_t i = 0; i < count; ++i)
-        if (win_core_group(cores[i]) == affinity.Group)
-            affinity.Mask |= static_cast<KAFFINITY>(1) << win_core_index(cores[i]);
-    return ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0;
-
-#elif FU_WITH_THREAD_PINNING
-    std::size_t const max_cores = possible_cores();
-    cpu_set_t *cpu_set_ptr = CPU_ALLOC(max_cores);
-    if (!cpu_set_ptr) return false;
-    std::size_t const cpu_set_size = CPU_ALLOC_SIZE(max_cores);
-    CPU_ZERO_S(cpu_set_size, cpu_set_ptr);
-    for (std::size_t i = 0; i < count; ++i) {
-        assert(cores[i] >= 0 && "Invalid CPU core ID");
-        CPU_SET_S(cores[i], cpu_set_size, cpu_set_ptr);
-    }
-    bool const pinned = ::pthread_setaffinity_np(thread, cpu_set_size, cpu_set_ptr) == 0;
-    CPU_FREE(cpu_set_ptr);
-    return pinned;
-#else
-    return false; // ? No placement here; the harvest still reports the domains
-#endif
-}
-
-/**
- *  @brief Puts the calling thread back on the cores @p saved recorded before it was pinned.
- *  @note A no-op where nothing was ever narrowed, or where @p saved was never captured.
- *
- *  A pool that narrows the caller owes it the mask it had, not the mask of the whole machine. The
- *  two differ under `taskset`, a cgroup `cpuset`, or any batch scheduler, and widening to the
- *  machine would hand the caller cores the kernel never gave this process.
- *
- *  Note that no NUMA run-node policy is reset here: the pool never sets one. Memory placement goes
- *  through `mbind` on the allocation, not through the calling thread's policy, and `numa_run_on_node`
- *  would rewrite the very CPU mask we just restored.
- */
-FU_MAYBE_UNUSED_ static inline void restore_thread_affinity(FU_MAYBE_UNUSED_ affinity_mask const &saved) noexcept {
-#if FU_ON_WINDOWS
-    // A thread can only run in one processor group at a time, so "widening" means every active
-    // processor in the group it currently sits on - the most freedom it can be given back.
-    // ! Unlike the POSIX path, this does not restore a snapshot; `GetThreadGroupAffinity` would.
-    PROCESSOR_NUMBER where;
-    ::GetCurrentProcessorNumberEx(&where);
-    DWORD const active = ::GetActiveProcessorCount(where.Group);
-    GROUP_AFFINITY affinity = {};
-    affinity.Group = where.Group;
-    affinity.Mask = active >= 64 ? ~static_cast<KAFFINITY>(0) : ((static_cast<KAFFINITY>(1) << active) - 1);
-    (void)::SetThreadGroupAffinity(::GetCurrentThread(), &affinity, nullptr);
-#elif FU_WITH_THREAD_PINNING
-    (void)saved.restore();
-#endif
-}
+enum pin_granularity_t {
+    /** Bind each worker to exactly one logical core. */
+    pin_to_core_k = 0,
+    /** Bind each worker to every core of its NUMA node, and let the kernel choose among them. */
+    pin_to_memory_domain_k,
+};
 
 /**
  *  @brief Used inside `colocated_pool` to describe a pinned thread.
@@ -495,11 +419,11 @@ FU_MAYBE_UNUSED_ static inline void restore_thread_affinity(FU_MAYBE_UNUSED_ aff
  *  we need to safeguard the reads/writes with atomics to avoid race conditions.
  *  @see https://stackoverflow.com/a/558815
  */
-struct alignas(default_alignment_k) numa_pthread_t {
+struct alignas(default_alignment_k) pinned_thread_t {
     std::atomic<native_thread_t> handle {}; // ? `pthread_t` on POSIX, `HANDLE` on Windows
     std::atomic<std::uint64_t>
         id {}; // ? `gettid` on Linux, `pthread_threadid_np` on Apple, `GetCurrentThreadId` on Windows
-    numa_core_id_t core_id {-1};
+    core_id_t core_id {-1};
     char name[16] {};           // ? Written by the spawner, applied by the worker to itself
     qos_level_t qos_level {-1}; // TODO: Populate from VFS, if available
     /**
@@ -513,7 +437,7 @@ struct alignas(default_alignment_k) numa_pthread_t {
     dynamic_claim<std::size_t> claim {};
 };
 
-#pragma region - Linux ComputeDomain Pool
+#pragma region Colocated Pool
 
 /**
  *  @brief A Linux-only thread-pool pinned to one NUMA node and same QoS level physical cores.
@@ -533,7 +457,7 @@ struct alignas(default_alignment_k) numa_pthread_t {
  *  How to best leverage this thread-pool?
  *  - use in conjunction with @b `linux_numa_allocator` to pin memory to the same NUMA node.
  *  - make sure the Linux kernel is built with @b `CONFIG_SCHED_IDLE` support.
- *  - avoid recreating the @b `numa_topology`, as it's expensive to harvest.
+ *  - avoid recreating the @b `machine_topology`, as it's expensive to harvest.
  *
  *  The synchronization protocol - epochs, generations, contributor counting, and the memory
  *  ordering rules - is identical to `basic_pool`; @sa @ref pool_concurrency_model.
@@ -543,7 +467,7 @@ struct colocated_pool {
 
   public:
 #if FU_WITH_NUMA_MEMORY
-    using allocator_t = numa_allocator_t; // ? Places the pool's own state on its node
+    using allocator_t = memory_domain_allocator_t; // ? Places the pool's own state on its node
 #else
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
 #endif
@@ -567,52 +491,61 @@ struct colocated_pool {
 
   private:
     using allocator_traits_t = std::allocator_traits<allocator_t>;
-    using numa_pthread_allocator_t = typename allocator_traits_t::template rebind_alloc<numa_pthread_t>;
-    using claim_t = dynamic_claim<index_t>; // ? Lives inside each `numa_pthread_t`, so no extra array
+    using pinned_threads_allocator_t = typename allocator_traits_t::template rebind_alloc<pinned_thread_t>;
+    using claim_t = dynamic_claim<index_t>; // ? Lives inside each `pinned_thread_t`, so no extra array
 
     // Thread-pool-specific variables:
+    /** @brief Allocator placing the pool's own state on its memory domain. */
     allocator_t allocator_ {};
 
     /**
+     *  @brief One padded `pinned_thread_t` per thread: its handle, kernel id, and claim cursor.
+     *
      *  Differs from STL `workers_` in base in type and size, as it may contain the `pthread_self`
-     *  at the first position. If the @b `numa_pin_to_core_k` granularity is used, the `numa_pthread_t::core_id`
+     *  at the first position. If the @b `pin_to_core_k` granularity is used, the `pinned_thread_t::core_id`
      *  will be set to the individual core IDs.
      */
-    unique_padded_buffer<numa_pthread_t, numa_pthread_allocator_t> pthreads_ {};
+    unique_padded_buffer<pinned_thread_t, pinned_threads_allocator_t> pthreads_ {};
 
-    /** The index of the first thread to start from. */
+    /** @brief The global index of this pool's first thread, offsetting its local indices. */
     thread_index_t first_thread_ {0};
-    /** Whether the caller thread is included in the count. */
-    caller_exclusivity_t exclusivity_ {caller_inclusive_k};
-    /** How long to sleep in microseconds when waiting for tasks. */
+    /** @brief How long to nap in microseconds while `chill_k`, waiting for work. */
     std::size_t sleep_length_micros_ {0};
 
     using char16_name_t = char[16]; // ? Fixed-size thread name buffer, for POSIX thread naming
-    /** Thread name buffer, for POSIX thread naming. */
+    /** @brief Thread name buffer applied to each worker for POSIX/OS naming. */
     char16_name_t name_ {};
-    /** Unique NUMA node ID, in [0, numa_max_node()). */
-    numa_node_id_t numa_node_id_ {-1};
-    /** Unique {NUMA node + QoS level} compute_domain ID, defined externally. */
+    /** @brief Whether the caller thread is counted as one of the contributors. */
+    caller_exclusivity_t exclusivity_ {caller_inclusive_k};
+    /** @brief The OS's id for the memory domain this pool allocates and runs on. */
+    memory_domain_id_t memory_domain_id_ {-1};
+    /** @brief Our dense index for this pool's compute domain, assigned by the caller. */
     index_t compute_domain_index_ {0};
-    numa_pin_granularity_t pin_granularity_ {numa_pin_to_core_k};
+    /** @brief Whether workers pin to one core each or to the whole memory domain. */
+    pin_granularity_t pin_granularity_ {pin_to_core_k};
 
     /** @brief The caller's affinity as it was before this pool narrowed it. @sa `_reset_affinity`. */
-    affinity_mask caller_affinity_;
+    core_mask_t caller_affinity_;
     /** @brief Workers the kernel refused to place, so a caller can tell a pinned pool from a crowded one. */
     thread_index_t unpinned_threads_ {0};
 
+    /** @brief Lifecycle switch between spinning (`grind_k`), sleeping (`chill_k`), and exiting (`die_k`). */
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
     // Task-specific variables:
-    /** Pointer to the users lambda. */
+    /** @brief Type-erased pointer to the caller's on-stack fork lambda. */
     punned_fork_context_t fork_state_ {nullptr};
-    /** Calls the lambda. */
+    /** @brief Invokes the punned fork lambda for a given `local_thread_t`. */
     trampoline_t fork_trampoline_ {nullptr};
+    /** @brief Countdown of contributors still running; the one reaching zero signals completion. */
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
+    /** @brief Generation clock: odd while a fork is in flight, even when idle. */
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
-    // ! Still the single cursor `invoke_distributed_for_n_dynamic` drains across compute domains;
-    // ! this pool's own `for_n_dynamic` uses the per-thread `dynamic_claims_` below instead.
+    /**
+     *  @brief The single cursor `invoke_distributed_for_n_dynamic` drains across compute domains.
+     *  @note This pool's own `for_n_dynamic` uses the per-thread cursors inside `pinned_thread_t` instead.
+     */
     alignas(alignment_k) std::atomic<index_t> dynamic_progress_ {0};
 
   public:
@@ -635,18 +568,18 @@ struct colocated_pool {
      *  @note This API is @b not synchronized.
      */
     std::size_t memory_usage() const noexcept {
-        return sizeof(colocated_pool) + threads_count() * sizeof(numa_pthread_t);
+        return sizeof(colocated_pool) + threads_count() * sizeof(pinned_thread_t);
     }
 
     /** @brief Checks if the thread-pool's core synchronization points are lock-free. */
     bool is_lock_free() const noexcept { return mood_.is_lock_free() && threads_to_sync_.is_lock_free(); }
 
     /**
-     *  @brief Returns the NUMA node ID this thread-pool is pinned to.
-     *  @retval -1 if the thread-pool is not initialized or the NUMA node ID is unknown.
+     *  @brief Returns the memory domain this thread-pool is pinned to.
+     *  @retval -1 if the thread-pool is not initialized or the memory domain is unknown.
      *  @note This API is @b not synchronized.
      */
-    numa_node_id_t numa_node_id() const noexcept { return numa_node_id_; }
+    memory_domain_id_t memory_domain_id() const noexcept { return memory_domain_id_; }
 
     /**
      *  @brief Returns the compute_domain index of this thread-pool.
@@ -665,7 +598,7 @@ struct colocated_pool {
     /** @brief Exposes the cross-domain cursor drained by `invoke_distributed_for_n_dynamic`. */
     std::atomic<index_t> &unsafe_dynamic_progress_ref() noexcept { return dynamic_progress_; }
 
-    /** @brief Exposes a thread's private claim cursor, kept inside its `numa_pthread_t`. */
+    /** @brief Exposes a thread's private claim cursor, kept inside its `pinned_thread_t`. */
     claim_t &unsafe_dynamic_claim_ref(thread_index_t const thread) noexcept { return pthreads_[thread].claim; }
 
 #pragma region Core API
@@ -694,8 +627,8 @@ struct colocated_pool {
     caller_exclusivity_t caller_exclusivity() const noexcept { return exclusivity_; }
 
     /**
-     *  @brief Creates a thread-pool addressing all cores on the given NUMA @p node.
-     *  @param[in] node Describes the NUMA node to use, with its ID, memory size, and core IDs.
+     *  @brief Creates a thread-pool addressing every core of the given compute @p domain.
+     *  @param[in] domain The compute domain to spawn on: its memory domain, cores, and QoS level.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
      *  @retval false if the number of threads is zero or if spawning has failed.
      *  @retval true if the thread-pool was created successfully, started, and is ready to use.
@@ -709,7 +642,7 @@ struct colocated_pool {
 
     /**
      *  @brief Creates a thread-pool with the given number of @p threads on the given NUMA @p node.
-     *  @param[in] node Describes the NUMA node to use, with its ID, memory size, and core IDs.
+     *  @param[in] domain The compute domain to spawn on: its memory domain, cores, and QoS level.
      *  @param[in] threads The number of threads to be used.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
      *  @param[in] pin_granularity How to pin the threads to the NUMA node?
@@ -727,23 +660,22 @@ struct colocated_pool {
      *
      *  If you only have one thread-pool active at any part of your application, that's meaningless.
      *  You'd be better off using exactly the number of cores available on the NUMA node and pinning
-     *  them to individual cores with @b `numa_pin_to_core_k` granularity.
+     *  them to individual cores with @b `pin_to_core_k` granularity.
      */
     bool try_spawn(compute_domain_t const &domain, thread_index_t const threads,
                    caller_exclusivity_t const exclusivity = caller_inclusive_k,
-                   numa_pin_granularity_t const pin_granularity = numa_pin_to_core_k,
-                   thread_index_t const first_thread = 0, index_t const compute_domain_index = 0,
-                   FU_MAYBE_UNUSED_ index_t const compute_levels = 1) noexcept {
+                   pin_granularity_t const pin_granularity = pin_to_core_k, thread_index_t const first_thread = 0,
+                   index_t const compute_domain_index = 0, FU_MAYBE_UNUSED_ index_t const compute_levels = 1) noexcept {
 
         if (threads == 0) return false;          // ! Can't have zero threads working on something
         if (pthreads_.size() != 0) return false; // ! Already initialized
 
-        // Allocate the thread pool of `numa_pthread_t` objects
+        // Allocate the thread pool of `pinned_thread_t` objects
 #if FU_WITH_NUMA_MEMORY
-        allocator_ = numa_allocator_t {domain.node_id};
+        allocator_ = memory_domain_allocator_t {domain.memory_domain_id};
 #endif
-        numa_pthread_allocator_t pthread_allocator {allocator_};
-        unique_padded_buffer<numa_pthread_t, numa_pthread_allocator_t> pthreads {pthread_allocator};
+        pinned_threads_allocator_t pthread_allocator {allocator_};
+        unique_padded_buffer<pinned_thread_t, pinned_threads_allocator_t> pthreads {pthread_allocator};
         if (!pthreads.try_resize(threads)) return false; // ! Allocation failed
 
         // Core IDs may outrun the online core count where cores can be hot-plugged.
@@ -755,18 +687,18 @@ struct colocated_pool {
         first_thread_ = first_thread;
         compute_domain_index_ = compute_domain_index;
         exclusivity_ = exclusivity;
-        numa_node_id_ = domain.node_id;
+        memory_domain_id_ = domain.memory_domain_id;
         pin_granularity_ = pin_granularity;
         auto reset_on_failure = [&]() noexcept {
             pthreads_ = {};
-            numa_node_id_ = -1;
-            pin_granularity_ = numa_pin_to_core_k;
+            memory_domain_id_ = -1;
+            pin_granularity_ = pin_to_core_k;
         };
 
         // Snapshot the caller's affinity before we narrow it, so teardown can put back exactly what
         // it had rather than the whole machine. Captured even when the caller is excluded: the
         // failure path below may still have touched it.
-        caller_affinity_.try_capture();
+        try_capture_thread_cores(caller_affinity_);
 
         // Include the main thread into the list of handles
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
@@ -850,11 +782,11 @@ struct colocated_pool {
         // The refusals are counted rather than dropped: a pool the kernel crowded onto a handful of
         // cores spins itself to a standstill, and `all_threads_pinned` is how a caller finds out.
         unpinned_threads_ = 0;
-        if (pin_granularity == numa_pin_to_core_k) {
+        if (pin_granularity == pin_to_core_k) {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
-                numa_core_id_t const cpu = domain.first_core_id[i % domain.core_count];
+                core_id_t const cpu = domain.first_core_id[i % domain.core_count];
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                if (pin_thread_to_cores(pin_handle, &cpu, 1)) pthreads_[i].core_id = cpu;
+                if (try_pin_thread_to_cores(pin_handle, &cpu, 1)) pthreads_[i].core_id = cpu;
                 else
                     ++unpinned_threads_;
             }
@@ -862,7 +794,7 @@ struct colocated_pool {
         else {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                if (!pin_thread_to_cores(pin_handle, domain.first_core_id, domain.core_count)) ++unpinned_threads_;
+                if (!try_pin_thread_to_cores(pin_handle, domain.first_core_id, domain.core_count)) ++unpinned_threads_;
             }
         }
 
@@ -879,111 +811,9 @@ struct colocated_pool {
      *  @sa For advanced resource management, consider `unsafe_for_threads` and `unsafe_join`.
      */
     template <typename fork_type_>
-    FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
+    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
     broadcast_join<colocated_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
         return {*this, std::forward<fork_type_>(fork)};
-    }
-
-    /**
-     *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
-     *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
-     *  @return A `generation_t` token identifying this dispatch.
-     *  @sa Use in conjunction with `unsafe_join`.
-     */
-    template <typename fork_type_>
-    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
-    generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
-
-        thread_index_t const threads = threads_count();
-        assert(threads != 0 && "Thread pool not initialized");
-        caller_exclusivity_t const exclusivity = caller_exclusivity();
-        bool const use_caller_thread = exclusivity == caller_inclusive_k;
-
-        // Only one dispatch can be in flight, and it must be fully joined - the caller's
-        // slice included - before the next one starts.
-        assert(threads_to_sync_.load(std::memory_order_acquire) == 0 &&
-               "The broadcast function can't be called concurrently or recursively");
-        assert((epoch_.load(std::memory_order_relaxed) & 1u) == 0 && "Previous dispatch not joined");
-
-        // Configure "fork" details
-        fork_state_ = std::addressof(fork);
-        fork_trampoline_ = &_call_as_lambda<fork_type_>;
-
-        // Every contributor gets counted: all worker threads, plus the calling thread itself
-        // on `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
-        threads_to_sync_.store(threads, std::memory_order_relaxed);
-
-        // We are most likely already "grinding", but in the unlikely case we are not,
-        // let's wake up from the "chilling" state with relaxed semantics. Assuming the sleeping
-        // logic for the workers also checks the epoch counter, no synchronization is needed and
-        // no immediate wake-up is required.
-        mood_t may_be_chilling = mood_t::chill_k;
-        bool const was_chilling = mood_.compare_exchange_weak( //
-            may_be_chilling, mood_t::grind_k,                  //
-            std::memory_order_relaxed, std::memory_order_relaxed);
-        generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
-
-        // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
-        if (was_chilling) {
-            for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
-                std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
-                if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
-#if FU_WITH_THREAD_SCHED_CLASS
-                // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
-                // for another thread; its QoS class is fixed at creation.
-                sched_param param {};
-                ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_FIFO | SCHED_RR, &param);
-#else
-                fu_unused_(pthread_id);
-#endif
-            }
-        }
-        return generation;
-    }
-
-    /**
-     *  @brief Returns true if the generation identified by @p generation has completed.
-     *  @note A `true` result synchronizes with all contributors: their writes are visible.
-     *
-     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join`
-     *  contributes the calling thread's slice, so the poll-then-join pattern is
-     *  reserved for `caller_exclusive_k` pools.
-     */
-    bool is_complete(generation_t generation) const noexcept {
-        return generation != epoch_.load(std::memory_order_acquire);
-    }
-
-    /**
-     *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
-     *  @note On `caller_inclusive_k` pools, first executes the calling thread's slice.
-     *  Idempotent: returns immediately for already-joined or stale generations.
-     */
-    void unsafe_join(generation_t generation) noexcept {
-        assert((generation & 1u) == 1 && "Generation tokens are always odd");
-        if (epoch_.load(std::memory_order_acquire) != generation) return; // ? Stale or already complete
-
-        // On inclusive pools the calling thread is a contributor: execute its slice
-        // and count it down exactly like a worker thread would.
-        bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
-        if (use_caller_thread) {
-            fork_trampoline_(fork_state_, local_thread_t {static_cast<thread_index_t>(0), compute_domain_index_});
-            thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
-            assert(before_decrement > 0 && "The contributor count must include the caller");
-
-            // The last contributor to finish increments the epoch, signaling completion
-            if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
-        }
-
-        // Wait for the last contributor's completion increment
-        micro_yield_t micro_yield;
-        while (epoch_.load(std::memory_order_acquire) == generation)
-            call_yield_(micro_yield, static_cast<thread_index_t>(0));
-    }
-
-    /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
-    void unsafe_join() noexcept {
-        epoch_index_t const current_epoch = epoch_.load(std::memory_order_acquire);
-        if (current_epoch & 1u) unsafe_join(static_cast<generation_t>(current_epoch)); // ? Even means idle
     }
 
 #pragma endregion Core API
@@ -1007,7 +837,7 @@ struct colocated_pool {
         assert((epoch_.load(std::memory_order_seq_cst) & 1u) == 0);    // ! Last dispatch must be joined
         if (pthreads_.size() == 0) return;                             // ? Uninitialized
 
-        numa_pthread_allocator_t pthread_allocator {allocator_};
+        pinned_threads_allocator_t pthread_allocator {allocator_};
 
         // Stop all threads and wait for them to finish
         mood_.store(mood_t::die_k, std::memory_order_release);
@@ -1125,6 +955,112 @@ struct colocated_pool {
 
 #pragma endregion Indexed Task Scheduling
 
+#pragma region Advanced
+
+    /**
+     *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
+     *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
+     *  @return A `generation_t` token identifying this dispatch.
+     *  @sa Use in conjunction with `unsafe_join`.
+     */
+    template <typename fork_type_>
+    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
+
+        thread_index_t const threads = threads_count();
+        assert(threads != 0 && "Thread pool not initialized");
+        caller_exclusivity_t const exclusivity = caller_exclusivity();
+        bool const use_caller_thread = exclusivity == caller_inclusive_k;
+
+        // Only one dispatch can be in flight, and it must be fully joined - the caller's
+        // slice included - before the next one starts.
+        assert(threads_to_sync_.load(std::memory_order_acquire) == 0 &&
+               "The broadcast function can't be called concurrently or recursively");
+        assert((epoch_.load(std::memory_order_relaxed) & 1u) == 0 && "Previous dispatch not joined");
+
+        // Configure "fork" details
+        fork_state_ = std::addressof(fork);
+        fork_trampoline_ = &_call_as_lambda<fork_type_>;
+
+        // Every contributor gets counted: all worker threads, plus the calling thread itself
+        // on `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
+        threads_to_sync_.store(threads, std::memory_order_relaxed);
+
+        // We are most likely already "grinding", but in the unlikely case we are not,
+        // let's wake up from the "chilling" state with relaxed semantics. Assuming the sleeping
+        // logic for the workers also checks the epoch counter, no synchronization is needed and
+        // no immediate wake-up is required.
+        mood_t may_be_chilling = mood_t::chill_k;
+        bool const was_chilling = mood_.compare_exchange_weak( //
+            may_be_chilling, mood_t::grind_k,                  //
+            std::memory_order_relaxed, std::memory_order_relaxed);
+        generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
+
+        // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
+        if (was_chilling) {
+            for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
+                std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
+                if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
+#if FU_WITH_THREAD_SCHED_CLASS
+                // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
+                // for another thread; its QoS class is fixed at creation.
+                sched_param param {};
+                ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_FIFO | SCHED_RR, &param);
+#else
+                fu_unused_(pthread_id);
+#endif
+            }
+        }
+        return generation;
+    }
+
+    /**
+     *  @brief Returns true if the generation identified by @p generation has completed.
+     *  @note A `true` result synchronizes with all contributors: their writes are visible.
+     *
+     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join`
+     *  contributes the calling thread's slice, so the poll-then-join pattern is
+     *  reserved for `caller_exclusive_k` pools.
+     */
+    bool is_complete(generation_t generation) const noexcept {
+        return generation != epoch_.load(std::memory_order_acquire);
+    }
+
+    /**
+     *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
+     *  @note On `caller_inclusive_k` pools, first executes the calling thread's slice.
+     *  Idempotent: returns immediately for already-joined or stale generations.
+     */
+    void unsafe_join(generation_t generation) noexcept {
+        assert((generation & 1u) == 1 && "Generation tokens are always odd");
+        if (epoch_.load(std::memory_order_acquire) != generation) return; // ? Stale or already complete
+
+        // On inclusive pools the calling thread is a contributor: execute its slice
+        // and count it down exactly like a worker thread would.
+        bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
+        if (use_caller_thread) {
+            fork_trampoline_(fork_state_, local_thread_t {static_cast<thread_index_t>(0), compute_domain_index_});
+            thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
+            assert(before_decrement > 0 && "The contributor count must include the caller");
+
+            // The last contributor to finish increments the epoch, signaling completion
+            if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
+        }
+
+        // Wait for the last contributor's completion increment
+        micro_yield_t micro_yield;
+        while (epoch_.load(std::memory_order_acquire) == generation)
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
+    }
+
+    /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
+    void unsafe_join() noexcept {
+        epoch_index_t const current_epoch = epoch_.load(std::memory_order_acquire);
+        if (current_epoch & 1u) unsafe_join(static_cast<generation_t>(current_epoch)); // ? Even means idle
+    }
+
+#pragma endregion Advanced
+
 #pragma region ComputeDomains Compatibility
 
     /**
@@ -1153,13 +1089,15 @@ struct colocated_pool {
 #pragma endregion ComputeDomains Compatibility
 
   private:
+    /** @brief Clears the fork state and trampoline between dispatches. */
     void _reset_fork() noexcept {
         fork_state_ = nullptr;
         fork_trampoline_ = nullptr;
     }
 
+    /** @brief Restores the caller's CPU affinity to its pre-spawn snapshot. @sa `try_restore_thread_cores`. */
     void _reset_affinity() noexcept {
-        restore_thread_affinity(caller_affinity_);
+        try_restore_thread_cores(caller_affinity_);
         caller_affinity_.reset();
     }
 
@@ -1237,7 +1175,7 @@ struct colocated_pool {
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
-                nap_for_micros(pool->sleep_length_micros_);
+                sleep_for_micros(pool->sleep_length_micros_);
                 continue;
             }
 
@@ -1261,11 +1199,13 @@ struct colocated_pool {
 
     // Platform thread entry points: same body, different ABI. Only the one this build spawns exists.
 #if FU_ON_WINDOWS
+    /** @brief Windows thread entry point; forwards to `_worker_loop_body`. */
     static DWORD WINAPI _win_worker_loop(LPVOID arg) noexcept {
         _worker_loop_body(static_cast<colocated_pool *>(arg));
         return 0;
     }
 #else
+    /** @brief POSIX thread entry point; forwards to `_worker_loop_body`. */
     static void *_posix_worker_loop(void *arg) noexcept {
         _worker_loop_body(static_cast<colocated_pool *>(arg));
         return nullptr;
@@ -1295,6 +1235,7 @@ struct colocated_pool {
     }
 #endif
 
+    /** @brief Composes a worker's thread name into @p output_name, truncating the base and zero-padding the index. */
     static void fill_thread_name(                          //
         char16_name_t &output_name, char const *base_name, //
         std::size_t const index, std::size_t const max_possible_cores) noexcept {
@@ -1326,9 +1267,9 @@ struct colocated_pool {
     }
 };
 
-#pragma endregion - Linux ComputeDomain Pool
+#pragma endregion Colocated Pool
 
-#pragma region - Linux Pool
+#pragma region Distributed Pool
 
 /**
  *  @brief Wraps the metadata needed for `for_slices` APIs for `broadcast_join` compatibility.
@@ -1395,8 +1336,8 @@ template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_distributed_for_n_dynamic {
 
     pool_type_ &pool_;
-    index_type_ n_;
     fork_type_ fork_;
+    index_type_ n_;
 
   public:
     invoke_distributed_for_n_dynamic(pool_type_ &pool, index_type_ n, fork_type_ &&fork) noexcept
@@ -1480,25 +1421,13 @@ template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ 
 struct distributed_pool {
 
     using colocated_pool_t = colocated_pool<micro_yield_type_, alignment_>;
-    using numa_topology_t = numa_topology<>;
+    using machine_topology_t = machine_topology<>;
 
 #if FU_WITH_NUMA_MEMORY
-    using allocator_t = numa_allocator_t; // ? Places the pool's own state on its node
+    using allocator_t = memory_domain_allocator_t; // ? Places the pool's own state on its node
 #else
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
 #endif
-
-    /**
-     *  @brief An allocator that places bytes on @p node_id, where the kernel can honour that.
-     *  @note On a machine without NUMA memory the node is meaningless and the argument is dropped.
-     */
-    static allocator_t allocator_for_node(FU_MAYBE_UNUSED_ numa_node_id_t const node_id) noexcept {
-#if FU_WITH_NUMA_MEMORY
-        return allocator_t {node_id};
-#else
-        return allocator_t {};
-#endif
-    }
 
     using micro_yield_t = typename colocated_pool_t::micro_yield_t;
     using index_t = typename colocated_pool_t::index_t;
@@ -1509,19 +1438,23 @@ struct distributed_pool {
     using prong_t = local_prong<index_t>;
 
   private:
-    numa_topology_t topology_ {};
-    char name_[16] {}; // ? Thread name buffer, for POSIX thread naming
-    thread_index_t threads_count_ {0};
-    /** Whether the caller thread is included in the count. */
-    caller_exclusivity_t exclusivity_ {caller_inclusive_k};
-
     /** @brief One `colocated_pool_t`, padded so neighbouring domains never share a cache line. */
     struct compute_domain_cell_t {
+        /** @brief This compute domain's pinned sub-pool. */
         alignas(alignment_k) colocated_pool_t pool {};
     };
 
     using unique_domain_cell_buffer_t = unique_padded_buffer<compute_domain_cell_t, allocator_t>;
     using compute_domain_cells_t = unique_padded_buffer<unique_domain_cell_buffer_t, allocator_t>;
+
+    /** @brief The machine topology this pool spans: memory domains, cores, and QoS levels. */
+    machine_topology_t topology_ {};
+    /** @brief Thread name buffer, forwarded to each sub-pool for OS thread naming. */
+    char name_[16] {};
+    /** @brief Total threads across all compute domains, including the caller on inclusive pools. */
+    thread_index_t threads_count_ {0};
+    /** @brief Whether the caller thread is counted as one of the contributors. */
+    caller_exclusivity_t exclusivity_ {caller_inclusive_k};
     /**
      *  @brief A heap allocated array of individual thread pools.
      *
@@ -1537,9 +1470,9 @@ struct distributed_pool {
     distributed_pool &operator=(distributed_pool &&) = delete;
     distributed_pool &operator=(distributed_pool const &) = delete;
 
-    distributed_pool(numa_topology_t topo = {}) noexcept : distributed_pool("forkunion", std::move(topo)) {}
+    distributed_pool(machine_topology_t topo = {}) noexcept : distributed_pool("forkunion", std::move(topo)) {}
 
-    explicit distributed_pool(char const *name, numa_topology_t topo = {}) noexcept : topology_(std::move(topo)) {
+    explicit distributed_pool(char const *name, machine_topology_t topo = {}) noexcept : topology_(std::move(topo)) {
         // Accept null or empty names by falling back to a sensible default
         char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::strncpy(name_, effective_name, sizeof(name_) - 1);
@@ -1547,6 +1480,17 @@ struct distributed_pool {
     }
 
     ~distributed_pool() noexcept { terminate(); }
+
+    /**
+     *  @brief Estimates the amount of memory managed by this pool handle and internal structures.
+     *  @note This API is @b not synchronized.
+     */
+    std::size_t memory_usage() const noexcept {
+        std::size_t total_bytes = sizeof(distributed_pool);
+        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
+            total_bytes += compute_domain_cells_[i].only().pool.memory_usage();
+        return total_bytes;
+    }
 
     /**
      *  @brief Checks if the thread-pool's core synchronization points are lock-free.
@@ -1560,17 +1504,11 @@ struct distributed_pool {
      *  @brief Returns the NUMA topology used by this thread-pool.
      *  @note This API is @b not synchronized.
      */
-    numa_topology_t const &topology() const noexcept { return topology_; }
+    machine_topology_t const &topology() const noexcept { return topology_; }
 
-    /**
-     *  @brief Estimates the amount of memory managed by this pool handle and internal structures.
-     *  @note This API is @b not synchronized.
-     */
-    std::size_t memory_usage() const noexcept {
-        std::size_t total_bytes = sizeof(distributed_pool);
-        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
-            total_bytes += compute_domain_cells_[i].only().pool.memory_usage();
-        return total_bytes;
+    /** @brief Exposes one compute domain's cross-domain cursor, drained by `invoke_distributed_for_n_dynamic`. */
+    std::atomic<index_t> &unsafe_dynamic_progress_ref(index_t compute_domain) noexcept {
+        return compute_domain_cells_[compute_domain].only().pool.unsafe_dynamic_progress_ref();
     }
 
 #pragma region Core API
@@ -1615,7 +1553,7 @@ struct distributed_pool {
     bool try_spawn(                   //
         thread_index_t const threads, //
         caller_exclusivity_t const exclusivity = caller_inclusive_k,
-        numa_pin_granularity_t const pin_granularity = numa_pin_to_core_k) noexcept {
+        pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
         return try_spawn(topology_, threads, exclusivity, pin_granularity);
     }
 
@@ -1629,8 +1567,8 @@ struct distributed_pool {
      *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
      */
     bool try_spawn( //
-        numa_topology_t const &topology, caller_exclusivity_t const exclusivity = caller_inclusive_k,
-        numa_pin_granularity_t const pin_granularity = numa_pin_to_core_k) noexcept {
+        machine_topology_t const &topology, caller_exclusivity_t const exclusivity = caller_inclusive_k,
+        pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
         return try_spawn(topology, topology.threads_count(), exclusivity, pin_granularity);
     }
 
@@ -1645,22 +1583,22 @@ struct distributed_pool {
      *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
      */
     bool try_spawn( //
-        numa_topology_t const &topology,
+        machine_topology_t const &topology,
         thread_index_t const threads, //
         caller_exclusivity_t const exclusivity = caller_inclusive_k,
-        numa_pin_granularity_t const pin_granularity = numa_pin_to_core_k) noexcept {
+        pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
 
         if (threads == 0) return false;        // ! Can't have zero threads working on something
         if (threads_count_ != 0) return false; // ! Already initialized
 
-        numa_topology_t new_topology;
+        machine_topology_t new_topology;
         if (!new_topology.try_assign(topology)) return false; // ! Copy-construction failed
 
         // Place the control structures on the first compute domain, pinning the caller there too.
         // We spawn one sub-pool per compute domain (a same-QoS core run), not per NUMA node, so
         // performance and efficiency cores on one node become separate, independently pinned pools.
         compute_domain_t const &first_domain = new_topology.compute_domain_at(compute_domain_index_t {});
-        allocator_t allocator = allocator_for_node(first_domain.node_id);
+        allocator_t allocator = allocator_for_node(first_domain.memory_domain_id);
         index_t const compute_domain_cells_count = std::min(new_topology.compute_domains_count(), threads);
 
         compute_domain_cells_t compute_domain_cells(allocator);
@@ -1669,9 +1607,10 @@ struct distributed_pool {
         // Allocate each sub-pool on its own compute domain's NUMA node
         for (index_t compute_domain_index = 0; compute_domain_index < compute_domain_cells_count;
              ++compute_domain_index) {
-            numa_node_id_t const node_id =
-                new_topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index)).node_id;
-            allocator_t node_allocator = allocator_for_node(node_id);
+            memory_domain_id_t const memory_domain_id =
+                new_topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index))
+                    .memory_domain_id;
+            allocator_t node_allocator = allocator_for_node(memory_domain_id);
             unique_domain_cell_buffer_t domain_cell_buffer(node_allocator);
             domain_cell_buffer.try_resize(1);
             compute_domain_cells[compute_domain_index] = std::move(domain_cell_buffer);
@@ -1735,68 +1674,6 @@ struct distributed_pool {
     FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
     broadcast_join<distributed_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
         return {*this, std::forward<fork_type_>(fork)};
-    }
-
-    /**
-     *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
-     *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
-     *  @return A `generation_t` token identifying this dispatch.
-     *  @sa Use in conjunction with `unsafe_join`.
-     */
-    template <typename fork_type_>
-    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
-    generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
-        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
-
-        // Submit to every thread pool. All sub-pool epochs advance in lockstep as long as
-        // every dispatch goes through this wrapper - never dispatch to a sub-pool directly.
-        generation_t last_sub_generation {};
-        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
-            last_sub_generation = compute_domain_cells_[i].only().pool.unsafe_for_threads(fork);
-        generation_t const generation = compute_domain_cells_[0].only().pool.unsafe_for_threads(fork);
-        assert((compute_domain_cells_.size() == 1 || last_sub_generation == generation) &&
-               "ComputeDomain sub-pools must advance in generation lockstep");
-        (void)last_sub_generation;
-        return generation;
-    }
-
-    /**
-     *  @brief Returns true if the generation identified by @p generation has completed on all compute_domain_cells.
-     *  @note A `true` result synchronizes with all contributors: their writes are visible.
-     *
-     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join`
-     *  contributes the calling thread's slice, so the poll-then-join pattern is
-     *  reserved for `caller_exclusive_k` pools.
-     */
-    bool is_complete(generation_t generation) const noexcept {
-        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
-            if (!compute_domain_cells_[i].only().pool.is_complete(generation)) return false;
-        return true;
-    }
-
-    /**
-     *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
-     *  @note On `caller_inclusive_k` pools, first executes the calling thread's slice.
-     *  Idempotent: returns immediately for already-joined or stale generations.
-     */
-    void unsafe_join(generation_t generation) noexcept {
-        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
-
-        // Join the caller-hosting compute_domain first: on inclusive pools its slice runs here
-        // and overlaps the remote compute_domain_cells' completion instead of waiting behind them.
-        compute_domain_cells_[0].only().pool.unsafe_join(generation);
-        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
-            compute_domain_cells_[i].only().pool.unsafe_join(generation);
-    }
-
-    /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
-    void unsafe_join() noexcept {
-        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
-
-        // Wait for everyone to finish, starting from the caller-hosting compute_domain
-        compute_domain_cells_[0].only().pool.unsafe_join();
-        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
-            compute_domain_cells_[i].only().pool.unsafe_join();
     }
 
 #pragma endregion Core API
@@ -1896,6 +1773,72 @@ struct distributed_pool {
 
 #pragma endregion Indexed Task Scheduling
 
+#pragma region Advanced
+
+    /**
+     *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
+     *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
+     *  @return A `generation_t` token identifying this dispatch.
+     *  @sa Use in conjunction with `unsafe_join`.
+     */
+    template <typename fork_type_>
+    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
+        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
+
+        // Submit to every thread pool. All sub-pool epochs advance in lockstep as long as
+        // every dispatch goes through this wrapper - never dispatch to a sub-pool directly.
+        generation_t last_sub_generation {};
+        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
+            last_sub_generation = compute_domain_cells_[i].only().pool.unsafe_for_threads(fork);
+        generation_t const generation = compute_domain_cells_[0].only().pool.unsafe_for_threads(fork);
+        assert((compute_domain_cells_.size() == 1 || last_sub_generation == generation) &&
+               "ComputeDomain sub-pools must advance in generation lockstep");
+        (void)last_sub_generation;
+        return generation;
+    }
+
+    /**
+     *  @brief Returns true if the generation identified by @p generation has completed on all compute_domain_cells.
+     *  @note A `true` result synchronizes with all contributors: their writes are visible.
+     *
+     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join`
+     *  contributes the calling thread's slice, so the poll-then-join pattern is
+     *  reserved for `caller_exclusive_k` pools.
+     */
+    bool is_complete(generation_t generation) const noexcept {
+        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
+            if (!compute_domain_cells_[i].only().pool.is_complete(generation)) return false;
+        return true;
+    }
+
+    /**
+     *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
+     *  @note On `caller_inclusive_k` pools, first executes the calling thread's slice.
+     *  Idempotent: returns immediately for already-joined or stale generations.
+     */
+    void unsafe_join(generation_t generation) noexcept {
+        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
+
+        // Join the caller-hosting compute_domain first: on inclusive pools its slice runs here
+        // and overlaps the remote compute_domain_cells' completion instead of waiting behind them.
+        compute_domain_cells_[0].only().pool.unsafe_join(generation);
+        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
+            compute_domain_cells_[i].only().pool.unsafe_join(generation);
+    }
+
+    /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
+    void unsafe_join() noexcept {
+        assert(compute_domain_cells_ && "Thread pools must be initialized before broadcasting");
+
+        // Wait for everyone to finish, starting from the caller-hosting compute_domain
+        compute_domain_cells_[0].only().pool.unsafe_join();
+        for (std::size_t i = 1; i < compute_domain_cells_.size(); ++i)
+            compute_domain_cells_[i].only().pool.unsafe_join();
+    }
+
+#pragma endregion Advanced
+
 #pragma region ComputeDomains Compatibility
 
     /**
@@ -1925,6 +1868,7 @@ struct distributed_pool {
         return global_thread_index - compute_domain_cells_[compute_domain].only().pool.first_thread();
     }
 
+    /** @brief Returns the compute domain index owning @p global_thread_index, or the count if none. */
     index_t thread_compute_domain(thread_index_t global_thread_index) const noexcept {
         index_t compute_domain_index = 0;
         for (; compute_domain_index < compute_domain_cells_.size(); ++compute_domain_index) {
@@ -1936,11 +1880,20 @@ struct distributed_pool {
         return compute_domain_index; // ? Not found
     }
 
-    std::atomic<index_t> &unsafe_dynamic_progress_ref(index_t compute_domain) noexcept {
-        return compute_domain_cells_[compute_domain].only().pool.unsafe_dynamic_progress_ref();
-    }
-
 #pragma endregion ComputeDomains Compatibility
+
+  private:
+    /**
+     *  @brief An allocator that places bytes on @p memory_domain_id, where the kernel can honour that.
+     *  @note On a machine without NUMA memory the node is meaningless and the argument is dropped.
+     */
+    static allocator_t allocator_for_node(FU_MAYBE_UNUSED_ memory_domain_id_t const memory_domain_id) noexcept {
+#if FU_WITH_NUMA_MEMORY
+        return allocator_t {memory_domain_id};
+#else
+        return allocator_t {};
+#endif
+    }
 };
 
 using colocated_pool_t = colocated_pool<>;
@@ -1955,7 +1908,7 @@ static_assert(is_pool<basic_pool_t> && is_pool<colocated_pool_t> && is_pool<dist
 
 #endif // FU_WITH_COLOCATED_POOLS
 
-#pragma endregion - Linux Pool
+#pragma endregion Distributed Pool
 
 } // namespace forkunion
 } // namespace ashvardanian

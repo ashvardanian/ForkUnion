@@ -104,8 +104,8 @@ struct log_memory_volume_t {
  */
 struct log_core_range_t {
 
-    void operator()(                                       //
-        numa_core_id_t const *core_ids, std::size_t count, //
+    void operator()(                                  //
+        core_id_t const *core_ids, std::size_t count, //
         char *buffer, std::size_t buffer_size, logging_colors_t colors) const noexcept {
 
         if (count == 0) {
@@ -163,7 +163,7 @@ struct log_numa_topology_t {
      *  @param output Output file stream (defaults to stdout)
      */
     template <std::size_t max_page_sizes_, typename allocator_type_>
-    void operator()(numa_topology<max_page_sizes_, allocator_type_> const &topology, logging_colors_t colors,
+    void operator()(machine_topology<max_page_sizes_, allocator_type_> const &topology, logging_colors_t colors,
                     std::FILE *output = stdout) const noexcept {
 
         // Line buffer for assembly
@@ -177,7 +177,7 @@ struct log_numa_topology_t {
         std::snprintf(line_buffer, sizeof(line_buffer), "%sNUMA Layout%s\n", colors.bold_cyan(), colors.reset());
         flush_line();
 
-        if (topology.nodes_count() == 0) {
+        if (topology.memory_domains_count() == 0) {
             std::snprintf(line_buffer, sizeof(line_buffer), "%sNo NUMA nodes detected%s\n", colors.dim(),
                           colors.reset());
             flush_line();
@@ -185,11 +185,13 @@ struct log_numa_topology_t {
         }
 
         // Get the last socket ID for comparison
-        int last_socket_id = topology.node(static_cast<memory_domain_index_t>(topology.nodes_count() - 1)).socket_id;
+        int last_socket_id =
+            topology.memory_domain_at(static_cast<memory_domain_index_t>(topology.memory_domains_count() - 1))
+                .socket_id;
         int current_socket_id = -1;
 
-        for (std::size_t i = 0; i < topology.nodes_count(); ++i) {
-            auto const node = topology.node(static_cast<memory_domain_index_t>(i));
+        for (std::size_t i = 0; i < topology.memory_domains_count(); ++i) {
+            auto const node = topology.memory_domain_at(static_cast<memory_domain_index_t>(i));
 
             // Print socket header when we encounter a new socket
             if (node.socket_id != current_socket_id) {
@@ -206,8 +208,8 @@ struct log_numa_topology_t {
 
             // Check if this is the last node in current socket
             bool is_last_node_in_socket =
-                (i + 1 >= topology.nodes_count() ||
-                 topology.node(static_cast<memory_domain_index_t>(i + 1)).socket_id != current_socket_id);
+                (i + 1 >= topology.memory_domains_count() ||
+                 topology.memory_domain_at(static_cast<memory_domain_index_t>(i + 1)).socket_id != current_socket_id);
 
             // Format core range and memory
             char cores_str[256], memory_str[64];
@@ -225,7 +227,7 @@ struct log_numa_topology_t {
                 "%s%s%s%sNode%s %s%d%s • %sCores:%s %s%s (%zu)%s • %sMemory:%s %s%s%s", //
                 colors.dim(), socket_prefix, node_connector,                            //
                 colors.cyan(), /* "Node" */ colors.reset(),                             //
-                colors.bold_cyan(), node.node_id, colors.reset(),                       //
+                colors.bold_cyan(), node.memory_domain_id, colors.reset(),              //
                 colors.green(), /* "Cores:" */ colors.reset(),                          //
                 colors.bold_green(), cores_str, node.core_count, colors.reset(),        //
                 colors.yellow(), /* "Memory:" */ colors.reset(),                        //

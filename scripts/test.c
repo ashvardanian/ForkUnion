@@ -21,7 +21,7 @@ static bool test_try_spawn_success(void) {
     fu_pool_t *pool = fu_pool_new("test_spawn");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     bool result = fu_pool_spawn(pool, threads, fu_caller_inclusive_k);
@@ -44,7 +44,7 @@ static bool test_for_threads(void) {
     fu_pool_t *pool = fu_pool_new("test_for_threads");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
@@ -52,7 +52,7 @@ static bool test_for_threads(void) {
         return false;
     }
 
-    size_t threads_count = fu_pool_count_threads(pool);
+    size_t threads_count = fu_pool_threads_count(pool);
     atomic_bool *visited = calloc(threads_count, sizeof(atomic_bool));
     struct for_threads_context context = {.visited = visited};
 
@@ -75,7 +75,7 @@ static bool test_caller_exclusivity_query(void) {
     fu_pool_t *pool = fu_pool_new("test_exclusivity");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     /* The pool is the single source of truth, even after a re-spawn with a different mode. */
@@ -95,13 +95,13 @@ static bool test_caller_exclusivity_query(void) {
 }
 
 static bool test_per_compute_domain_pool(void) {
-    size_t compute_domains = fu_count_compute_domains();
+    size_t compute_domains = fu_compute_domains_count();
     if (compute_domains == 0) return false;
 
     /* Spawn one pool per compute domain, sized to that domain's core count. */
     bool result = true;
     for (size_t compute_domain = 0; compute_domain < compute_domains && result; ++compute_domain) {
-        size_t cores = fu_count_logical_cores_in(compute_domain);
+        size_t cores = fu_logical_cores_count_in(compute_domain);
         if (cores == 0) cores = 2; /* Non-NUMA build reports via hardware_concurrency */
 
         fu_pool_t *pool = fu_pool_new("compute_domain");
@@ -110,7 +110,7 @@ static bool test_per_compute_domain_pool(void) {
             break;
         }
         if (!fu_pool_spawn_on(pool, compute_domain, cores, fu_caller_exclusive_k)) result = false;
-        else if (fu_pool_count_threads(pool) == 0)
+        else if (fu_pool_threads_count(pool) == 0)
             result = false;
         fu_pool_delete(pool);
     }
@@ -126,7 +126,7 @@ static bool test_generation_polling(void) {
     fu_pool_t *pool = fu_pool_new("test_generation");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     /* Polling before join is the caller-exclusive pattern: no caller slice is owed. */
@@ -135,7 +135,7 @@ static bool test_generation_polling(void) {
         return false;
     }
 
-    size_t threads_count = fu_pool_count_threads(pool);
+    size_t threads_count = fu_pool_threads_count(pool);
     atomic_bool *visited = calloc(threads_count, sizeof(atomic_bool));
     struct for_threads_context context = {.visited = visited};
 
@@ -176,7 +176,7 @@ static bool test_uncomfortable_input_size(void) {
     fu_pool_t *pool = fu_pool_new("test_uncomfortable");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
@@ -184,7 +184,7 @@ static bool test_uncomfortable_input_size(void) {
         return false;
     }
 
-    size_t threads_count = fu_pool_count_threads(pool);
+    size_t threads_count = fu_pool_threads_count(pool);
     size_t max_input_size = threads_count * 3;
 
     for (size_t input_size = 0; input_size <= max_input_size; ++input_size) {
@@ -243,7 +243,7 @@ static bool test_for_n(void) {
     fu_pool_t *pool = fu_pool_new("test_for_n");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
@@ -277,7 +277,7 @@ static bool test_for_n_dynamic(void) {
     fu_pool_t *pool = fu_pool_new("test_for_n_dynamic");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
@@ -326,7 +326,7 @@ static bool test_oversubscribed_threads(void) {
     fu_pool_t *pool = fu_pool_new("test_oversubscribed");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     if (!fu_pool_spawn(pool, threads * oversubscription, fu_caller_inclusive_k)) {
@@ -354,7 +354,7 @@ static bool test_gcc_nested_functions(void) {
     fu_pool_t *pool = fu_pool_new("test_gcc_nested");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
@@ -403,7 +403,7 @@ static bool test_clang_blocks(void) {
     fu_pool_t *pool = fu_pool_new("test_clang_blocks");
     if (!pool) return false;
 
-    size_t threads = fu_count_logical_cores();
+    size_t threads = fu_logical_cores_count();
     if (threads == 0) threads = 4;
 
     if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
@@ -448,9 +448,9 @@ int main(void) {
 
     printf("Compiled with: %s\n", fu_comptime_capabilities_string());
     printf("Running on:    %s\n", caps);
-    printf("Logical cores: %zu\n", fu_count_logical_cores());
-    printf("NUMA nodes: %zu\n", fu_count_memory_domains());
-    printf("ComputeDomains: %zu\n", fu_count_compute_domains());
+    printf("Logical cores: %zu\n", fu_logical_cores_count());
+    printf("NUMA nodes: %zu\n", fu_memory_domains_count());
+    printf("ComputeDomains: %zu\n", fu_compute_domains_count());
 
     printf("\nStarting unit tests...\n");
 

@@ -24,17 +24,17 @@
 #endif
 #endif
 
-#include <memory>  // `std::allocator`
-#include <thread>  // `std::thread`
+#include <array>   // `std::array`
 #include <atomic>  // `std::atomic`
-#include <cstddef> // `std::max_align_t`
+#include <memory>  // `std::allocator`
+#include <new>     // `std::hardware_destructive_interference_size`
+#include <thread>  // `std::thread`
+#include <utility> // `std::exchange`, `std::addressof`
 #include <cassert> // `assert`
-#include <cstring> // `std::strlen`
+#include <cstddef> // `std::max_align_t`
 #include <cstdio>  // `std::snprintf`
 #include <cstdlib> // `std::strtoull`
-#include <utility> // `std::exchange`, `std::addressof`
-#include <new>     // `std::hardware_destructive_interference_size`
-#include <array>   // `std::array`
+#include <cstring> // `std::strlen`
 
 #define FORKUNION_VERSION_MAJOR 2
 #define FORKUNION_VERSION_MINOR 3
@@ -226,22 +226,29 @@
 #endif
 
 #if FU_WITH_THREAD_PINNING && FU_ON_POSIX
-#include <sched.h> // `cpu_set_t`, `CPU_ALLOC`, `pthread_setaffinity_np`
+#include <cerrno>  // `errno`, `EINVAL` - the kernel's way of saying "your mask is too narrow"
+#include <sched.h> // `cpu_set_t`, `sched_getaffinity`, `pthread_setaffinity_np`
+#endif
+
+#if FU_WITH_THREAD_PINNING && FU_ON_FREEBSD
+#include <pthread_np.h> // `pthread_setaffinity_np` taking a `cpuset_t`
+#include <sys/cpuset.h> // `cpuset_t`, `cpuset_getaffinity`, `CPU_LEVEL_WHICH`, `CPU_WHICH_TID`
+#include <sys/param.h>  // ! Must precede `<sys/cpuset.h>`
 #endif
 
 #if FU_WITH_THREAD_QOS
 #include <sys/qos.h> // `qos_class_t`, `pthread_attr_set_qos_class_np`
 #endif
 
-#if defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
+#if defined(__unix__) || defined(__unix) || defined(unix) || FU_ON_APPLE
 #include <unistd.h> // `gettid`, `sysconf`
 #endif
 
-#if defined(__APPLE__)
+#if FU_ON_APPLE
 #include <sys/sysctl.h> // `sysctl`
 #endif
 
-#if defined(_WIN32)
+#if FU_ON_WINDOWS
 // `NOMINMAX` and `_CRT_SECURE_NO_WARNINGS` are already defined at the top of this header, before the
 // CRT includes, where they can still take effect.
 #include <windows.h> // `GlobalMemoryStatusEx`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`
@@ -264,6 +271,25 @@
 #define FU_DETECT_CPP_17_ 1
 #else
 #define FU_DETECT_CPP_17_ 0
+#endif
+
+/*  Detect target CPU architecture.
+ *  We'll only use it when compiling Inline Assembly code on GCC or Clang.
+ */
+#if defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64)
+#define FU_DETECT_ARCH_ARM64_ 1
+#else
+#define FU_DETECT_ARCH_ARM64_ 0
+#endif
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
+#define FU_DETECT_ARCH_X86_64_ 1
+#else
+#define FU_DETECT_ARCH_X86_64_ 0
+#endif
+#if defined(__riscv)
+#define FU_DETECT_ARCH_RISC5_ 1
+#else
+#define FU_DETECT_ARCH_RISC5_ 0
 #endif
 
 #if FU_DETECT_CPP_17_
@@ -301,35 +327,19 @@
 #define FU_WITH_ASM_YIELDS_ 0
 #endif
 
-/*  Detect target CPU architecture.
- *  We'll only use it when compiling Inline Assembly code on GCC or Clang.
- */
-#if defined(__arm64__) || defined(__arm64__) || defined(_M_ARM64)
-#define FU_DETECT_ARCH_ARM64_ 1
-#else
-#define FU_DETECT_ARCH_ARM64_ 0
-#endif
-#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
-#define FU_DETECT_ARCH_X86_64_ 1
-#else
-#define FU_DETECT_ARCH_X86_64_ 0
-#endif
-#if defined(__riscv)
-#define FU_DETECT_ARCH_RISC5_ 1
-#else
-#define FU_DETECT_ARCH_RISC5_ 0
-#endif
-
 namespace ashvardanian {
 namespace forkunion {
 
-using numa_node_id_t = int;   // ? A.k.a. NUMA node ID, in [0, numa_max_node())
-using numa_core_id_t = int;   // ? A.k.a. CPU core ID, in [0, threads_count)
-using numa_socket_id_t = int; // ? A.k.a. physical CPU socket ID
-using qos_level_t = int;      // ? Quality of Service, like: "performance", "efficiency", "low-power"
+/*  Identifiers the operating system hands us, as opposed to the dense indices we hand ourselves.
+ *  A `*_index_t` counts from zero into one of our own arrays; a `*_id_t` is opaque, and only the
+ *  platform layer may decode it. Neither is interchangeable with the other. */
+using memory_domain_id_t = int; // ? The OS's NUMA node number, in [0, numa_max_node()]
+using core_id_t = int;          // ? Opaque logical-processor id; on Windows it packs (group, bit)
+using socket_id_t = int;        // ? Physical CPU socket, or -1 where the OS will not say
+using qos_level_t = int;        // ? Quality of Service, like: "performance", "efficiency", "low-power"
 
 /**
- *  @brief A position in `numa_topology`'s array of @b compute domains, in [0, compute_domains_count).
+ *  @brief A position in `machine_topology`'s array of @b compute domains, in [0, compute_domains_count).
  *  @sa `memory_domain_index_t`, which indexes a different array and must not be confused with this.
  *
  *  These are plain enums with a fixed underlying type, not `enum class`, deliberately. The implicit
@@ -348,8 +358,102 @@ using qos_level_t = int;      // ? Quality of Service, like: "performance", "eff
  */
 enum compute_domain_index_t : std::size_t {};
 
-/** @brief A position in `numa_topology`'s array of @b memory domains, in [0, memory_domains_count). */
+/** @brief A position in `machine_topology`'s array of @b memory domains, in [0, memory_domains_count). */
 enum memory_domain_index_t : std::size_t {};
+
+/**
+ *  @brief Defines the in- and exclusivity of the calling thread in for the executing task.
+ *  @sa `caller_inclusive_k` and `caller_exclusive_k`
+ *
+ *  This enum affects how the join is performed. If the caller is inclusive, 1/Nth of the call
+ *  will be executed by the calling thread (as opposed to workers) and the join will happen
+ *  inside of the calling scope.
+ */
+enum caller_exclusivity_t : unsigned int {
+    caller_inclusive_k = 0,
+    caller_exclusive_k = 1,
+};
+
+/**
+ *  @brief Defines the mood of the thread-pool, whether it is busy or about to die.
+ *  @sa `mood_t::grind_k`, `mood_t::chill_k`, `mood_t::die_k`
+ */
+enum class mood_t : unsigned int {
+    /** That's our default ;) */
+    grind_k = 0,
+    /** Sleepy and tired, but just a wake-up call away. */
+    chill_k,
+    /** The thread is about to die, we must exit the loop peacefully. */
+    die_k,
+};
+
+/**
+ *  @brief Describes all the special library features, both those compiled in and those found here.
+ *  @sa `comptime_capabilities` and `runtime_capabilities`
+ *
+ *  Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
+ *  about @b this @b machine: `capability_huge_pages_k` means the kernel is offering them. A bit
+ *  marked `comptime_` is a fact about @b this @b build: `capability_comptime_huge_pages_k` means we
+ *  compiled the code that would ask for them.
+ *
+ *  Neither implies the other. A binary carrying `capability_comptime_numa_memory_k` runs perfectly
+ *  well on a single-node box, where `capability_numa_aware_k` never appears; and a machine with four
+ *  NUMA nodes reports none of them to a build that left the topology out.
+ */
+enum capabilities_t : unsigned int {
+    capabilities_unknown_k = 0,
+
+    /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
+    capability_x86_pause_k = 1 << 1,
+    /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
+    capability_x86_tpause_k = 1 << 2,
+    /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
+    capability_arm64_yield_k = 1 << 3,
+    /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
+    capability_arm64_wfet_k = 1 << 4,
+    /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
+    capability_risc5_pause_k = 1 << 5,
+
+    /**
+     *  @brief A @b pool is pinned to a single compute domain (a same-QoS core cluster).
+     *  @note Unlike its neighbours, this describes a pool rather than the machine, so it never appears
+     *        in `cpu_capabilities()`, `ram_capabilities()`, or their union `fu_runtime_capabilities()`.
+     *        The C wrapper uses it to discriminate its pool variants.
+     */
+    capability_compute_domain_k = 1 << 6,
+
+    /** NUMA-aware memory allocations. */
+    capability_numa_aware_k = 1 << 10,
+    /** Reducing TLB pressure with huge pages. */
+    capability_huge_pages_k = 1 << 11,
+    /** ... doing the same "transparently". */
+    capability_huge_pages_transparent_k = 1 << 12,
+
+    /** Can spawn OS threads directly, rather than through `std::thread`. `FU_WITH_THREADS`. */
+    capability_comptime_threads_k = 1 << 16,
+    /** Can enumerate this machine's cores, compute domains, and memory domains. `FU_WITH_TOPOLOGY`. */
+    capability_comptime_topology_k = 1 << 17,
+    /** Can see which cores share a cache, so a domain is cut at a cluster. `FU_WITH_TOPOLOGY_CACHES`. */
+    capability_comptime_topology_caches_k = 1 << 18,
+    /** Can read inter-domain distance, bandwidth, and latency. `FU_WITH_TOPOLOGY_METRICS`. */
+    capability_comptime_topology_metrics_k = 1 << 19,
+    /** Can bind a thread to a set of cores, and have the kernel honour it. `FU_WITH_THREAD_PINNING`. */
+    capability_comptime_thread_pinning_k = 1 << 20,
+    /** Can hint which class of core a thread runs on, at creation. `FU_WITH_THREAD_QOS`. */
+    capability_comptime_thread_qos_k = 1 << 21,
+    /** Can change another thread's scheduling class, to sleep or wake it. `FU_WITH_THREAD_SCHED_CLASS`. */
+    capability_comptime_thread_sched_class_k = 1 << 22,
+    /** Can place pages on a chosen memory domain. `FU_WITH_NUMA_MEMORY`. */
+    capability_comptime_numa_memory_k = 1 << 23,
+    /** Can request pages larger than the base page. `FU_WITH_HUGE_PAGES`. */
+    capability_comptime_huge_pages_k = 1 << 24,
+    /** The `colocated_pool` and `distributed_pool` are compiled in. `FU_WITH_COLOCATED_POOLS`. */
+    capability_comptime_colocated_pools_k = 1 << 25,
+};
+
+inline capabilities_t operator|(capabilities_t a, capabilities_t b) {
+    return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
+}
 
 /**
  *  @brief Defines variable alignment to avoid false sharing.
@@ -408,16 +512,64 @@ constexpr int popcount(scalar_type_ value) noexcept {
 }
 
 /**
+ *  @brief Ceiling of @p value divided by @p divisor - how many buckets of that size a value needs.
+ *  @note @p divisor must be non-zero; overflow of @p value near the type maximum is not guarded.
+ */
+constexpr std::size_t divide_round_up(std::size_t value, std::size_t divisor) noexcept {
+    return (value + divisor - 1) / divisor;
+}
+
+/**
  *  @brief Smallest multiple of @p multiple that is not less than @p value.
  *  @note @p multiple must be non-zero; overflow of @p value near the type maximum is not guarded.
  */
 constexpr std::size_t round_up_to_multiple(std::size_t value, std::size_t multiple) noexcept {
-    return (value + multiple - 1) / multiple * multiple;
+    return divide_round_up(value, multiple) * multiple;
+}
+
+template <typename value_type_, typename comparator_type_ = std::less<value_type_>>
+void bubble_sort(value_type_ *array, std::size_t size, comparator_type_ comp = {}) noexcept {
+    if (size < 2) return; // ? Already sorted; also guards the `size - 1` unsigned underflow
+    assert(array != nullptr && "Array must not be null");
+    for (std::size_t i = 0; i < size - 1; ++i)
+        for (std::size_t j = 0; j < size - i - 1; ++j)
+            if (comp(array[j + 1], array[j])) std::swap(array[j], array[j + 1]);
+}
+
+/**
+ *  @brief Dense-ranks `count` items by an ascending integer key, writing each item's 0-based rank.
+ *  @return The number of distinct keys, at least 1 when `count > 0`.
+ *
+ *  `key(index)` must read a @b stable source and `assign(index, rank)` write a @b different field, so
+ *  ranking in place never corrupts a not-yet-ranked item whose key repeats. Used to turn raw CPU
+ *  capacities into compute levels and raw memory tiers into memory levels.
+ */
+template <typename key_type_, typename assign_type_>
+std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ const &assign) noexcept {
+    for (std::size_t i = 0; i < count; ++i) {
+        std::size_t rank = 0;
+        for (std::size_t j = 0; j < count; ++j)
+            if (key(j) < key(i)) {
+                bool counted = false;
+                for (std::size_t k = 0; k < j; ++k)
+                    if (key(k) == key(j)) counted = true;
+                if (!counted) rank += 1;
+            }
+        assign(i, rank);
+    }
+    std::size_t distinct = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        bool seen = false;
+        for (std::size_t j = 0; j < i; ++j)
+            if (key(j) == key(i)) seen = true;
+        if (!seen) distinct += 1;
+    }
+    return distinct ? distinct : 1;
 }
 
 /**
  *  @brief The kernel's own identifier for the calling thread, or 0 where there is none.
- *  @sa `numa_pthread_t::id`, which caches it so other threads can read it.
+ *  @sa `pinned_thread_t::id`, which caches it so other threads can read it.
  *
  *  Linux calls it a `pid_t` and hands it out through `gettid`. Darwin has no `gettid` at all, and
  *  spells the same idea `pthread_threadid_np`, returning 64 bits. Both are the number a scheduler
@@ -480,288 +632,17 @@ FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ cha
  *  reserves IDs for cores that are offline right now. Elsewhere the distinction does not exist.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
-#if FU_ON_POSIX
+#if FU_ON_WINDOWS
+    DWORD const configured = ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (configured > 0) return static_cast<std::size_t>(configured);
+#elif FU_ON_POSIX
     // ! Not `_SC_NPROCESSORS_ONLN`: a core that is offline right now still owns an ID, and a mask
     // ! sized to the online count would refuse to name it.
     long const configured = ::sysconf(_SC_NPROCESSORS_CONF);
     if (configured > 0) return static_cast<std::size_t>(configured);
-#elif FU_ON_WINDOWS
-    DWORD const configured = ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    if (configured > 0) return static_cast<std::size_t>(configured);
 #endif
     return static_cast<std::size_t>(std::thread::hardware_concurrency());
 }
-
-/**
- *  @brief The cores the calling thread may run on - this process's contract with the kernel.
- *
- *  A machine is not the same thing as the slice of it we were handed. `taskset`, a cgroup `cpuset`,
- *  and a batch scheduler all narrow this mask, and `hardware_concurrency` sees none of them. Sizing
- *  a pool from the machine and pinning to cores outside the mask either escapes the restriction, or
- *  - where the kernel enforces it - crowds every spinning worker onto the few cores that remain.
- *
- *  Owns its mask, so the same type serves as the snapshot a pool restores on teardown. @sa `restore`.
- */
-struct affinity_mask {
-#if FU_WITH_THREAD_PINNING && FU_ON_POSIX
-
-  private:
-    cpu_set_t *cores_ {nullptr};
-    std::size_t bytes_ {0};
-
-  public:
-    affinity_mask() noexcept = default;
-    affinity_mask(affinity_mask const &) = delete;
-    affinity_mask &operator=(affinity_mask const &) = delete;
-    affinity_mask(affinity_mask &&other) noexcept : cores_(other.cores_), bytes_(other.bytes_) {
-        other.cores_ = nullptr;
-        other.bytes_ = 0;
-    }
-    affinity_mask &operator=(affinity_mask &&other) noexcept {
-        if (this != &other) {
-            reset();
-            cores_ = std::exchange(other.cores_, nullptr);
-            bytes_ = std::exchange(other.bytes_, 0);
-        }
-        return *this;
-    }
-    ~affinity_mask() noexcept { reset(); }
-
-    void reset() noexcept {
-        if (cores_) CPU_FREE(cores_);
-        cores_ = nullptr;
-        bytes_ = 0;
-    }
-
-    bool valid() const noexcept { return cores_ != nullptr; }
-
-    /** @brief Reads the calling thread's current affinity. @retval false if it could not be read. */
-    bool try_capture() noexcept {
-        reset();
-        std::size_t const max_cores = possible_cores();
-        cores_ = CPU_ALLOC(max_cores);
-        if (!cores_) return false;
-        bytes_ = CPU_ALLOC_SIZE(max_cores);
-        CPU_ZERO_S(bytes_, cores_);
-        if (::sched_getaffinity(0, bytes_, cores_) == 0) return true;
-        reset();
-        return false;
-    }
-
-    /** @brief Reinstates this mask on the calling thread. @retval false if the kernel refused. */
-    bool restore() const noexcept {
-        if (!cores_) return false;
-        return ::pthread_setaffinity_np(::pthread_self(), bytes_, cores_) == 0;
-    }
-
-    bool contains(numa_core_id_t const core) const noexcept {
-        return cores_ && core >= 0 && CPU_ISSET_S(static_cast<std::size_t>(core), bytes_, cores_) != 0;
-    }
-    std::size_t count() const noexcept { return cores_ ? static_cast<std::size_t>(CPU_COUNT_S(bytes_, cores_)) : 0; }
-
-#else // ? Nothing is ever narrowed here, so every core is allowed and there is nothing to restore
-
-  public:
-    void reset() noexcept {}
-    bool valid() const noexcept { return false; }
-    bool try_capture() noexcept { return false; }
-    bool restore() const noexcept { return false; }
-    bool contains(FU_MAYBE_UNUSED_ numa_core_id_t const core) const noexcept { return true; }
-    std::size_t count() const noexcept { return 0; }
-#endif
-};
-
-/**
- *  @brief Number of cores the calling thread may run on, or `possible_cores()` where unknowable.
- *  @note Prefer this to `std::thread::hardware_concurrency` when sizing a pool: the latter counts
- *        the machine's cores, not the ones this process was given.
- */
-FU_MAYBE_UNUSED_ static inline std::size_t count_allowed_cores() noexcept {
-    affinity_mask allowed;
-    if (allowed.try_capture()) {
-        std::size_t const allowed_count = allowed.count();
-        if (allowed_count > 0) return allowed_count;
-    }
-    return possible_cores();
-}
-
-#if FU_ON_WINDOWS
-/*  Windows addresses a logical processor by (processor group, bit within the group's 64-bit
- *  `KAFFINITY` mask), not by a flat global id. A `numa_core_id_t` therefore packs both, so the free
- *  function `pin_thread_to_cores` can rebuild a `GROUP_AFFINITY` from an id alone - no side table
- *  threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits, so the
- *  index is 0..63); the remaining bits hold the group number. Everywhere else a `numa_core_id_t` is
- *  still just an opaque, comparable id - only the pinning path decodes it. */
-static constexpr int win_core_group_shift_k = 6;
-static constexpr numa_core_id_t win_core_index_mask_k = (numa_core_id_t {1} << win_core_group_shift_k) - 1;
-/** @brief Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap
- *         of 64 @b per @b group, never a cap on total cores (a machine with more uses several groups). */
-static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
-
-FU_MAYBE_UNUSED_ static inline numa_core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
-    return (static_cast<numa_core_id_t>(group) << win_core_group_shift_k) |
-           (static_cast<numa_core_id_t>(bit) & win_core_index_mask_k);
-}
-FU_MAYBE_UNUSED_ static inline WORD win_core_group(numa_core_id_t id) noexcept {
-    return static_cast<WORD>(id >> win_core_group_shift_k);
-}
-FU_MAYBE_UNUSED_ static inline unsigned win_core_index(numa_core_id_t id) noexcept {
-    return static_cast<unsigned>(id & win_core_index_mask_k);
-}
-#endif // FU_ON_WINDOWS
-
-/**
- *  @brief Defines the in- and exclusivity of the calling thread in for the executing task.
- *  @sa `caller_inclusive_k` and `caller_exclusive_k`
- *
- *  This enum affects how the join is performed. If the caller is inclusive, 1/Nth of the call
- *  will be executed by the calling thread (as opposed to workers) and the join will happen
- *  inside of the calling scope.
- */
-enum caller_exclusivity_t : unsigned int {
-    caller_inclusive_k = 0,
-    caller_exclusive_k = 1,
-};
-
-/**
- *  @brief Defines the mood of the thread-pool, whether it is busy or about to die.
- *  @sa `mood_t::grind_k`, `mood_t::chill_k`, `mood_t::die_k`
- */
-enum class mood_t : unsigned int {
-    /** That's our default ;) */
-    grind_k = 0,
-    /** Sleepy and tired, but just a wake-up call away. */
-    chill_k,
-    /** The thread is about to die, we must exit the loop peacefully. */
-    die_k,
-};
-
-/**
- *  @brief Describes all the special library features, both those compiled in and those found here.
- *  @sa `comptime_capabilities` and `runtime_capabilities`
- *
- *  Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
- *  about @b this @b machine: `capability_huge_pages_k` means the kernel is offering them. A bit
- *  marked `comptime_` is a fact about @b this @b build: `capability_comptime_huge_pages_k` means we
- *  compiled the code that would ask for them.
- *
- *  Neither implies the other. A binary carrying `capability_comptime_numa_memory_k` runs perfectly
- *  well on a single-node box, where `capability_numa_aware_k` never appears; and a machine with four
- *  NUMA nodes reports none of them to a build that left the topology out.
- */
-enum capabilities_t : unsigned int {
-    capabilities_unknown_k = 0,
-
-    /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
-    capability_x86_pause_k = 1 << 1,
-    /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
-    capability_x86_tpause_k = 1 << 2,
-    /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
-    capability_arm64_yield_k = 1 << 3,
-    /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
-    capability_arm64_wfet_k = 1 << 4,
-    /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
-    capability_risc5_pause_k = 1 << 5,
-
-    /** Pinned to a single compute_domain (a same-QoS core cluster). */
-    capability_compute_domain_k = 1 << 6,
-
-    /** NUMA-aware memory allocations. */
-    capability_numa_aware_k = 1 << 10,
-    /** Reducing TLB pressure with huge pages. */
-    capability_huge_pages_k = 1 << 11,
-    /** ... doing the same "transparently". */
-    capability_huge_pages_transparent_k = 1 << 12,
-
-    /** Can spawn OS threads directly, rather than through `std::thread`. `FU_WITH_THREADS`. */
-    capability_comptime_threads_k = 1 << 16,
-    /** Can enumerate this machine's cores, compute domains, and memory domains. `FU_WITH_TOPOLOGY`. */
-    capability_comptime_topology_k = 1 << 17,
-    /** Can see which cores share a cache, so a domain is cut at a cluster. `FU_WITH_TOPOLOGY_CACHES`. */
-    capability_comptime_topology_caches_k = 1 << 18,
-    /** Can read inter-domain distance, bandwidth, and latency. `FU_WITH_TOPOLOGY_METRICS`. */
-    capability_comptime_topology_metrics_k = 1 << 19,
-    /** Can bind a thread to a set of cores, and have the kernel honour it. `FU_WITH_THREAD_PINNING`. */
-    capability_comptime_thread_pinning_k = 1 << 20,
-    /** Can hint which class of core a thread runs on, at creation. `FU_WITH_THREAD_QOS`. */
-    capability_comptime_thread_qos_k = 1 << 21,
-    /** Can change another thread's scheduling class, to sleep or wake it. `FU_WITH_THREAD_SCHED_CLASS`. */
-    capability_comptime_thread_sched_class_k = 1 << 22,
-    /** Can place pages on a chosen memory domain. `FU_WITH_NUMA_MEMORY`. */
-    capability_comptime_numa_memory_k = 1 << 23,
-    /** Can request pages larger than the base page. `FU_WITH_HUGE_PAGES`. */
-    capability_comptime_huge_pages_k = 1 << 24,
-    /** The `colocated_pool` and `distributed_pool` are compiled in. `FU_WITH_COLOCATED_POOLS`. */
-    capability_comptime_colocated_pools_k = 1 << 25,
-};
-
-inline capabilities_t operator|(capabilities_t a, capabilities_t b) {
-    return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
-}
-
-/** @brief The portable busy-wait hint: hands the core back to the scheduler. Works everywhere, cheap nowhere. */
-struct standard_yield_t {
-    inline void operator()() const noexcept { std::this_thread::yield(); }
-};
-
-/**
- *  @brief A synchronization point that waits for all threads to finish the last fork.
- *  @note You don't have to explicitly call any of the APIs, it's like `std::jthread` ;)
- *
- *  The lifecycle is keyed on the pool's exclusivity:
- *  - On `caller_exclusive_k` pools the fork is dispatched at @b construction: the workers
- *    start immediately, the caller may overlap its own work, poll `is_complete`, and the
- *    `join` call (or the destructor) waits for completion.
- *  - On `caller_inclusive_k` pools the dispatch is deferred to @b join (or the destructor),
- *    where the calling thread contributes its own slice - a deferred blocking call.
- *
- *  You don't have to explicitly handle the return value and wait on it.
- *  According to the C++ standard, the destructor of the `broadcast_join` will
- *  be called in the end of the `for_threads`-calling expression.
- *
- *  The object is immovable: on caller-exclusive pools the pool holds a pointer to the
- *  `fork_` member for the lifetime of the broadcast, so the object must never relocate.
- *  Guaranteed copy elision (C++17) still allows returning it by value from `for_threads`.
- */
-template <typename pool_type_, typename fork_type_>
-struct broadcast_join {
-
-    using pool_t = pool_type_;
-    using fork_t = fork_type_;
-    using generation_t = typename pool_t::generation_t;
-
-  private:
-    pool_t &pool_ref_;
-    /** We need this to extend the lifetime of the lambda object. */
-    fork_t fork_;
-    /** Real tokens are odd; zero means "not yet dispatched". */
-    generation_t generation_ {0};
-
-  public:
-    broadcast_join(pool_t &pool_ref, fork_t &&f) noexcept : pool_ref_(pool_ref), fork_(std::forward<fork_t>(f)) {
-        if (pool_ref_.caller_exclusivity() == caller_exclusive_k) generation_ = pool_ref_.unsafe_for_threads(fork_);
-    }
-
-    /** @brief The wrapped fork; on caller-exclusive pools only read it after `join`. */
-    fork_t &fork_ref() noexcept { return fork_; }
-
-    /** @brief The generation token of this broadcast; always odd once dispatched, zero before. */
-    generation_t generation() const noexcept { return generation_; }
-
-    /** @brief Non-blocking check; can only turn `true` before `join` on caller-exclusive pools. */
-    bool is_complete() const noexcept { return generation_ != 0 && pool_ref_.is_complete(generation_); }
-
-    void join() noexcept {
-        if (generation_ == 0) generation_ = pool_ref_.unsafe_for_threads(fork_);
-        pool_ref_.unsafe_join(generation_); // ? Idempotent for already-joined generations
-    }
-
-    ~broadcast_join() noexcept { join(); }
-    broadcast_join(broadcast_join &&) = delete;
-    broadcast_join(broadcast_join const &) = delete;
-    broadcast_join &operator=(broadcast_join &&) = delete;
-    broadcast_join &operator=(broadcast_join const &) = delete;
-};
 
 /**
  *  @brief A "prong" - is a tip of a "fork" - pinning "task" to a "thread".
@@ -772,14 +653,16 @@ struct prong {
     using task_index_t = index_t;   // ? A.k.a. "task index" in [0, prongs_count)
     using thread_index_t = index_t; // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
 
+    /** @brief The task index, in [0, prongs_count). */
     task_index_t task {0};
+    /** @brief The thread (core) index running the task, in [0, threads_count). */
     thread_index_t thread {0};
 
     constexpr prong() noexcept = default;
     constexpr prong(prong &&) noexcept = default;
     constexpr prong(prong const &) noexcept = default;
-    constexpr prong &operator=(prong &&) noexcept = default;
     constexpr prong &operator=(prong const &) noexcept = default;
+    constexpr prong &operator=(prong &&) noexcept = default;
 
     explicit prong(task_index_t task_index, thread_index_t thread_index) noexcept
         : task(task_index), thread(thread_index) {}
@@ -799,8 +682,11 @@ struct local_prong {
     using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
     using compute_domain_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "compute_domain ID"
 
+    /** @brief The task index, in [0, prongs_count). */
     task_index_t task {0};
+    /** @brief The thread (core) index running the task, in [0, threads_count). */
     thread_index_t thread {0};
+    /** @brief The compute domain the thread is pinned to, in [0, compute_domains_count). */
     compute_domain_index_t compute_domain {0};
 
     constexpr local_prong() noexcept = default;
@@ -830,7 +716,9 @@ struct local_thread {
     using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
     using compute_domain_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "compute_domain ID"
 
+    /** @brief The thread (core) index, in [0, threads_count). */
     thread_index_t thread {0};
+    /** @brief The compute domain the thread is pinned to, in [0, compute_domains_count). */
     compute_domain_index_t compute_domain {0};
 
     constexpr local_thread() noexcept = default;
@@ -856,13 +744,13 @@ struct allocation_result {
     using pointer_type = pointer_type_;
     using size_type = size_type_;
 
-    /** Pointer to the allocated memory, or nullptr if allocation failed. */
+    /** @brief Pointer to the allocated memory, or nullptr if allocation failed. */
     pointer_type ptr {nullptr};
-    /** Number of elements allocated, or 0 if allocation failed. */
+    /** @brief Number of elements allocated, or 0 if allocation failed. */
     size_type count {0};
-    /** Reports the total volume of memory allocated, in bytes. */
+    /** @brief Total volume of memory allocated, in bytes. */
     size_type bytes {0};
-    /** Reports the number of memory pages allocated. */
+    /** @brief Number of memory pages allocated. */
     size_type pages {0};
 
     constexpr allocation_result() noexcept = default;
@@ -924,7 +812,9 @@ class limited_array {
                   "limited_array requires noexcept-default-constructible values");
 
     using value_t = value_type_;
+    /** @brief Inline storage for up to `capacity_` values. */
     std::array<value_t, capacity_> values_ {};
+    /** @brief Number of values currently stored, in [0, capacity_]. */
     std::size_t size_ {0};
 
   public:
@@ -974,8 +864,11 @@ class dynamic_array {
     using value_t = value_type_;
     using allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_t>;
 
+    /** @brief Allocator used to acquire and release the heap block. */
     allocator_t allocator_ {};
+    /** @brief Pointer to the heap block, or nullptr when empty. */
     value_t *data_ {nullptr};
+    /** @brief Number of elements in the block, fixed at the last `try_resize`. */
     std::size_t size_ {0};
 
     void destroy_all() noexcept {
@@ -1022,7 +915,12 @@ class dynamic_array {
         if (new_size == 0) return true;
         value_t *fresh = allocator_.allocate(new_size);
         if (!fresh) return false;
-        for (std::size_t i = 0; i < new_size; ++i) ::new (static_cast<void *>(fresh + i)) value_t();
+        // Value-initialization of a trivial type is a zero-fill; say so, rather than trusting the
+        // optimizer to turn a placement-new loop back into one.
+        if constexpr (std::is_trivially_default_constructible_v<value_t>)
+            std::memset(fresh, 0, new_size * sizeof(value_t));
+        else
+            for (std::size_t i = 0; i < new_size; ++i) ::new (static_cast<void *>(fresh + i)) value_t();
         data_ = fresh;
         size_ = new_size;
         return true;
@@ -1056,11 +954,17 @@ class unique_padded_buffer {
     using allocator_traits_t = std::allocator_traits<allocator_t>;
     using raw_allocator_t = typename allocator_traits_t::template rebind_alloc<char>;
 
-    char *raw_ {nullptr};       // ? Aligned base the objects live at
-    char *raw_owned_ {nullptr}; // ? What the allocator actually handed us, and what we must give back
+    /** @brief Aligned base the objects live at. */
+    char *raw_ {nullptr};
+    /** @brief What the allocator actually handed us, and what we must give back. */
+    char *raw_owned_ {nullptr};
+    /** @brief Number of objects currently held. */
     std::size_t objects_count_ {0};
+    /** @brief Stride between consecutive objects, in bytes; at least `sizeof(object_t)`. */
     std::size_t bytes_per_object_ {sizeof(object_t)};
+    /** @brief Total bytes owned, and what we must free. */
     std::size_t bytes_total_ {0};
+    /** @brief Raw byte allocator that backs the buffer. */
     raw_allocator_t allocator_ {};
 
     object_t *ptr(std::size_t i) noexcept { return reinterpret_cast<object_t *>(raw_ + i * bytes_per_object_); }
@@ -1180,10 +1084,288 @@ class unique_padded_buffer {
     explicit operator bool() const noexcept { return raw_ != nullptr && objects_count_ > 0; }
 };
 
+#if FU_ON_WINDOWS
+/*  Windows addresses a logical processor by (processor group, bit within the group's 64-bit
+ *  `KAFFINITY` mask), not by a flat global id. A `core_id_t` therefore packs both, so the free
+ *  function `try_pin_thread_to_cores` can rebuild a `GROUP_AFFINITY` from an id alone - no side table
+ *  threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits, so the
+ *  index is 0..63); the remaining bits hold the group number. Everywhere else a `core_id_t` is
+ *  still just an opaque, comparable id - only the pinning path decodes it. */
+static constexpr int win_core_group_shift_k = 6;
+static constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
+/** @brief Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap
+ *         of 64 @b per @b group, never a cap on total cores (a machine with more uses several groups). */
+static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
+
+FU_MAYBE_UNUSED_ static inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
+    return (static_cast<core_id_t>(group) << win_core_group_shift_k) |
+           (static_cast<core_id_t>(bit) & win_core_index_mask_k);
+}
+FU_MAYBE_UNUSED_ static inline WORD win_core_group(core_id_t id) noexcept {
+    return static_cast<WORD>(id >> win_core_group_shift_k);
+}
+FU_MAYBE_UNUSED_ static inline unsigned win_core_index(core_id_t id) noexcept {
+    return static_cast<unsigned>(id & win_core_index_mask_k);
+}
+#endif // FU_ON_WINDOWS
+
+/*  The unit each kernel writes its affinity mask in. Deliberately not `std::uint64_t` everywhere:
+ *  a glibc `cpu_set_t` is an array of `__cpu_mask`, a FreeBSD `cpuset_t` an array of `long`, and a
+ *  Windows `GROUP_AFFINITY` carries one 64-bit `KAFFINITY`. Matching the word keeps the aliasing
+ *  below honest on 32-bit and big-endian targets alike. */
+#if FU_ON_WINDOWS
+using core_mask_word_t = KAFFINITY;
+#elif FU_ON_FREEBSD
+using core_mask_word_t = long;
+#elif FU_ON_POSIX
+using core_mask_word_t = unsigned long;
+#else
+using core_mask_word_t = std::uint64_t;
+#endif
+
+/**
+ *  @brief A dense bitset over `core_id_t` - the cores a thread may run on, or should be confined to.
+ *
+ *  A machine is not the same thing as the slice of it we were handed. `taskset`, a cgroup `cpuset`,
+ *  and a batch scheduler all narrow this set, and `hardware_concurrency` sees none of them. Sizing a
+ *  pool from the machine and pinning to cores outside the set either escapes the restriction, or -
+ *  where the kernel enforces it - crowds every spinning worker onto the few cores that remain.
+ *
+ *  Every platform hands out a dense core id, so one bitset covers them all: Linux and FreeBSD number
+ *  logical processors from zero, and Windows packs `(group << 6) | bit` into the same integer.
+ *
+ *  @note Not `CPU_ALLOC`. That macro is `malloc` behind a name - glibc's `__sched_cpualloc` rounds
+ *        the count up and tail-calls it - which would both bypass this allocator and contradict what
+ *        the library promises. A `dynamic_array` sized from `possible_cores()` costs one cold-path
+ *        allocation and, unlike a fixed `cpu_set_t`, does not stop at glibc's 1024-core `CPU_SETSIZE`.
+ */
+template <typename allocator_type_ = std::allocator<core_mask_word_t>>
+class core_mask {
+    static constexpr std::size_t bits_per_word_k = sizeof(core_mask_word_t) * 8;
+
+    /** @brief Backing words of the bitset, one bit per `core_id_t`. */
+    dynamic_array<core_mask_word_t, allocator_type_> words_;
+
+  public:
+    core_mask() noexcept = default;
+    explicit core_mask(allocator_type_ const &allocator) noexcept : words_(allocator) {}
+
+    /**
+     *  @brief Upper bound on the `core_id_t` values this machine can produce - the width a mask covers.
+     *  @note Not `possible_cores()`. Windows ids are `(group << 6) | bit`, so a two-group machine with
+     *        80 logical processors still emits ids up to 103. Sizing by the core count would drop them.
+     */
+    static std::size_t id_space() noexcept {
+#if FU_ON_WINDOWS
+        WORD const groups = ::GetActiveProcessorGroupCount();
+        return static_cast<std::size_t>(groups ? groups : 1) * win_processors_per_group_k;
+#else
+        return possible_cores();
+#endif
+    }
+
+    /** @retval false on allocation failure, leaving the mask unusable rather than half-sized. */
+    bool try_resize_for(std::size_t const cores) noexcept {
+        return words_.try_resize(divide_round_up(cores, bits_per_word_k));
+    }
+
+    /** @brief Sizes the mask to hold every id this machine can produce. @sa `id_space`. */
+    bool try_resize() noexcept { return try_resize_for(id_space()); }
+
+    void reset() noexcept { words_.reset(); }
+    void clear() noexcept { std::memset(words_.data(), 0, bytes()); }
+
+    bool valid() const noexcept { return !words_.empty(); }
+    std::size_t capacity() const noexcept { return words_.size() * bits_per_word_k; }
+    std::size_t bytes() const noexcept { return words_.size() * sizeof(core_mask_word_t); }
+    void *data() noexcept { return static_cast<void *>(words_.data()); }
+    void const *data() const noexcept { return static_cast<void const *>(words_.data()); }
+
+    void add(core_id_t const core) noexcept {
+        if (core < 0 || static_cast<std::size_t>(core) >= capacity()) return;
+        std::size_t const bit = static_cast<std::size_t>(core);
+        words_[bit / bits_per_word_k] |= static_cast<core_mask_word_t>(core_mask_word_t {1} << (bit % bits_per_word_k));
+    }
+
+    bool contains(core_id_t const core) const noexcept {
+        if (core < 0 || static_cast<std::size_t>(core) >= capacity()) return false;
+        std::size_t const bit = static_cast<std::size_t>(core);
+        return ((words_[bit / bits_per_word_k] >> (bit % bits_per_word_k)) & core_mask_word_t {1}) != 0;
+    }
+
+    std::size_t count() const noexcept {
+        std::size_t total = 0;
+        for (std::size_t i = 0; i < words_.size(); ++i)
+            total += static_cast<std::size_t>(popcount(static_cast<std::uint64_t>(words_[i])));
+        return total;
+    }
+};
+
+using core_mask_t = core_mask<>;
+
+/**
+ *  @brief Reads the cores the calling thread may run on into @p cores.
+ *  @retval false where the platform exposes no such mask, which is @b not an error.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_capture_thread_cores(FU_MAYBE_UNUSED_ core_mask_t &cores) noexcept {
+#if FU_ON_LINUX
+    // A `cpu_set_t` is an array of `__cpu_mask`, which is exactly `core_mask_word_t` here. The kernel
+    // rejects a buffer narrower than its own cpumask, so grow once rather than guess at `nr_cpu_ids`.
+    std::size_t cores_to_fit = core_mask_t::id_space();
+    for (int attempt = 0; attempt < 4; ++attempt, cores_to_fit *= 2) {
+        if (!cores.try_resize_for(cores_to_fit)) return false;
+        if (::sched_getaffinity(0, cores.bytes(), static_cast<cpu_set_t *>(cores.data())) == 0) return true;
+        if (errno != EINVAL) break; // ! Anything but "your buffer is too small" will not improve
+    }
+    cores.reset();
+    return false;
+
+#elif FU_ON_WINDOWS
+    // A thread lives in exactly one processor group at a time, so that group's mask is its allowed set.
+    if (!cores.try_resize()) return false;
+    GROUP_AFFINITY affinity = {};
+    if (!::GetThreadGroupAffinity(::GetCurrentThread(), &affinity)) return false;
+    for (unsigned bit = 0; bit < win_processors_per_group_k; ++bit)
+        if (affinity.Mask & (static_cast<KAFFINITY>(1) << bit)) cores.add(win_encode_core_id(affinity.Group, bit));
+    return true;
+
+#elif FU_ON_FREEBSD
+    // ! Not `sched_getaffinity`: FreeBSD spells it `cpuset_getaffinity`, and `-1` means "this thread".
+    if (!cores.try_resize()) return false;
+    if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, cores.bytes(),
+                             static_cast<cpuset_t *>(cores.data())) == 0)
+        return true;
+    cores.reset();
+    return false;
+
+#else
+    // Darwin exposes no CPU mask at all. `thread_policy_set(THREAD_AFFINITY_POLICY)` sets an affinity
+    // @b tag - a hint that threads want to share an L2 - not a set of cores, and Apple Silicon answers
+    // `KERN_NOT_SUPPORTED`. A pool there partitions the work by domain and lets the scheduler place it.
+    return false;
+#endif
+}
+
+/**
+ *  @brief Number of cores the calling thread may run on, or `possible_cores()` where unknowable.
+ *  @note Prefer this to `std::thread::hardware_concurrency` when sizing a pool: the latter counts
+ *        the machine's cores, not the ones this process was given.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
+    core_mask_t allowed;
+    if (try_capture_thread_cores(allowed)) {
+        std::size_t const allowed_count = allowed.count();
+        if (allowed_count > 0) return allowed_count;
+    }
+    return possible_cores();
+}
+
+/** @brief The OS thread handle a `colocated_pool` stores, joins, and pins - one per worker. */
+#if FU_ON_WINDOWS
+using native_thread_t = HANDLE; // ? From `CreateThread`; identity is tracked by thread id, not this
+#else
+using native_thread_t = pthread_t;
+#endif
+
+/**
+ *  @brief Confines @p thread to the cores held by @p cores. The one place placement actually happens.
+ *  @retval false when the platform exposes no thread placement, which is @b not an error.
+ *
+ *  Linux hands out a `cpu_set_t` and honours it. FreeBSD spells the same idea `cpuset_t`. Windows
+ *  addresses a core by (processor group, bit), packed into each `core_id_t`; a thread lives in exactly
+ *  one group, so a mask spanning two is a caller error. Apple Silicon answers `KERN_NOT_SUPPORTED` to
+ *  `thread_policy_set` - measured, not assumed - and offers only a Quality-of-Service class, chosen at
+ *  creation. So a pool there partitions the @b work by domain and lets the scheduler place the @b threads.
+ *  @sa `try_pin_thread_to_cores`, the adaptor that builds a mask from a core list.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
+                                                           FU_MAYBE_UNUSED_ core_mask_t const &cores) noexcept {
+#if FU_ON_WINDOWS
+    // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them,
+    // and a thread cannot span groups. Cores from another group are a caller error, not a mask.
+    GROUP_AFFINITY affinity = {};
+    bool group_chosen = false;
+    for (std::size_t core = 0; core < cores.capacity(); ++core) {
+        core_id_t const id = static_cast<core_id_t>(core);
+        if (!cores.contains(id)) continue;
+        WORD const group = win_core_group(id);
+        if (!group_chosen) affinity.Group = group, group_chosen = true;
+        else if (group != affinity.Group)
+            return false; // ! A thread lives in exactly one group
+        affinity.Mask |= static_cast<KAFFINITY>(1) << win_core_index(id);
+    }
+    return group_chosen && ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0;
+
+#elif FU_ON_FREEBSD
+    if (!cores.valid()) return false;
+    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpuset_t const *>(cores.data())) == 0;
+
+#elif FU_WITH_THREAD_PINNING
+    if (!cores.valid()) return false;
+    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpu_set_t const *>(cores.data())) == 0;
+
+#else
+    return false; // ? No placement here; the harvest still reports the domains
+#endif
+}
+
+/**
+ *  @brief Confines @p thread to the @p count cores listed in @p cores.
+ *  @retval false when the platform exposes no thread placement, which is @b not an error.
+ *  @note A thin adaptor: it builds a `core_mask` and defers to `try_apply_thread_cores`, which is
+ *        where the per-platform placement lives. It owns no platform logic of its own.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_pin_thread_to_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
+                                                            FU_MAYBE_UNUSED_ core_id_t const *cores,
+                                                            FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
+#if FU_WITH_THREAD_PINNING
+    if (count == 0) return false;
+    core_mask_t mask;
+    if (!mask.try_resize()) return false;
+    for (std::size_t i = 0; i < count; ++i) {
+        assert(cores[i] >= 0 && "Invalid CPU core ID");
+        mask.add(cores[i]);
+    }
+    return try_apply_thread_cores(thread, mask);
+#else
+    return false; // ? No placement here; the harvest still reports the domains
+#endif
+}
+
+/**
+ *  @brief Puts the calling thread back on the cores @p saved recorded before it was pinned.
+ *  @note A no-op where nothing was ever narrowed, or where @p saved was never captured.
+ *
+ *  A pool that narrows the caller owes it the mask it had, not the mask of the whole machine. The
+ *  two differ under `taskset`, a cgroup `cpuset`, or any batch scheduler, and widening to the
+ *  machine would hand the caller cores this process was never granted.
+ *
+ *  Note that no NUMA run-node policy is reset here: the pool never sets one. Memory placement goes
+ *  through `mbind` on the allocation, not through the calling thread's policy, and `numa_run_on_node`
+ *  would rewrite the very CPU mask we just restored.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_restore_thread_cores(FU_MAYBE_UNUSED_ core_mask_t const &saved) noexcept {
+#if FU_WITH_THREAD_PINNING
+    if (!saved.valid()) return false;
+#if FU_ON_WINDOWS
+    return try_apply_thread_cores(::GetCurrentThread(), saved);
+#else
+    return try_apply_thread_cores(::pthread_self(), saved);
+#endif
+#else
+    return false;
+#endif
+}
+
 /**
  *  @brief Placeholder type for Parallel Algorithms.
  */
 struct dummy_lambda_t {};
+
+/** @brief The portable busy-wait hint: hands the core back to the scheduler. Works everywhere, cheap nowhere. */
+struct standard_yield_t {
+    inline void operator()() const noexcept { std::this_thread::yield(); }
+};
 
 /**
  *  @brief Which call shapes a busy-wait functor accepts, so `call_yield_` can pick one.
@@ -1266,9 +1448,9 @@ template <typename index_type_ = std::size_t>
 struct indexed_range {
     using index_t = index_type_;
 
-    /** The first task index in the slice. */
+    /** @brief The first task index in the slice. */
     index_t first {0};
-    /** How many tasks the slice covers; zero means an empty slice. */
+    /** @brief How many tasks the slice covers; zero means an empty slice. */
     index_t count {0};
 };
 
@@ -1288,6 +1470,13 @@ struct indexed_split {
     using index_t = index_type_;
     using indexed_range_t = indexed_range<index_t>;
 
+  private:
+    /** @brief Floor of tasks divided by threads; the smaller chunk size. */
+    index_t quotient_ {0};
+    /** @brief Tasks left over; the first `remainder_` chunks get one extra task. */
+    index_t remainder_ {0};
+
+  public:
     inline indexed_split() noexcept = default;
 
     /**
@@ -1308,10 +1497,6 @@ struct indexed_split {
 
     inline index_t smallest_size() const noexcept { return quotient_; }
     inline index_t largest_size() const noexcept { return quotient_ + (remainder_ > 0); }
-
-  private:
-    index_t quotient_ {0};
-    index_t remainder_ {0};
 };
 
 using indexed_split_t = indexed_split<>;
@@ -1336,6 +1521,17 @@ template <typename index_type_ = std::size_t>
 struct coprime_permutation_range {
     using index_t = index_type_;
 
+  private:
+    /** @brief First value of the domain. */
+    index_t start_ {0};
+    /** @brief Size of the domain being permuted. */
+    index_t length_ {1};
+    /** @brief Co-prime step between consecutive values. */
+    index_t stride_ {1};
+    /** @brief Where this seed's walk begins, in [0, length_). */
+    index_t first_offset_ {0};
+
+  public:
     struct iterator {
         using iterator_category = std::forward_iterator_tag;
         using value_type = index_t;
@@ -1375,11 +1571,16 @@ struct coprime_permutation_range {
                         index_t const elements_left) noexcept
             : start_(start), length_(length), stride_(stride), offset_(first_offset), elements_left_(elements_left) {}
 
-        index_t start_ {0};         // first value of the domain
-        index_t length_ {1};        // |domain|
-        index_t stride_ {1};        // co-prime step
-        index_t offset_ {0};        // current offset 0 ... length_-1
-        index_t elements_left_ {0}; // countdown until `end()`
+        /** @brief First value of the domain. */
+        index_t start_ {0};
+        /** @brief Size of the domain being permuted. */
+        index_t length_ {1};
+        /** @brief Co-prime step between consecutive values. */
+        index_t stride_ {1};
+        /** @brief Current offset into the domain, in [0, length_). */
+        index_t offset_ {0};
+        /** @brief Countdown of values remaining until `end()`. */
+        index_t elements_left_ {0};
     };
 
     coprime_permutation_range() noexcept = default;
@@ -1424,12 +1625,6 @@ struct coprime_permutation_range {
         }
         return seed;
     }
-
-    index_t start_ {0};
-    index_t length_ {1};
-    index_t stride_ {1};
-    /** Where this seed's walk begins, in [0, length_). */
-    index_t first_offset_ {0};
 };
 
 using coprime_permutation_range_t = coprime_permutation_range<>;
@@ -1483,9 +1678,9 @@ class invoke_for_n {
  */
 template <typename index_type_ = std::size_t>
 struct dynamic_claim {
-    /** Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
+    /** @brief Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
     std::atomic<index_type_> next {0};
-    /** One past this slice's last task. Written once before the dispatch, then read-only. */
+    /** @brief One past this slice's last task; written once before the dispatch, then read-only. */
     index_type_ end {0};
 };
 
@@ -1528,9 +1723,13 @@ using dynamic_claim_t = dynamic_claim<>;
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_for_n_dynamic {
-    pool_type_ &pool_; // ? Owns one padded `dynamic_claim` per thread; we never allocate
+    /** @brief The pool, owning one padded `dynamic_claim` per thread; we never allocate. */
+    pool_type_ &pool_;
+    /** @brief The per-task callback to invoke. */
     fork_type_ fork_;
+    /** @brief Total number of tasks to dispatch. */
     index_type_ n_;
+    /** @brief Number of worker threads sharing the dispatch. */
     index_type_ threads_;
 
     /** @brief Number of tasks handed out dynamically; the trailing `threads_` are static prongs. */
@@ -1603,6 +1802,66 @@ class invoke_for_n_dynamic {
     }
 };
 
+/**
+ *  @brief A synchronization point that waits for all threads to finish the last fork.
+ *  @note You don't have to explicitly call any of the APIs, it's like `std::jthread` ;)
+ *
+ *  The lifecycle is keyed on the pool's exclusivity:
+ *  - On `caller_exclusive_k` pools the fork is dispatched at @b construction: the workers
+ *    start immediately, the caller may overlap its own work, poll `is_complete`, and the
+ *    `join` call (or the destructor) waits for completion.
+ *  - On `caller_inclusive_k` pools the dispatch is deferred to @b join (or the destructor),
+ *    where the calling thread contributes its own slice - a deferred blocking call.
+ *
+ *  You don't have to explicitly handle the return value and wait on it.
+ *  According to the C++ standard, the destructor of the `broadcast_join` will
+ *  be called in the end of the `for_threads`-calling expression.
+ *
+ *  The object is immovable: on caller-exclusive pools the pool holds a pointer to the
+ *  `fork_` member for the lifetime of the broadcast, so the object must never relocate.
+ *  Guaranteed copy elision (C++17) still allows returning it by value from `for_threads`.
+ */
+template <typename pool_type_, typename fork_type_>
+struct broadcast_join {
+
+    using pool_t = pool_type_;
+    using fork_t = fork_type_;
+    using generation_t = typename pool_t::generation_t;
+
+  private:
+    /** @brief The pool this broadcast dispatches onto and joins. */
+    pool_t &pool_ref_;
+    /** @brief The wrapped fork; held to extend the lifetime of the lambda object. */
+    fork_t fork_;
+    /** @brief Generation token of this broadcast; real tokens are odd, zero means "not yet dispatched". */
+    generation_t generation_ {0};
+
+  public:
+    broadcast_join(pool_t &pool_ref, fork_t &&f) noexcept : pool_ref_(pool_ref), fork_(std::forward<fork_t>(f)) {
+        if (pool_ref_.caller_exclusivity() == caller_exclusive_k) generation_ = pool_ref_.unsafe_for_threads(fork_);
+    }
+
+    /** @brief The wrapped fork; on caller-exclusive pools only read it after `join`. */
+    fork_t &fork_ref() noexcept { return fork_; }
+
+    /** @brief The generation token of this broadcast; always odd once dispatched, zero before. */
+    generation_t generation() const noexcept { return generation_; }
+
+    /** @brief Non-blocking check; can only turn `true` before `join` on caller-exclusive pools. */
+    bool is_complete() const noexcept { return generation_ != 0 && pool_ref_.is_complete(generation_); }
+
+    void join() noexcept {
+        if (generation_ == 0) generation_ = pool_ref_.unsafe_for_threads(fork_);
+        pool_ref_.unsafe_join(generation_); // ? Idempotent for already-joined generations
+    }
+
+    ~broadcast_join() noexcept { join(); }
+    broadcast_join(broadcast_join &&) = delete;
+    broadcast_join(broadcast_join const &) = delete;
+    broadcast_join &operator=(broadcast_join &&) = delete;
+    broadcast_join &operator=(broadcast_join const &) = delete;
+};
+
 template <typename fork_type_, typename index_type_ = std::size_t>
 constexpr bool can_be_for_thread_callback() noexcept {
     using fork_t = fork_type_;
@@ -1648,46 +1907,6 @@ constexpr bool can_be_for_slice_callback() noexcept {
 #define FU_DETECT_CONCEPTS_ 0
 #define FU_REQUIRES_(condition)
 #endif // FU_DETECT_CPP_20_
-
-template <typename value_type_, typename comparator_type_ = std::less<value_type_>>
-void bubble_sort(value_type_ *array, std::size_t size, comparator_type_ comp = {}) noexcept {
-    if (size < 2) return; // ? Already sorted; also guards the `size - 1` unsigned underflow
-    assert(array != nullptr && "Array must not be null");
-    for (std::size_t i = 0; i < size - 1; ++i)
-        for (std::size_t j = 0; j < size - i - 1; ++j)
-            if (comp(array[j + 1], array[j])) std::swap(array[j], array[j + 1]);
-}
-
-/**
- *  @brief Dense-ranks `count` items by an ascending integer key, writing each item's 0-based rank.
- *  @return The number of distinct keys, at least 1 when `count > 0`.
- *
- *  `key(index)` must read a @b stable source and `assign(index, rank)` write a @b different field, so
- *  ranking in place never corrupts a not-yet-ranked item whose key repeats. Used to turn raw CPU
- *  capacities into compute levels and raw memory tiers into memory levels.
- */
-template <typename key_type_, typename assign_type_>
-std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ const &assign) noexcept {
-    for (std::size_t i = 0; i < count; ++i) {
-        std::size_t rank = 0;
-        for (std::size_t j = 0; j < count; ++j)
-            if (key(j) < key(i)) {
-                bool counted = false;
-                for (std::size_t k = 0; k < j; ++k)
-                    if (key(k) == key(j)) counted = true;
-                if (!counted) rank += 1;
-            }
-        assign(i, rank);
-    }
-    std::size_t distinct = 0;
-    for (std::size_t i = 0; i < count; ++i) {
-        bool seen = false;
-        for (std::size_t j = 0; j < i; ++j)
-            if (key(j) == key(i)) seen = true;
-        if (!seen) distinct += 1;
-    }
-    return distinct ? distinct : 1;
-}
 
 } // namespace forkunion
 } // namespace ashvardanian

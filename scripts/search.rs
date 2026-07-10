@@ -63,7 +63,7 @@ fn create_distributed_embeddings(
     pool: &mut fu::ThreadPool,
     memory_scope_percent: usize,
 ) -> Option<DistributedEmbeddings> {
-    let compute_domains_count = fu::count_compute_domains();
+    let compute_domains_count = fu::compute_domains_count();
     println!("Initializing storage across {compute_domains_count} compute_domains");
 
     // Calculate total capacity based on total system memory and scope percentage
@@ -139,7 +139,7 @@ fn numa_aware_search(
                 // Get the vectors held in this compute domain's local memory
                 if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
                     let vectors_count = node_vectors.len();
-                    let threads_in_compute_domain = scope.count_threads_in(compute_domain_index);
+                    let threads_in_compute_domain = scope.threads_count_in(compute_domain_index);
                     let thread_local_index =
                         scope.locate_thread_in(thread_index, compute_domain_index);
 
@@ -187,7 +187,7 @@ fn worst_case_search(
     pool.scope(|scope| {
         scope.broadcast(|thread_index, compute_domain_index| {
             let mut local_result = SearchResult::new(compute_domain_index);
-            let total_threads = scope.threads();
+            let total_threads = scope.threads_count();
 
             for compute_domain_index in 0..compute_domains_count {
                 if let Some(node_vectors) = storage.get_compute_domain(compute_domain_index) {
@@ -283,9 +283,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print system information
     println!("System Information:");
-    println!("  Logical cores: {}", fu::count_logical_cores());
-    println!("  Memory domains: {}", fu::count_memory_domains());
-    println!("  Thread compute_domains: {}", fu::count_compute_domains());
+    println!("  Logical cores: {}", fu::logical_cores_count());
+    println!("  Memory domains: {}", fu::memory_domains_count());
+    println!("  Thread compute_domains: {}", fu::compute_domains_count());
     println!(
         "  NUMA enabled: {}",
         fu::comptime_capabilities().contains(fu::Capabilities::COMPTIME_NUMA_MEMORY)
@@ -305,8 +305,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Failed to initialize vector storage")?;
     println!(
         "Thread pool initialized with {} threads across {} compute_domains",
-        pool.threads(),
-        pool.compute_domains()
+        pool.threads_count(),
+        pool.compute_domains_count()
     );
 
     // Generate random queries with fixed-size vectors

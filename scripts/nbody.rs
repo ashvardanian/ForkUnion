@@ -249,7 +249,7 @@ fn iteration_fu_iter_dynamic(
 /// local memory. Mirrors `make_buffers_for_forkunion_numa` in `nbody.cpp`.
 #[cfg(feature = "numa")]
 fn make_numa_replicas(bodies: &[Body]) -> Vec<fu::PinnedVec<Body>> {
-    (0..fu::count_compute_domains())
+    (0..fu::compute_domains_count())
         .map(|compute_domain| {
             let memory_domain = fu::local_memory_of(compute_domain);
             let allocator = fu::PinnedAllocator::new(memory_domain)
@@ -284,7 +284,7 @@ fn refresh_numa_replicas(
 
     pool.scope(|scope| {
         scope.broadcast(|thread_index, compute_domain_index| {
-            let threads_here = scope.count_threads_in(compute_domain_index);
+            let threads_here = scope.threads_count_in(compute_domain_index);
             let local_index = scope.locate_thread_in(thread_index, compute_domain_index);
             let range = fu::IndexedSplit::new(n, threads_here).get(local_index);
             if range.is_empty() {
@@ -388,32 +388,6 @@ fn iteration_fu_numa_dynamic(
     }
 }
 
-fn iteration_rayon_dynamic(pool: &ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
-    let n = bodies.len();
-
-    pool.install(|| {
-        forces
-            .par_iter_mut()
-            .with_max_len(1)
-            .enumerate()
-            .for_each(|(i, force)| {
-                let mut acc = Vector3::default();
-                for j in 0..n {
-                    acc += gravitational_force(&bodies[i], &bodies[j]);
-                }
-                *force = acc;
-            });
-    });
-
-    pool.install(|| {
-        bodies
-            .par_iter_mut()
-            .with_max_len(1)
-            .zip(forces.par_iter())
-            .for_each(|(b, f)| apply_force(b, f));
-    });
-}
-
 // "Static" scheduling: one *contiguous* stripe per thread, no stealing.
 fn iteration_rayon_static(pool: &ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
     let n = bodies.len();
@@ -447,6 +421,32 @@ fn iteration_rayon_static(pool: &ThreadPool, bodies: &mut [Body], forces: &mut [
                     apply_force(b, f);
                 }
             });
+    });
+}
+
+fn iteration_rayon_dynamic(pool: &ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
+    let n = bodies.len();
+
+    pool.install(|| {
+        forces
+            .par_iter_mut()
+            .with_max_len(1)
+            .enumerate()
+            .for_each(|(i, force)| {
+                let mut acc = Vector3::default();
+                for j in 0..n {
+                    acc += gravitational_force(&bodies[i], &bodies[j]);
+                }
+                *force = acc;
+            });
+    });
+
+    pool.install(|| {
+        bodies
+            .par_iter_mut()
+            .with_max_len(1)
+            .zip(forces.par_iter())
+            .for_each(|(b, f)| apply_force(b, f));
     });
 }
 

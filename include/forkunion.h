@@ -35,7 +35,7 @@
  *      fu_pool_t *pool = fu_pool_new("forkunion_demo");
  *      if (!pool) return EXIT_FAILURE; // ! Failed to create a thread pool
  *
- *      size_t threads = fu_count_logical_cores();
+ *      size_t threads = fu_logical_cores_count();
  *      if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) return EXIT_FAILURE; // ! Can't spawn
  *
  *      print_args_context_t context = {argc, argv};
@@ -59,14 +59,14 @@
  *  On Linux, when NUMA and PThreads are available, the library can also leverage @b NUMA-aware
  *  memory allocations and pin threads to specific physical cores to increase memory locality.
  *  It should reduce memory access latency by around 35% on average, compared to remote accesses.
- *  @sa `fu_count_memory_domains`, `fu_allocate_at_least_in`, `fu_free_in`.
+ *  @sa `fu_memory_domains_count`, `fu_allocate_at_least_in`, `fu_free_in`.
  *
  *  On heterogeneous chips, cores with a different @b "Quality-of-Service" (QoS) may be combined.
  *  A typical example is laptop/desktop chips, having 1 NUMA node, but 3 tiers of CPU cores:
  *  performance, efficiency, and power-saving cores. Each group will have vastly different speed,
  *  so considering them equal in tasks scheduling is a bad idea... and separating them automatically
  *  isn't feasible either. It's up to the user to isolate those groups into individual pools.
- *  @sa `fu_count_compute_levels`
+ *  @sa `fu_compute_levels_count`
  *
  *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
  *  exposes cheaper @b "busy-waiting" mechanisms, such as `tpause`, `wfet`, & `yield` instructions.
@@ -90,7 +90,7 @@ int fu_version_minor(void);
 /** @brief Returns the patch version component of the ForkUnion library. */
 int fu_version_patch(void);
 
-#pragma region - Types
+#pragma region Types
 
 /** @brief Boolean type: 0 for false, non-zero for true. */
 typedef int fu_bool_t;
@@ -103,7 +103,7 @@ typedef void *fu_lambda_context_t;
  *  @brief Callback type for thread-level operations.
  *  @param[in] context Type-punned pointer to user-defined context data.
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] compute_domain The compute-domain index in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
  */
 typedef void (*fu_for_threads_t)(fu_lambda_context_t context, size_t thread, size_t compute_domain);
 
@@ -112,7 +112,7 @@ typedef void (*fu_for_threads_t)(fu_lambda_context_t context, size_t thread, siz
  *  @param[in] context Type-punned pointer to user-defined context data.
  *  @param[in] task The task index in [0, n).
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] compute_domain The compute-domain index in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
  */
 typedef void (*fu_for_prongs_t)(fu_lambda_context_t context, size_t task, size_t thread, size_t compute_domain);
 
@@ -122,7 +122,7 @@ typedef void (*fu_for_prongs_t)(fu_lambda_context_t context, size_t task, size_t
  *  @param[in] first The first task index in the slice.
  *  @param[in] count The number of tasks in the slice.
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] compute_domain The compute-domain index in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
  */
 typedef void (*fu_for_slices_t)(fu_lambda_context_t context, size_t first, size_t count, size_t thread,
                                 size_t compute_domain);
@@ -142,9 +142,9 @@ typedef enum fu_caller_exclusivity_t {
     fu_caller_exclusive_k,
 } fu_caller_exclusivity_t;
 
-#pragma endregion - Types
+#pragma endregion Types
 
-#pragma region - Metadata
+#pragma region Metadata
 
 /**
  *  @brief Describes all the special library features, both those compiled in and those found here.
@@ -237,6 +237,17 @@ fu_capabilities_t fu_runtime_capabilities(void);
 char const *fu_runtime_capabilities_string(void);
 
 /**
+ *  @brief Returns the number of logical cores in a given compute domain.
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
+ *  @retval Number of cores backing that compute domain, or 0 if the index is out of range.
+ *
+ *  Use this to size a per-compute-domain pool (`fu_pool_spawn_on`), or to weight work across
+ *  compute domains of differing core counts (e.g. performance vs efficiency cores).
+ *  @sa `fu_compute_domains_count`, `fu_pool_spawn_on`.
+ */
+size_t fu_logical_cores_count_in(size_t compute_domain_index);
+
+/**
  *  @brief Describes the number of logical CPU cores available on the system.
  *  @retval 0 if the thread pool is not supported on the current platform or detection failed.
  *  @retval 1-N where N is the number of logical cores detected by the OS.
@@ -246,11 +257,11 @@ char const *fu_runtime_capabilities_string(void);
  *  The returned value is suitable for passing to `fu_pool_spawn` for maximum utilization.
  *
  *  When in doubt about optimal thread count:
- *  - CPU-bound tasks: use `fu_count_logical_cores()`
- *  - Memory-bound tasks: consider `fu_count_memory_domains() * cores_per_node`
- *  - I/O-bound tasks: consider 2-4x `fu_count_logical_cores()`
+ *  - CPU-bound tasks: use `fu_logical_cores_count()`
+ *  - Memory-bound tasks: consider `fu_memory_domains_count() * cores_per_node`
+ *  - I/O-bound tasks: consider 2-4x `fu_logical_cores_count()`
  */
-size_t fu_count_logical_cores(void);
+size_t fu_logical_cores_count(void);
 
 /**
  *  @brief Returns the number of compute domains (bindable clusters of cores).
@@ -261,59 +272,48 @@ size_t fu_count_logical_cores(void);
  *  A @b compute @b domain is a set of cores sharing one Quality-of-Service class (performance,
  *  efficiency, ...) and locality. It is the unit a pool binds to and the index a worker
  *  callback receives. Compute domains are one axis of the topology; @b memory @b domains
- *  (`fu_count_memory_domains`) are the other. The two are bridged by `fu_local_memory_of`.
- *  @sa `fu_count_logical_cores_in`, `fu_pool_spawn_on`, `fu_count_memory_domains`.
+ *  (`fu_memory_domains_count`) are the other. The two are bridged by `fu_local_memory_of`.
+ *  @sa `fu_logical_cores_count_in`, `fu_pool_spawn_on`, `fu_memory_domains_count`.
  */
-size_t fu_count_compute_domains(void);
-
-/**
- *  @brief Returns the number of logical cores in a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
- *  @retval Number of cores backing that compute domain, or 0 if the index is out of range.
- *
- *  Use this to size a per-compute-domain pool (`fu_pool_spawn_on`), or to weight work across
- *  compute domains of differing core counts (e.g. performance vs efficiency cores).
- *  @sa `fu_count_compute_domains`, `fu_pool_spawn_on`.
- */
-size_t fu_count_logical_cores_in(size_t compute_domain_index);
+size_t fu_compute_domains_count(void);
 
 /**
  *  @brief Returns the performance level of a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
  *  @retval A level ordinal where @b higher @b is @b more @b performant (0 = most efficient), or 0
  *  if the index is out of range. Homogeneous systems report level 0 for every compute domain.
  *
  *  Distinguishes performance vs efficiency cores (Intel P/E, ARM big.LITTLE). @note The compute
  *  ordinal grows with performance, while the memory-domain level (`fu_memory_level_in`) grows with
  *  @b distance - both match their native hardware conventions, so they run opposite ways by design.
- *  @sa `fu_count_compute_levels`, `fu_count_compute_domains`.
+ *  @sa `fu_compute_levels_count`, `fu_compute_domains_count`.
  */
 size_t fu_compute_level_in(size_t compute_domain_index);
 
 /**
  *  @brief Returns the number of distinct compute performance levels across all compute domains.
  *  @retval 0 if unsupported, 1 on homogeneous cores, 2-3 with heterogeneous cores (P/E, big.LITTLE).
- *  @note May be smaller than `fu_count_compute_domains()` - several domains can share one level,
+ *  @note May be smaller than `fu_compute_domains_count()` - several domains can share one level,
  *  as when equally-fast cores are split across cache clusters, or across NUMA nodes.
  *  @sa `fu_compute_level_in`.
  */
-size_t fu_count_compute_levels(void);
+size_t fu_compute_levels_count(void);
 
 /**
  *  @brief Returns the relative throughput of @b one core in a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
  *  @retval A magnitude on the Linux `cpu_capacity` scale (1024 = fastest core present), or 0 when
  *  the index is out of range or the platform publishes no per-core throughput rating.
  *
  *  This is the number to weight work by; `fu_compute_level_in` is a dense ordinal and must never be
- *  divided by. When this reports 0, weigh compute domains by `fu_count_logical_cores_in` instead.
- *  @sa `fu_compute_level_in`, `fu_count_logical_cores_in`.
+ *  divided by. When this reports 0, weigh compute domains by `fu_logical_cores_count_in` instead.
+ *  @sa `fu_compute_level_in`, `fu_logical_cores_count_in`.
  */
 size_t fu_compute_capacity_in(size_t compute_domain_index);
 
 /**
  *  @brief Returns the bytes of deepest cache private to a given compute domain's cores.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
  *  @retval Cache bytes shared within the domain, or 0 if the index is out of range or unknown.
  *
  *  Sizes a cache-resident chunk - a different question from how @b many chunks a domain deserves.
@@ -333,32 +333,32 @@ size_t fu_compute_cache_bytes_in(size_t compute_domain_index);
  *  @b several compute domains (performance and efficiency cores sharing one DDR controller).
  *  @sa `fu_volume_ram_in`, `fu_memory_level_in`, `fu_local_memory_of`, `fu_allocate_in`.
  */
-size_t fu_count_memory_domains(void);
+size_t fu_memory_domains_count(void);
 
 /**
  *  @brief Returns the performance level of a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @retval A level ordinal where @b lower @b is @b faster (0 = fastest, e.g. HBM), or 0 if the index
  *  is out of range. Uniform-memory systems report level 0 for every memory domain.
  *
  *  Ranks memory by access speed independently of compute (HBM < DDR < CXL/PMEM), following the Linux
  *  memory-tiering abstract-distance convention. @note Runs opposite to `fu_compute_level_in`, where
  *  higher is faster - each direction matches its own hardware source.
- *  @sa `fu_count_memory_domains`, `fu_volume_ram_in`.
+ *  @sa `fu_memory_domains_count`, `fu_volume_ram_in`.
  */
 size_t fu_memory_level_in(size_t memory_domain_index);
 
 /**
  *  @brief Returns the number of distinct memory tiers across all memory domains.
  *  @retval 0 if unsupported, 1 on single-tier systems, 2+ when HBM / DDR / CXL are mixed.
- *  @note The memory-axis twin of `fu_count_compute_levels`; several memory domains may share a tier.
- *  @sa `fu_memory_level_in`, `fu_count_memory_domains`.
+ *  @note The memory-axis twin of `fu_compute_levels_count`; several memory domains may share a tier.
+ *  @sa `fu_memory_level_in`, `fu_memory_domains_count`.
  */
-size_t fu_count_memory_levels(void);
+size_t fu_memory_levels_count(void);
 
 /**
  *  @brief Returns the memory domain nearest to a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
  *  @retval The index of that compute domain's primary (lowest-distance) memory domain, or 0 if
  *  the compute-domain index is out of range.
  *
@@ -370,8 +370,8 @@ size_t fu_local_memory_of(size_t compute_domain_index);
 
 /**
  *  @brief Returns the relative access distance from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_count_compute_domains()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @retval A relative distance where @b 10 means local (SLIT convention); larger is farther;
  *  0 means unknown or an out-of-range index.
  *
@@ -383,8 +383,8 @@ size_t fu_memory_distance(size_t compute_domain_index, size_t memory_domain_inde
 
 /**
  *  @brief Returns the HMAT read bandwidth from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_count_compute_domains()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @retval Peak read bandwidth in MB/s, or 0 when the machine exposes no ACPI HMAT table.
  *  @sa `fu_memory_latency`, `fu_memory_distance`.
  */
@@ -392,12 +392,20 @@ size_t fu_memory_bandwidth(size_t compute_domain_index, size_t memory_domain_ind
 
 /**
  *  @brief Returns the HMAT read latency from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_count_compute_domains()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @retval Read latency in nanoseconds, or 0 when the machine exposes no ACPI HMAT table.
  *  @sa `fu_memory_bandwidth`, `fu_memory_distance`.
  */
 size_t fu_memory_latency(size_t compute_domain_index, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the RAM volume (bytes) of a given memory domain.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
+ *  @retval Number of bytes of RAM in that memory domain, regardless of page size; 0 if out of range.
+ *  @sa `fu_volume_ram`, `fu_allocate_in`.
+ */
+size_t fu_volume_ram_in(size_t memory_domain_index);
 
 /**
  *  @brief Returns the total RAM volume (bytes) across all memory domains.
@@ -407,53 +415,45 @@ size_t fu_memory_latency(size_t compute_domain_index, size_t memory_domain_index
 size_t fu_volume_ram(void);
 
 /**
- *  @brief Returns the RAM volume (bytes) of a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
- *  @retval Number of bytes of RAM in that memory domain, regardless of page size; 0 if out of range.
- *  @sa `fu_volume_ram`, `fu_allocate_in`.
- */
-size_t fu_volume_ram_in(size_t memory_domain_index);
-
-/**
- *  @brief Returns the total huge-page volume (bytes) across all memory domains.
- *  @retval Number of bytes backed by free huge pages, or 0 if huge pages are unavailable.
- *  @sa `fu_volume_huge_pages_in`, `fu_count_huge_pages`.
- */
-size_t fu_volume_huge_pages(void);
-
-/**
  *  @brief Returns the huge-page volume (bytes) available in a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @retval Bytes backed by free huge pages in that memory domain; 0 if out of range or unavailable.
  *
  *  Huge pages reduce TLB pressure by mapping memory in larger units than the base page.
- *  @sa `fu_count_huge_pages_in`, `fu_allocate_at_least_in`.
+ *  @sa `fu_huge_pages_count_in`, `fu_allocate_at_least_in`.
  */
 size_t fu_volume_huge_pages_in(size_t memory_domain_index);
 
 /**
- *  @brief Returns the total number of free huge pages across all memory domains.
- *  @retval Count of free huge pages of any size, or 0 if huge pages are unavailable.
- *  @sa `fu_volume_huge_pages`, `fu_count_huge_pages_in`.
+ *  @brief Returns the total huge-page volume (bytes) across all memory domains.
+ *  @retval Number of bytes backed by free huge pages, or 0 if huge pages are unavailable.
+ *  @sa `fu_volume_huge_pages_in`, `fu_huge_pages_count`.
  */
-size_t fu_count_huge_pages(void);
+size_t fu_volume_huge_pages(void);
 
 /**
  *  @brief Returns the number of free huge pages in a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @retval Count of free huge pages (summed across page sizes) in that memory domain; 0 if
  *  out of range or unavailable.
- *  @sa `fu_volume_huge_pages_in`, `fu_count_huge_pages`.
+ *  @sa `fu_volume_huge_pages_in`, `fu_huge_pages_count`.
  */
-size_t fu_count_huge_pages_in(size_t memory_domain_index);
+size_t fu_huge_pages_count_in(size_t memory_domain_index);
 
-#pragma endregion - Metadata
+/**
+ *  @brief Returns the total number of free huge pages across all memory domains.
+ *  @retval Count of free huge pages of any size, or 0 if huge pages are unavailable.
+ *  @sa `fu_volume_huge_pages`, `fu_huge_pages_count_in`.
+ */
+size_t fu_huge_pages_count(void);
 
-#pragma region - Memory
+#pragma endregion Metadata
+
+#pragma region Memory
 
 /**
  *  @brief Allocates memory in a given memory domain with the largest suitable page size.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @param[in] minimum_bytes Minimum number of bytes to allocate, must be > 0.
  *  @param[out] allocated_bytes Receives the actual allocation size (>= @p minimum_bytes), must not be NULL.
  *  @param[out] bytes_per_page Receives the page size used for the allocation, must not be NULL.
@@ -469,11 +469,22 @@ size_t fu_count_huge_pages_in(size_t memory_domain_index);
  *  if ((pointer = fu_allocate_at_least_in(memory_domain, 1u << 20, &actual_bytes, &page)))
  *      fu_free_in(memory_domain, pointer, actual_bytes);
  *  @endcode
- *  @sa `fu_free_in`, `fu_local_memory_of`, `fu_count_memory_domains`.
+ *  @sa `fu_free_in`, `fu_local_memory_of`, `fu_memory_domains_count`.
  */
 void *fu_allocate_at_least_in(                        //
     size_t memory_domain_index, size_t minimum_bytes, //
     size_t *allocated_bytes, size_t *bytes_per_page);
+
+/**
+ *  @brief Allocates exactly the requested number of bytes in a given memory domain.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
+ *  @param[in] bytes Number of bytes to allocate, must be > 0.
+ *  @retval Pointer to allocated memory, or NULL if allocation failed.
+ *  @note This API is @b thread-safe. Unlike `fu_allocate_at_least_in`, it does not over-allocate
+ *  for page optimization — use it for standard-allocator compatibility.
+ *  @sa `fu_free_in`, `fu_allocate_at_least_in`.
+ */
+void *fu_allocate_in(size_t memory_domain_index, size_t bytes);
 
 /**
  *  @brief Releases memory allocated in a given memory domain.
@@ -485,20 +496,9 @@ void *fu_allocate_at_least_in(                        //
  */
 void fu_free_in(size_t memory_domain_index, void *pointer, size_t bytes);
 
-/**
- *  @brief Allocates exactly the requested number of bytes in a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_count_memory_domains()`).
- *  @param[in] bytes Number of bytes to allocate, must be > 0.
- *  @retval Pointer to allocated memory, or NULL if allocation failed.
- *  @note This API is @b thread-safe. Unlike `fu_allocate_at_least_in`, it does not over-allocate
- *  for page optimization — use it for standard-allocator compatibility.
- *  @sa `fu_free_in`, `fu_allocate_at_least_in`.
- */
-void *fu_allocate_in(size_t memory_domain_index, size_t bytes);
+#pragma endregion Memory
 
-#pragma endregion - Memory
-
-#pragma region - Lifetime
+#pragma region Lifetime
 
 /**
  *  @brief Creates a new thread pool instance.
@@ -543,19 +543,19 @@ void fu_pool_delete(fu_pool_t *pool);
  *
  *  @code{.c}
  *  fu_pool_t *pool = fu_pool_new();
- *  if (pool && fu_pool_spawn(pool, fu_count_logical_cores(), fu_caller_inclusive_k)) {
+ *  if (pool && fu_pool_spawn(pool, fu_logical_cores_count(), fu_caller_inclusive_k)) {
  *      ... // Dispatch some parallel tasks
  *      fu_pool_delete(pool);
  *  }
  *  @endcode
- *  @sa `fu_pool_terminate` for shutdown, `fu_count_logical_cores` for optimal thread count.
+ *  @sa `fu_pool_terminate` for shutdown, `fu_logical_cores_count` for optimal thread count.
  */
 fu_bool_t fu_pool_spawn(fu_pool_t *pool, size_t threads, fu_caller_exclusivity_t exclusivity);
 
 /**
  *  @brief Spawns a pool pinned to a single compute domain.
  *  @param[in] pool Thread pool handle, must not be NULL.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_count_compute_domains()`).
+ *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
  *  @param[in] threads The number of threads to create, must be > 0.
  *  @param[in] exclusivity Whether the calling thread participates in task execution.
  *  @retval 1 on success; 0 on failure or if @p compute_domain_index is out of range.
@@ -566,10 +566,82 @@ fu_bool_t fu_pool_spawn(fu_pool_t *pool, size_t threads, fu_caller_exclusivity_t
  *  Spawn one pool per compute domain and coordinate them with the generation-token API. Contrast
  *  `fu_pool_spawn`, which spans @b all compute domains. On builds without NUMA, only compute
  *  domain 0 is valid.
- *  @sa `fu_pool_spawn`, `fu_count_compute_domains`, `fu_count_logical_cores_in`.
+ *  @sa `fu_pool_spawn`, `fu_compute_domains_count`, `fu_logical_cores_count_in`.
  */
 fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, size_t compute_domain_index, size_t threads,
                            fu_caller_exclusivity_t exclusivity);
+
+/**
+ *  @brief Returns whether the calling thread participates in task execution.
+ *  @param[in] pool Thread pool handle, must not be NULL and initialized.
+ *  @retval `fu_caller_inclusive_k` if the calling thread contributes a slice of the work.
+ *  @retval `fu_caller_exclusive_k` if the calling thread only coordinates.
+ *  @note This API is @b not synchronized.
+ *
+ *  This reflects the exclusivity passed to the most recent `fu_pool_spawn` - the pool
+ *  itself is the single source of truth, so this stays correct across `fu_pool_terminate`
+ *  and re-spawning with a different mode. It also determines the completion contract:
+ *  on `fu_caller_inclusive_k` pools the caller owes a slice that only runs inside
+ *  `fu_pool_unsafe_join`, so `fu_pool_is_complete` cannot be reached by polling alone.
+ *  @sa `fu_pool_spawn` for setting the mode, `fu_pool_is_complete` for the polling contract.
+ */
+fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t *pool);
+
+/**
+ *  @brief Returns the number of distinct thread compute_domains in the pool.
+ *  @param[in] pool Thread pool handle, must not be NULL.
+ *  @retval 0 if the pool is not initialized.
+ *  @retval 1 on systems without NUMA or QoS heterogeneity.
+ *  @retval 2-N on systems with multiple NUMA nodes or QoS levels.
+ *  @note This API is @b not synchronized.
+ *
+ *  A compute_domain represents a group of threads sharing the same memory domain
+ *  and performance characteristics. This information is useful for:
+ *  - Understanding the system's memory topology
+ *  - Optimizing memory allocation strategies
+ *  - Load balancing across heterogeneous cores
+ *  @sa `fu_pool_threads_count_in` for per-compute_domain thread counts.
+ */
+size_t fu_pool_compute_domains_count(fu_pool_t *pool);
+
+/**
+ *  @brief Returns the number of threads in a specific compute_domain.
+ *  @param[in] pool Thread pool handle, must not be NULL.
+ *  @param[in] compute_domain_index Index of the compute_domain, must be < `fu_pool_compute_domains_count(pool)`.
+ *  @retval 0 if the pool is not initialized or compute_domain_index is invalid.
+ *  @retval 1-N where N is the number of threads in the specified compute_domain.
+ *  @note This API is @b not synchronized and doesn't validate bounds.
+ *
+ *  Different compute_domains may have different thread counts depending on:
+ *  - NUMA node core counts (different sockets may have different core counts)
+ *  - QoS level availability (P-cores vs E-cores)
+ *  - User-specified thread distribution
+ *  @sa `fu_pool_compute_domains_count` for valid compute_domain indices.
+ */
+size_t fu_pool_threads_count_in(fu_pool_t *pool, size_t compute_domain_index);
+
+/**
+ *  @brief Returns the total number of threads in the pool.
+ *  @param[in] pool Thread pool handle, must not be NULL.
+ *  @retval 0 if the pool is not initialized.
+ *  @retval 1-N where N is the number of threads specified in `fu_pool_spawn`.
+ *  @note This API is @b not synchronized.
+ *
+ *  This count includes the calling thread if `fu_caller_inclusive_k` was used
+ *  during spawning. The returned value represents the maximum parallelism
+ *  available for task execution.
+ *  @sa `fu_pool_spawn` for thread count specification.
+ */
+size_t fu_pool_threads_count(fu_pool_t *pool);
+
+/**
+ *  @brief Converts a global thread index to a local thread index within a compute_domain.
+ *  @param[in] pool Thread pool handle, must not be NULL.
+ *  @param[in] global_thread_index The global thread index to convert.
+ *  @param[in] compute_domain_index Index of the compute_domain, must be < `fu_pool_compute_domains_count(pool)`.
+ *  @retval Local thread index within the specified compute_domain.
+ */
+size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, size_t compute_domain_index);
 
 /**
  *  @brief Transitions worker threads to a power-saving sleep state.
@@ -624,81 +696,9 @@ void fu_pool_sleep(fu_pool_t *pool, size_t micros);
  */
 void fu_pool_terminate(fu_pool_t *pool);
 
-/**
- *  @brief Returns whether the calling thread participates in task execution.
- *  @param[in] pool Thread pool handle, must not be NULL and initialized.
- *  @retval `fu_caller_inclusive_k` if the calling thread contributes a slice of the work.
- *  @retval `fu_caller_exclusive_k` if the calling thread only coordinates.
- *  @note This API is @b not synchronized.
- *
- *  This reflects the exclusivity passed to the most recent `fu_pool_spawn` - the pool
- *  itself is the single source of truth, so this stays correct across `fu_pool_terminate`
- *  and re-spawning with a different mode. It also determines the completion contract:
- *  on `fu_caller_inclusive_k` pools the caller owes a slice that only runs inside
- *  `fu_pool_unsafe_join`, so `fu_pool_is_complete` cannot be reached by polling alone.
- *  @sa `fu_pool_spawn` for setting the mode, `fu_pool_is_complete` for the polling contract.
- */
-fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t *pool);
+#pragma endregion Lifetime
 
-/**
- *  @brief Returns the number of distinct thread compute_domains in the pool.
- *  @param[in] pool Thread pool handle, must not be NULL.
- *  @retval 0 if the pool is not initialized.
- *  @retval 1 on systems without NUMA or QoS heterogeneity.
- *  @retval 2-N on systems with multiple NUMA nodes or QoS levels.
- *  @note This API is @b not synchronized.
- *
- *  A compute_domain represents a group of threads sharing the same memory domain
- *  and performance characteristics. This information is useful for:
- *  - Understanding the system's memory topology
- *  - Optimizing memory allocation strategies
- *  - Load balancing across heterogeneous cores
- *  @sa `fu_pool_count_threads_in` for per-compute_domain thread counts.
- */
-size_t fu_pool_count_compute_domains(fu_pool_t *pool);
-
-/**
- *  @brief Returns the total number of threads in the pool.
- *  @param[in] pool Thread pool handle, must not be NULL.
- *  @retval 0 if the pool is not initialized.
- *  @retval 1-N where N is the number of threads specified in `fu_pool_spawn`.
- *  @note This API is @b not synchronized.
- *
- *  This count includes the calling thread if `fu_caller_inclusive_k` was used
- *  during spawning. The returned value represents the maximum parallelism
- *  available for task execution.
- *  @sa `fu_pool_spawn` for thread count specification.
- */
-size_t fu_pool_count_threads(fu_pool_t *pool);
-
-/**
- *  @brief Returns the number of threads in a specific compute_domain.
- *  @param[in] pool Thread pool handle, must not be NULL.
- *  @param[in] compute_domain_index Index of the compute_domain, must be < `fu_pool_count_compute_domains(pool)`.
- *  @retval 0 if the pool is not initialized or compute_domain_index is invalid.
- *  @retval 1-N where N is the number of threads in the specified compute_domain.
- *  @note This API is @b not synchronized and doesn't validate bounds.
- *
- *  Different compute_domains may have different thread counts depending on:
- *  - NUMA node core counts (different sockets may have different core counts)
- *  - QoS level availability (P-cores vs E-cores)
- *  - User-specified thread distribution
- *  @sa `fu_pool_count_compute_domains` for valid compute_domain indices.
- */
-size_t fu_pool_count_threads_in(fu_pool_t *pool, size_t compute_domain_index);
-
-/**
- *  @brief Converts a global thread index to a local thread index within a compute_domain.
- *  @param[in] pool Thread pool handle, must not be NULL.
- *  @param[in] global_thread_index The global thread index to convert.
- *  @param[in] compute_domain_index Index of the compute_domain, must be < `fu_pool_count_compute_domains(pool)`.
- *  @retval Local thread index within the specified compute_domain.
- */
-size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, size_t compute_domain_index);
-
-#pragma endregion - Lifetime
-
-#pragma region - Primary API
+#pragma region Primary API
 
 /**
  *  @brief Executes a callback function in parallel on all threads.
@@ -727,6 +727,51 @@ size_t fu_pool_locate_thread_in(fu_pool_t *pool, size_t global_thread_index, siz
  *  @sa `fu_pool_unsafe_for_threads` for non-blocking execution.
  */
 void fu_pool_for_threads(fu_pool_t *pool, fu_for_threads_t callback, fu_lambda_context_t context);
+
+/**
+ *  @brief Distributes `n` tasks in slices, providing range information to callbacks.
+ *  @param[in] pool Thread pool handle, must not be NULL and initialized.
+ *  @param[in] n Total number of tasks to split across threads, may be 0 (no-op).
+ *  @param[in] callback Function to execute for each slice, must not be NULL if n > 0.
+ *  @param[in] context User-defined context passed to the callback, may be NULL.
+ *  @note This API blocks until all slices are processed.
+ *
+ *  This function splits the task range into contiguous slices and provides each
+ *  thread with both the starting index and count of tasks to process. This is
+ *  particularly useful when the callback can optimize for processing contiguous
+ *  ranges rather than individual elements.
+ *
+ *  Slicing strategy:
+ *  - Tasks [0, n) are divided into approximately equal-sized contiguous ranges
+ *  - Each thread receives exactly one slice (first_index, count)
+ *  - Threads with no work receive empty slices (count = 0)
+ *  - Maximum cache locality due to sequential access patterns
+ *
+ *  The callback receives:
+ *  - `context`: User-provided data (shared across all slices)
+ *  - `first`: Starting task index for this slice
+ *  - `count`: Number of tasks in this slice (may be 0)
+ *  - `thread`: Thread index processing this slice
+ *  - `compute_domain`: NUMA node & QoS level of the executing thread
+ *
+ *  Use cases:
+ *  - Vectorized operations that benefit from contiguous data access
+ *  - Memory copying or initialization operations
+ *  - Algorithms with significant per-slice setup costs
+ *  - SIMD operations that process multiple elements simultaneously
+ *
+ *  @code{.c}
+ *  void process_slice(void *array, size_t first, size_t count, size_t thread, size_t compute_domain) {
+ *      float *data = (float*)array;
+ *      for (size_t i = 0; i < count; ++i) {
+ *          data[first + i] = sqrt(data[first + i]);
+ *      }
+ *  }
+ *  fu_pool_for_slices(pool, array_length, process_slice, my_float_array);
+ *  @endcode
+ *  @sa `fu_pool_for_n` for individual task processing.
+ */
+void fu_pool_for_slices(fu_pool_t *pool, size_t n, fu_for_slices_t callback, fu_lambda_context_t context);
 
 /**
  *  @brief Distributes `n` similar-duration tasks across all threads.
@@ -799,54 +844,9 @@ void fu_pool_for_n(fu_pool_t *pool, size_t n, fu_for_prongs_t callback, fu_lambd
  */
 void fu_pool_for_n_dynamic(fu_pool_t *pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context);
 
-/**
- *  @brief Distributes `n` tasks in slices, providing range information to callbacks.
- *  @param[in] pool Thread pool handle, must not be NULL and initialized.
- *  @param[in] n Total number of tasks to split across threads, may be 0 (no-op).
- *  @param[in] callback Function to execute for each slice, must not be NULL if n > 0.
- *  @param[in] context User-defined context passed to the callback, may be NULL.
- *  @note This API blocks until all slices are processed.
- *
- *  This function splits the task range into contiguous slices and provides each
- *  thread with both the starting index and count of tasks to process. This is
- *  particularly useful when the callback can optimize for processing contiguous
- *  ranges rather than individual elements.
- *
- *  Slicing strategy:
- *  - Tasks [0, n) are divided into approximately equal-sized contiguous ranges
- *  - Each thread receives exactly one slice (first_index, count)
- *  - Threads with no work receive empty slices (count = 0)
- *  - Maximum cache locality due to sequential access patterns
- *
- *  The callback receives:
- *  - `context`: User-provided data (shared across all slices)
- *  - `first`: Starting task index for this slice
- *  - `count`: Number of tasks in this slice (may be 0)
- *  - `thread`: Thread index processing this slice
- *  - `compute_domain`: NUMA node & QoS level of the executing thread
- *
- *  Use cases:
- *  - Vectorized operations that benefit from contiguous data access
- *  - Memory copying or initialization operations
- *  - Algorithms with significant per-slice setup costs
- *  - SIMD operations that process multiple elements simultaneously
- *
- *  @code{.c}
- *  void process_slice(void *array, size_t first, size_t count, size_t thread, size_t compute_domain) {
- *      float *data = (float*)array;
- *      for (size_t i = 0; i < count; ++i) {
- *          data[first + i] = sqrt(data[first + i]);
- *      }
- *  }
- *  fu_pool_for_slices(pool, array_length, process_slice, my_float_array);
- *  @endcode
- *  @sa `fu_pool_for_n` for individual task processing.
- */
-void fu_pool_for_slices(fu_pool_t *pool, size_t n, fu_for_slices_t callback, fu_lambda_context_t context);
+#pragma endregion Primary API
 
-#pragma endregion - Primary API
-
-#pragma region - Flexible API
+#pragma region Flexible API
 
 /**
  *  @brief Token identifying one dispatch on one pool; always an @b odd number.
@@ -927,7 +927,7 @@ fu_bool_t fu_pool_is_complete(fu_pool_t *pool, fu_generation_t generation);
  */
 void fu_pool_unsafe_join(fu_pool_t *pool, fu_generation_t generation);
 
-#pragma endregion - Flexible API
+#pragma endregion Flexible API
 
 #ifdef __cplusplus
 } // extern "C"

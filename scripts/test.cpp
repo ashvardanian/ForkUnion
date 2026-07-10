@@ -91,26 +91,80 @@ bool test_coprime_permutation() noexcept {
     return true;
 }
 
+/**
+ *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
+ *
+ *  Deliberately @b not gated on `FU_WITH_NUMA_MEMORY`: some platforms harvest a topology without
+ *  compiling the NUMA pools, so gating this on the pools leaves their harvest wholly untested.
+ *  A host with no harvest at all reports `false` and is skipped rather than failed - the absence
+ *  of a topology is not a broken topology.
+ */
+static bool test_topology_invariants() noexcept {
+    fu::machine_topology_t topology;
+    if (!topology.try_harvest()) return true; // ? No harvest on this host; nothing to check
+
+    std::size_t const compute_domains = topology.compute_domains_count();
+    std::size_t const memory_domains = topology.memory_domains_count();
+    std::size_t const compute_levels = topology.compute_levels_count();
+    std::size_t const memory_levels = topology.memory_levels_count();
+    if (compute_domains == 0 || memory_domains == 0) return false;
+    if (compute_levels == 0 || memory_levels == 0) return false;
+
+    // Levels are dense ranks over domains, so they can never outnumber the domains they rank.
+    if (compute_levels > compute_domains) return false;
+    if (memory_levels > memory_domains) return false;
+
+    // Levels are a *dense* rank, so each of [0, levels) must be claimed by at least one domain.
+    // Merely staying in range is too weak - it would accept a count inflated past the distinct levels.
+    std::vector<bool> compute_level_seen(compute_levels, false);
+    std::vector<bool> memory_level_seen(memory_levels, false);
+
+    std::size_t cores_across_domains = 0;
+    for (std::size_t i = 0; i < compute_domains; ++i) {
+        fu::compute_domain_t const &domain = topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(i));
+        if (domain.core_count == 0 || domain.first_core_id == nullptr) return false;
+        if (domain.compute_level >= compute_levels) return false;
+        if (domain.memory_domain_index >= memory_domains) return false;
+        compute_level_seen[domain.compute_level] = true;
+        cores_across_domains += domain.core_count;
+    }
+    // Every core must belong to exactly one compute domain.
+    if (cores_across_domains != topology.threads_count()) return false;
+
+    for (std::size_t i = 0; i < memory_domains; ++i) {
+        std::size_t const level = topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(i)).memory_level;
+        if (level >= memory_levels) return false;
+        memory_level_seen[level] = true;
+    }
+
+    for (std::size_t level = 0; level < compute_levels; ++level)
+        if (!compute_level_seen[level]) return false; // ? An unclaimed rank means the count is inflated
+    for (std::size_t level = 0; level < memory_levels; ++level)
+        if (!memory_level_seen[level]) return false;
+
+    return true;
+}
+
 constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
 
 struct make_pool_t {
     fu::basic_pool_t construct() const noexcept { return fu::basic_pool_t(); }
     std::size_t scope(std::size_t oversubscription = 1) const noexcept {
-        return fu::count_allowed_cores() * oversubscription;
+        return fu::allowed_cores_count() * oversubscription;
     }
 };
 
 #if FU_WITH_COLOCATED_POOLS
-static fu::numa_topology_t numa_topology;
+static fu::machine_topology_t machine_topology;
 struct make_colocated_pool_t {
     fu::colocated_pool_t construct() const noexcept { return fu::colocated_pool_t("forkunion"); }
     fu::compute_domain_t scope(std::size_t = 0) const noexcept {
-        return numa_topology.compute_domain_at(fu::compute_domain_index_t {});
+        return machine_topology.compute_domain_at(fu::compute_domain_index_t {});
     }
 };
 struct make_distributed_pool_t {
     fu::distributed_pool_t construct() const noexcept { return fu::distributed_pool_t("forkunion"); }
-    fu::numa_topology_t const &scope(std::size_t = 0) const noexcept { return numa_topology; }
+    fu::machine_topology_t const &scope(std::size_t = 0) const noexcept { return machine_topology; }
 };
 #endif
 
@@ -518,31 +572,6 @@ static bool test_for_n_dynamic() noexcept {
     return counter.load() == default_parallel_tasks_k && contains_iota(visited);
 }
 
-/** @brief Stress-tests the implementation by oversubscribing the number of threads. */
-template <typename make_pool_type_ = make_pool_t>
-static bool test_oversubscribed_threads() noexcept {
-    constexpr std::size_t oversubscription = 3;
-
-    auto maker = make_pool_type_ {};
-    auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope(oversubscription))) return false;
-
-    std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
-    std::atomic<std::size_t> counter(0);
-    thread_local volatile std::size_t some_local_work = 0;
-    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
-        // Perform some weird amount of work, that is not very different between consecutive tasks.
-        for (std::size_t i = 0; i != task % oversubscription; ++i) some_local_work = some_local_work + i * i;
-
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
-        std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
-        visited[count_populated].task = task;
-    });
-
-    // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
-    return counter.load() == default_parallel_tasks_k && contains_iota(visited);
-}
-
 /**
  *  @brief Stalls one thread and checks its neighbours drain the slice it can't reach.
  *
@@ -589,6 +618,31 @@ static bool test_for_n_dynamic_stealing() noexcept {
     fu::indexed_split<std::size_t> const split(dynamic_tasks, threads);
     std::size_t const own_slice = split[0].count;
     return thread_0_runs.load() < own_slice; // ! Nobody stole, so this test proves nothing
+}
+
+/** @brief Stress-tests the implementation by oversubscribing the number of threads. */
+template <typename make_pool_type_ = make_pool_t>
+static bool test_oversubscribed_threads() noexcept {
+    constexpr std::size_t oversubscription = 3;
+
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    if (!pool.try_spawn(maker.scope(oversubscription))) return false;
+
+    std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
+    std::atomic<std::size_t> counter(0);
+    thread_local volatile std::size_t some_local_work = 0;
+    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
+        // Perform some weird amount of work, that is not very different between consecutive tasks.
+        for (std::size_t i = 0; i != task % oversubscription; ++i) some_local_work = some_local_work + i * i;
+
+        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
+        visited[count_populated].task = task;
+    });
+
+    // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
+    return counter.load() == default_parallel_tasks_k && contains_iota(visited);
 }
 
 /** @brief Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
@@ -666,67 +720,13 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
 }
 
 /**
- *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
- *
- *  Deliberately @b not gated on `FU_WITH_NUMA_MEMORY`: some platforms harvest a topology without
- *  compiling the NUMA pools, so gating this on the pools leaves their harvest wholly untested.
- *  A host with no harvest at all reports `false` and is skipped rather than failed - the absence
- *  of a topology is not a broken topology.
- */
-static bool test_topology_invariants() noexcept {
-    fu::numa_topology_t topology;
-    if (!topology.try_harvest()) return true; // ? No harvest on this host; nothing to check
-
-    std::size_t const compute_domains = topology.compute_domains_count();
-    std::size_t const memory_domains = topology.memory_domains_count();
-    std::size_t const compute_levels = topology.compute_levels_count();
-    std::size_t const memory_levels = topology.memory_levels_count();
-    if (compute_domains == 0 || memory_domains == 0) return false;
-    if (compute_levels == 0 || memory_levels == 0) return false;
-
-    // Levels are dense ranks over domains, so they can never outnumber the domains they rank.
-    if (compute_levels > compute_domains) return false;
-    if (memory_levels > memory_domains) return false;
-
-    // Levels are a *dense* rank, so each of [0, levels) must be claimed by at least one domain.
-    // Merely staying in range is too weak - it would accept a count inflated past the distinct levels.
-    std::vector<bool> compute_level_seen(compute_levels, false);
-    std::vector<bool> memory_level_seen(memory_levels, false);
-
-    std::size_t cores_across_domains = 0;
-    for (std::size_t i = 0; i < compute_domains; ++i) {
-        fu::compute_domain_t const &domain = topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(i));
-        if (domain.core_count == 0 || domain.first_core_id == nullptr) return false;
-        if (domain.compute_level >= compute_levels) return false;
-        if (domain.memory_domain_index >= memory_domains) return false;
-        compute_level_seen[domain.compute_level] = true;
-        cores_across_domains += domain.core_count;
-    }
-    // Every core must belong to exactly one compute domain.
-    if (cores_across_domains != topology.threads_count()) return false;
-
-    for (std::size_t i = 0; i < memory_domains; ++i) {
-        std::size_t const level = topology.memory_domain(static_cast<fu::memory_domain_index_t>(i)).memory_level;
-        if (level >= memory_levels) return false;
-        memory_level_seen[level] = true;
-    }
-
-    for (std::size_t level = 0; level < compute_levels; ++level)
-        if (!compute_level_seen[level]) return false; // ? An unclaimed rank means the count is inflated
-    for (std::size_t level = 0; level < memory_levels; ++level)
-        if (!memory_level_seen[level]) return false;
-
-    return true;
-}
-
-/**
  *  @brief Enhanced NUMA topology logging function using the logger class.
  */
 void log_numa_topology() noexcept {
     fu::logging_colors_t colors;
 #if FU_WITH_COLOCATED_POOLS
     // Harvest topology
-    if (!numa_topology.try_harvest()) {
+    if (!machine_topology.try_harvest()) {
         std::fprintf(stderr, "%sX Failed to harvest NUMA topology%s\n", colors.bold_red(), colors.reset());
         std::exit(EXIT_FAILURE);
     }
@@ -735,7 +735,7 @@ void log_numa_topology() noexcept {
     fu::capabilities_t ram_caps = fu::ram_capabilities();
 
     // Log topology and capabilities
-    fu::log_numa_topology_t {}(numa_topology, colors);
+    fu::log_numa_topology_t {}(machine_topology, colors);
     fu::log_capabilities_t {}(static_cast<fu::capabilities_t>(cpu_caps | ram_caps), colors);
 
 #else
@@ -753,23 +753,20 @@ void log_numa_topology() noexcept {
  *  cores this process was never granted.
  */
 static bool test_caller_affinity_preserved() noexcept {
-    fu::affinity_mask original;
-    if (!original.try_capture()) return true; // ? Nothing to restrict, nothing to check
-    std::size_t const allowed_before = original.count();
-    if (allowed_before < 2) return true; // ? Too narrow already to narrow further
+    fu::core_mask_t original;
+    if (!fu::try_capture_thread_cores(original)) return true; // ? Nothing to restrict, nothing to check
+    if (original.count() < 2) return true;                    // ? Too narrow already to narrow further
 
-    std::size_t const max_cores = fu::possible_cores();
-    cpu_set_t *narrowed = CPU_ALLOC(max_cores);
-    if (!narrowed) return false;
-    std::size_t const narrowed_bytes = CPU_ALLOC_SIZE(max_cores);
-    CPU_ZERO_S(narrowed_bytes, narrowed);
+    // Narrow the caller the way `taskset` would: keep the two lowest allowed cores.
+    fu::core_mask_t narrowed;
+    if (!narrowed.try_resize()) return false;
     std::size_t kept = 0;
-    for (std::size_t cpu = 0; cpu < max_cores && kept < 2; ++cpu)
-        if (original.contains(static_cast<fu::numa_core_id_t>(cpu))) CPU_SET_S(cpu, narrowed_bytes, narrowed), ++kept;
+    for (std::size_t cpu = 0; cpu < original.capacity() && kept < 2; ++cpu)
+        if (original.contains(static_cast<fu::core_id_t>(cpu))) narrowed.add(static_cast<fu::core_id_t>(cpu)), ++kept;
 
-    bool succeeded = ::sched_setaffinity(0, narrowed_bytes, narrowed) == 0;
+    bool succeeded = fu::try_restore_thread_cores(narrowed); // ? Applies `narrowed` to this thread
     if (succeeded) {
-        fu::numa_topology_t topology;
+        fu::machine_topology_t topology;
         succeeded = topology.try_harvest() && topology.threads_count() == 2;
 
         if (succeeded) {
@@ -779,13 +776,12 @@ static bool test_caller_affinity_preserved() noexcept {
             pool.terminate();
         }
 
-        // The caller must be back on the two cores it narrowed itself to, not on the machine's 128.
-        fu::affinity_mask afterwards;
-        succeeded = succeeded && afterwards.try_capture() && afterwards.count() == 2;
+        // The caller must be back on the two cores it narrowed itself to, not on the machine's cores.
+        fu::core_mask_t afterwards;
+        succeeded = succeeded && fu::try_capture_thread_cores(afterwards) && afterwards.count() == 2;
     }
 
-    CPU_FREE(narrowed);
-    (void)original.restore(); // ? Leave the process as we found it, whatever happened above
+    (void)fu::try_restore_thread_cores(original); // ? Leave the process as we found it
     return succeeded;
 }
 #endif // FU_WITH_COLOCATED_POOLS && FU_ON_LINUX && FU_WITH_THREAD_PINNING
@@ -805,7 +801,7 @@ int main(void) {
         {"`indexed_split` helpers", test_indexed_split},            //
         {"`coprime_permutation` ranges", test_coprime_permutation}, //
         // Hardware topology, on every host that reports one
-        {"`numa_topology` invariants", test_topology_invariants}, //
+        {"`machine_topology` invariants", test_topology_invariants}, //
         // Actual thread-pools
         {"`try_spawn` zero threads", test_try_spawn_zero},                       //
         {"`try_spawn` normal", test_try_spawn_success},                          //
@@ -883,7 +879,7 @@ int main(void) {
 
     // Start stress-testing the implementation
     std::printf("Starting stress tests...\n");
-    std::size_t const max_cores = fu::count_allowed_cores();
+    std::size_t const max_cores = fu::allowed_cores_count();
 
     // On 32-bit architectures, limit thread counts to avoid resource exhaustion
     // Each thread needs ~8MB stack, and 255 threads would consume 2GB+ address space

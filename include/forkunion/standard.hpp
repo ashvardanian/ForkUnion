@@ -42,7 +42,7 @@ namespace forkunion {
  *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::basic_pool_t pool; // ? Alias to `fu::basic_pool<>` template
- *      if (!pool.try_spawn(count_allowed_cores())) return EXIT_FAILURE;
+ *      if (!pool.try_spawn(allowed_cores_count())) return EXIT_FAILURE;
  *      pool.for_threads([](std::size_t i) noexcept { std::printf("Hi from thread %zu\n", i); });
  *      return EXIT_SUCCESS;
  *  }
@@ -126,10 +126,10 @@ class basic_pool {
     // ! With small index types (like the `fu8_t`/`fu16_t` debug configs) a worker stalled across
     // ! exactly 2^bits epochs would alias its `last_epoch` - astronomically unlikely at `size_t`.
     using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using compute_domain_index_t = index_t; // ? A.k.a. "NUMA node ID" in [0, numa_nodes_count)
+    using compute_domain_index_t = index_t; // ? Dense index in [0, compute_domains_count)
     using indexed_split_t = indexed_split<index_t>;
-    using prong_t = prong<index_t>;
     using local_thread_t = local_thread<index_t>;
+    using prong_t = prong<index_t>;
     using claim_t = dynamic_claim<index_t>; // ? One private cursor per thread
 
     /**
@@ -148,8 +148,9 @@ class basic_pool {
      *        cell would placement-new it into storage that cannot satisfy the request.
      */
     struct worker_cell_t {
+        /** @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`. */
         claim_t claim {};
-        /** Default-constructed, and left so for the caller's own cell. */
+        /** @brief The worker thread; default-constructed, and left so for the caller's own cell. */
         std::thread worker {};
     };
     static_assert(sizeof(worker_cell_t) <= alignment_k, "A worker cell must fit within one stride");
@@ -165,22 +166,27 @@ class basic_pool {
 
   private:
     // Thread-pool-specific variables:
+    /** @brief Allocator backing the pool's single worker-cells allocation. */
     allocator_t allocator_ {};
-    /** One padded cell per thread: its `std::thread` and its claim cursor. */
+    /** @brief One padded cell per thread: its `std::thread` and its claim cursor. */
     worker_cells_t workers_ {};
+    /** @brief Total threads in the pool, including the caller on inclusive pools. */
     thread_index_t threads_count_ {0};
-    /** Whether the caller thread is included in the count. */
+    /** @brief Whether the caller thread is counted as one of the contributors. */
     caller_exclusivity_t exclusivity_ {caller_inclusive_k};
-    /** How long to sleep in microseconds when waiting for tasks. */
+    /** @brief How long to nap in microseconds while `chill_k`, waiting for work. */
     std::size_t sleep_length_micros_ {0};
+    /** @brief Lifecycle switch between spinning (`grind_k`), sleeping (`chill_k`), and exiting (`die_k`). */
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
     // Task-specific variables:
-    /** Pointer to the users lambda. */
+    /** @brief Type-erased pointer to the caller's on-stack fork lambda. */
     punned_fork_context_t fork_state_ {nullptr};
-    /** Calls the lambda. */
+    /** @brief Invokes the punned fork lambda for a given thread index. */
     trampoline_t fork_trampoline_ {nullptr};
+    /** @brief Countdown of contributors still running; the one reaching zero signals completion. */
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
+    /** @brief Generation clock: odd while a fork is in flight, even when idle. */
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
   public:
@@ -202,10 +208,10 @@ class basic_pool {
     bool is_lock_free() const noexcept { return mood_.is_lock_free() && threads_to_sync_.is_lock_free(); }
 
     /**
-     *  @brief Returns the NUMA node ID this thread-pool is pinned to.
-     *  @retval -1 as this thread-pool is not NUMA-aware.
+     *  @brief Returns the memory domain this thread-pool is pinned to.
+     *  @retval -1 as this pool is not memory-domain-aware.
      */
-    constexpr numa_node_id_t numa_node_id() const noexcept { return -1; }
+    constexpr memory_domain_id_t memory_domain_id() const noexcept { return -1; }
 
     /**
      *  @brief Returns the first thread index in the thread-pool.
@@ -313,89 +319,6 @@ class basic_pool {
     FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
     broadcast_join<basic_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
         return {*this, std::forward<fork_type_>(fork)};
-    }
-
-    /**
-     *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
-     *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
-     *  @return A `generation_t` token identifying this dispatch.
-     *  @sa Use in conjunction with `unsafe_join`.
-     */
-    template <typename fork_type_>
-    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
-    generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
-
-        thread_index_t const threads = threads_count();
-        assert(threads != 0 && "Thread pool not initialized");
-
-        // Only one dispatch can be in flight, and it must be fully joined - the caller's
-        // slice included - before the next one starts.
-        assert(threads_to_sync_.load(std::memory_order_acquire) == 0 &&
-               "The broadcast function can't be called concurrently or recursively");
-        assert((epoch_.load(std::memory_order_relaxed) & 1u) == 0 && "Previous dispatch not joined");
-
-        // Configure "fork" details
-        fork_state_ = std::addressof(fork);
-        fork_trampoline_ = &_call_as_lambda<fork_type_>;
-
-        // Every contributor gets counted: all worker threads, plus the calling thread itself
-        // on `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
-        threads_to_sync_.store(threads, std::memory_order_relaxed);
-
-        // We are most likely already "grinding", but in the unlikely case we are not,
-        // let's wake up from the "chilling" state with relaxed semantics. Assuming the sleeping
-        // logic for the workers also checks the epoch counter, no synchronization is needed and
-        // no immediate wake-up is required.
-        mood_t may_be_chilling = mood_t::chill_k;
-        mood_.compare_exchange_weak(          //
-            may_be_chilling, mood_t::grind_k, //
-            std::memory_order_relaxed, std::memory_order_relaxed);
-        return static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
-    }
-
-    /**
-     *  @brief Returns true if the generation identified by @p generation has completed.
-     *  @note A `true` result synchronizes with all contributors: their writes are visible.
-     *
-     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join`
-     *  contributes the calling thread's slice, so the poll-then-join pattern is
-     *  reserved for `caller_exclusive_k` pools.
-     */
-    bool is_complete(generation_t generation) const noexcept {
-        return generation != epoch_.load(std::memory_order_acquire);
-    }
-
-    /**
-     *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
-     *  @note On `caller_inclusive_k` pools, first executes the calling thread's slice.
-     *  Idempotent: returns immediately for already-joined or stale generations.
-     */
-    void unsafe_join(generation_t generation) noexcept {
-        assert((generation & 1u) == 1 && "Generation tokens are always odd");
-        if (epoch_.load(std::memory_order_acquire) != generation) return; // ? Stale or already complete
-
-        // On inclusive pools the calling thread is a contributor: execute its slice
-        // and count it down exactly like a worker thread would.
-        bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
-        if (use_caller_thread) {
-            fork_trampoline_(fork_state_, static_cast<thread_index_t>(0));
-            thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
-            assert(before_decrement > 0 && "The contributor count must include the caller");
-
-            // The last contributor to finish increments the epoch, signaling completion
-            if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
-        }
-
-        // Wait for the last contributor's completion increment
-        micro_yield_t micro_yield;
-        while (epoch_.load(std::memory_order_acquire) == generation)
-            call_yield_(micro_yield, static_cast<thread_index_t>(0));
-    }
-
-    /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
-    void unsafe_join() noexcept {
-        epoch_index_t const current_epoch = epoch_.load(std::memory_order_acquire);
-        if (current_epoch & 1u) unsafe_join(static_cast<generation_t>(current_epoch)); // ? Even means idle
     }
 
 #pragma endregion Core API
@@ -515,6 +438,93 @@ class basic_pool {
 
 #pragma endregion Indexed Task Scheduling
 
+#pragma region Advanced
+
+    /**
+     *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
+     *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
+     *  @return A `generation_t` token identifying this dispatch.
+     *  @sa Use in conjunction with `unsafe_join`.
+     */
+    template <typename fork_type_>
+    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
+
+        thread_index_t const threads = threads_count();
+        assert(threads != 0 && "Thread pool not initialized");
+
+        // Only one dispatch can be in flight, and it must be fully joined - the caller's
+        // slice included - before the next one starts.
+        assert(threads_to_sync_.load(std::memory_order_acquire) == 0 &&
+               "The broadcast function can't be called concurrently or recursively");
+        assert((epoch_.load(std::memory_order_relaxed) & 1u) == 0 && "Previous dispatch not joined");
+
+        // Configure "fork" details
+        fork_state_ = std::addressof(fork);
+        fork_trampoline_ = &_call_as_lambda<fork_type_>;
+
+        // Every contributor gets counted: all worker threads, plus the calling thread itself
+        // on `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
+        threads_to_sync_.store(threads, std::memory_order_relaxed);
+
+        // We are most likely already "grinding", but in the unlikely case we are not,
+        // let's wake up from the "chilling" state with relaxed semantics. Assuming the sleeping
+        // logic for the workers also checks the epoch counter, no synchronization is needed and
+        // no immediate wake-up is required.
+        mood_t may_be_chilling = mood_t::chill_k;
+        mood_.compare_exchange_weak(          //
+            may_be_chilling, mood_t::grind_k, //
+            std::memory_order_relaxed, std::memory_order_relaxed);
+        return static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
+    }
+
+    /**
+     *  @brief Returns true if the generation identified by @p generation has completed.
+     *  @note A `true` result synchronizes with all contributors: their writes are visible.
+     *
+     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join`
+     *  contributes the calling thread's slice, so the poll-then-join pattern is
+     *  reserved for `caller_exclusive_k` pools.
+     */
+    bool is_complete(generation_t generation) const noexcept {
+        return generation != epoch_.load(std::memory_order_acquire);
+    }
+
+    /**
+     *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
+     *  @note On `caller_inclusive_k` pools, first executes the calling thread's slice.
+     *  Idempotent: returns immediately for already-joined or stale generations.
+     */
+    void unsafe_join(generation_t generation) noexcept {
+        assert((generation & 1u) == 1 && "Generation tokens are always odd");
+        if (epoch_.load(std::memory_order_acquire) != generation) return; // ? Stale or already complete
+
+        // On inclusive pools the calling thread is a contributor: execute its slice
+        // and count it down exactly like a worker thread would.
+        bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
+        if (use_caller_thread) {
+            fork_trampoline_(fork_state_, static_cast<thread_index_t>(0));
+            thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
+            assert(before_decrement > 0 && "The contributor count must include the caller");
+
+            // The last contributor to finish increments the epoch, signaling completion
+            if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
+        }
+
+        // Wait for the last contributor's completion increment
+        micro_yield_t micro_yield;
+        while (epoch_.load(std::memory_order_acquire) == generation)
+            call_yield_(micro_yield, static_cast<thread_index_t>(0));
+    }
+
+    /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
+    void unsafe_join() noexcept {
+        epoch_index_t const current_epoch = epoch_.load(std::memory_order_acquire);
+        if (current_epoch & 1u) unsafe_join(static_cast<generation_t>(current_epoch)); // ? Even means idle
+    }
+
+#pragma endregion Advanced
+
 #pragma region ComputeDomains Compatibility
 
     /**
@@ -545,6 +555,7 @@ class basic_pool {
 #pragma endregion ComputeDomains Compatibility
 
   private:
+    /** @brief Clears the fork state and trampoline between dispatches. */
     void _reset_fork() noexcept {
         fork_state_ = nullptr;
         fork_trampoline_ = nullptr;

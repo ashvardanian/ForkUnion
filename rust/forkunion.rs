@@ -52,11 +52,11 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 ///
 /// // Each thread gets its own cache-aligned accumulator
 /// let mut scratch: Vec<CacheAligned<usize>> =
-///     (0..pool.threads()).map(|_| CacheAligned(0)).collect();
+///     (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 ///
 /// // No false sharing during parallel reduction
 /// for value in &data {
-///     let tid = *value % pool.threads();
+///     let tid = *value % pool.threads_count();
 ///     scratch[tid].0 += value;
 /// }
 ///
@@ -372,24 +372,18 @@ extern "C" {
     fn fu_runtime_capabilities_string() -> *const c_char;
 
     // Compute topology
-    fn fu_count_logical_cores() -> usize;
-    fn fu_count_compute_domains() -> usize;
-    fn fu_count_compute_levels() -> usize;
-    fn fu_count_logical_cores_in(compute_domain_index: usize) -> usize;
+    fn fu_logical_cores_count_in(compute_domain_index: usize) -> usize;
+    fn fu_logical_cores_count() -> usize;
+    fn fu_compute_domains_count() -> usize;
     fn fu_compute_level_in(compute_domain_index: usize) -> usize;
+    fn fu_compute_levels_count() -> usize;
     fn fu_compute_capacity_in(compute_domain_index: usize) -> usize;
     fn fu_compute_cache_bytes_in(compute_domain_index: usize) -> usize;
 
     // Memory topology
-    fn fu_count_memory_domains() -> usize;
-    fn fu_count_memory_levels() -> usize;
+    fn fu_memory_domains_count() -> usize;
     fn fu_memory_level_in(memory_domain_index: usize) -> usize;
-    fn fu_volume_ram() -> usize;
-    fn fu_volume_ram_in(memory_domain_index: usize) -> usize;
-    fn fu_volume_huge_pages() -> usize;
-    fn fu_volume_huge_pages_in(memory_domain_index: usize) -> usize;
-    fn fu_count_huge_pages() -> usize;
-    fn fu_count_huge_pages_in(memory_domain_index: usize) -> usize;
+    fn fu_memory_levels_count() -> usize;
 
     // Affinity
     fn fu_local_memory_of(compute_domain_index: usize) -> usize;
@@ -397,14 +391,21 @@ extern "C" {
     fn fu_memory_bandwidth(compute_domain_index: usize, memory_domain_index: usize) -> usize;
     fn fu_memory_latency(compute_domain_index: usize, memory_domain_index: usize) -> usize;
 
+    fn fu_volume_ram_in(memory_domain_index: usize) -> usize;
+    fn fu_volume_ram() -> usize;
+    fn fu_volume_huge_pages_in(memory_domain_index: usize) -> usize;
+    fn fu_volume_huge_pages() -> usize;
+    fn fu_huge_pages_count_in(memory_domain_index: usize) -> usize;
+    fn fu_huge_pages_count() -> usize;
+
     // Allocation
-    fn fu_allocate_in(memory_domain_index: usize, bytes: usize) -> *mut c_void;
     fn fu_allocate_at_least_in(
         memory_domain_index: usize,
         minimum_bytes: usize,
         allocated_bytes: *mut usize,
         bytes_per_page: *mut usize,
     ) -> *mut c_void;
+    fn fu_allocate_in(memory_domain_index: usize, bytes: usize) -> *mut c_void;
     fn fu_free_in(memory_domain_index: usize, pointer: *mut c_void, bytes: usize);
 
     // Pool lifecycle & introspection
@@ -417,23 +418,29 @@ extern "C" {
         threads: usize,
         exclusivity: c_int,
     ) -> c_int;
-    fn fu_pool_terminate(pool: *mut c_void);
-    fn fu_pool_sleep(pool: *mut c_void, micros: usize);
     fn fu_pool_caller_exclusivity(pool: *mut c_void) -> c_int;
-    fn fu_pool_count_threads(pool: *mut c_void) -> usize;
-    fn fu_pool_count_compute_domains(pool: *mut c_void) -> usize;
-    fn fu_pool_count_threads_in(pool: *mut c_void, compute_domain_index: usize) -> usize;
+    fn fu_pool_compute_domains_count(pool: *mut c_void) -> usize;
+    fn fu_pool_threads_count_in(pool: *mut c_void, compute_domain_index: usize) -> usize;
+    fn fu_pool_threads_count(pool: *mut c_void) -> usize;
     fn fu_pool_locate_thread_in(
         pool: *mut c_void,
         global_thread_index: usize,
         compute_domain_index: usize,
     ) -> usize;
+    fn fu_pool_sleep(pool: *mut c_void, micros: usize);
+    fn fu_pool_terminate(pool: *mut c_void);
 
     // Parallel dispatch
     #[allow(dead_code)]
     fn fu_pool_for_threads(
         pool: *mut c_void,
         callback: extern "C" fn(*mut c_void, usize, usize),
+        context: *mut c_void,
+    );
+    fn fu_pool_for_slices(
+        pool: *mut c_void,
+        n: usize,
+        callback: extern "C" fn(*mut c_void, usize, usize, usize, usize),
         context: *mut c_void,
     );
     fn fu_pool_for_n(
@@ -446,12 +453,6 @@ extern "C" {
         pool: *mut c_void,
         n: usize,
         callback: extern "C" fn(*mut c_void, usize, usize, usize),
-        context: *mut c_void,
-    );
-    fn fu_pool_for_slices(
-        pool: *mut c_void,
-        n: usize,
-        callback: extern "C" fn(*mut c_void, usize, usize, usize, usize),
         context: *mut c_void,
     );
 
@@ -535,6 +536,26 @@ impl Capabilities {
     }
 }
 
+/// Returns the major version number of the ForkUnion library.
+pub fn version_major() -> usize {
+    unsafe { fu_version_major() as usize }
+}
+
+/// Returns the minor version number of the ForkUnion library.
+pub fn version_minor() -> usize {
+    unsafe { fu_version_minor() as usize }
+}
+
+/// Returns the patch version number of the ForkUnion library.
+pub fn version_patch() -> usize {
+    unsafe { fu_version_patch() as usize }
+}
+
+/// Returns the library version as a tuple of (major, minor, patch).
+pub fn version() -> (usize, usize, usize) {
+    (version_major(), version_minor(), version_patch())
+}
+
 /// Which kernel facilities this build of ForkUnion was compiled to use.
 pub fn comptime_capabilities() -> Capabilities {
     Capabilities(unsafe { fu_comptime_capabilities() })
@@ -573,12 +594,7 @@ pub fn runtime_capabilities_string_ptr() -> *const c_char {
     unsafe { fu_runtime_capabilities_string() }
 }
 
-/// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
-pub fn volume_ram() -> usize {
-    unsafe { fu_volume_ram() }
-}
-
-/// A position in the topology's array of **compute** domains, in `[0, count_compute_domains())`.
+/// A position in the topology's array of **compute** domains, in `[0, compute_domains_count())`.
 ///
 /// Distinct from [`MemoryDomain`], and deliberately not interchangeable with it. The two axes are
 /// indexed independently: an Apple M5 Pro reports three compute domains over a single memory domain,
@@ -591,7 +607,7 @@ pub fn volume_ram() -> usize {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComputeDomain(pub usize);
 
-/// A position in the topology's array of **memory** domains, in `[0, count_memory_domains())`.
+/// A position in the topology's array of **memory** domains, in `[0, memory_domains_count())`.
 /// See [`ComputeDomain`] for why these are separate types.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomain(pub usize);
@@ -612,39 +628,17 @@ impl MemoryDomain {
     }
 }
 
-/// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
-pub fn volume_ram_in(memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_volume_ram_in(memory_domain.get()) }
-}
-
-/// Returns the total huge-page volume (bytes) across all memory domains.
-pub fn volume_huge_pages() -> usize {
-    unsafe { fu_volume_huge_pages() }
-}
-
-/// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
-pub fn volume_huge_pages_in(memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_volume_huge_pages_in(memory_domain.get()) }
-}
-
-/// Returns the total number of free huge pages across all memory domains.
-pub fn count_huge_pages() -> usize {
-    unsafe { fu_count_huge_pages() }
-}
-
-/// Returns the number of free huge pages in a given memory domain (0 if out of range).
-pub fn count_huge_pages_in(memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_count_huge_pages_in(memory_domain.get()) }
+/// Returns the number of logical cores backing a given compute domain.
+///
+/// Zero if `compute_domain_index` is out of range. Use it to size a per-compute-domain pool
+/// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
+pub fn logical_cores_count_in(compute_domain: ComputeDomain) -> usize {
+    unsafe { fu_logical_cores_count_in(compute_domain.get()) }
 }
 
 /// Returns the number of logical CPU cores available on the system.
-pub fn count_logical_cores() -> usize {
-    unsafe { fu_count_logical_cores() }
-}
-
-/// Returns the number of NUMA nodes available on the system.
-pub fn count_memory_domains() -> usize {
-    unsafe { fu_count_memory_domains() }
+pub fn logical_cores_count() -> usize {
+    unsafe { fu_logical_cores_count() }
 }
 
 /// Returns the number of distinct thread compute_domains available.
@@ -659,16 +653,8 @@ pub fn count_memory_domains() -> usize {
 /// - `1` on most desktop, laptop, or IoT platforms with unified memory
 /// - `2-8` on typical dual-socket servers or heterogeneous mobile chips
 /// - `4-32` on high-end cloud servers with multiple sockets
-pub fn count_compute_domains() -> usize {
-    unsafe { fu_count_compute_domains() }
-}
-
-/// Returns the number of logical cores backing a given compute domain.
-///
-/// Zero if `compute_domain_index` is out of range. Use it to size a per-compute-domain pool
-/// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
-pub fn count_logical_cores_in(compute_domain: ComputeDomain) -> usize {
-    unsafe { fu_count_logical_cores_in(compute_domain.get()) }
+pub fn compute_domains_count() -> usize {
+    unsafe { fu_compute_domains_count() }
 }
 
 /// Returns the performance level of a compute domain (higher = more performant).
@@ -676,9 +662,47 @@ pub fn compute_level_in(compute_domain: ComputeDomain) -> usize {
     unsafe { fu_compute_level_in(compute_domain.get()) }
 }
 
+/// Returns the number of distinct Quality-of-Service levels.
+///
+/// May be smaller than [`compute_domains_count`], as several domains can share one level -
+/// equally-fast cores may still be split across cache clusters, or across NUMA nodes.
+pub fn compute_levels_count() -> usize {
+    unsafe { fu_compute_levels_count() }
+}
+
+/// Returns the relative throughput of one core in a compute domain (0 if unknown).
+///
+/// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present.
+/// This is the number to weight work by - [`compute_level_in`] is a dense ordinal and must
+/// never be divided by. Platforms that rank cores without rating them report 0 here; fall back
+/// to [`threads_count_in`](ThreadPool::threads_count_in) when they do.
+pub fn compute_capacity_in(compute_domain: ComputeDomain) -> usize {
+    unsafe { fu_compute_capacity_in(compute_domain.get()) }
+}
+
+/// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
+///
+/// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
+/// deserves - domains of equal throughput may back onto very differently sized caches.
+pub fn compute_cache_bytes_in(compute_domain: ComputeDomain) -> usize {
+    unsafe { fu_compute_cache_bytes_in(compute_domain.get()) }
+}
+
+/// Returns the number of NUMA nodes available on the system.
+pub fn memory_domains_count() -> usize {
+    unsafe { fu_memory_domains_count() }
+}
+
 /// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
 pub fn memory_level_in(memory_domain: MemoryDomain) -> usize {
     unsafe { fu_memory_level_in(memory_domain.get()) }
+}
+
+/// Returns the number of distinct memory tiers, the memory-axis twin of [`compute_levels_count`].
+///
+/// Reports 1 on single-tier systems, and 2+ where HBM, DDR, and CXL are mixed.
+pub fn memory_levels_count() -> usize {
+    unsafe { fu_memory_levels_count() }
 }
 
 /// Returns the memory domain nearest a given compute domain (its local allocation target).
@@ -701,6 +725,36 @@ pub fn memory_latency(compute_domain: ComputeDomain, memory_domain: MemoryDomain
     unsafe { fu_memory_latency(compute_domain.get(), memory_domain.get()) }
 }
 
+/// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+pub fn volume_ram_in(memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_volume_ram_in(memory_domain.get()) }
+}
+
+/// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
+pub fn volume_ram() -> usize {
+    unsafe { fu_volume_ram() }
+}
+
+/// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
+pub fn volume_huge_pages_in(memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_volume_huge_pages_in(memory_domain.get()) }
+}
+
+/// Returns the total huge-page volume (bytes) across all memory domains.
+pub fn volume_huge_pages() -> usize {
+    unsafe { fu_volume_huge_pages() }
+}
+
+/// Returns the number of free huge pages in a given memory domain (0 if out of range).
+pub fn huge_pages_count_in(memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_huge_pages_count_in(memory_domain.get()) }
+}
+
+/// Returns the total number of free huge pages across all memory domains.
+pub fn huge_pages_count() -> usize {
+    unsafe { fu_huge_pages_count() }
+}
+
 /// Defines whether the calling thread participates in task execution.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CallerExclusivity {
@@ -708,59 +762,6 @@ pub enum CallerExclusivity {
     Inclusive = 0,
     /// The calling thread only coordinates, doesn't execute tasks (spawns N workers)
     Exclusive = 1,
-}
-
-/// Returns the number of distinct Quality-of-Service levels.
-///
-/// May be smaller than [`count_compute_domains`], as several domains can share one level -
-/// equally-fast cores may still be split across cache clusters, or across NUMA nodes.
-pub fn count_compute_levels() -> usize {
-    unsafe { fu_count_compute_levels() }
-}
-
-/// Returns the number of distinct memory tiers, the memory-axis twin of [`count_compute_levels`].
-///
-/// Reports 1 on single-tier systems, and 2+ where HBM, DDR, and CXL are mixed.
-pub fn count_memory_levels() -> usize {
-    unsafe { fu_count_memory_levels() }
-}
-
-/// Returns the relative throughput of one core in a compute domain (0 if unknown).
-///
-/// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present.
-/// This is the number to weight work by - [`compute_level_in`] is a dense ordinal and must
-/// never be divided by. Platforms that rank cores without rating them report 0 here; fall back
-/// to [`count_threads_in`](ThreadPool::count_threads_in) when they do.
-pub fn compute_capacity_in(compute_domain: ComputeDomain) -> usize {
-    unsafe { fu_compute_capacity_in(compute_domain.get()) }
-}
-
-/// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
-///
-/// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
-/// deserves - domains of equal throughput may back onto very differently sized caches.
-pub fn compute_cache_bytes_in(compute_domain: ComputeDomain) -> usize {
-    unsafe { fu_compute_cache_bytes_in(compute_domain.get()) }
-}
-
-/// Returns the major version number of the ForkUnion library.
-pub fn version_major() -> usize {
-    unsafe { fu_version_major() as usize }
-}
-
-/// Returns the minor version number of the ForkUnion library.
-pub fn version_minor() -> usize {
-    unsafe { fu_version_minor() as usize }
-}
-
-/// Returns the patch version number of the ForkUnion library.
-pub fn version_patch() -> usize {
-    unsafe { fu_version_patch() as usize }
-}
-
-/// Returns the library version as a tuple of (major, minor, patch).
-pub fn version() -> (usize, usize, usize) {
-    (version_major(), version_minor(), version_patch())
 }
 
 /// Minimalistic, fixed-size thread-pool for blocking scoped parallelism.
@@ -868,7 +869,7 @@ impl ThreadPool {
     /// Spawns a pool pinned to a single compute domain (a same-QoS core cluster).
     ///
     /// The pool's threads and NUMA-local allocations stay on `compute_domain_index`, in
-    /// `0..count_compute_domains()`. Spawn one such pool per compute domain and coordinate them
+    /// `0..compute_domains_count()`. Spawn one such pool per compute domain and coordinate them
     /// from a single thread with the generation-token API (`for_threads` guards or the
     /// raw `unsafe_for_threads`/`is_complete`/`unsafe_join`). On builds without NUMA,
     /// only compute domain 0 is valid.
@@ -878,10 +879,10 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     /// // One pool per compute domain, sized to that domain's core count.
-    /// let pools: Vec<ThreadPool> = (0..count_compute_domains())
-    ///     .map(|c| ThreadPool::try_spawn_on(c, count_logical_cores_in(ComputeDomain(c)).max(1), CallerExclusivity::Exclusive).unwrap())
+    /// let pools: Vec<ThreadPool> = (0..compute_domains_count())
+    ///     .map(|c| ThreadPool::try_spawn_on(c, logical_cores_count_in(ComputeDomain(c)).max(1), CallerExclusivity::Exclusive).unwrap())
     ///     .collect();
-    /// assert_eq!(pools.len(), count_compute_domains());
+    /// assert_eq!(pools.len(), compute_domains_count());
     /// ```
     pub fn try_spawn_on(
         compute_domain_index: usize,
@@ -906,16 +907,6 @@ impl ThreadPool {
         }
     }
 
-    /// Returns whether the calling thread participates in the workload.
-    ///
-    /// Queries the pool directly rather than caching, so it stays correct across
-    /// `terminate` and re-spawning with a different exclusivity.
-    pub fn caller_exclusivity(&self) -> CallerExclusivity {
-        match unsafe { fu_pool_caller_exclusivity(self.inner) } {
-            0 => CallerExclusivity::Inclusive,
-            _ => CallerExclusivity::Exclusive,
-        }
-    }
     /// Creates a new thread pool with the specified number of threads.
     ///
     /// By default, uses `CallerExclusivity::Inclusive`, meaning the calling thread
@@ -933,7 +924,7 @@ impl ThreadPool {
     ///
     /// // Create a pool that uses 4 threads total (3 spawned + caller)
     /// let pool = ThreadPool::try_spawn(4).expect("Failed to create thread pool");
-    /// assert_eq!(pool.threads(), 4);
+    /// assert_eq!(pool.threads_count(), 4);
     /// ```
     pub fn try_spawn(threads: usize) -> Result<Self, Error> {
         Self::try_spawn_with_exclusivity(threads, CallerExclusivity::Inclusive)
@@ -956,23 +947,29 @@ impl ThreadPool {
     /// use forkunion::*;
     ///
     /// let pool = ThreadPool::try_named_spawn("worker_pool", 4).expect("Failed to create thread pool");
-    /// assert_eq!(pool.threads(), 4);
+    /// assert_eq!(pool.threads_count(), 4);
     /// ```
     pub fn try_named_spawn(name: &str, threads: usize) -> Result<Self, Error> {
         Self::try_named_spawn_with_exclusivity(Some(name), threads, CallerExclusivity::Inclusive)
     }
 
-    /// Returns the number of threads in the pool.
-    pub fn threads(&self) -> usize {
-        unsafe { fu_pool_count_threads(self.inner) }
+    /// Returns whether the calling thread participates in the workload.
+    ///
+    /// Queries the pool directly rather than caching, so it stays correct across
+    /// `terminate` and re-spawning with a different exclusivity.
+    pub fn caller_exclusivity(&self) -> CallerExclusivity {
+        match unsafe { fu_pool_caller_exclusivity(self.inner) } {
+            0 => CallerExclusivity::Inclusive,
+            _ => CallerExclusivity::Exclusive,
+        }
     }
 
     /// Returns the number of thread compute_domains in the pool.
     ///
     /// Compute domains group threads sharing a memory domain, QoS level, and cache hierarchy.
     /// This information is useful for NUMA-aware load balancing and memory allocation.
-    pub fn compute_domains(&self) -> usize {
-        unsafe { fu_pool_count_compute_domains(self.inner) }
+    pub fn compute_domains_count(&self) -> usize {
+        unsafe { fu_pool_compute_domains_count(self.inner) }
     }
 
     /// Returns the number of threads in a specific compute_domain.
@@ -990,15 +987,20 @@ impl ThreadPool {
     /// use forkunion::*;
     ///
     /// let pool = spawn(8);
-    /// let total_compute_domains = pool.compute_domains();
+    /// let total_compute_domains = pool.compute_domains_count();
     ///
     /// for compute_domain_index in 0..total_compute_domains {
-    ///     let thread_count = pool.count_threads_in(compute_domain_index);
+    ///     let thread_count = pool.threads_count_in(compute_domain_index);
     ///     println!("ComputeDomain {} has {} threads", compute_domain_index, thread_count);
     /// }
     /// ```
-    pub fn count_threads_in(&self, compute_domain_index: usize) -> usize {
-        unsafe { fu_pool_count_threads_in(self.inner, compute_domain_index) }
+    pub fn threads_count_in(&self, compute_domain_index: usize) -> usize {
+        unsafe { fu_pool_threads_count_in(self.inner, compute_domain_index) }
+    }
+
+    /// Returns the number of threads in the pool.
+    pub fn threads_count(&self) -> usize {
+        unsafe { fu_pool_threads_count(self.inner) }
     }
 
     /// Converts a global thread index to a local thread index within a compute_domain.
@@ -1113,7 +1115,7 @@ impl ThreadPool {
     /// pool.broadcast(|_thread_index, _compute_domain_index| {
     ///     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     /// });
-    /// assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), pool.threads());
+    /// assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), pool.threads_count());
     /// ```
     pub fn broadcast<F>(&mut self, function: F)
     where
@@ -1128,7 +1130,7 @@ impl ThreadPool {
     /// read-only topology queries, joining every dispatch before returning.
     ///
     /// The scope holds the pool by shared reference, so a worker closure can query it
-    /// (`count_threads_in`, `locate_thread_in`) *and* borrow the same stack values the caller owns
+    /// (`threads_count_in`, `locate_thread_in`) *and* borrow the same stack values the caller owns
     /// - the borrow conflict that otherwise forces a [`SafePtr`] smuggle. Because each
     /// [`Scope::broadcast`] blocks until it joins, those borrows can never outlive the work.
     ///
@@ -1144,7 +1146,7 @@ impl ThreadPool {
     ///         *counter.lock() += 1;
     ///     });
     /// });
-    /// assert_eq!(*counter.lock(), pool.threads());
+    /// assert_eq!(*counter.lock(), pool.threads_count());
     /// ```
     pub fn scope<F, R>(&mut self, body: F) -> R
     where
@@ -1152,6 +1154,49 @@ impl ThreadPool {
     {
         let scope = Scope { pool: self };
         body(&scope)
+    }
+
+    /// Distributes `n` similar duration calls between threads in slices.
+    ///
+    /// Instead of individual task assignment, this method groups tasks into
+    /// contiguous slices and assigns each slice to a thread. This reduces
+    /// per-task overhead and improves cache locality.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Total number of tasks to distribute
+    /// * `function` - Closure executed for each slice, receiving a `Prong` (with first task index) and slice size
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use forkunion::*;
+    ///
+    /// let mut pool = spawn(4);
+    ///
+    /// pool.for_slices(1000, |prong, count| {
+    ///     let start_index = prong.task_index;
+    ///     
+    ///     // Process the slice - each thread gets a contiguous range
+    ///     for i in 0..count {
+    ///         let global_index = start_index + i;
+    ///         let result = global_index * global_index;
+    ///         std::hint::black_box(result);
+    ///     }
+    ///     
+    ///     println!("Thread {} processed slice [{}, {})",
+    ///              prong.thread_index, start_index, start_index + count);
+    /// });
+    /// ```
+    pub fn for_slices<F>(&mut self, n: usize, function: F) -> ForSlicesOperation<'_, F>
+    where
+        F: Fn(Prong, usize) + Sync,
+    {
+        ForSlicesOperation {
+            pool: self,
+            n,
+            function,
+        }
     }
 
     /// Splits `data` into one contiguous chunk per thread and runs `function` on each in
@@ -1180,7 +1225,7 @@ impl ThreadPool {
         T: Send,
         F: Fn(usize, &mut [T]) + Sync,
     {
-        let threads = self.threads();
+        let threads = self.threads_count();
         let split = IndexedSplit::new(data.len(), threads);
         let base = SafePtr::new(data.as_mut_ptr()); // ? `Sync` wrapper for the disjoint scatter
         let function = &function;
@@ -1198,46 +1243,6 @@ impl ThreadPool {
             function(thread_index, chunk);
         };
         BroadcastJoin::new(self, &scatter).join();
-    }
-
-    /// Dispatches `callback` on every thread without blocking, returning the generation token.
-    ///
-    /// This is the raw C-ABI mirror for building custom orchestration; prefer the safe
-    /// [`BroadcastJoin`] guard returned by `for_threads`.
-    ///
-    /// # Safety
-    ///
-    /// - Only one thread may operate the pool at a time, and only one dispatch may be in
-    ///   flight: `unsafe_join` must complete before the next dispatch or pool destruction.
-    /// - `callback` and `context` must remain valid until `unsafe_join` returns.
-    pub unsafe fn unsafe_for_threads(
-        &self,
-        callback: extern "C" fn(*mut c_void, usize, usize),
-        context: *mut c_void,
-    ) -> usize {
-        fu_pool_unsafe_for_threads(self.inner, callback, context)
-    }
-
-    /// Returns true if the given generation has completed on all threads.
-    ///
-    /// A `true` result also guarantees visibility of every contributor's writes. On
-    /// `Inclusive` pools this can only turn `true` once `unsafe_join` contributes the
-    /// calling thread's slice, so the poll-then-join pattern is reserved for
-    /// `Exclusive` pools.
-    pub fn is_complete(&self, generation: usize) -> bool {
-        unsafe { fu_pool_is_complete(self.inner, generation) != 0 }
-    }
-
-    /// Blocks until the given generation completes; idempotent for joined generations.
-    ///
-    /// On `Inclusive` pools this also executes the calling thread's slice of the work.
-    ///
-    /// # Safety
-    ///
-    /// Must be called on the thread operating the pool, with the dispatched callback
-    /// and context still valid.
-    pub unsafe fn unsafe_join(&self, generation: usize) {
-        fu_pool_unsafe_join(self.inner, generation)
     }
 
     /// Distributes `n` similar duration calls between threads by individual indices.
@@ -1311,47 +1316,44 @@ impl ThreadPool {
         }
     }
 
-    /// Distributes `n` similar duration calls between threads in slices.
+    /// Dispatches `callback` on every thread without blocking, returning the generation token.
     ///
-    /// Instead of individual task assignment, this method groups tasks into
-    /// contiguous slices and assigns each slice to a thread. This reduces
-    /// per-task overhead and improves cache locality.
+    /// This is the raw C-ABI mirror for building custom orchestration; prefer the safe
+    /// [`BroadcastJoin`] guard returned by `for_threads`.
     ///
-    /// # Arguments
+    /// # Safety
     ///
-    /// * `n` - Total number of tasks to distribute
-    /// * `function` - Closure executed for each slice, receiving a `Prong` (with first task index) and slice size
+    /// - Only one thread may operate the pool at a time, and only one dispatch may be in
+    ///   flight: `unsafe_join` must complete before the next dispatch or pool destruction.
+    /// - `callback` and `context` must remain valid until `unsafe_join` returns.
+    pub unsafe fn unsafe_for_threads(
+        &self,
+        callback: extern "C" fn(*mut c_void, usize, usize),
+        context: *mut c_void,
+    ) -> usize {
+        fu_pool_unsafe_for_threads(self.inner, callback, context)
+    }
+
+    /// Returns true if the given generation has completed on all threads.
     ///
-    /// # Examples
+    /// A `true` result also guarantees visibility of every contributor's writes. On
+    /// `Inclusive` pools this can only turn `true` once `unsafe_join` contributes the
+    /// calling thread's slice, so the poll-then-join pattern is reserved for
+    /// `Exclusive` pools.
+    pub fn is_complete(&self, generation: usize) -> bool {
+        unsafe { fu_pool_is_complete(self.inner, generation) != 0 }
+    }
+
+    /// Blocks until the given generation completes; idempotent for joined generations.
     ///
-    /// ```rust
-    /// use forkunion::*;
+    /// On `Inclusive` pools this also executes the calling thread's slice of the work.
     ///
-    /// let mut pool = spawn(4);
+    /// # Safety
     ///
-    /// pool.for_slices(1000, |prong, count| {
-    ///     let start_index = prong.task_index;
-    ///     
-    ///     // Process the slice - each thread gets a contiguous range
-    ///     for i in 0..count {
-    ///         let global_index = start_index + i;
-    ///         let result = global_index * global_index;
-    ///         std::hint::black_box(result);
-    ///     }
-    ///     
-    ///     println!("Thread {} processed slice [{}, {})",
-    ///              prong.thread_index, start_index, start_index + count);
-    /// });
-    /// ```
-    pub fn for_slices<F>(&mut self, n: usize, function: F) -> ForSlicesOperation<'_, F>
-    where
-        F: Fn(Prong, usize) + Sync,
-    {
-        ForSlicesOperation {
-            pool: self,
-            n,
-            function,
-        }
+    /// Must be called on the thread operating the pool, with the dispatched callback
+    /// and context still valid.
+    pub unsafe fn unsafe_join(&self, generation: usize) {
+        fu_pool_unsafe_join(self.inner, generation)
     }
 }
 
@@ -1360,6 +1362,292 @@ impl Drop for ThreadPool {
         unsafe {
             fu_pool_terminate(self.inner);
             fu_pool_delete(self.inner);
+        }
+    }
+}
+
+/// A synchronization guard that waits for all threads to finish the broadcasted closure.
+///
+/// The lifecycle is keyed on the pool's exclusivity:
+/// - On `CallerExclusivity::Exclusive` pools the closure is dispatched at **construction**:
+///   the workers start immediately, the caller can overlap its own work, poll
+///   `is_complete`, and `join` (or `Drop`) waits for completion.
+/// - On `CallerExclusivity::Inclusive` pools the dispatch is deferred to **join** (or
+///   `Drop`), where the calling thread contributes its own slice of the work.
+///
+/// The closure is borrowed rather than owned, so its address stays stable while worker
+/// threads hold a pointer to it, and the guard itself remains freely movable.
+pub struct BroadcastJoin<'pool, 'fork, F>
+where
+    F: Fn(usize, usize) + Sync,
+{
+    pool: &'pool mut ThreadPool,
+    function: &'fork F,
+    generation: Option<usize>, // ? Real tokens are odd; `None` means "not yet dispatched"
+    did_join: bool,
+}
+
+impl<'pool, 'fork, F> BroadcastJoin<'pool, 'fork, F>
+where
+    F: Fn(usize, usize) + Sync,
+{
+    /// Create a new BroadcastJoin (internal use by ThreadPool)
+    pub(crate) fn new(pool: &'pool mut ThreadPool, function: &'fork F) -> Self {
+        let mut operation = Self {
+            pool,
+            function,
+            generation: None,
+            did_join: false,
+        };
+        if operation.pool.caller_exclusivity() == CallerExclusivity::Exclusive {
+            operation.dispatch();
+        }
+        operation
+    }
+
+    fn dispatch(&mut self) {
+        if self.generation.is_some() {
+            return; // No need to dispatch again
+        }
+
+        extern "C" fn trampoline<F>(
+            context: *mut c_void,
+            thread_index: usize,
+            compute_domain_index: usize,
+        ) where
+            F: Fn(usize, usize) + Sync,
+        {
+            let function = unsafe { &*(context as *const F) };
+            function(thread_index, compute_domain_index);
+        }
+
+        unsafe {
+            let context = self.function as *const F as *mut c_void;
+            let generation = fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, context);
+            self.generation = Some(generation);
+        }
+    }
+
+    /// The generation token of this broadcast; always odd once dispatched.
+    pub fn generation(&self) -> Option<usize> {
+        self.generation
+    }
+
+    /// True once the dispatched generation has fully completed on all threads.
+    ///
+    /// A `true` result also guarantees visibility of every contributor's writes. On
+    /// `Inclusive` pools this can only turn `true` once `join` contributes the calling
+    /// thread's slice, so the poll-then-join pattern is reserved for `Exclusive` pools.
+    pub fn is_complete(&self) -> bool {
+        match self.generation {
+            Some(generation) => unsafe { fu_pool_is_complete(self.pool.inner, generation) != 0 },
+            None => false,
+        }
+    }
+
+    /// Wait for all threads to complete their work.
+    /// On `Inclusive` pools this dispatches the work first and contributes the caller's slice.
+    /// Idempotent - subsequent calls are no-ops.
+    pub fn join(&mut self) {
+        self.dispatch();
+        if self.did_join {
+            return; // No need to join again
+        }
+        unsafe {
+            fu_pool_unsafe_join(self.pool.inner, self.generation.unwrap());
+        }
+        self.did_join = true;
+    }
+}
+
+impl<F> Drop for BroadcastJoin<'_, '_, F>
+where
+    F: Fn(usize, usize) + Sync,
+{
+    fn drop(&mut self) {
+        self.join();
+    }
+}
+
+/// A borrow-scoped handle to a thread pool, yielded by [`ThreadPool::scope`].
+///
+/// Holding the pool by shared reference is what lets a worker closure both query the pool
+/// (`threads_count_in`, `locate_thread_in`) and borrow the caller's stack data at the same time -
+/// the borrow conflict that otherwise forces a [`SafePtr`] smuggle. Every [`Scope::broadcast`]
+/// joins before returning, so those borrows are always valid.
+pub struct Scope<'pool> {
+    pool: &'pool ThreadPool,
+}
+
+impl Scope<'_> {
+    /// Total number of worker threads in the pool.
+    pub fn threads_count(&self) -> usize {
+        self.pool.threads_count()
+    }
+
+    /// Number of compute domains the pool spans.
+    pub fn compute_domains_count(&self) -> usize {
+        self.pool.compute_domains_count()
+    }
+
+    /// Number of threads pinned to the given compute domain.
+    pub fn threads_count_in(&self, compute_domain_index: usize) -> usize {
+        self.pool.threads_count_in(compute_domain_index)
+    }
+
+    /// Local index of a global thread within its compute domain.
+    pub fn locate_thread_in(
+        &self,
+        global_thread_index: usize,
+        compute_domain_index: usize,
+    ) -> usize {
+        self.pool
+            .locate_thread_in(global_thread_index, compute_domain_index)
+    }
+
+    /// Broadcasts `function` to every thread and blocks until all of them finish.
+    ///
+    /// The closure is borrowed for the dispatch and joined before this returns, so it may freely
+    /// borrow the stack data enclosing the [`ThreadPool::scope`] call.
+    pub fn broadcast<F>(&self, function: F)
+    where
+        F: Fn(usize, usize) + Sync,
+    {
+        extern "C" fn trampoline<F>(
+            context: *mut c_void,
+            thread_index: usize,
+            compute_domain_index: usize,
+        ) where
+            F: Fn(usize, usize) + Sync,
+        {
+            let function = unsafe { &*(context as *const F) };
+            function(thread_index, compute_domain_index);
+        }
+
+        // SAFETY: `function` outlives the dispatch because we join before returning, and the
+        // enclosing `scope` holds the pool by `&mut`, so no other dispatch overlaps this one.
+        unsafe {
+            let context = &function as *const F as *mut c_void;
+            let generation = self.pool.unsafe_for_threads(trampoline::<F>, context);
+            self.pool.unsafe_join(generation);
+        }
+    }
+}
+
+/// Operation object for parallel task execution with static load balancing.
+pub struct ForNOperation<'a, F>
+where
+    F: Fn(Prong) + Sync,
+{
+    pool: &'a mut ThreadPool,
+    n: usize,
+    function: F,
+}
+
+impl<'a, F> Drop for ForNOperation<'a, F>
+where
+    F: Fn(Prong) + Sync,
+{
+    fn drop(&mut self) {
+        extern "C" fn trampoline<F>(
+            ctx: *mut c_void,
+            task_index: usize,
+            thread_index: usize,
+            compute_domain_index: usize,
+        ) where
+            F: Fn(Prong) + Sync,
+        {
+            let f = unsafe { &*(ctx as *const F) };
+            f(Prong {
+                task_index,
+                thread_index,
+                compute_domain_index,
+            });
+        }
+
+        unsafe {
+            let ctx = &self.function as *const F as *mut c_void;
+            fu_pool_for_n(self.pool.inner, self.n, trampoline::<F>, ctx);
+        }
+    }
+}
+
+/// Operation object for parallel task execution with dynamic work-stealing.
+pub struct ForNDynamicOperation<'a, F>
+where
+    F: Fn(Prong) + Sync,
+{
+    pool: &'a mut ThreadPool,
+    n: usize,
+    function: F,
+}
+
+impl<'a, F> Drop for ForNDynamicOperation<'a, F>
+where
+    F: Fn(Prong) + Sync,
+{
+    fn drop(&mut self) {
+        extern "C" fn trampoline<F>(
+            ctx: *mut c_void,
+            task_index: usize,
+            thread_index: usize,
+            compute_domain_index: usize,
+        ) where
+            F: Fn(Prong) + Sync,
+        {
+            let f = unsafe { &*(ctx as *const F) };
+            f(Prong {
+                task_index,
+                thread_index,
+                compute_domain_index,
+            });
+        }
+
+        unsafe {
+            let ctx = &self.function as *const F as *mut c_void;
+            fu_pool_for_n_dynamic(self.pool.inner, self.n, trampoline::<F>, ctx);
+        }
+    }
+}
+
+/// Operation object for parallel slice execution.
+pub struct ForSlicesOperation<'a, F>
+where
+    F: Fn(Prong, usize) + Sync,
+{
+    pool: &'a mut ThreadPool,
+    n: usize,
+    function: F,
+}
+
+impl<'a, F> Drop for ForSlicesOperation<'a, F>
+where
+    F: Fn(Prong, usize) + Sync,
+{
+    fn drop(&mut self) {
+        extern "C" fn trampoline<F>(
+            ctx: *mut c_void,
+            first_index: usize,
+            count: usize,
+            thread_index: usize,
+            compute_domain_index: usize,
+        ) where
+            F: Fn(Prong, usize) + Sync,
+        {
+            let f = unsafe { &*(ctx as *const F) };
+            f(
+                Prong {
+                    task_index: first_index,
+                    thread_index,
+                    compute_domain_index,
+                },
+                count,
+            );
+        }
+
+        unsafe {
+            let ctx = &self.function as *const F as *mut c_void;
+            fu_pool_for_slices(self.pool.inner, self.n, trampoline::<F>, ctx);
         }
     }
 }
@@ -1495,14 +1783,14 @@ impl PinnedAllocator {
     /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("NUMA node 0 should be available");
     ///
     /// // Check if a specific NUMA node exists
-    /// let numa_count = count_memory_domains();
+    /// let numa_count = memory_domains_count();
     /// if numa_count > 1 {
     ///     let allocator2 = PinnedAllocator::new(MemoryDomain(1)).expect("NUMA node 1 should be available");
     ///     println!("Created allocator for NUMA node: {}", allocator2.memory_domain());
     /// }
     /// ```
     pub fn new(memory_domain: MemoryDomain) -> Option<Self> {
-        if memory_domain.get() >= count_memory_domains() {
+        if memory_domain.get() >= memory_domains_count() {
             return None;
         }
 
@@ -1754,7 +2042,7 @@ impl PinnedAllocator {
 /// assert_eq!(allocation.memory_domain(), 0);
 ///
 /// // For more control, create specific NUMA allocators
-/// let numa_count = count_memory_domains();
+/// let numa_count = memory_domains_count();
 /// println!("System has {} NUMA nodes available", numa_count);
 ///
 /// if numa_count > 1 {
@@ -2385,10 +2673,10 @@ impl<T> RoundRobinVec<T> {
     /// use forkunion::*;
     ///
     /// let rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
-    /// assert_eq!(rr_vec.compute_domains_count(), count_compute_domains());
+    /// assert_eq!(rr_vec.compute_domains_count(), compute_domains_count());
     /// ```
     pub fn new() -> Option<Self> {
-        let compute_domains_count = count_compute_domains();
+        let compute_domains_count = compute_domains_count();
         if compute_domains_count == 0 {
             return None;
         }
@@ -2444,7 +2732,7 @@ impl<T> RoundRobinVec<T> {
     /// }
     /// ```
     pub fn with_capacity_per_compute_domain(capacity_per_compute_domain: usize) -> Option<Self> {
-        let compute_domains_count = count_compute_domains();
+        let compute_domains_count = compute_domains_count();
         if compute_domains_count == 0 {
             return None;
         }
@@ -2727,7 +3015,7 @@ impl<T> RoundRobinVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `memory_domain` - The memory domain index (0 to count_memory_domains()-1)
+    /// * `memory_domain` - The memory domain index (0 to memory_domains_count()-1)
     /// * `local_index` - The local index within that NUMA node's `PinnedVec`
     ///
     /// # Returns
@@ -2790,7 +3078,7 @@ impl<T> RoundRobinVec<T> {
                 let current_len = domain_vec.len();
                 let base = domain_vec.sync_ptr();
 
-                let threads_here = scope.count_threads_in(compute_domain_index);
+                let threads_here = scope.threads_count_in(compute_domain_index);
                 let local_thread = scope.locate_thread_in(thread_index, compute_domain_index);
                 let split =
                     IndexedSplit::new(split_len(compute_domain_index, current_len), threads_here);
@@ -2807,10 +3095,10 @@ impl<T> RoundRobinVec<T> {
         // would leave slots unconstructed while `len` claims otherwise, so the caller sweeps them.
         // Domains past the pool's own count have no threads by definition, and asking the pool
         // about them would read past its thread map.
-        let pool_domains_count = pool.compute_domains();
+        let pool_domains_count = pool.compute_domains_count();
         for compute_domain_index in 0..compute_domains_count {
             let covered = compute_domain_index < pool_domains_count
-                && pool.count_threads_in(compute_domain_index) != 0;
+                && pool.threads_count_in(compute_domain_index) != 0;
             if covered {
                 continue;
             }
@@ -3063,6 +3351,9 @@ impl<T> RoundRobinVec<T> {
     }
 }
 
+unsafe impl<T: Send> Send for RoundRobinVec<T> {}
+unsafe impl<T: Sync> Sync for RoundRobinVec<T> {}
+
 /// A thread-safe wrapper for raw pointers used in parallel operations.
 ///
 /// # Safety
@@ -3090,9 +3381,6 @@ impl<T> SafePtr<T> {
         unsafe { &mut *self.0 }
     }
 }
-
-unsafe impl<T: Send> Send for RoundRobinVec<T> {}
-unsafe impl<T: Sync> Sync for RoundRobinVec<T> {}
 
 /// A thread-safe wrapper around raw pointers for sharing read-only data across threads.
 ///
@@ -3231,6 +3519,46 @@ impl<T> SyncOnceCell<T> {
 
     fn into_inner(self) -> Option<T> {
         self.inner.into_inner()
+    }
+}
+
+/// Splits a range of tasks into fair-sized chunks for parallel distribution.
+///
+/// The first `(tasks % threads)` chunks have size `ceil(tasks / threads)`.
+/// The remaining chunks have size `floor(tasks / threads)`.
+///
+/// This ensures optimal load balancing across threads with minimal size variance.
+/// See: <https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/>
+#[derive(Debug, Clone)]
+pub struct IndexedSplit {
+    quotient: usize,
+    remainder: usize,
+}
+
+impl IndexedSplit {
+    /// Creates a new indexed split for distributing tasks across threads.
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks_count` - Total number of tasks to distribute
+    /// * `threads_count` - Number of threads to distribute across (must be > 0)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `threads_count` is zero.
+    pub fn new(tasks_count: usize, threads_count: usize) -> Self {
+        assert!(threads_count > 0, "Threads count must be greater than zero");
+        Self {
+            quotient: tasks_count / threads_count,
+            remainder: tasks_count % threads_count,
+        }
+    }
+
+    /// Returns the range for a specific thread index.
+    pub fn get(&self, thread_index: usize) -> core::ops::Range<usize> {
+        let begin = self.quotient * thread_index + thread_index.min(self.remainder);
+        let count = self.quotient + if thread_index < self.remainder { 1 } else { 0 };
+        begin..(begin + count)
     }
 }
 
@@ -3393,6 +3721,18 @@ where
     I: ParallelIterator,
     S: ParallelSchedule,
 {
+    pub fn with_schedule<S2>(self, schedule: S2) -> ParallelRunner<'pool, I, S2>
+    where
+        S2: ParallelSchedule,
+    {
+        let ParallelRunner { pool, iterator, .. } = self;
+        ParallelRunner {
+            pool,
+            iterator,
+            schedule,
+        }
+    }
+
     pub fn for_each<F>(self, function: F)
     where
         F: Fn(I::Item) + Sync,
@@ -3445,7 +3785,7 @@ where
     /// to prevent false sharing. Indexes by thread_index (works with dynamic scheduling).
     ///
     /// # Arguments
-    /// * `scratch` - Per-thread accumulators (must be `>= pool.threads()`)
+    /// * `scratch` - Per-thread accumulators (must be `>= pool.threads_count()`)
     /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, Prong)`
     /// * `combine` - Function to merge two accumulators: `fn(T, T) -> T`
     ///
@@ -3458,7 +3798,7 @@ where
     /// let mut pool = ThreadPool::try_spawn(4).unwrap();
     /// let data: Vec<u64> = (0..1000).collect();
     /// let mut scratch: Vec<CacheAligned<u64>> =
-    ///     (0..pool.threads()).map(|_| CacheAligned(0)).collect();
+    ///     (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
     ///
     /// let total = (&data[..]).into_par_iter().with_pool(&mut pool)
     ///     .reduce_with_scratch(
@@ -3491,6 +3831,90 @@ where
             combine(first, value);
         }
         core::mem::take(first)
+    }
+
+    /// Fold with early-exit on error, using caller-provided scratch buffer.
+    ///
+    /// Similar to `fold_with_scratch`, but allows the fold function to return `Result`.
+    /// Stops processing on the first error. Scratch buffers are indexed by `thread_index`.
+    ///
+    /// # Arguments
+    ///
+    /// * `scratch` - Per-thread accumulators (must be `>= pool.threads_count()`)
+    /// * `fold` - Fallible fold function: `fn(&mut T, I::Item, Prong) -> Result<(), E>`
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if all items were folded successfully
+    /// - `Err(E)` with the first error encountered
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use forkunion::*;
+    ///
+    /// fn checked_add(acc: &mut u64, value: &u64) -> Result<(), &'static str> {
+    ///     *acc = acc.checked_add(*value).ok_or("overflow")?;
+    ///     Ok(())
+    /// }
+    ///
+    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let data: Vec<u64> = (1..100).collect();
+    /// let mut scratch: Vec<CacheAligned<u64>> =
+    ///     (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
+    ///
+    /// let result = (&data[..])
+    ///     .into_par_iter()
+    ///     .with_pool(&mut pool)
+    ///     .try_fold_with_scratch(scratch.as_mut_slice(), |acc, value, _| {
+    ///         checked_add(&mut acc.0, value)
+    ///     });
+    ///
+    /// assert!(result.is_ok());
+    /// ```
+    pub fn try_fold_with_scratch<T, F, E>(self, scratch: &mut [T], fold: F) -> Result<(), E>
+    where
+        T: Send,
+        F: Fn(&mut T, I::Item, Prong) -> Result<(), E> + Sync,
+        E: Send,
+    {
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        let ParallelRunner {
+            pool,
+            iterator,
+            schedule,
+        } = self;
+
+        let stop = AtomicBool::new(false);
+        let first_err = SyncOnceCell::new();
+        let f_ptr = SyncConstPtr::new(&fold as *const F);
+        let s_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
+
+        iterator.drive(pool, schedule, &|item, prong| {
+            // Check if we should stop (Acquire: see all writes before Release swap)
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+
+            let slot = unsafe { &mut *s_ptr.get(prong.thread_index) };
+            let func = unsafe { &*f_ptr.as_ptr() };
+
+            if let Err(e) = func(slot, item, prong) {
+                // Try to set stop flag (Release: make error write visible to Acquire loads)
+                let already_stopped = stop.swap(true, Ordering::Release);
+                if !already_stopped {
+                    // SAFETY: Only one thread sets stop to true, so only one write
+                    unsafe { first_err.set(e) };
+                }
+            }
+        });
+
+        // SAFETY: All worker threads finished, exclusive access
+        match first_err.into_inner() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Executes a fallible operation on each item, stopping at the first error.
@@ -3568,6 +3992,161 @@ where
         }
     }
 
+    /// Searches for the first element that matches a predicate (deterministic, by index).
+    ///
+    /// Returns the element with the smallest `task_index` among all matches.
+    /// Uses `fetch_min` to track the minimum index found so far.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(item)` with the lowest index if any match was found
+    /// - `None` if no item matched or the iterator was empty
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use forkunion::*;
+    ///
+    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let data: Vec<u64> = vec![10, 20, 30, 20, 10];
+    ///
+    /// let found = (&data[..])
+    ///     .into_par_iter()
+    ///     .with_pool(&mut pool)
+    ///     .find_first(|&&x| x == 20);
+    ///
+    /// assert_eq!(found, Some(&20)); // Index 1, not 3
+    /// ```
+    pub fn find_first<P>(self, predicate: P) -> Option<I::Item>
+    where
+        I::Item: Send,
+        P: Fn(&I::Item) -> bool + Sync,
+    {
+        // The index has to travel with the item, and the comparison has to be the same step as the
+        // store. Deciding from a `fetch_min` and then storing under a separate lock is a
+        // check-then-act race: with matches at 100 and 152, the thread at 152 reads `usize::MAX`
+        // and decides to store, the thread at 100 reads 152 and also decides to store, and whichever
+        // takes the lock last wins - which is 152 about half the time.
+        //
+        // So give every worker a slot of its own, keyed by `thread_index`. A slot has exactly one
+        // writer, which is why the fold below needs no atomic, no lock, and no compare-exchange.
+        // The caller then reduces the per-thread minima into the global one, sequentially, after the
+        // join has already established happens-before.
+        if self.iterator.is_empty() {
+            return None;
+        }
+        let threads = self.pool.threads_count();
+        let mut scratch: PinnedVec<CacheAligned<Option<(usize, I::Item)>>> =
+            PinnedVec::with_capacity_in(
+                PinnedAllocator::new(MemoryDomain(0)).expect("failed to get allocator"),
+                threads,
+            )
+            .expect("failed to allocate scratch");
+        for _ in 0..threads {
+            scratch.push(CacheAligned(None)).expect("failed to push");
+        }
+
+        self.reduce_with_scratch(
+            scratch.as_mut_slice(),
+            |slot, item, prong| {
+                if !predicate(&item) {
+                    return;
+                }
+                let index = prong.task_index;
+                match &slot.0 {
+                    // ? Every task index is dispatched exactly once, so there are never ties
+                    Some((best, _)) if *best <= index => {}
+                    _ => slot.0 = Some((index, item)),
+                }
+            },
+            |a, b| {
+                let take_b = match (&a.0, &b.0) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some((a_index, _)), Some((b_index, _))) => b_index < a_index,
+                };
+                if take_b {
+                    a.0 = b.0;
+                }
+            },
+        )
+        .0
+        .map(|(_, item)| item)
+    }
+
+    /// Searches for the last element that matches a predicate (deterministic, by index).
+    ///
+    /// Returns the element with the largest `task_index` among all matches.
+    /// Uses `fetch_max` to track the maximum index found so far.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(item)` with the highest index if any match was found
+    /// - `None` if no item matched or the iterator was empty
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use forkunion::*;
+    ///
+    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let data: Vec<u64> = vec![10, 20, 30, 20, 10];
+    ///
+    /// let found = (&data[..])
+    ///     .into_par_iter()
+    ///     .with_pool(&mut pool)
+    ///     .find_last(|&&x| x == 20);
+    ///
+    /// assert_eq!(found, Some(&20)); // Index 3, not 1
+    /// ```
+    pub fn find_last<P>(self, predicate: P) -> Option<I::Item>
+    where
+        I::Item: Send,
+        P: Fn(&I::Item) -> bool + Sync,
+    {
+        // The mirror of `find_first`, and it was racy for the same reason. A slot starts empty rather
+        // than at a sentinel index, so index zero - a real index - cannot reject itself.
+        if self.iterator.is_empty() {
+            return None;
+        }
+        let threads = self.pool.threads_count();
+        let mut scratch: PinnedVec<CacheAligned<Option<(usize, I::Item)>>> =
+            PinnedVec::with_capacity_in(
+                PinnedAllocator::new(MemoryDomain(0)).expect("failed to get allocator"),
+                threads,
+            )
+            .expect("failed to allocate scratch");
+        for _ in 0..threads {
+            scratch.push(CacheAligned(None)).expect("failed to push");
+        }
+
+        self.reduce_with_scratch(
+            scratch.as_mut_slice(),
+            |slot, item, prong| {
+                if !predicate(&item) {
+                    return;
+                }
+                let index = prong.task_index;
+                match &slot.0 {
+                    Some((best, _)) if *best >= index => {}
+                    _ => slot.0 = Some((index, item)),
+                }
+            },
+            |a, b| {
+                let take_b = match (&a.0, &b.0) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some((a_index, _)), Some((b_index, _))) => b_index > a_index,
+                };
+                if take_b {
+                    a.0 = b.0;
+                }
+            },
+        )
+        .0
+        .map(|(_, item)| item)
+    }
+
     /// Searches for any element that matches a predicate (non-deterministic).
     ///
     /// Uses cooperative cancellation: once a match is found, no further items are processed.
@@ -3631,120 +4210,6 @@ where
         found.into_inner()
     }
 
-    /// Searches for the first element that matches a predicate (deterministic, by index).
-    ///
-    /// Returns the element with the smallest `task_index` among all matches.
-    /// Uses `fetch_min` to track the minimum index found so far.
-    ///
-    /// # Returns
-    ///
-    /// - `Some(item)` with the lowest index if any match was found
-    /// - `None` if no item matched or the iterator was empty
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use forkunion::*;
-    ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
-    /// let data: Vec<u64> = vec![10, 20, 30, 20, 10];
-    ///
-    /// let found = (&data[..])
-    ///     .into_par_iter()
-    ///     .with_pool(&mut pool)
-    ///     .find_first(|&&x| x == 20);
-    ///
-    /// assert_eq!(found, Some(&20)); // Index 1, not 3
-    /// ```
-    pub fn find_first<P>(self, predicate: P) -> Option<I::Item>
-    where
-        I::Item: Send,
-        P: Fn(&I::Item) -> bool + Sync,
-    {
-        use core::sync::atomic::{AtomicUsize, Ordering};
-
-        let ParallelRunner {
-            pool,
-            iterator,
-            schedule,
-        } = self;
-
-        let min_index = AtomicUsize::new(usize::MAX);
-        let found = BasicSpinMutex::<_, true>::new(None);
-        let p_ptr = SyncConstPtr::new(&predicate as *const P);
-
-        iterator.drive(pool, schedule, &|item, prong| {
-            let pred = unsafe { &*p_ptr.as_ptr() };
-            if pred(&item) {
-                let my_index = prong.task_index;
-                let old_min = min_index.fetch_min(my_index, Ordering::Relaxed);
-                if my_index < old_min {
-                    // We have a new minimum, update the stored item
-                    *found.lock() = Some(item);
-                }
-            }
-        });
-
-        found.into_inner()
-    }
-
-    /// Searches for the last element that matches a predicate (deterministic, by index).
-    ///
-    /// Returns the element with the largest `task_index` among all matches.
-    /// Uses `fetch_max` to track the maximum index found so far.
-    ///
-    /// # Returns
-    ///
-    /// - `Some(item)` with the highest index if any match was found
-    /// - `None` if no item matched or the iterator was empty
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use forkunion::*;
-    ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
-    /// let data: Vec<u64> = vec![10, 20, 30, 20, 10];
-    ///
-    /// let found = (&data[..])
-    ///     .into_par_iter()
-    ///     .with_pool(&mut pool)
-    ///     .find_last(|&&x| x == 20);
-    ///
-    /// assert_eq!(found, Some(&20)); // Index 3, not 1
-    /// ```
-    pub fn find_last<P>(self, predicate: P) -> Option<I::Item>
-    where
-        I::Item: Send,
-        P: Fn(&I::Item) -> bool + Sync,
-    {
-        use core::sync::atomic::{AtomicUsize, Ordering};
-
-        let ParallelRunner {
-            pool,
-            iterator,
-            schedule,
-        } = self;
-
-        let max_index = AtomicUsize::new(0);
-        let found = BasicSpinMutex::<_, true>::new(None);
-        let p_ptr = SyncConstPtr::new(&predicate as *const P);
-
-        iterator.drive(pool, schedule, &|item, prong| {
-            let pred = unsafe { &*p_ptr.as_ptr() };
-            if pred(&item) {
-                let my_index = prong.task_index;
-                let old_max = max_index.fetch_max(my_index, Ordering::Relaxed);
-                if my_index > old_max {
-                    // We have a new maximum, update the stored item
-                    *found.lock() = Some(item);
-                }
-            }
-        });
-
-        found.into_inner()
-    }
-
     /// Returns `true` if any item matches the predicate.
     ///
     /// Stops searching after the first match is found.
@@ -3799,110 +4264,8 @@ where
         !self.any(|x| !predicate(x))
     }
 
-    /// Fold with early-exit on error, using caller-provided scratch buffer.
-    ///
-    /// Similar to `fold_with_scratch`, but allows the fold function to return `Result`.
-    /// Stops processing on the first error. Scratch buffers are indexed by `thread_index`.
-    ///
-    /// # Arguments
-    ///
-    /// * `scratch` - Per-thread accumulators (must be `>= pool.threads()`)
-    /// * `fold` - Fallible fold function: `fn(&mut T, I::Item, Prong) -> Result<(), E>`
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())` if all items were folded successfully
-    /// - `Err(E)` with the first error encountered
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use forkunion::*;
-    ///
-    /// fn checked_add(acc: &mut u64, value: &u64) -> Result<(), &'static str> {
-    ///     *acc = acc.checked_add(*value).ok_or("overflow")?;
-    ///     Ok(())
-    /// }
-    ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
-    /// let data: Vec<u64> = (1..100).collect();
-    /// let mut scratch: Vec<CacheAligned<u64>> =
-    ///     (0..pool.threads()).map(|_| CacheAligned(0)).collect();
-    ///
-    /// let result = (&data[..])
-    ///     .into_par_iter()
-    ///     .with_pool(&mut pool)
-    ///     .try_fold_with_scratch(scratch.as_mut_slice(), |acc, value, _| {
-    ///         checked_add(&mut acc.0, value)
-    ///     });
-    ///
-    /// assert!(result.is_ok());
-    /// ```
-    pub fn try_fold_with_scratch<T, F, E>(self, scratch: &mut [T], fold: F) -> Result<(), E>
-    where
-        T: Send,
-        F: Fn(&mut T, I::Item, Prong) -> Result<(), E> + Sync,
-        E: Send,
-    {
-        use core::sync::atomic::{AtomicBool, Ordering};
-
-        let ParallelRunner {
-            pool,
-            iterator,
-            schedule,
-        } = self;
-
-        let stop = AtomicBool::new(false);
-        let first_err = SyncOnceCell::new();
-        let f_ptr = SyncConstPtr::new(&fold as *const F);
-        let s_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
-
-        iterator.drive(pool, schedule, &|item, prong| {
-            // Check if we should stop (Acquire: see all writes before Release swap)
-            if stop.load(Ordering::Acquire) {
-                return;
-            }
-
-            let slot = unsafe { &mut *s_ptr.get(prong.thread_index) };
-            let func = unsafe { &*f_ptr.as_ptr() };
-
-            if let Err(e) = func(slot, item, prong) {
-                // Try to set stop flag (Release: make error write visible to Acquire loads)
-                let already_stopped = stop.swap(true, Ordering::Release);
-                if !already_stopped {
-                    // SAFETY: Only one thread sets stop to true, so only one write
-                    unsafe { first_err.set(e) };
-                }
-            }
-        });
-
-        // SAFETY: All worker threads finished, exclusive access
-        match first_err.into_inner() {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
-    }
-
-    pub fn with_schedule<S2>(self, schedule: S2) -> ParallelRunner<'pool, I, S2>
-    where
-        S2: ParallelSchedule,
-    {
-        let ParallelRunner { pool, iterator, .. } = self;
-        ParallelRunner {
-            pool,
-            iterator,
-            schedule,
-        }
-    }
-}
-
-// Convenience methods using NUMA-aware RoundRobinVec for scratch buffers
-// Each compute_domain gets its own CacheAligned accumulator pinned to local NUMA node!
-impl<'pool, I, S> ParallelRunner<'pool, I, S>
-where
-    I: ParallelIterator,
-    S: ParallelSchedule,
-{
+    // Convenience methods using NUMA-aware RoundRobinVec for scratch buffers
+    // Each compute_domain gets its own CacheAligned accumulator pinned to local NUMA node!
     /// Parallel reduction with NUMA-aware scratch allocation.
     ///
     /// Automatically allocates cache-aligned scratch buffers on each NUMA node
@@ -3937,7 +4300,7 @@ where
             return init();
         }
 
-        let threads = self.pool.threads();
+        let threads = self.pool.threads_count();
 
         // Create cache-aligned scratch: one CacheAligned<T> per thread
         // Note: Using PinnedVec per compute_domain for true NUMA-awareness would be ideal,
@@ -4001,6 +4364,31 @@ where
     pub fn count(self) -> usize {
         self.reduce(|| 0usize, |acc, _item, _| *acc += 1, |a, b| a + b)
     }
+}
+
+pub fn fold_with_scratch<I, S, T, F>(
+    pool: &mut ThreadPool,
+    iterator: I,
+    schedule: S,
+    scratch: &mut [T],
+    fold: F,
+) where
+    I: ParallelIterator,
+    S: ParallelSchedule,
+    T: Send,
+    F: Fn(&mut T, I::Item, Prong) + Sync,
+{
+    let scratch_len = scratch.len();
+    assert!(
+        scratch_len >= pool.threads_count(),
+        "scratch space must cover all threads"
+    );
+    let scratch_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
+    iterator.drive(pool, schedule, &move |item, prong| {
+        debug_assert!(prong.thread_index < scratch_len);
+        let slot = unsafe { &mut *scratch_ptr.get(prong.thread_index) };
+        fold(slot, item, prong);
+    });
 }
 
 pub trait IntoParallelIterator {
@@ -4510,322 +4898,11 @@ where
     }
 }
 
-pub fn fold_with_scratch<I, S, T, F>(
-    pool: &mut ThreadPool,
-    iterator: I,
-    schedule: S,
-    scratch: &mut [T],
-    fold: F,
-) where
-    I: ParallelIterator,
-    S: ParallelSchedule,
-    T: Send,
-    F: Fn(&mut T, I::Item, Prong) + Sync,
-{
-    let scratch_len = scratch.len();
-    assert!(
-        scratch_len >= pool.threads(),
-        "scratch space must cover all threads"
-    );
-    let scratch_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
-    iterator.drive(pool, schedule, &move |item, prong| {
-        debug_assert!(prong.thread_index < scratch_len);
-        let slot = unsafe { &mut *scratch_ptr.get(prong.thread_index) };
-        fold(slot, item, prong);
-    });
-}
-
 pub mod prelude {
     pub use super::{
         DynamicScheduler, IntoParallelIterator, ParallelIterator, ParallelIteratorExt,
         ParallelRunner, StaticScheduler,
     };
-}
-
-/// A synchronization guard that waits for all threads to finish the broadcasted closure.
-///
-/// The lifecycle is keyed on the pool's exclusivity:
-/// - On `CallerExclusivity::Exclusive` pools the closure is dispatched at **construction**:
-///   the workers start immediately, the caller can overlap its own work, poll
-///   `is_complete`, and `join` (or `Drop`) waits for completion.
-/// - On `CallerExclusivity::Inclusive` pools the dispatch is deferred to **join** (or
-///   `Drop`), where the calling thread contributes its own slice of the work.
-///
-/// The closure is borrowed rather than owned, so its address stays stable while worker
-/// threads hold a pointer to it, and the guard itself remains freely movable.
-pub struct BroadcastJoin<'pool, 'fork, F>
-where
-    F: Fn(usize, usize) + Sync,
-{
-    pool: &'pool mut ThreadPool,
-    function: &'fork F,
-    generation: Option<usize>, // ? Real tokens are odd; `None` means "not yet dispatched"
-    did_join: bool,
-}
-
-impl<'pool, 'fork, F> BroadcastJoin<'pool, 'fork, F>
-where
-    F: Fn(usize, usize) + Sync,
-{
-    /// Create a new BroadcastJoin (internal use by ThreadPool)
-    pub(crate) fn new(pool: &'pool mut ThreadPool, function: &'fork F) -> Self {
-        let mut operation = Self {
-            pool,
-            function,
-            generation: None,
-            did_join: false,
-        };
-        if operation.pool.caller_exclusivity() == CallerExclusivity::Exclusive {
-            operation.dispatch();
-        }
-        operation
-    }
-
-    fn dispatch(&mut self) {
-        if self.generation.is_some() {
-            return; // No need to dispatch again
-        }
-
-        extern "C" fn trampoline<F>(
-            context: *mut c_void,
-            thread_index: usize,
-            compute_domain_index: usize,
-        ) where
-            F: Fn(usize, usize) + Sync,
-        {
-            let function = unsafe { &*(context as *const F) };
-            function(thread_index, compute_domain_index);
-        }
-
-        unsafe {
-            let context = self.function as *const F as *mut c_void;
-            let generation = fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, context);
-            self.generation = Some(generation);
-        }
-    }
-
-    /// The generation token of this broadcast; always odd once dispatched.
-    pub fn generation(&self) -> Option<usize> {
-        self.generation
-    }
-
-    /// True once the dispatched generation has fully completed on all threads.
-    ///
-    /// A `true` result also guarantees visibility of every contributor's writes. On
-    /// `Inclusive` pools this can only turn `true` once `join` contributes the calling
-    /// thread's slice, so the poll-then-join pattern is reserved for `Exclusive` pools.
-    pub fn is_complete(&self) -> bool {
-        match self.generation {
-            Some(generation) => unsafe { fu_pool_is_complete(self.pool.inner, generation) != 0 },
-            None => false,
-        }
-    }
-
-    /// Wait for all threads to complete their work.
-    /// On `Inclusive` pools this dispatches the work first and contributes the caller's slice.
-    /// Idempotent - subsequent calls are no-ops.
-    pub fn join(&mut self) {
-        self.dispatch();
-        if self.did_join {
-            return; // No need to join again
-        }
-        unsafe {
-            fu_pool_unsafe_join(self.pool.inner, self.generation.unwrap());
-        }
-        self.did_join = true;
-    }
-}
-
-impl<F> Drop for BroadcastJoin<'_, '_, F>
-where
-    F: Fn(usize, usize) + Sync,
-{
-    fn drop(&mut self) {
-        self.join();
-    }
-}
-
-/// A borrow-scoped handle to a thread pool, yielded by [`ThreadPool::scope`].
-///
-/// Holding the pool by shared reference is what lets a worker closure both query the pool
-/// (`count_threads_in`, `locate_thread_in`) and borrow the caller's stack data at the same time -
-/// the borrow conflict that otherwise forces a [`SafePtr`] smuggle. Every [`Scope::broadcast`]
-/// joins before returning, so those borrows are always valid.
-pub struct Scope<'pool> {
-    pool: &'pool ThreadPool,
-}
-
-impl Scope<'_> {
-    /// Total number of worker threads in the pool.
-    pub fn threads(&self) -> usize {
-        self.pool.threads()
-    }
-
-    /// Number of compute domains the pool spans.
-    pub fn compute_domains(&self) -> usize {
-        self.pool.compute_domains()
-    }
-
-    /// Number of threads pinned to the given compute domain.
-    pub fn count_threads_in(&self, compute_domain_index: usize) -> usize {
-        self.pool.count_threads_in(compute_domain_index)
-    }
-
-    /// Local index of a global thread within its compute domain.
-    pub fn locate_thread_in(
-        &self,
-        global_thread_index: usize,
-        compute_domain_index: usize,
-    ) -> usize {
-        self.pool
-            .locate_thread_in(global_thread_index, compute_domain_index)
-    }
-
-    /// Broadcasts `function` to every thread and blocks until all of them finish.
-    ///
-    /// The closure is borrowed for the dispatch and joined before this returns, so it may freely
-    /// borrow the stack data enclosing the [`ThreadPool::scope`] call.
-    pub fn broadcast<F>(&self, function: F)
-    where
-        F: Fn(usize, usize) + Sync,
-    {
-        extern "C" fn trampoline<F>(
-            context: *mut c_void,
-            thread_index: usize,
-            compute_domain_index: usize,
-        ) where
-            F: Fn(usize, usize) + Sync,
-        {
-            let function = unsafe { &*(context as *const F) };
-            function(thread_index, compute_domain_index);
-        }
-
-        // SAFETY: `function` outlives the dispatch because we join before returning, and the
-        // enclosing `scope` holds the pool by `&mut`, so no other dispatch overlaps this one.
-        unsafe {
-            let context = &function as *const F as *mut c_void;
-            let generation = self.pool.unsafe_for_threads(trampoline::<F>, context);
-            self.pool.unsafe_join(generation);
-        }
-    }
-}
-
-/// Operation object for parallel task execution with static load balancing.
-pub struct ForNOperation<'a, F>
-where
-    F: Fn(Prong) + Sync,
-{
-    pool: &'a mut ThreadPool,
-    n: usize,
-    function: F,
-}
-
-impl<'a, F> Drop for ForNOperation<'a, F>
-where
-    F: Fn(Prong) + Sync,
-{
-    fn drop(&mut self) {
-        extern "C" fn trampoline<F>(
-            ctx: *mut c_void,
-            task_index: usize,
-            thread_index: usize,
-            compute_domain_index: usize,
-        ) where
-            F: Fn(Prong) + Sync,
-        {
-            let f = unsafe { &*(ctx as *const F) };
-            f(Prong {
-                task_index,
-                thread_index,
-                compute_domain_index,
-            });
-        }
-
-        unsafe {
-            let ctx = &self.function as *const F as *mut c_void;
-            fu_pool_for_n(self.pool.inner, self.n, trampoline::<F>, ctx);
-        }
-    }
-}
-
-/// Operation object for parallel task execution with dynamic work-stealing.
-pub struct ForNDynamicOperation<'a, F>
-where
-    F: Fn(Prong) + Sync,
-{
-    pool: &'a mut ThreadPool,
-    n: usize,
-    function: F,
-}
-
-impl<'a, F> Drop for ForNDynamicOperation<'a, F>
-where
-    F: Fn(Prong) + Sync,
-{
-    fn drop(&mut self) {
-        extern "C" fn trampoline<F>(
-            ctx: *mut c_void,
-            task_index: usize,
-            thread_index: usize,
-            compute_domain_index: usize,
-        ) where
-            F: Fn(Prong) + Sync,
-        {
-            let f = unsafe { &*(ctx as *const F) };
-            f(Prong {
-                task_index,
-                thread_index,
-                compute_domain_index,
-            });
-        }
-
-        unsafe {
-            let ctx = &self.function as *const F as *mut c_void;
-            fu_pool_for_n_dynamic(self.pool.inner, self.n, trampoline::<F>, ctx);
-        }
-    }
-}
-
-/// Operation object for parallel slice execution.
-pub struct ForSlicesOperation<'a, F>
-where
-    F: Fn(Prong, usize) + Sync,
-{
-    pool: &'a mut ThreadPool,
-    n: usize,
-    function: F,
-}
-
-impl<'a, F> Drop for ForSlicesOperation<'a, F>
-where
-    F: Fn(Prong, usize) + Sync,
-{
-    fn drop(&mut self) {
-        extern "C" fn trampoline<F>(
-            ctx: *mut c_void,
-            first_index: usize,
-            count: usize,
-            thread_index: usize,
-            compute_domain_index: usize,
-        ) where
-            F: Fn(Prong, usize) + Sync,
-        {
-            let f = unsafe { &*(ctx as *const F) };
-            f(
-                Prong {
-                    task_index: first_index,
-                    thread_index,
-                    compute_domain_index,
-                },
-                count,
-            );
-        }
-
-        unsafe {
-            let ctx = &self.function as *const F as *mut c_void;
-            fu_pool_for_slices(self.pool.inner, self.n, trampoline::<F>, ctx);
-        }
-    }
 }
 
 /// Spawns a pool with the specified number of threads.
@@ -4895,46 +4972,6 @@ where
     });
 }
 
-/// Splits a range of tasks into fair-sized chunks for parallel distribution.
-///
-/// The first `(tasks % threads)` chunks have size `ceil(tasks / threads)`.
-/// The remaining chunks have size `floor(tasks / threads)`.
-///
-/// This ensures optimal load balancing across threads with minimal size variance.
-/// See: <https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/>
-#[derive(Debug, Clone)]
-pub struct IndexedSplit {
-    quotient: usize,
-    remainder: usize,
-}
-
-impl IndexedSplit {
-    /// Creates a new indexed split for distributing tasks across threads.
-    ///
-    /// # Arguments
-    ///
-    /// * `tasks_count` - Total number of tasks to distribute
-    /// * `threads_count` - Number of threads to distribute across (must be > 0)
-    ///
-    /// # Panics
-    ///
-    /// Panics if `threads_count` is zero.
-    pub fn new(tasks_count: usize, threads_count: usize) -> Self {
-        assert!(threads_count > 0, "Threads count must be greater than zero");
-        Self {
-            quotient: tasks_count / threads_count,
-            remainder: tasks_count % threads_count,
-        }
-    }
-
-    /// Returns the range for a specific thread index.
-    pub fn get(&self, thread_index: usize) -> core::ops::Range<usize> {
-        let begin = self.quotient * thread_index + thread_index.min(self.remainder);
-        let count = self.quotient + if thread_index < self.remainder { 1 } else { 0 };
-        begin..(begin + count)
-    }
-}
-
 #[cfg(test)]
 #[cfg(feature = "std")]
 mod tests {
@@ -4947,7 +4984,7 @@ mod tests {
 
     #[inline]
     fn hw_threads() -> usize {
-        count_logical_cores().max(1)
+        logical_cores_count().max(1)
     }
 
     #[cfg_attr(miri, ignore)]
@@ -4976,7 +5013,7 @@ mod tests {
 
         // Whatever we can construct, we can only construct because a capability was compiled in.
         if !comptime.contains(Capabilities::COMPTIME_COLOCATED_POOLS) {
-            assert_eq!(count_compute_domains(), 1);
+            assert_eq!(compute_domains_count(), 1);
         }
 
         // A machine cannot report NUMA nodes to a build that never learned to look for them.
@@ -5000,10 +5037,10 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn system_info() {
-        let cores = count_logical_cores();
-        let numa = count_memory_domains();
-        let compute_domains = count_compute_domains();
-        let qos = count_compute_levels();
+        let cores = logical_cores_count();
+        let numa = memory_domains_count();
+        let compute_domains = compute_domains_count();
+        let qos = compute_levels_count();
 
         std::println!(
             "Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}"
@@ -5014,10 +5051,10 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn topology_axes() {
-        let compute_domains = count_compute_domains();
-        let compute_levels = count_compute_levels();
-        let memory_domains = count_memory_domains();
-        let memory_levels = count_memory_levels();
+        let compute_domains = compute_domains_count();
+        let compute_levels = compute_levels_count();
+        let memory_domains = memory_domains_count();
+        let memory_levels = memory_levels_count();
         assert!(compute_domains > 0 && memory_domains > 0);
 
         // Levels are dense ranks over domains, so they can never outnumber them.
@@ -5047,8 +5084,8 @@ mod tests {
     #[test]
     fn spawn_and_basic_info() {
         let pool = spawn(2);
-        assert_eq!(pool.threads(), 2);
-        assert!(pool.compute_domains() > 0);
+        assert_eq!(pool.threads_count(), 2);
+        assert!(pool.compute_domains_count() > 0);
     }
 
     #[cfg_attr(miri, ignore)]
@@ -5071,12 +5108,12 @@ mod tests {
     #[test]
     fn per_compute_domain_pools() {
         // One pool per compute_domain, each pinned to its node; drive them from this thread.
-        let compute_domains = count_compute_domains();
+        let compute_domains = compute_domains_count();
         assert!(compute_domains >= 1);
 
         let mut pools: Vec<ThreadPool> = (0..compute_domains)
             .map(|c| {
-                let cores = count_logical_cores_in(ComputeDomain(c)).max(1);
+                let cores = logical_cores_count_in(ComputeDomain(c)).max(1);
                 ThreadPool::try_spawn_on(c, cores, CallerExclusivity::Exclusive)
                     .expect("failed to spawn per-compute_domain pool")
             })
@@ -5088,7 +5125,7 @@ mod tests {
             pool.broadcast(|_thread_index, _compute_domain_index| {
                 counter.fetch_add(1, Ordering::Relaxed);
             });
-            assert_eq!(counter.load(Ordering::Relaxed), pool.threads());
+            assert_eq!(counter.load(Ordering::Relaxed), pool.threads_count());
         }
 
         // Out-of-range compute_domain must fail cleanly, not panic.
@@ -5134,7 +5171,7 @@ mod tests {
         pool.broadcast(|_thread_index, _compute_domain_index| {
             counter.fetch_add(1, Ordering::Relaxed);
         });
-        assert_eq!(counter.load(Ordering::Relaxed), pool.threads());
+        assert_eq!(counter.load(Ordering::Relaxed), pool.threads_count());
     }
 
     #[cfg_attr(miri, ignore)]
@@ -5320,7 +5357,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_allocator_creation() {
-        let numa_count = count_memory_domains();
+        let numa_count = memory_domains_count();
         assert!(numa_count > 0, "System should have at least one NUMA node");
 
         // Test valid NUMA node
@@ -5517,6 +5554,84 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
+    fn pinned_vec_iterators() {
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let mut vec = PinnedVec::<i32>::new_in(allocator);
+        for i in 0..5 {
+            vec.push(i).expect("Failed to push");
+        }
+
+        // Test immutable iterator
+        let collected: Vec<i32> = vec.iter().copied().collect();
+        let expected = Vec::from([0, 1, 2, 3, 4]);
+        assert_eq!(collected, expected);
+
+        // Test mutable iterator
+        for value in vec.iter_mut() {
+            *value *= 2;
+        }
+        assert_eq!(vec[0], 0);
+        assert_eq!(vec[1], 2);
+        assert_eq!(vec[2], 4);
+        assert_eq!(vec[3], 6);
+        assert_eq!(vec[4], 8);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn pinned_vec_slices() {
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let mut vec = PinnedVec::<i32>::new_in(allocator);
+        for i in 0..5 {
+            vec.push(i).expect("Failed to push");
+        }
+
+        // Test as_slice
+        let slice = vec.as_slice();
+        assert_eq!(slice.len(), 5);
+        assert_eq!(slice[2], 2);
+
+        // Test as_mut_slice
+        let mut_slice = vec.as_mut_slice();
+        mut_slice[2] = 99;
+        assert_eq!(vec[2], 99);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn pinned_vec_growth() {
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let mut vec = PinnedVec::<i32>::new_in(allocator);
+
+        // Push many elements to test growth
+        for i in 0..100 {
+            vec.push(i).expect("Failed to push");
+        }
+
+        assert_eq!(vec.len(), 100);
+        for i in 0..100 {
+            assert_eq!(vec[i], i as i32);
+        }
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn pinned_vec_invalid_memory_domain() {
+        let numa_count = memory_domains_count();
+        let allocator = PinnedAllocator::new(MemoryDomain(numa_count + 1));
+        assert!(allocator.is_none());
+    }
+
+    #[test]
+    fn pinned_vec_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+
+        assert_send::<PinnedVec<i32>>();
+        assert_sync::<PinnedVec<i32>>();
+    }
+
+    #[test]
     fn parallel_slice_static_for_each() {
         let mut pool = spawn(hw_threads());
         let data: Vec<usize> = (0..512).collect();
@@ -5657,94 +5772,6 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn scratch_reduction_collects_sum() {
-        let mut pool = spawn(hw_threads());
-        let data: Vec<usize> = (0..1024).collect();
-        let mut scratch = vec![0usize; pool.threads()];
-
-        (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .fold_with_scratch(scratch.as_mut_slice(), |slot, value, _| {
-                *slot += *value;
-            });
-
-        let total: usize = scratch.iter().sum();
-        let expected: usize = data.iter().sum();
-        assert_eq!(total, expected);
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn pinned_vec_iterators() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
-        let mut vec = PinnedVec::<i32>::new_in(allocator);
-        for i in 0..5 {
-            vec.push(i).expect("Failed to push");
-        }
-
-        // Test immutable iterator
-        let collected: Vec<i32> = vec.iter().copied().collect();
-        let expected = Vec::from([0, 1, 2, 3, 4]);
-        assert_eq!(collected, expected);
-
-        // Test mutable iterator
-        for value in vec.iter_mut() {
-            *value *= 2;
-        }
-        assert_eq!(vec[0], 0);
-        assert_eq!(vec[1], 2);
-        assert_eq!(vec[2], 4);
-        assert_eq!(vec[3], 6);
-        assert_eq!(vec[4], 8);
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn pinned_vec_slices() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
-        let mut vec = PinnedVec::<i32>::new_in(allocator);
-        for i in 0..5 {
-            vec.push(i).expect("Failed to push");
-        }
-
-        // Test as_slice
-        let slice = vec.as_slice();
-        assert_eq!(slice.len(), 5);
-        assert_eq!(slice[2], 2);
-
-        // Test as_mut_slice
-        let mut_slice = vec.as_mut_slice();
-        mut_slice[2] = 99;
-        assert_eq!(vec[2], 99);
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn pinned_vec_growth() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
-        let mut vec = PinnedVec::<i32>::new_in(allocator);
-
-        // Push many elements to test growth
-        for i in 0..100 {
-            vec.push(i).expect("Failed to push");
-        }
-
-        assert_eq!(vec.len(), 100);
-        for i in 0..100 {
-            assert_eq!(vec[i], i as i32);
-        }
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn pinned_vec_invalid_memory_domain() {
-        let numa_count = count_memory_domains();
-        let allocator = PinnedAllocator::new(MemoryDomain(numa_count + 1));
-        assert!(allocator.is_none());
-    }
-
-    #[test]
     fn sync_const_ptr() {
         let data = Vec::from([1, 2, 3, 4, 5]);
         let sync_ptr = SyncConstPtr::new(data.as_ptr());
@@ -5765,15 +5792,6 @@ mod tests {
 
         assert_send::<SyncConstPtr<i32>>();
         assert_sync::<SyncConstPtr<i32>>();
-    }
-
-    #[test]
-    fn pinned_vec_send_sync() {
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-
-        assert_send::<PinnedVec<i32>>();
-        assert_sync::<PinnedVec<i32>>();
     }
 
     #[test]
@@ -5808,11 +5826,30 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
+    fn scratch_reduction_collects_sum() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<usize> = (0..1024).collect();
+        let mut scratch = vec![0usize; pool.threads_count()];
+
+        (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .fold_with_scratch(scratch.as_mut_slice(), |slot, value, _| {
+                *slot += *value;
+            });
+
+        let total: usize = scratch.iter().sum();
+        let expected: usize = data.iter().sum();
+        assert_eq!(total, expected);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
     fn reduce_with_scratch_sum() {
         let mut pool = spawn(hw_threads());
         let data: Vec<u64> = (0..1024).collect();
         let mut scratch: Vec<CacheAligned<u64>> =
-            (0..pool.threads()).map(|_| CacheAligned(0)).collect();
+            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 
         let total = (&data[..])
             .into_par_iter()
@@ -5832,7 +5869,7 @@ mod tests {
         let mut pool = spawn(hw_threads());
         let data: Vec<usize> = (0..1000).collect();
         let mut scratch: Vec<CacheAligned<usize>> =
-            (0..pool.threads()).map(|_| CacheAligned(0)).collect();
+            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 
         let total = (&data[..])
             .into_par_iter()
@@ -5941,6 +5978,146 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
+    fn try_fold_with_scratch_success() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..1000).collect();
+        let mut scratch: Vec<CacheAligned<u64>> =
+            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
+
+        let result = (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .try_fold_with_scratch(scratch.as_mut_slice(), |acc, &value, _| {
+                acc.0 += value;
+                Ok::<(), &str>(())
+            });
+
+        assert!(result.is_ok());
+        let total: u64 = scratch.iter().map(|x| x.0).sum();
+        assert_eq!(total, data.iter().sum());
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn try_fold_with_scratch_early_exit() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..1000).collect();
+        let mut scratch: Vec<CacheAligned<u64>> =
+            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
+
+        let result = (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .try_fold_with_scratch(scratch.as_mut_slice(), |acc, &value, _| {
+                if value >= 500 {
+                    Err(value)
+                } else {
+                    acc.0 += value;
+                    Ok(())
+                }
+            });
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err >= 500 && err < 1000);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn find_first_deterministic() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..1000).collect();
+        // Find first even number >= 100
+        let found = (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .find_first(|&&x| x >= 100 && x % 2 == 0);
+        assert_eq!(found, Some(&100));
+    }
+
+    /// The old implementation decided from a `fetch_min` and stored under a separate lock, so a
+    /// higher index could overwrite a lower one. It failed roughly seven runs in twelve; one pass is
+    /// not evidence, so repeat until the race would have had every chance to show.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn find_first_not_found() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..100).collect();
+        let found = (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .find_first(|&&x| x >= 200);
+        assert_eq!(found, None);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn find_first_last_deterministic_under_contention() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..10_000).collect();
+        for _ in 0..64 {
+            let first = (&data[..])
+                .into_par_iter()
+                .with_pool(&mut pool)
+                .find_first(|&&x| x >= 100 && x % 2 == 0);
+            assert_eq!(
+                first,
+                Some(&100),
+                "find_first must return the lowest matching index"
+            );
+
+            let last = (&data[..])
+                .into_par_iter()
+                .with_pool(&mut pool)
+                .find_last(|&&x| x <= 9_000 && x % 2 == 0);
+            assert_eq!(
+                last,
+                Some(&9_000),
+                "find_last must return the highest matching index"
+            );
+        }
+    }
+
+    /// Index zero is a real index: `find_last` must not reject it against an empty slot.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn find_last_accepts_index_zero() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..1_000).collect();
+        let last = (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .find_last(|&&x| x == 0);
+        assert_eq!(last, Some(&0));
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn find_last_deterministic() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..1000).collect();
+        // Find last even number < 900
+        let found = (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .find_last(|&&x| x < 900 && x % 2 == 0);
+        assert_eq!(found, Some(&898));
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn find_last_not_found() {
+        let mut pool = spawn(hw_threads());
+        let data: Vec<u64> = (0..100).collect();
+        let found = (&data[..])
+            .into_par_iter()
+            .with_pool(&mut pool)
+            .find_last(|&&x| x >= 200);
+        assert_eq!(found, None);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
     fn find_any_found() {
         let mut pool = spawn(hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -5972,56 +6149,6 @@ mod tests {
             .into_par_iter()
             .with_pool(&mut pool)
             .find_any(|&&_x| true);
-        assert_eq!(found, None);
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn find_first_deterministic() {
-        let mut pool = spawn(hw_threads());
-        let data: Vec<u64> = (0..1000).collect();
-        // Find first even number >= 100
-        let found = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .find_first(|&&x| x >= 100 && x % 2 == 0);
-        assert_eq!(found, Some(&100));
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn find_first_not_found() {
-        let mut pool = spawn(hw_threads());
-        let data: Vec<u64> = (0..100).collect();
-        let found = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .find_first(|&&x| x >= 200);
-        assert_eq!(found, None);
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn find_last_deterministic() {
-        let mut pool = spawn(hw_threads());
-        let data: Vec<u64> = (0..1000).collect();
-        // Find last even number < 900
-        let found = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .find_last(|&&x| x < 900 && x % 2 == 0);
-        assert_eq!(found, Some(&898));
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn find_last_not_found() {
-        let mut pool = spawn(hw_threads());
-        let data: Vec<u64> = (0..100).collect();
-        let found = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .find_last(|&&x| x >= 200);
         assert_eq!(found, None);
     }
 
@@ -6095,52 +6222,6 @@ mod tests {
             .with_pool(&mut pool)
             .all(|&&_x| false);
         assert!(result); // vacuous truth
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn try_fold_with_scratch_success() {
-        let mut pool = spawn(hw_threads());
-        let data: Vec<u64> = (0..1000).collect();
-        let mut scratch: Vec<CacheAligned<u64>> =
-            (0..pool.threads()).map(|_| CacheAligned(0)).collect();
-
-        let result = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .try_fold_with_scratch(scratch.as_mut_slice(), |acc, &value, _| {
-                acc.0 += value;
-                Ok::<(), &str>(())
-            });
-
-        assert!(result.is_ok());
-        let total: u64 = scratch.iter().map(|x| x.0).sum();
-        assert_eq!(total, data.iter().sum());
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn try_fold_with_scratch_early_exit() {
-        let mut pool = spawn(hw_threads());
-        let data: Vec<u64> = (0..1000).collect();
-        let mut scratch: Vec<CacheAligned<u64>> =
-            (0..pool.threads()).map(|_| CacheAligned(0)).collect();
-
-        let result = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .try_fold_with_scratch(scratch.as_mut_slice(), |acc, &value, _| {
-                if value >= 500 {
-                    Err(value)
-                } else {
-                    acc.0 += value;
-                    Ok(())
-                }
-            });
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err >= 500 && err < 1000);
     }
 
     #[cfg_attr(miri, ignore)]

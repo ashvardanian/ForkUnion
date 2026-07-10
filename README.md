@@ -115,9 +115,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 Free functions report the [hardware topology](#hardware-topology), to size and place work:
 
 ```rust
-for domain in 0..fu::count_compute_domains() {
+for domain in 0..fu::compute_domains_count() {
     println!("domain {domain}: {} cores, level {}, allocate on memory domain {}",
-        fu::count_logical_cores_in(domain), fu::compute_level_in(domain),
+        fu::logical_cores_count_in(domain), fu::compute_level_in(domain),
         fu::local_memory_of(domain));
 }
 ```
@@ -158,7 +158,7 @@ namespace fu = ashvardanian::forkunion;
 
 int main() {
     alignas(fu::default_alignment_k) fu::basic_pool_t pool;
-    if (!pool.try_spawn(fu::count_allowed_cores())) {
+    if (!pool.try_spawn(fu::allowed_cores_count())) {
         std::fprintf(stderr, "Failed to fork the threads\n");
         return EXIT_FAILURE;
     }
@@ -286,7 +286,7 @@ void hello_callback(void *context, size_t thread, size_t compute_domain) {
 
 int main(void) {
     fu_pool_t *pool = fu_pool_new("my_pool");
-    if (!pool || !fu_pool_spawn(pool, fu_count_logical_cores(), fu_caller_inclusive_k))
+    if (!pool || !fu_pool_spawn(pool, fu_logical_cores_count(), fu_caller_inclusive_k))
         return 1;
 
     fu_pool_for_threads(pool, hello_callback, NULL);
@@ -298,9 +298,9 @@ int main(void) {
 The `fu_`-prefixed functions report the [hardware topology](#hardware-topology), to size and place work:
 
 ```c
-for (size_t domain = 0; domain < fu_count_compute_domains(); ++domain) {
+for (size_t domain = 0; domain < fu_compute_domains_count(); ++domain) {
     printf("domain %zu: %zu cores, level %zu, allocate on memory domain %zu\n",
-           domain, fu_count_logical_cores_in(domain), fu_compute_level_in(domain),
+           domain, fu_logical_cores_count_in(domain), fu_compute_level_in(domain),
            fu_local_memory_of(domain));
 }
 ```
@@ -487,8 +487,8 @@ Compute levels grow with performance, as the scheduler ranks big cores above lit
 
 |                   | Compute axis            | Memory axis            |
 | ----------------- | ----------------------- | ---------------------- |
-| Count domains     | `count_compute_domains` | `count_memory_domains` |
-| Count levels      | `count_compute_levels`  | `count_memory_levels`  |
+| Count domains     | `compute_domains_count` | `memory_domains_count` |
+| Count levels      | `compute_levels_count`  | `memory_levels_count`  |
 | Level of a domain | `compute_level_in`      | `memory_level_in`      |
 | Faster means      | __higher__              | __lower__              |
 
@@ -507,7 +507,7 @@ Where no topology is harvested, every query degrades to a single compute domain 
 ### Non-Uniform Memory Access (NUMA)
 
 Handling NUMA isn't trivial and is only supported on Linux with the help of the [`libnuma` library](https://github.com/numactl/numactl).
-It provides the `mbind` interface to pin specific memory regions to particular memory domains, as well as helper functions to query the system topology, which are exposed via the `forkunion::numa_topology` template.
+It provides the `mbind` interface to pin specific memory regions to particular memory domains, as well as helper functions to query the system topology, which are exposed via the `forkunion::machine_topology` template.
 
 Let's say you are working on a Big Data application, like brute-forcing Vector Search using the [SimSIMD](https://github.com/ashvardanian/simsimd) library on a 2 dual-socket CPU system, similar to [USearch](https://github.com/unum-cloud/usearch/pulls).
 The first part of that program may be responsible for sharding the incoming stream of data between distinct memory regions.
@@ -516,7 +516,7 @@ That part, in our simple example will be single-threaded:
 ```cpp
 #include <vector> // `std::vector`
 #include <span> // `std::span`
-#include <forkunion.hpp> // `linux_numa_allocator`, `numa_topology_t`, `distributed_pool_t`
+#include <forkunion.hpp> // `linux_numa_allocator`, `machine_topology_t`, `distributed_pool_t`
 #include <simsimd/simsimd.h> // `simsimd_f32_cos`, `simsimd_distance_t`
 
 namespace fu = ashvardanian::forkunion;
@@ -525,7 +525,7 @@ using floats_alloc_t = fu::linux_numa_allocator<float>;
 constexpr std::size_t dimensions = 768; /// Matches most BERT-like models
 static std::vector<float, floats_alloc_t> first_half(floats_alloc_t(0));
 static std::vector<float, floats_alloc_t> second_half(floats_alloc_t(1));
-static fu::numa_topology_t numa_topology;
+static fu::machine_topology_t machine_topology;
 static fu::distributed_pool_t distributed_pool;
 
 /// Dynamically shards incoming vectors across 2 nodes in a round-robin fashion.
@@ -563,9 +563,9 @@ search_result_t search(std::span<float, dimensions> query) {
 
     bool const need_to_spawn_threads = distributed_pool.threads_count() == 0;
     if (need_to_spawn_threads) {
-        assert(numa_topology.try_harvest() && "Failed to harvest NUMA topology");
-        assert(numa_topology.nodes_count() == 2 && "Expected exactly 2 NUMA nodes");
-        assert(distributed_pool.try_spawn(numa_topology, sizeof(search_result_t)) && "Failed to spawn NUMA pools");
+        assert(machine_topology.try_harvest() && "Failed to harvest NUMA topology");
+        assert(machine_topology.memory_domains_count() == 2 && "Expected exactly 2 NUMA nodes");
+        assert(distributed_pool.try_spawn(machine_topology, sizeof(search_result_t)) && "Failed to spawn NUMA pools");
     }
 
     search_result_t result;

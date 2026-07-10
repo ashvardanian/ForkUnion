@@ -11,6 +11,66 @@ namespace forkunion {
 
 #if FU_WITH_ASM_YIELDS_ // We need inline assembly support
 
+#if FU_DETECT_ARCH_X86_64_
+
+/** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
+struct x86_pause_t {
+    inline void operator()() const noexcept { __asm__ __volatile__("pause"); }
+};
+
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("waitpkg"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("waitpkg")
+#endif
+
+/**
+ *  @brief On x86 uses the `TPAUSE` instruction to yield for 1 microsecond if `WAITPKG` is supported.
+ *
+ *  There are several newer ways to yield on x86, but they may require different privileges:
+ *  - `MONITOR` and `MWAIT` in SSE - used for power management, require RING 0 privilege.
+ *  - `UMONITOR` and `UMWAIT` in `WAITPKG` - are the user-space variants.
+ *  - `MWAITX` in `MONITORX` ISA on AMD - used for power management, requires RING 0 privilege.
+ *  - `TPAUSE` in `WAITPKG` - time-based pause instruction, available in RING 3.
+ */
+struct x86_tpause_t {
+    inline void operator()() const noexcept {
+        // Around 3K cycles per microsecond
+        constexpr std::uint64_t cycles_per_us = 3ull * 1000ull;
+        // The deepest "C0.2" state
+        constexpr std::uint32_t sleep_level = 0;
+
+        // Now we need to fetch the current time in cycles, add a delay, and sleep until that time is reached.
+        // Using intrinsics from `<x86intrin.h>` it may look like:
+        //
+        //      std::uint64_t const deadline = __rdtsc() + cycles_per_us;
+        //      _tpause(sleep_level, deadline);
+        //
+        // To avoid includes, using inline Assembly:
+        std::uint32_t rdtsc_lo, rdtsc_hi;
+        __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
+        std::uint64_t const deadline = ((static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo) + cycles_per_us;
+        std::uint32_t const deadline_lo = static_cast<std::uint32_t>(deadline);
+        std::uint32_t const deadline_hi = static_cast<std::uint32_t>(deadline >> 32);
+        __asm__ __volatile__(               //
+            "mov    %[lo], %%eax\n\t"       // deadline_lo
+            "mov    %[hi], %%edx\n\t"       // deadline_hi
+            ".byte  0x66, 0x0F, 0xAE, 0xF3" // TPAUSE EBX
+            :
+            : [lo] "r"(deadline_lo), [hi] "r"(deadline_hi), "b"(sleep_level)
+            : "eax", "edx", "memory", "cc");
+    }
+};
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+
+#endif // FU_DETECT_ARCH_X86_64_
+
 #if FU_DETECT_ARCH_ARM64_
 
 /** @brief On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
@@ -71,64 +131,6 @@ struct arm64_wfet_t {
 #endif
 
 #endif // FU_DETECT_ARCH_ARM64_
-
-#if FU_DETECT_ARCH_X86_64_
-
-/** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
-struct x86_pause_t {
-    inline void operator()() const noexcept { __asm__ __volatile__("pause"); }
-};
-
-#if defined(__clang__)
-#pragma clang attribute push(__attribute__((target("waitpkg"))), apply_to = function)
-#elif defined(__GNUC__)
-#pragma GCC push_options
-#pragma GCC target("waitpkg")
-#endif
-
-/**
- *  @brief On x86 uses the `TPAUSE` instruction to yield for 1 microsecond if `WAITPKG` is supported.
- *
- *  There are several newer ways to yield on x86, but they may require different privileges:
- *  - `MONITOR` and `MWAIT` in SSE - used for power management, require RING 0 privilege.
- *  - `UMONITOR` and `UMWAIT` in `WAITPKG` - are the user-space variants.
- *  - `MWAITX` in `MONITORX` ISA on AMD - used for power management, requires RING 0 privilege.
- *  - `TPAUSE` in `WAITPKG` - time-based pause instruction, available in RING 3.
- */
-struct x86_tpause_t {
-    inline void operator()() const noexcept {
-        constexpr std::uint64_t cycles_per_us = 3ull * 1000ull; // ? Around 3K cycles per microsecond
-        constexpr std::uint32_t sleep_level = 0;                // ? The deepest "C0.2" state
-
-        // Now we need to fetch the current time in cycles, add a delay, and sleep until that time is reached.
-        // Using intrinsics from `<x86intrin.h>` it may look like:
-        //
-        //      std::uint64_t const deadline = __rdtsc() + cycles_per_us;
-        //      _tpause(sleep_level, deadline);
-        //
-        // To avoid includes, using inline Assembly:
-        std::uint32_t rdtsc_lo, rdtsc_hi;
-        __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
-        std::uint64_t const deadline = ((static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo) + cycles_per_us;
-        std::uint32_t const deadline_lo = static_cast<std::uint32_t>(deadline);
-        std::uint32_t const deadline_hi = static_cast<std::uint32_t>(deadline >> 32);
-        __asm__ __volatile__(               //
-            "mov    %[lo], %%eax\n\t"       // deadline_lo
-            "mov    %[hi], %%edx\n\t"       // deadline_hi
-            ".byte  0x66, 0x0F, 0xAE, 0xF3" // TPAUSE EBX
-            :
-            : [lo] "r"(deadline_lo), [hi] "r"(deadline_hi), "b"(sleep_level)
-            : "eax", "edx", "memory", "cc");
-    }
-};
-
-#if defined(__clang__)
-#pragma clang attribute pop
-#elif defined(__GNUC__)
-#pragma GCC pop_options
-#endif
-
-#endif // FU_DETECT_ARCH_X86_64_
 
 #if FU_DETECT_ARCH_RISC5_
 
@@ -245,7 +247,15 @@ inline capabilities_t ram_capabilities() noexcept {
     return caps;
 }
 
-#pragma region - Compile-Time Capabilities
+/**
+ *  @brief Which features this machine turned out to offer, probing the CPU and the memory system.
+ *  @sa `comptime_capabilities` for what this build is able to ask for in the first place.
+ */
+inline capabilities_t runtime_capabilities() noexcept {
+    return static_cast<capabilities_t>(cpu_capabilities() | ram_capabilities());
+}
+
+#pragma region Compile Time Capabilities
 
 /**
  *  @brief Which kernel facilities this translation unit was compiled to use, one bit per `FU_WITH_*`.
@@ -271,15 +281,7 @@ constexpr capabilities_t comptime_capabilities() noexcept {
         (FU_WITH_COLOCATED_POOLS ? static_cast<unsigned>(capability_comptime_colocated_pools_k) : 0u));
 }
 
-/**
- *  @brief Which features this machine turned out to offer, probing the CPU and the memory system.
- *  @sa `comptime_capabilities` for what this build is able to ask for in the first place.
- */
-inline capabilities_t runtime_capabilities() noexcept {
-    return static_cast<capabilities_t>(cpu_capabilities() | ram_capabilities());
-}
-
-#pragma endregion - Compile - Time Capabilities
+#pragma endregion Compile Time Capabilities
 
 } // namespace forkunion
 } // namespace ashvardanian

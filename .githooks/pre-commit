@@ -96,6 +96,23 @@ while IFS= read -r file; do
     fi
 done < <(git diff --cached --name-only --diff-filter=ACM)
 
+# A `#pragma region` label must carry no dash. clang-format mis-tokenises `#pragma region - Name`
+# (it reflows around the `-`), so the region markers drift out of place on the next format run. Keep
+# the label a plain phrase: `#pragma region Name`.
+while IFS= read -r file; do
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc) ;;
+    *) continue ;;
+    esac
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    dashed_regions=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*#pragma[[:space:]]+(end)?region\b[^-]*-' || true)
+    if [ -n "$dashed_regions" ]; then
+        echo "pre-commit: $file has a dash in a #pragma region label - clang-format mishandles it, drop the dash:"
+        printf '%s\n' "$dashed_regions" | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
 # C/C++ - changed lines must satisfy .clang-format. `git clang-format --staged --diff` restricts to the
 # staged hunks, so legacy formatting is left untouched.
 if command -v git-clang-format > /dev/null 2>&1 && command -v clang-format > /dev/null 2>&1; then
