@@ -21,12 +21,43 @@ project(
 # Control strict interface warnings for consumers
 option(FORKUNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
 
-# Control NUMA enablement: AUTO, ON, OFF
+# Each kernel facility the library can use is a tri-state: AUTO, ON, or OFF.
+#
+# AUTO is the default and defines *nothing*. The header derives it, from the platform and from whether <numa.h> is there
+# to include. That keeps the derivation rules in exactly one place, instead of spread across CMakeLists.txt, build.rs,
+# and build.zig, where they would drift.
+#
+# ON and OFF pass `-DFU_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say - is
+# rejected by an `#error` in `types.hpp`, not by a check duplicated here.
+set(FORKUNION_CAPABILITIES
+    TOPOLOGY # ? Enumerate cores, compute domains, and memory domains
+    TOPOLOGY_CACHES # ? See which cores share a cache
+    TOPOLOGY_METRICS # ? Read inter-domain distance and bandwidth
+    THREAD_PINNING # ? Bind a thread to a set of cores
+    THREAD_QOS # ? Hint a thread's core class at creation
+    THREAD_SCHED_CLASS # ? Change another thread's scheduling class
+    NUMA_MEMORY # ? Place pages on a chosen memory domain
+    HUGE_PAGES # ? Request pages larger than the base page
+)
+foreach (capability IN LISTS FORKUNION_CAPABILITIES)
+    set(FORKUNION_WITH_${capability}
+        "AUTO"
+        CACHE STRING "ForkUnion ${capability} support: AUTO, ON, or OFF"
+    )
+    set_property(CACHE FORKUNION_WITH_${capability} PROPERTY STRINGS "AUTO;ON;OFF")
+endforeach ()
+
+# Deprecated, and honored only so an out-of-tree build that still sets it keeps working. It used to mean five things at
+# once; it now maps onto the one it mostly meant.
 set(FORKUNION_ENABLE_NUMA
     "AUTO"
-    CACHE STRING "NUMA support mode: AUTO, ON, or OFF"
+    CACHE STRING "Deprecated: use FORKUNION_WITH_NUMA_MEMORY"
 )
 set_property(CACHE FORKUNION_ENABLE_NUMA PROPERTY STRINGS "AUTO;ON;OFF")
+if (NOT FORKUNION_ENABLE_NUMA STREQUAL "AUTO" AND FORKUNION_WITH_NUMA_MEMORY STREQUAL "AUTO")
+    message(WARNING "FORKUNION_ENABLE_NUMA is deprecated; forwarding to FORKUNION_WITH_NUMA_MEMORY")
+    set(FORKUNION_WITH_NUMA_MEMORY ${FORKUNION_ENABLE_NUMA})
+endif ()
 
 # Enforce C++17 as the minimum standard for the project.
 set(PROJECT_CXX_STANDARD 17)
@@ -204,8 +235,7 @@ if (CPPCHECK_EXECUTABLE)
             --suppress=missingIncludeSystem --suppress=unusedFunction --suppress=unmatchedSuppression
             --suppress=ConfigurationNotChecked --suppress=knownConditionTrueFalse --suppress=shadowFunction
             --suppress=shadowVariable --suppress=useStlAlgorithm --suppress=noExplicitConstructor
-            -I${CMAKE_CURRENT_SOURCE_DIR}/include -DFU_ENABLE_NUMA=1 ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/c
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/c
         COMMENT "Running cppcheck static analysis"
     )
 endif ()
@@ -274,37 +304,49 @@ install(
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
-# NUMA selection logic controlled by FORKUNION_ENABLE_NUMA
-if (UNIX AND NOT APPLE) # Linux
-    # Find POSIX threads library
-    find_package(Threads)
-    # Find libNUMA
+# Turn the tri-states into compile definitions, and link whatever they imply.
+#
+# Note the asymmetry: we pass definitions only for the capabilities a caller pinned, but we link libnuma whenever it is
+# present. Over-linking a library the code never calls costs a DT_NEEDED entry that `--as-needed` drops; under-linking
+# one the header decided to `#include` costs a link error the caller cannot diagnose.
+find_package(Threads)
+if (Threads_FOUND)
+    target_link_libraries(forkunion INTERFACE Threads::Threads)
+endif ()
+
+set(NUMA_FOUND FALSE)
+if (UNIX AND NOT APPLE)
     find_library(NUMA_LIBRARY NAMES numa)
-    set(NUMA_FOUND FALSE)
-    if (NUMA_LIBRARY)
+    find_path(NUMA_INCLUDE_DIR NAMES numa.h)
+    if (NUMA_LIBRARY AND NUMA_INCLUDE_DIR)
         set(NUMA_FOUND TRUE)
+        target_link_libraries(forkunion INTERFACE ${NUMA_LIBRARY})
         message(STATUS "libNUMA found: ${NUMA_LIBRARY}")
     else ()
-        message(STATUS "libNUMA not found - NUMA-dependent features unavailable")
+        message(STATUS "libNUMA not found - the header will lower the capabilities that need it")
     endif ()
-
-    if (FORKUNION_ENABLE_NUMA STREQUAL "ON")
-        if (Threads_FOUND AND NUMA_FOUND)
-            target_link_libraries(forkunion INTERFACE ${NUMA_LIBRARY} Threads::Threads)
-            target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=1)
-        else ()
-            message(FATAL_ERROR "FORKUNION_ENABLE_NUMA=ON, but Threads or libnuma not found")
-        endif ()
-    elseif (FORKUNION_ENABLE_NUMA STREQUAL "AUTO")
-        if (Threads_FOUND AND NUMA_FOUND)
-            target_link_libraries(forkunion INTERFACE ${NUMA_LIBRARY} Threads::Threads)
-            target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=1)
-        else ()
-            target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=0)
-        endif ()
-    else () # OFF
-        target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=0)
-    endif ()
-else () # Non-Linux platforms
-    target_compile_definitions(forkunion INTERFACE FU_ENABLE_NUMA=0)
 endif ()
+
+# These four are the ones libnuma actually backs. Demanding any of them without it is an error we can catch now, with a
+# sentence, rather than at link time with a list of missing symbols.
+set(FORKUNION_LIBNUMA_CAPABILITIES TOPOLOGY TOPOLOGY_METRICS NUMA_MEMORY HUGE_PAGES)
+
+foreach (capability IN LISTS FORKUNION_CAPABILITIES)
+    set(mode ${FORKUNION_WITH_${capability}})
+    if (mode STREQUAL "AUTO")
+        continue() # ? Let the header decide, and say nothing
+    elseif (mode STREQUAL "ON")
+        if (UNIX
+            AND NOT APPLE
+            AND NOT NUMA_FOUND
+            AND capability IN_LIST FORKUNION_LIBNUMA_CAPABILITIES
+        )
+            message(FATAL_ERROR "FORKUNION_WITH_${capability}=ON, but libnuma was not found")
+        endif ()
+        target_compile_definitions(forkunion INTERFACE FU_WITH_${capability}=1)
+    elseif (mode STREQUAL "OFF")
+        target_compile_definitions(forkunion INTERFACE FU_WITH_${capability}=0)
+    else ()
+        message(FATAL_ERROR "FORKUNION_WITH_${capability} must be AUTO, ON, or OFF - got '${mode}'")
+    endif ()
+endforeach ()

@@ -33,7 +33,13 @@ cc = "1.2.40"
 [features]
 default = ["std"]
 std = []
-numa = []
+
+# Kernel facilities. Left alone, each is decided by `include/forkunion/types.hpp` from the platform
+# and from whether `<numa.h>` is present; these only override that. See `build.rs`.
+numa-memory = []                # ? Force page placement on a chosen memory domain
+huge-pages = []                 # ? Force pages larger than the base page
+portable = []                   # ? Force every optional capability off, leaving the STL pool
+numa = ["numa-memory"]          # ? Deprecated alias, kept for out-of-tree builds
 
 [profile.release]
 opt-level = 2     # Corresponds to -O2

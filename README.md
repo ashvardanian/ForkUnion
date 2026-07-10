@@ -45,7 +45,7 @@ On `caller_inclusive_k` pools the calling thread owes one slice of the work, whi
 The same rule shapes the RAII guard returned by `for_threads` and the `for_n` family: on exclusive pools the work starts at the guard's construction, while on inclusive pools it runs at `join` or destruction.
 
 On Linux, in C++, given the maturity and flexibility of the HPC ecosystem, it provides [NUMA extensions](#non-uniform-memory-access-numa).
-That includes the `linux_compute_domain_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory in a specific memory domain.
+That includes the `colocated_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory in a specific memory domain.
 Those are out-of-the-box compatible with the higher-level APIs.
 Most interestingly, for Big Data applications, a higher-level `distributed_pool` class will address and balance the work across all compute domains.
 
@@ -55,8 +55,9 @@ To integrate into your Rust project, add the following lines to Cargo.toml:
 
 ```toml
 [dependencies]
-forkunion = "2.3.1"                                     # default
-forkunion = { version = "2.3.1", features = ["numa"] }  # with NUMA support on Linux
+forkunion = "2.3.1"                                          # detect what the platform offers
+forkunion = { version = "2.3.1", features = ["portable"] }   # STL thread pool only
+forkunion = { version = "2.3.1", features = ["numa-memory"] } # require NUMA-aware allocations
 ```
 
 Or for the preview development version:
@@ -126,7 +127,8 @@ For convenience Rayon-style parallel iterators pull the `prelude` module and [ch
 
 ### Intro in C++
 
-To integrate into your C++ project, either just copy the `include/forkunion.hpp` file into your project, add a Git submodule, or CMake.
+To integrate into your C++ project, either copy the `include/` directory into your project, add a Git submodule, or CMake.
+The `forkunion.hpp` umbrella is a list of `#include`s; the implementation lives beside it in `include/forkunion/`, one header per concern, so a platform backend can be read or replaced on its own.
 For a Git submodule, run:
 
 ```bash
@@ -193,7 +195,10 @@ int main() {
 ```
 
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
-NUMA detection on Linux defaults to AUTO. Override with `-D FORKUNION_ENABLE_NUMA=ON` or `OFF`.
+Every kernel facility the library uses is detected by default, and each can be pinned with
+`-D FORKUNION_WITH_<CAPABILITY>=ON` or `OFF` - such as `FORKUNION_WITH_NUMA_MEMORY` or
+`FORKUNION_WITH_THREAD_PINNING`. Call `fu_comptime_capabilities_string()` to see what survived,
+and `fu_runtime_capabilities_string()` to see what the machine underneath actually offers.
 
 
 ### Intro in Zig
@@ -511,7 +516,7 @@ That part, in our simple example will be single-threaded:
 ```cpp
 #include <vector> // `std::vector`
 #include <span> // `std::span`
-#include <forkunion.hpp> // `linux_numa_allocator`, `numa_topology_t`, `linux_distributed_pool_t`
+#include <forkunion.hpp> // `linux_numa_allocator`, `numa_topology_t`, `distributed_pool_t`
 #include <simsimd/simsimd.h> // `simsimd_f32_cos`, `simsimd_distance_t`
 
 namespace fu = ashvardanian::forkunion;
@@ -521,7 +526,7 @@ constexpr std::size_t dimensions = 768; /// Matches most BERT-like models
 static std::vector<float, floats_alloc_t> first_half(floats_alloc_t(0));
 static std::vector<float, floats_alloc_t> second_half(floats_alloc_t(1));
 static fu::numa_topology_t numa_topology;
-static fu::linux_distributed_pool_t distributed_pool;
+static fu::distributed_pool_t distributed_pool;
 
 /// Dynamically shards incoming vectors across 2 nodes in a round-robin fashion.
 void append(std::span<float, dimensions> vector) {
@@ -731,37 +736,41 @@ That's a small enough job to truly pressure the communication primitives, rather
 The most popular parallel programming toolkit in the world is __OpenMP__, which also happens to be tightly integrated into modern __C/C++__ compilers.
 It's vastly superior to [Taskflow](https://github.com/taskflow/taskflow) and most other C++ libraries, so we prefer it as our baseline for performance comparisons:
 
-| Machine        | OpenMP (D) | OpenMP (S) | ForkUnion (D) | ForkUnion (S) |
-| :------------- | ---------: | ---------: | ------------: | ------------: |
-| 16x Intel SPR  |      18.9s |      12.4s |         16.8s |          8.7s |
-| 128x Intel SPR |   1m:40.6s |   1m:10.3s |         27.8s |         23.3s |
-| 12x Apple M2   | 1m:34.8s ² | 1m:25.9s ² |         31.5s |         20.3s |
-| 96x Graviton 4 |      32.2s |      20.8s |         39.8s |         26.0s |
+| Machine            | OpenMP (D) | OpenMP (S) | ForkUnion (D) | ForkUnion (S) |
+| :----------------- | ---------: | ---------: | ------------: | ------------: |
+| 16x Intel SPR      |      18.9s |      12.4s |         16.8s |          8.7s |
+| 128x Intel SPR     |   1m:40.6s |   1m:10.3s |         27.8s |         23.3s |
+| 12x Apple M2       | 1m:34.8s ² | 1m:25.9s ² |         31.5s |         20.3s |
+| 18x Apple M5 Pro ³ |   1m:53.4s |   1m:46.9s |         13.4s |          9.9s |
+| 96x Graviton 4     |      32.2s |      20.8s |         39.8s |         26.0s |
 
 The most popular parallel programming toolkit in the __Rust__ ecosystem is [__Rayon__](https://github.com/rayon-rs/rayon).
 It's vastly faster than [Tokio](https://github.com/tokio-rs/tokio), yet still loses to ForkUnion by an order of magnitude or more on larger systems:
 
-| Machine        |  Rayon (D) |  Rayon (S) |  ForkUnion (D) |  ForkUnion (S) |
-| :------------- | ---------: | ---------: | -------------: | -------------: |
-| 16x Intel SPR  |    🔄 45.4s |    🔄 32.1s | 18.1s, 🔄 22.4s | 12.4s, 🔄 12.9s |
-| 128x Intel SPR | 🔄 7m:41.2s | 🔄 6m:13.5s | 30.1s, 🔄 36.2s | 17.2s, 🔄 17.9s |
-| 12x Apple M2   | 🔄 1m:47.8s | 🔄 1m:07.1s | 24.5s, 🔄 26.8s | 11.0s, 🔄 11.8s |
-| 96x Graviton 4 | 🔄 2m:13.9s | 🔄 1m:35.6s |          18.9s |          10.1s |
+| Machine            |  Rayon (D) |  Rayon (S) |  ForkUnion (D) |  ForkUnion (S) |
+| :----------------- | ---------: | ---------: | -------------: | -------------: |
+| 16x Intel SPR      |    🔄 45.4s |    🔄 32.1s | 18.1s, 🔄 22.4s | 12.4s, 🔄 12.9s |
+| 128x Intel SPR     | 🔄 7m:41.2s | 🔄 6m:13.5s | 30.1s, 🔄 36.2s | 17.2s, 🔄 17.9s |
+| 12x Apple M2       | 🔄 1m:47.8s | 🔄 1m:07.1s | 24.5s, 🔄 26.8s | 11.0s, 🔄 11.8s |
+| 18x Apple M5 Pro ³ | 🔄 3m:57.9s | 🔄 3m:09.0s | 11.0s, 🔄 12.0s |   9.0s, 🔄 9.1s |
+| 96x Graviton 4     | 🔄 2m:13.9s | 🔄 1m:35.6s |          18.9s |          10.1s |
 
 __Zig__ has a less mature library ecosystem, featuring [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev).
 Neither, however, provides a comparable bulk-synchronous API.
 Both typically execute all of the submitted tasks on a single thread, so their numbers wouldn't line up against the rest.
 That leaves the standard library thread-pool as our only point of comparison:
 
-| Machine        | Standard (S) | ForkUnion (D) | ForkUnion (S) |
-| :------------- | -----------: | ------------: | ------------: |
-| 16x Intel SPR  |      2m52.0s |         18.2s |         12.8s |
-| 128x Intel SPR |            - |         43.5s |         19.2s |
-| 12x Apple M2   |      1m44.8s |         33.2s |         12.2s |
-| 96x Graviton 4 |            - |             - |             - |
+| Machine            | Standard (S) | ForkUnion (D) | ForkUnion (S) |
+| :----------------- | -----------: | ------------: | ------------: |
+| 16x Intel SPR      |      2m52.0s |         18.2s |         12.8s |
+| 128x Intel SPR     |            - |         43.5s |         19.2s |
+| 12x Apple M2       |      1m44.8s |         33.2s |         12.2s |
+| 18x Apple M5 Pro ³ |     2m:07.0s |         10.3s |          8.8s |
+| 96x Graviton 4     |            - |             - |             - |
 
 > ¹ Another common workload is "Parallel Reductions" covered in a separate [repository](https://github.com/ashvardanian/ParallelReductionsBenchmark).
 > ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing.
+> ³ The M5 Pro reports two performance levels, named "Super" and "Performance" - six wide-cache cores and twelve narrower ones, with no efficiency tier at all - so ² does not apply to it. Its three L2 clusters make it one memory domain across three compute domains.
 > It's also fair to say, that OpenMP is not optimized for AppleClang.
 > 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for ForkUnion.
 
@@ -898,7 +907,8 @@ For Zig, use the following commands:
 
 ```bash
 zig build test --summary all            # run tests
-zig build -Dnuma=true                   # enable NUMA support (Linux)
+zig build -Dnuma-memory=true            # require NUMA-aware allocations (Linux)
+zig build -Dportable=true               # STL thread pool only
 
 # Run benchmark from the `scripts` directory
 cd scripts

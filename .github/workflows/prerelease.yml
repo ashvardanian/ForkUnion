@@ -104,7 +104,7 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1
         run: |
           set -euxo pipefail
-          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
             -D CMAKE_C_FLAGS="-fsanitize=thread -g" -D CMAKE_CXX_FLAGS="-fsanitize=thread -g" \
             -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
           cmake --build build_tsan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
@@ -114,7 +114,7 @@ jobs:
       - name: Build & Test under Address+UB Sanitizer
         run: |
           set -euxo pipefail
-          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
             -D CMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
             -D CMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
             -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
@@ -179,7 +179,7 @@ jobs:
           TSAN_OPTIONS: halt_on_error=1
         run: |
           set -euxo pipefail
-          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
             -D CMAKE_C_FLAGS="-fsanitize=thread -g" -D CMAKE_CXX_FLAGS="-fsanitize=thread -g" \
             -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
           cmake --build build_tsan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
@@ -189,7 +189,7 @@ jobs:
       - name: Build & Test under Address+UB Sanitizer
         run: |
           set -euxo pipefail
-          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=OFF \
+          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
             -D CMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
             -D CMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
             -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
@@ -215,7 +215,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y cmake build-essential libomp-dev libnuma-dev
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_ENABLE_NUMA=ON
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON
           cmake --build build_artifacts --config RelWithDebInfo
       - name: Test C++
         run: |
@@ -449,6 +449,181 @@ jobs:
       - name: Test C
         run: |
           qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/forkunion_test_c11
+
+  # Every `FU_WITH_*` capability is a switch a downstream build may flip, and each one guards a
+  # different kernel facility. The combinations do not collapse: a Linux box without `libnuma` can
+  # still pin threads, and a Mac that reports a rich topology can pin nothing at all. Compiling only
+  # the default configuration is how `pthread_setaffinity_np` sat behind a NUMA macro for so long.
+  test_ubuntu_capabilities:
+    name: Ubuntu (Capability Matrix)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: auto, libnuma present
+            libnuma: true
+            flags: ""
+          - name: auto, libnuma absent
+            libnuma: false
+            flags: ""
+          - name: no topology
+            libnuma: true
+            flags: "-DFU_WITH_TOPOLOGY=0"
+          - name: no NUMA memory, but still pinning
+            libnuma: true
+            flags: "-DFU_WITH_NUMA_MEMORY=0"
+          - name: no huge pages
+            libnuma: true
+            flags: "-DFU_WITH_HUGE_PAGES=0"
+          - name: no pinning
+            libnuma: true
+            flags: "-DFU_WITH_THREAD_PINNING=0"
+          - name: no metrics
+            libnuma: true
+            flags: "-DFU_WITH_TOPOLOGY_METRICS=0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential
+          if [ "${{ matrix.libnuma }}" = "true" ]; then sudo apt install -y libnuma-dev; fi
+
+      - name: Build & Test C++ (${{ matrix.name }})
+        run: |
+          LIBS="-latomic"
+          if [ "${{ matrix.libnuma }}" = "true" ]; then LIBS="-lnuma $LIBS"; fi
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude scripts/test.cpp -o test_cpp $LIBS
+          ./test_cpp
+
+      - name: Build C shim (${{ matrix.name }})
+        run: g++ -std=c++17 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
+
+      - name: Report the capabilities that survived
+        run: |
+          LIBS="-latomic"
+          if [ "${{ matrix.libnuma }}" = "true" ]; then LIBS="-lnuma $LIBS"; fi
+          cat > options.c <<'EOF'
+          #include <stdio.h>
+          #include "forkunion.h"
+          int main(void) {
+              printf("comptime: %s\n", fu_comptime_capabilities_string());
+              printf("runtime:  %s\n", fu_runtime_capabilities_string());
+              return 0;
+          }
+          EOF
+          gcc -std=c11 -Iinclude -c options.c -o options.o
+          g++ options.o forkunion.o -o options $LIBS
+          ./options
+
+  # A capability nobody can turn off by hand is not a capability. These must be rejected at the
+  # `#include`, by an `#error` naming the contradiction - never at link time, with missing symbols.
+  test_ubuntu_bad_capabilities:
+    name: Ubuntu (Impossible Capabilities)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential libnuma-dev
+
+      - name: Every contradiction must fail to compile
+        run: |
+          set -e
+          for flags in \
+            "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_NUMA_MEMORY=1" \
+            "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_TOPOLOGY_METRICS=1" \
+            "-DFU_WITH_NUMA_MEMORY=0 -DFU_WITH_HUGE_PAGES=1"; do
+            if g++ -std=c++20 $flags -Iinclude -fsyntax-only scripts/test.cpp 2>/dev/null; then
+              echo "::error::'$flags' compiled, but describes a build that cannot exist"
+              exit 1
+            fi
+            echo "rejected, as it should be: $flags"
+          done
+
+      - name: A typo in a CMake tri-state must fail to configure
+        run: |
+          if cmake -B build_typo -D FORKUNION_WITH_TOPOLOGY=YES >/dev/null 2>&1; then
+            echo "::error::FORKUNION_WITH_TOPOLOGY=YES configured, but YES is not AUTO, ON, or OFF"
+            exit 1
+          fi
+          echo "rejected, as it should be"
+
+  # Rust and Zig express the same tri-state through additive features and through `-D` options, and
+  # both must land on the same `fu_comptime_capabilities()`. `portable` is the one that has to hold: it
+  # what a caller on an unsupported platform gets, and nothing may depend on a capability it lacks.
+  test_bindings_capabilities:
+    name: Bindings (Capability Overrides)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential libnuma-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test Rust (auto)
+        run: cargo test --lib
+
+      - name: Test Rust (portable)
+        run: cargo test --lib --no-default-features --features portable,std
+
+      - name: Test Rust (forced NUMA memory)
+        run: cargo test --lib --features numa-memory
+
+      - name: Reject Rust `portable` alongside a capability it disables
+        run: |
+          if cargo build --features portable,numa-memory 2>/dev/null; then
+            echo "::error::portable and numa-memory built together"
+            exit 1
+          fi
+          echo "rejected, as it should be"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Test Zig (auto)
+        run: zig build test
+
+      - name: Test Zig (portable)
+        run: zig build test -Dportable=true
+
+  # iOS shares Darwin's `pthread_attr_set_qos_class_np` and `hw.perflevel*`, and shares its refusal
+  # to pin. Compiling for the device and for the simulator is enough to keep those paths honest;
+  # running is not, because a simulator binary reads the *host* Mac's topology, not a phone's.
+  build_ios:
+    name: iOS (Compile Only)
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [iphoneos, iphonesimulator]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build C++ for ${{ matrix.sdk }}
+        run: |
+          SYSROOT=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
+          if [ "${{ matrix.sdk }}" = "iphoneos" ]; then TARGET=arm64-apple-ios17.0; \
+          else TARGET=arm64-apple-ios17.0-simulator; fi
+          clang++ -std=c++20 -O2 -Wall -Wextra -Werror -target $TARGET -isysroot "$SYSROOT" \
+            -Iinclude -c scripts/test.cpp -o test_ios.o
+          clang++ -std=c++17 -O2 -Wall -Wextra -Werror -target $TARGET -isysroot "$SYSROOT" \
+            -Iinclude -c c/forkunion.cpp -o forkunion_ios.o
 
   test_s390x:
     name: Cross-compilation (s390x)
