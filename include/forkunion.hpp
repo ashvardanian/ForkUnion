@@ -19,7 +19,7 @@
  *  int main(int argc, char *argv[]) {
  *
  *      fu::basic_pool_t pool;
- *      if (!pool.try_spawn(std::thread::hardware_concurrency()))
+ *      if (!pool.try_spawn(fu::count_allowed_cores()))
  *          return EXIT_FAILURE;
  *
  *      pool.for_n(argc, [=](auto prong) noexcept {

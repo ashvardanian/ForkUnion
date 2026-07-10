@@ -449,7 +449,9 @@ size_t fu_count_logical_cores(void) {
     if (!globals_initialize()) return 0;
     return global_numa_topology.threads_count();
 #else
-    return std::thread::hardware_concurrency();
+    // ! Not `hardware_concurrency`, which counts the machine's cores rather than the ones a
+    // ! `taskset` or a cgroup `cpuset` left us. Sizing a pool from the former oversubscribes.
+    return fu::count_allowed_cores();
 #endif
 }
 

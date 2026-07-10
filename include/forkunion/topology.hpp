@@ -396,6 +396,20 @@ struct compute_domain_t {
 /** Sentinel for `compute_domain_t::capacity` when the platform exposes no per-core throughput. */
 static constexpr std::size_t capacity_unknown_k = 0;
 
+#if FU_WITH_TOPOLOGY && FU_ON_LINUX
+/**
+ *  @brief Clears from @p cpus every core that @p allowed does not hold.
+ *  @note A node whose every core is masked away survives as a cpuless memory domain, which the rest
+ *        of the harvest already models - its memory stays ours to allocate from.
+ */
+FU_MAYBE_UNUSED_ static inline void restrict_cpumask_to(struct bitmask *cpus, affinity_mask const &allowed) noexcept {
+    for (std::size_t bit = 0; bit < cpus->size; ++bit)
+        if (::numa_bitmask_isbitset(cpus, static_cast<unsigned int>(bit)) &&
+            !allowed.contains(static_cast<numa_core_id_t>(bit)))
+            ::numa_bitmask_clearbit(cpus, static_cast<unsigned int>(bit));
+}
+#endif
+
 /**
  *  @brief Fetches the socket ID for a given CPU core.
  *  @param[in] core_id The CPU core ID to query.
@@ -807,6 +821,12 @@ struct numa_topology {
     bool try_harvest() noexcept {
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
         struct bitmask *numa_mask = nullptr;
+
+        // The cores this process may actually run on. A cgroup `cpuset` or a `taskset` narrows it,
+        // and a domain's CPU list must be intersected with it - otherwise we would size the pool
+        // from the machine and pin workers onto cores the kernel will never schedule us on.
+        affinity_mask allowed;
+        bool const allowed_known = allowed.try_capture() && allowed.count() != 0;
         numa_node_t *nodes_ptr = nullptr;
         numa_core_id_t *core_ids_ptr = nullptr;
         compute_domain_t *domains_ptr = nullptr;
@@ -835,8 +855,9 @@ struct numa_topology {
             if (::numa_node_size64(node_id, &dummy) < 0) continue; // ! Offline node
             ::numa_bitmask_clearall(numa_mask);
             if (::numa_node_to_cpus(node_id, numa_mask) < 0) continue; // ! Invalid CPU map
+            if (allowed_known) restrict_cpumask_to(numa_mask, allowed);
             // A cpuless memory domain (HBM-flat, CXL expander, GPU HBM) reports zero cores, yet is a
-            // valid memory domain - count the node and add its (possibly zero) cores.
+            // valid memory domain - and so is one whose every core was masked away from us.
             std::size_t const node_cores = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
             fetched_nodes += 1;
             fetched_cores += node_cores;
@@ -863,6 +884,7 @@ struct numa_topology {
             if (total_memory_size < 0) continue;
             ::numa_bitmask_clearall(numa_mask);
             if (::numa_node_to_cpus(node_id, numa_mask) < 0) continue;
+            if (allowed_known) restrict_cpumask_to(numa_mask, allowed);
 
             numa_node_t &node = nodes_ptr[node_index];
             node.node_id = node_id;

@@ -158,7 +158,7 @@ namespace fu = ashvardanian::forkunion;
 
 int main() {
     alignas(fu::default_alignment_k) fu::basic_pool_t pool;
-    if (!pool.try_spawn(std::thread::hardware_concurrency())) {
+    if (!pool.try_spawn(fu::count_allowed_cores())) {
         std::fprintf(stderr, "Failed to fork the threads\n");
         return EXIT_FAILURE;
     }

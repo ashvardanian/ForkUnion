@@ -42,7 +42,7 @@ namespace forkunion {
  *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::basic_pool_t pool; // ? Alias to `fu::basic_pool<>` template
- *      if (!pool.try_spawn(std::thread::hardware_concurrency())) return EXIT_FAILURE;
+ *      if (!pool.try_spawn(count_allowed_cores())) return EXIT_FAILURE;
  *      pool.for_threads([](std::size_t i) noexcept { std::printf("Hi from thread %zu\n", i); });
  *      return EXIT_SUCCESS;
  *  }

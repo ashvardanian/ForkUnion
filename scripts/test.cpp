@@ -96,7 +96,7 @@ constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
 struct make_pool_t {
     fu::basic_pool_t construct() const noexcept { return fu::basic_pool_t(); }
     std::size_t scope(std::size_t oversubscription = 1) const noexcept {
-        return std::thread::hardware_concurrency() * oversubscription;
+        return fu::count_allowed_cores() * oversubscription;
     }
 };
 
@@ -743,6 +743,53 @@ void log_numa_topology() noexcept {
 #endif // FU_WITH_COLOCATED_POOLS
 }
 
+#if FU_WITH_COLOCATED_POOLS && FU_ON_LINUX && FU_WITH_THREAD_PINNING
+/**
+ *  @brief A pool must size itself from the cores we were given, and hand the caller back its own mask.
+ *
+ *  The process is narrowed here the way `taskset` or a cgroup `cpuset` would narrow it. A topology
+ *  harvested from the machine rather than from the mask would report every core, the pool would
+ *  oversubscribe them, and a "restore" that widens to the machine would leave the caller running on
+ *  cores this process was never granted.
+ */
+static bool test_caller_affinity_preserved() noexcept {
+    fu::affinity_mask original;
+    if (!original.try_capture()) return true; // ? Nothing to restrict, nothing to check
+    std::size_t const allowed_before = original.count();
+    if (allowed_before < 2) return true; // ? Too narrow already to narrow further
+
+    std::size_t const max_cores = fu::possible_cores();
+    cpu_set_t *narrowed = CPU_ALLOC(max_cores);
+    if (!narrowed) return false;
+    std::size_t const narrowed_bytes = CPU_ALLOC_SIZE(max_cores);
+    CPU_ZERO_S(narrowed_bytes, narrowed);
+    std::size_t kept = 0;
+    for (std::size_t cpu = 0; cpu < max_cores && kept < 2; ++cpu)
+        if (original.contains(static_cast<fu::numa_core_id_t>(cpu))) CPU_SET_S(cpu, narrowed_bytes, narrowed), ++kept;
+
+    bool succeeded = ::sched_setaffinity(0, narrowed_bytes, narrowed) == 0;
+    if (succeeded) {
+        fu::numa_topology_t topology;
+        succeeded = topology.try_harvest() && topology.threads_count() == 2;
+
+        if (succeeded) {
+            fu::distributed_pool_t pool;
+            succeeded = pool.try_spawn(topology, 2);
+            if (succeeded) succeeded = pool.all_threads_pinned();
+            pool.terminate();
+        }
+
+        // The caller must be back on the two cores it narrowed itself to, not on the machine's 128.
+        fu::affinity_mask afterwards;
+        succeeded = succeeded && afterwards.try_capture() && afterwards.count() == 2;
+    }
+
+    CPU_FREE(narrowed);
+    (void)original.restore(); // ? Leave the process as we found it, whatever happened above
+    return succeeded;
+}
+#endif // FU_WITH_COLOCATED_POOLS && FU_ON_LINUX && FU_WITH_THREAD_PINNING
+
 int main(void) {
 
     std::printf("Welcome to the ForkUnion library test suite!\n");
@@ -812,6 +859,9 @@ int main(void) {
         {"NUMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_distributed_pool_t>},
         {"NUMA `terminate` avoided", test_mixed_restart<false, make_distributed_pool_t>},
         {"NUMA `terminate` and re-spawn", test_mixed_restart<true, make_distributed_pool_t>},
+#if FU_ON_LINUX && FU_WITH_THREAD_PINNING
+        {"NUMA caller affinity preserved", test_caller_affinity_preserved},
+#endif
 #endif // FU_WITH_COLOCATED_POOLS
     };
 
@@ -833,7 +883,7 @@ int main(void) {
 
     // Start stress-testing the implementation
     std::printf("Starting stress tests...\n");
-    std::size_t const max_cores = std::thread::hardware_concurrency();
+    std::size_t const max_cores = fu::count_allowed_cores();
 
     // On 32-bit architectures, limit thread counts to avoid resource exhaustion
     // Each thread needs ~8MB stack, and 255 threads would consume 2GB+ address space

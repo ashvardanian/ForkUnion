@@ -492,6 +492,99 @@ FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
     return static_cast<std::size_t>(std::thread::hardware_concurrency());
 }
 
+/**
+ *  @brief The cores the calling thread may run on - this process's contract with the kernel.
+ *
+ *  A machine is not the same thing as the slice of it we were handed. `taskset`, a cgroup `cpuset`,
+ *  and a batch scheduler all narrow this mask, and `hardware_concurrency` sees none of them. Sizing
+ *  a pool from the machine and pinning to cores outside the mask either escapes the restriction, or
+ *  - where the kernel enforces it - crowds every spinning worker onto the few cores that remain.
+ *
+ *  Owns its mask, so the same type serves as the snapshot a pool restores on teardown. @sa `restore`.
+ */
+struct affinity_mask {
+#if FU_WITH_THREAD_PINNING && FU_ON_POSIX
+
+  private:
+    cpu_set_t *cores_ {nullptr};
+    std::size_t bytes_ {0};
+
+  public:
+    affinity_mask() noexcept = default;
+    affinity_mask(affinity_mask const &) = delete;
+    affinity_mask &operator=(affinity_mask const &) = delete;
+    affinity_mask(affinity_mask &&other) noexcept : cores_(other.cores_), bytes_(other.bytes_) {
+        other.cores_ = nullptr;
+        other.bytes_ = 0;
+    }
+    affinity_mask &operator=(affinity_mask &&other) noexcept {
+        if (this != &other) {
+            reset();
+            cores_ = std::exchange(other.cores_, nullptr);
+            bytes_ = std::exchange(other.bytes_, 0);
+        }
+        return *this;
+    }
+    ~affinity_mask() noexcept { reset(); }
+
+    void reset() noexcept {
+        if (cores_) CPU_FREE(cores_);
+        cores_ = nullptr;
+        bytes_ = 0;
+    }
+
+    bool valid() const noexcept { return cores_ != nullptr; }
+
+    /** @brief Reads the calling thread's current affinity. @retval false if it could not be read. */
+    bool try_capture() noexcept {
+        reset();
+        std::size_t const max_cores = possible_cores();
+        cores_ = CPU_ALLOC(max_cores);
+        if (!cores_) return false;
+        bytes_ = CPU_ALLOC_SIZE(max_cores);
+        CPU_ZERO_S(bytes_, cores_);
+        if (::sched_getaffinity(0, bytes_, cores_) == 0) return true;
+        reset();
+        return false;
+    }
+
+    /** @brief Reinstates this mask on the calling thread. @retval false if the kernel refused. */
+    bool restore() const noexcept {
+        if (!cores_) return false;
+        return ::pthread_setaffinity_np(::pthread_self(), bytes_, cores_) == 0;
+    }
+
+    bool contains(numa_core_id_t const core) const noexcept {
+        return cores_ && core >= 0 && CPU_ISSET_S(static_cast<std::size_t>(core), bytes_, cores_) != 0;
+    }
+    std::size_t count() const noexcept { return cores_ ? static_cast<std::size_t>(CPU_COUNT_S(bytes_, cores_)) : 0; }
+
+#else // ? Nothing is ever narrowed here, so every core is allowed and there is nothing to restore
+
+  public:
+    void reset() noexcept {}
+    bool valid() const noexcept { return false; }
+    bool try_capture() noexcept { return false; }
+    bool restore() const noexcept { return false; }
+    bool contains(FU_MAYBE_UNUSED_ numa_core_id_t const core) const noexcept { return true; }
+    std::size_t count() const noexcept { return 0; }
+#endif
+};
+
+/**
+ *  @brief Number of cores the calling thread may run on, or `possible_cores()` where unknowable.
+ *  @note Prefer this to `std::thread::hardware_concurrency` when sizing a pool: the latter counts
+ *        the machine's cores, not the ones this process was given.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t count_allowed_cores() noexcept {
+    affinity_mask allowed;
+    if (allowed.try_capture()) {
+        std::size_t const allowed_count = allowed.count();
+        if (allowed_count > 0) return allowed_count;
+    }
+    return possible_cores();
+}
+
 #if FU_ON_WINDOWS
 /*  Windows addresses a logical processor by (processor group, bit within the group's 64-bit
  *  `KAFFINITY` mask), not by a flat global id. A `numa_core_id_t` therefore packs both, so the free

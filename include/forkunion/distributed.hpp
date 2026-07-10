@@ -454,13 +454,22 @@ FU_MAYBE_UNUSED_ static inline bool pin_thread_to_cores(FU_MAYBE_UNUSED_ native_
 }
 
 /**
- *  @brief Widens the calling thread back to every core the machine has.
- *  @note A no-op where nothing was ever narrowed.
+ *  @brief Puts the calling thread back on the cores @p saved recorded before it was pinned.
+ *  @note A no-op where nothing was ever narrowed, or where @p saved was never captured.
+ *
+ *  A pool that narrows the caller owes it the mask it had, not the mask of the whole machine. The
+ *  two differ under `taskset`, a cgroup `cpuset`, or any batch scheduler, and widening to the
+ *  machine would hand the caller cores the kernel never gave this process.
+ *
+ *  Note that no NUMA run-node policy is reset here: the pool never sets one. Memory placement goes
+ *  through `mbind` on the allocation, not through the calling thread's policy, and `numa_run_on_node`
+ *  would rewrite the very CPU mask we just restored.
  */
-FU_MAYBE_UNUSED_ static inline void unpin_current_thread() noexcept {
+FU_MAYBE_UNUSED_ static inline void restore_thread_affinity(FU_MAYBE_UNUSED_ affinity_mask const &saved) noexcept {
 #if FU_ON_WINDOWS
     // A thread can only run in one processor group at a time, so "widening" means every active
     // processor in the group it currently sits on - the most freedom it can be given back.
+    // ! Unlike the POSIX path, this does not restore a snapshot; `GetThreadGroupAffinity` would.
     PROCESSOR_NUMBER where;
     ::GetCurrentProcessorNumberEx(&where);
     DWORD const active = ::GetActiveProcessorCount(where.Group);
@@ -469,19 +478,7 @@ FU_MAYBE_UNUSED_ static inline void unpin_current_thread() noexcept {
     affinity.Mask = active >= 64 ? ~static_cast<KAFFINITY>(0) : ((static_cast<KAFFINITY>(1) << active) - 1);
     (void)::SetThreadGroupAffinity(::GetCurrentThread(), &affinity, nullptr);
 #elif FU_WITH_THREAD_PINNING
-    std::size_t const max_cores = possible_cores();
-    cpu_set_t *cpu_set_ptr = CPU_ALLOC(max_cores);
-    if (!cpu_set_ptr) return;
-    std::size_t const cpu_set_size = CPU_ALLOC_SIZE(max_cores);
-    CPU_ZERO_S(cpu_set_size, cpu_set_ptr);
-    for (std::size_t cpu = 0; cpu < max_cores; ++cpu) CPU_SET_S(cpu, cpu_set_size, cpu_set_ptr);
-    FU_MAYBE_UNUSED_ int const pin_result = ::pthread_setaffinity_np(::pthread_self(), cpu_set_size, cpu_set_ptr);
-    assert(pin_result == 0 && "Failed to reset the caller thread's affinity");
-    CPU_FREE(cpu_set_ptr);
-#endif
-#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
-    FU_MAYBE_UNUSED_ int const spread_result = ::numa_run_on_node(-1);
-    assert(spread_result == 0 && "Failed to reset the caller thread's NUMA node affinity");
+    (void)saved.restore();
 #endif
 }
 
@@ -599,6 +596,11 @@ struct colocated_pool {
     index_t compute_domain_index_ {0};
     numa_pin_granularity_t pin_granularity_ {numa_pin_to_core_k};
 
+    /** @brief The caller's affinity as it was before this pool narrowed it. @sa `_reset_affinity`. */
+    affinity_mask caller_affinity_;
+    /** @brief Workers the kernel refused to place, so a caller can tell a pinned pool from a crowded one. */
+    thread_index_t unpinned_threads_ {0};
+
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
     // Task-specific variables:
@@ -675,6 +677,16 @@ struct colocated_pool {
      */
     thread_index_t threads_count() const noexcept { return pthreads_.size(); }
 
+    /** @brief Workers the kernel refused to place; zero on a fully pinned pool. */
+    thread_index_t unpinned_threads_count() const noexcept { return unpinned_threads_; }
+
+    /**
+     *  @brief Whether every worker sits on the core this pool asked for.
+     *  @note False on platforms with no thread placement, and false when a `cpuset` crowded the pool
+     *        onto fewer cores than it has threads - which is where spinning workers fall apart.
+     */
+    bool all_threads_pinned() const noexcept { return threads_count() != 0 && unpinned_threads_ == 0; }
+
     /**
      *  @brief Reports if the current calling thread will be used for broadcasts.
      *  @note This API is @b not synchronized.
@@ -750,6 +762,11 @@ struct colocated_pool {
             numa_node_id_ = -1;
             pin_granularity_ = numa_pin_to_core_k;
         };
+
+        // Snapshot the caller's affinity before we narrow it, so teardown can put back exactly what
+        // it had rather than the whole machine. Captured even when the caller is excluded: the
+        // failure path below may still have touched it.
+        caller_affinity_.try_capture();
 
         // Include the main thread into the list of handles
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
@@ -830,17 +847,22 @@ struct colocated_pool {
 
         // Pin all of the threads. Where the kernel refuses, the domains still describe the machine
         // and the pool still partitions work by them - it simply cannot hold a thread in place.
+        // The refusals are counted rather than dropped: a pool the kernel crowded onto a handful of
+        // cores spins itself to a standstill, and `all_threads_pinned` is how a caller finds out.
+        unpinned_threads_ = 0;
         if (pin_granularity == numa_pin_to_core_k) {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
                 numa_core_id_t const cpu = domain.first_core_id[i % domain.core_count];
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
                 if (pin_thread_to_cores(pin_handle, &cpu, 1)) pthreads_[i].core_id = cpu;
+                else
+                    ++unpinned_threads_;
             }
         }
         else {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                (void)pin_thread_to_cores(pin_handle, domain.first_core_id, domain.core_count);
+                if (!pin_thread_to_cores(pin_handle, domain.first_core_id, domain.core_count)) ++unpinned_threads_;
             }
         }
 
@@ -1136,7 +1158,10 @@ struct colocated_pool {
         fork_trampoline_ = nullptr;
     }
 
-    void _reset_affinity() noexcept { unpin_current_thread(); }
+    void _reset_affinity() noexcept {
+        restore_thread_affinity(caller_affinity_);
+        caller_affinity_.reset();
+    }
 
     /**
      *  @brief A trampoline function that is used to call the user-defined lambda.
@@ -1556,6 +1581,21 @@ struct distributed_pool {
      *  @note This API is @b not synchronized.
      */
     thread_index_t threads_count() const noexcept { return threads_count_; }
+
+    /** @brief Workers the kernel refused to place, summed over every compute domain. */
+    thread_index_t unpinned_threads_count() const noexcept {
+        thread_index_t unpinned = 0;
+        for (std::size_t i = 0; i < compute_domain_cells_.size(); ++i)
+            unpinned += compute_domain_cells_[i].only().pool.unpinned_threads_count();
+        return unpinned;
+    }
+
+    /**
+     *  @brief Whether every worker sits on the core this pool asked for.
+     *  @note False on platforms with no thread placement, and false when a `cpuset` crowded the pool
+     *        onto fewer cores than it has threads - which is where spinning workers fall apart.
+     */
+    bool all_threads_pinned() const noexcept { return threads_count_ != 0 && unpinned_threads_count() == 0; }
 
     /**
      *  @brief Reports if the current calling thread will be used for broadcasts.

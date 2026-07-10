@@ -329,7 +329,7 @@ int main(void) {
     std::size_t const iterations = (iterations_ull > size_max) ? size_max : static_cast<std::size_t>(iterations_ull);
     std::size_t threads = (threads_ull > size_max) ? size_max : static_cast<std::size_t>(threads_ull);
     std::string_view const backend = backend_str ? backend_str : "forkunion_static";
-    if (threads == 0) threads = std::thread::hardware_concurrency();
+    if (threads == 0) threads = fu::count_allowed_cores();
     if (n == 0) n = threads;
 
     // Prepare bodies and forces - 2 memory allocations
