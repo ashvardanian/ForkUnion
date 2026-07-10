@@ -36,7 +36,7 @@ enum numa_pin_granularity_t {
  */
 FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_bytes,
                                                     numa_node_id_t node_id) noexcept {
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
     // Pin the memory - that may require an extra allocation for `node_mask` on some systems
     ::nodemask_t node_mask;
     ::bitmask node_mask_as_bitset;
@@ -71,7 +71,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
                                                          numa_node_id_t node_id) noexcept {
     assert(node_id >= 0 && "NUMA node ID must be non-negative");
 
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
 
     // Fast path: regular pages – let `libnuma` handle any rounding internally.
     if (page_size_bytes == static_cast<std::size_t>(::numa_pagesize())) return ::numa_alloc_onnode(size_bytes, node_id);
@@ -112,7 +112,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
 FU_MAYBE_UNUSED_ static inline void linux_numa_free(void *ptr, std::size_t size_bytes) noexcept {
     assert(ptr != nullptr && "Pointer must not be null");
     assert(size_bytes > 0 && "Size must be greater than zero");
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
     numa_free(ptr, size_bytes);
 #else
     fu_unused_(ptr);
@@ -165,7 +165,7 @@ struct linux_numa_allocator {
      */
     allocation_result<value_type *, size_type> allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
         size_type const size_bytes = size * sizeof(value_type);
-        size_type const aligned_size_bytes = (size_bytes + page_size_bytes - 1) / page_size_bytes * page_size_bytes;
+        size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
 
         // Check if the new size is actually perfectly divisible by the `sizeof(value_type)`
         if (aligned_size_bytes % sizeof(value_type)) return {}; // ! Not a size multiple
@@ -252,6 +252,135 @@ struct linux_numa_allocator {
 
 using linux_numa_allocator_t = linux_numa_allocator<>;
 
+/**
+ *  @brief Enables `SeLockMemoryPrivilege` for the current process, needed before large-page allocation.
+ *  @retval true if the privilege is now held by the process token.
+ *  @note This only @b enables a privilege the account already holds; the account must first be granted
+ *        "Lock pages in memory" (Local Security Policy / `SeLockMemoryPrivilege`), typically by an admin.
+ *        Call once at start-up, then construct a `windows_numa_allocator` with `large_pages = true`.
+ */
+FU_MAYBE_UNUSED_ static inline bool windows_enable_lock_memory_privilege() noexcept {
+#if FU_ON_WINDOWS
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
+    TOKEN_PRIVILEGES privileges = {};
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    bool const enabled = ::LookupPrivilegeValue(nullptr, SE_LOCK_MEMORY_NAME, &privileges.Privileges[0].Luid) &&
+                         ::AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr) &&
+                         ::GetLastError() == ERROR_SUCCESS; // ! `AdjustTokenPrivileges` succeeds even when it did not
+    ::CloseHandle(token);
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+/**
+ *  @brief Allocates uninitialized memory placed on a specific NUMA @p node_id on Windows.
+ *  @param[in] large_pages Request `MEM_LARGE_PAGES`; the size is rounded up to `GetLargePageMinimum()`.
+ *  @retval nullptr if allocation failed, the size is zero, or NUMA memory is unavailable.
+ *
+ *  `VirtualAllocExNuma` reserves and commits a range whose pages the kernel will fault in on the
+ *  requested node - the Windows analogue of Linux's `mbind`, folded into the allocation call. Large
+ *  pages need `SeLockMemoryPrivilege` (see `windows_enable_lock_memory_privilege`) and can still fail
+ *  under memory fragmentation; a caller wanting a soft failure should retry with @p large_pages false.
+ */
+FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_bytes, numa_node_id_t node_id,
+                                                           bool large_pages = false) noexcept {
+    assert(node_id >= 0 && "NUMA node ID must be non-negative");
+#if FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+    if (size_bytes == 0) return nullptr;
+    DWORD allocation_type = MEM_RESERVE | MEM_COMMIT;
+    if (large_pages) {
+        SIZE_T const large_page_bytes = ::GetLargePageMinimum();
+        if (large_page_bytes == 0) return nullptr; // ! Large pages unsupported on this system
+        size_bytes = round_up_to_multiple(size_bytes, static_cast<std::size_t>(large_page_bytes));
+        allocation_type |= MEM_LARGE_PAGES;
+    }
+    return ::VirtualAllocExNuma(::GetCurrentProcess(), nullptr, size_bytes, allocation_type, PAGE_READWRITE,
+                                static_cast<DWORD>(node_id));
+#else
+    fu_unused_(size_bytes);
+    fu_unused_(node_id);
+    fu_unused_(large_pages);
+    return nullptr;
+#endif
+}
+
+FU_MAYBE_UNUSED_ static inline void windows_numa_free(void *ptr) noexcept {
+#if FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+    if (ptr) ::VirtualFree(ptr, 0, MEM_RELEASE); // ? Size must be 0 with MEM_RELEASE
+#else
+    fu_unused_(ptr);
+#endif
+}
+
+/**
+ *  @brief STL-compatible allocator pinned to a NUMA node on Windows, backed by `VirtualAllocExNuma`.
+ *  @sa `linux_numa_allocator` is the Linux counterpart; both satisfy the pool's allocator needs.
+ *
+ *  Deliberately plainer than the Linux allocator: it exposes only `allocate`/`deallocate`, so
+ *  `unique_padded_buffer` takes its ordinary `allocate(total)` path rather than the sized
+ *  `allocate_at_least` one. Large pages are opt-in per allocator instance (`large_pages` ctor flag);
+ *  they need `SeLockMemoryPrivilege` first (@sa `windows_enable_lock_memory_privilege`) and round every
+ *  request up to `GetLargePageMinimum()`. The pool constructs the allocator without them, since its own
+ *  state is small; a caller wanting large pages for bulk data opts in explicitly.
+ */
+template <typename value_type_ = char>
+struct windows_numa_allocator {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+    using propagate_on_container_move_assignment = std::true_type;
+
+  private:
+    numa_node_id_t node_id_ {-1};
+    size_type default_page_size_ {0};
+    bool large_pages_ {false};
+
+  public:
+    numa_node_id_t node_id() const noexcept { return node_id_; }
+    size_type default_page_size() const noexcept { return default_page_size_; }
+    bool large_pages() const noexcept { return large_pages_; }
+
+    constexpr windows_numa_allocator() noexcept = default;
+    explicit windows_numa_allocator(numa_node_id_t id, size_type paging = get_ram_page_size(),
+                                    bool large_pages = false) noexcept
+        : node_id_(id), default_page_size_(paging), large_pages_(large_pages) {}
+
+    template <typename other_type_>
+    explicit constexpr windows_numa_allocator(windows_numa_allocator<other_type_> const &o) noexcept
+        : node_id_(o.node_id()), default_page_size_(o.default_page_size()), large_pages_(o.large_pages()) {}
+
+    value_type *allocate(size_type size) noexcept {
+        return static_cast<value_type *>(windows_numa_allocate(size * sizeof(value_type), node_id_, large_pages_));
+    }
+
+    void deallocate(value_type *p, size_type) noexcept { windows_numa_free(p); }
+
+    template <typename other_type_>
+    bool operator==(windows_numa_allocator<other_type_> const &o) const noexcept {
+        return node_id_ == o.node_id() && default_page_size_ == o.default_page_size() &&
+               large_pages_ == o.large_pages();
+    }
+    template <typename other_type_>
+    bool operator!=(windows_numa_allocator<other_type_> const &o) const noexcept {
+        return !(*this == o);
+    }
+};
+
+using windows_numa_allocator_t = windows_numa_allocator<>;
+
+/**
+ *  @brief The NUMA-placing allocator for this platform, or `std::allocator` where there is none.
+ *  @sa Selected as `colocated_pool::allocator_t` so the pool's own state lands on its node.
+ */
+#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+using numa_allocator_t = linux_numa_allocator_t;
+#elif FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+using numa_allocator_t = windows_numa_allocator_t;
+#endif
+
 #if FU_WITH_COLOCATED_POOLS
 
 /**
@@ -259,28 +388,54 @@ using linux_numa_allocator_t = linux_numa_allocator<>;
  *  @note Linux's `clock_nanosleep` lets us name the clock; Darwin only has `nanosleep`, whose clock
  *        is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
  */
-FU_MAYBE_UNUSED_ static inline void nap_for_micros(std::size_t const micros) noexcept {
+FU_MAYBE_UNUSED_ static inline void nap_for_micros(FU_MAYBE_UNUSED_ std::size_t const micros) noexcept {
+#if FU_ON_WINDOWS
+    // Reached only after the pool is told to `sleep` to save power, where the docs promise latency is
+    // irrelevant - so a millisecond-granular `Sleep` (rounded up) is enough, and spares us the per-nap
+    // timer object a sub-millisecond wait would cost.
+    ::Sleep(static_cast<DWORD>((micros + 999) / 1000));
+#elif FU_ON_LINUX
     struct timespec ts {0, static_cast<long>(micros * 1000)};
-#if FU_ON_LINUX
-    ::clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr);
+    ::clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr); // ? A named clock; Darwin has only `nanosleep`
 #else
+    struct timespec ts {0, static_cast<long>(micros * 1000)};
     ::nanosleep(&ts, nullptr);
 #endif
 }
+
+/** @brief The OS thread handle a `colocated_pool` stores, joins, and pins - one per worker. */
+#if FU_ON_WINDOWS
+using native_thread_t = HANDLE; // ? From `CreateThread`; identity is tracked by thread id, not this
+#else
+using native_thread_t = pthread_t;
+#endif
 
 /**
  *  @brief Confines @p thread to @p cores, where the kernel allows it.
  *  @retval false when the platform exposes no thread placement, which is @b not an error.
  *
- *  Linux hands out a `cpu_set_t` and honours it. Apple Silicon answers `KERN_NOT_SUPPORTED` to
- *  `thread_policy_set(THREAD_AFFINITY_POLICY)` - measured, not assumed - and offers only a
- *  Quality-of-Service class, chosen at creation. So a pool there partitions the @b work by domain and
- *  lets the scheduler place the @b threads. The data stays cluster-local; the threads do not.
+ *  Linux hands out a `cpu_set_t` and honours it. Windows addresses a core by (processor group, bit),
+ *  packed into each `numa_core_id_t`; a compute domain lives within one group, so its cores share one
+ *  `GROUP_AFFINITY`. Apple Silicon answers `KERN_NOT_SUPPORTED` to `thread_policy_set` - measured, not
+ *  assumed - and offers only a Quality-of-Service class, chosen at creation. So a pool there partitions
+ *  the @b work by domain and lets the scheduler place the @b threads.
  */
-FU_MAYBE_UNUSED_ static inline bool pin_thread_to_cores(FU_MAYBE_UNUSED_ pthread_t thread,
+FU_MAYBE_UNUSED_ static inline bool pin_thread_to_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
                                                         FU_MAYBE_UNUSED_ numa_core_id_t const *cores,
                                                         FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
-#if FU_WITH_THREAD_PINNING
+#if FU_ON_WINDOWS
+    if (count == 0) return false;
+    // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them.
+    // The group of the first core sets the group; cores from any other group are ignored (they cannot
+    // be expressed in a single mask, and a domain never spans groups).
+    GROUP_AFFINITY affinity = {};
+    affinity.Group = win_core_group(cores[0]);
+    for (std::size_t i = 0; i < count; ++i)
+        if (win_core_group(cores[i]) == affinity.Group)
+            affinity.Mask |= static_cast<KAFFINITY>(1) << win_core_index(cores[i]);
+    return ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0;
+
+#elif FU_WITH_THREAD_PINNING
     std::size_t const max_cores = possible_cores();
     cpu_set_t *cpu_set_ptr = CPU_ALLOC(max_cores);
     if (!cpu_set_ptr) return false;
@@ -303,7 +458,17 @@ FU_MAYBE_UNUSED_ static inline bool pin_thread_to_cores(FU_MAYBE_UNUSED_ pthread
  *  @note A no-op where nothing was ever narrowed.
  */
 FU_MAYBE_UNUSED_ static inline void unpin_current_thread() noexcept {
-#if FU_WITH_THREAD_PINNING
+#if FU_ON_WINDOWS
+    // A thread can only run in one processor group at a time, so "widening" means every active
+    // processor in the group it currently sits on - the most freedom it can be given back.
+    PROCESSOR_NUMBER where;
+    ::GetCurrentProcessorNumberEx(&where);
+    DWORD const active = ::GetActiveProcessorCount(where.Group);
+    GROUP_AFFINITY affinity = {};
+    affinity.Group = where.Group;
+    affinity.Mask = active >= 64 ? ~static_cast<KAFFINITY>(0) : ((static_cast<KAFFINITY>(1) << active) - 1);
+    (void)::SetThreadGroupAffinity(::GetCurrentThread(), &affinity, nullptr);
+#elif FU_WITH_THREAD_PINNING
     std::size_t const max_cores = possible_cores();
     cpu_set_t *cpu_set_ptr = CPU_ALLOC(max_cores);
     if (!cpu_set_ptr) return;
@@ -314,7 +479,7 @@ FU_MAYBE_UNUSED_ static inline void unpin_current_thread() noexcept {
     assert(pin_result == 0 && "Failed to reset the caller thread's affinity");
     CPU_FREE(cpu_set_ptr);
 #endif
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
     FU_MAYBE_UNUSED_ int const spread_result = ::numa_run_on_node(-1);
     assert(spread_result == 0 && "Failed to reset the caller thread's NUMA node affinity");
 #endif
@@ -334,8 +499,9 @@ FU_MAYBE_UNUSED_ static inline void unpin_current_thread() noexcept {
  *  @see https://stackoverflow.com/a/558815
  */
 struct alignas(default_alignment_k) numa_pthread_t {
-    std::atomic<pthread_t> handle {};
-    std::atomic<std::uint64_t> id {}; // ? `gettid` on Linux, `pthread_threadid_np` on Apple
+    std::atomic<native_thread_t> handle {}; // ? `pthread_t` on POSIX, `HANDLE` on Windows
+    std::atomic<std::uint64_t>
+        id {}; // ? `gettid` on Linux, `pthread_threadid_np` on Apple, `GetCurrentThreadId` on Windows
     numa_core_id_t core_id {-1};
     char name[16] {};           // ? Written by the spawner, applied by the worker to itself
     qos_level_t qos_level {-1}; // TODO: Populate from VFS, if available
@@ -380,7 +546,7 @@ struct colocated_pool {
 
   public:
 #if FU_WITH_NUMA_MEMORY
-    using allocator_t = linux_numa_allocator_t; // ? Places the pool's own state on its node
+    using allocator_t = numa_allocator_t; // ? Places the pool's own state on its node
 #else
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
 #endif
@@ -562,7 +728,7 @@ struct colocated_pool {
 
         // Allocate the thread pool of `numa_pthread_t` objects
 #if FU_WITH_NUMA_MEMORY
-        allocator_ = linux_numa_allocator_t {domain.node_id};
+        allocator_ = numa_allocator_t {domain.node_id};
 #endif
         numa_pthread_allocator_t pthread_allocator {allocator_};
         unique_padded_buffer<numa_pthread_t, numa_pthread_allocator_t> pthreads {pthread_allocator};
@@ -588,7 +754,13 @@ struct colocated_pool {
         // Include the main thread into the list of handles
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (use_caller_thread) {
+#if FU_ON_WINDOWS
+            // A pseudo-handle that always means "this thread"; valid because slot 0 is only ever
+            // pinned from within this very call, on this very thread, and is never joined.
+            pthreads_[0].handle.store(::GetCurrentThread(), std::memory_order_release);
+#else
             pthreads_[0].handle.store(::pthread_self(), std::memory_order_release);
+#endif
             pthreads_[0].id.store(current_thread_id(), std::memory_order_release);
         }
 
@@ -603,6 +775,17 @@ struct colocated_pool {
         // - `EPERM` if we don't have the right permissions.
         for (thread_index_t i = use_caller_thread; i < threads; ++i) {
 
+            // Spawn one worker. POSIX hands back a `pthread_t` and learns the kernel thread id only
+            // from inside (via `gettid`); Windows hands back both a `HANDLE` and the thread id at once,
+            // so the parent can publish the id here and let the worker match on it.
+            bool created = false;
+#if FU_ON_WINDOWS
+            DWORD new_thread_id = 0;
+            HANDLE const new_handle = ::CreateThread(nullptr, 0, &_win_worker_loop, this, 0, &new_thread_id);
+            created = new_handle != nullptr;
+            pthreads_[i].handle.store(new_handle, std::memory_order_relaxed);
+            pthreads_[i].id.store(static_cast<std::uint64_t>(new_thread_id), std::memory_order_relaxed);
+#else
             pthread_t new_pthread_handle;
             pthread_attr_t attributes;
             ::pthread_attr_init(&attributes);
@@ -612,18 +795,25 @@ struct colocated_pool {
             // is what confines a thread to them; on an all-performance chip the class is inert.
             ::pthread_attr_set_qos_class_np(&attributes, _qos_for_level(domain.compute_level, compute_levels), 0);
 #endif
-            int creation_result = ::pthread_create(&new_pthread_handle, &attributes, &_posix_worker_loop, this);
+            created = ::pthread_create(&new_pthread_handle, &attributes, &_posix_worker_loop, this) == 0;
             ::pthread_attr_destroy(&attributes);
             pthreads_[i].handle.store(new_pthread_handle, std::memory_order_relaxed);
             pthreads_[i].id.store(0, std::memory_order_relaxed); // ? 0 means "not published yet"
-            pthreads_[i].core_id = -1;                           // ? Not pinned yet
+#endif
+            pthreads_[i].core_id = -1; // ? Not pinned yet
 
-            if (creation_result != 0) {
+            if (!created) {
                 mood_.store(mood_t::die_k, std::memory_order_release);
                 for (thread_index_t j = use_caller_thread; j < i; ++j) {
-                    pthread_t cancel_pthread_handle = pthreads_[j].handle.load(std::memory_order_relaxed);
-                    FU_MAYBE_UNUSED_ int cancel_result = ::pthread_cancel(cancel_pthread_handle);
+                    native_thread_t const started = pthreads_[j].handle.load(std::memory_order_relaxed);
+#if FU_ON_WINDOWS
+                    // Workers already see `die_k` and are exiting; reap and close each to avoid a leak.
+                    ::WaitForSingleObject(started, INFINITE);
+                    ::CloseHandle(started);
+#else
+                    FU_MAYBE_UNUSED_ int cancel_result = ::pthread_cancel(started);
                     assert(cancel_result == 0 && "Failed to cancel a thread");
+#endif
                 }
                 reset_on_failure();
                 return false; // ! Thread creation failed
@@ -643,14 +833,14 @@ struct colocated_pool {
         if (pin_granularity == numa_pin_to_core_k) {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
                 numa_core_id_t const cpu = domain.first_core_id[i % domain.core_count];
-                pthread_t const pin_pthread_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                if (pin_thread_to_cores(pin_pthread_handle, &cpu, 1)) pthreads_[i].core_id = cpu;
+                native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
+                if (pin_thread_to_cores(pin_handle, &cpu, 1)) pthreads_[i].core_id = cpu;
             }
         }
         else {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
-                pthread_t const pin_pthread_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                (void)pin_thread_to_cores(pin_pthread_handle, domain.first_core_id, domain.core_count);
+                native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
+                (void)pin_thread_to_cores(pin_handle, domain.first_core_id, domain.core_count);
             }
         }
 
@@ -804,10 +994,15 @@ struct colocated_pool {
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         thread_index_t const threads = pthreads_.size();
         for (thread_index_t i = use_caller_thread; i != threads; ++i) {
+            native_thread_t const join_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
+#if FU_ON_WINDOWS
+            ::WaitForSingleObject(join_handle, INFINITE);
+            ::CloseHandle(join_handle); // ? Release the reference `CreateThread` handed us
+#else
             void *returned_value = nullptr;
-            pthread_t const join_pthread_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-            FU_MAYBE_UNUSED_ int const join_result = ::pthread_join(join_pthread_handle, &returned_value);
+            FU_MAYBE_UNUSED_ int const join_result = ::pthread_join(join_handle, &returned_value);
             assert(join_result == 0 && "Thread join failed");
+#endif
         }
 
         // Deallocate the handles, IDs, and the claim cursors they carry
@@ -954,8 +1149,11 @@ struct colocated_pool {
         lambda_object(local_thread);
     }
 
-    static void *_posix_worker_loop(void *arg) noexcept {
-        colocated_pool *pool = static_cast<colocated_pool *>(arg);
+    /**
+     *  @brief The worker's run loop, shared by every platform's thread entry point.
+     *  @note POSIX and Windows entry points differ only in signature, so both forward to this body.
+     */
+    static void _worker_loop_body(colocated_pool *pool) noexcept {
 
         // Following section untile the main `while` loop may introduce race conditions,
         // so spin-loop for a bit until the pool is ready.
@@ -969,17 +1167,26 @@ struct colocated_pool {
         // observable and controllable.
         thread_index_t local_thread_index = 0;
         if (mood == mood_t::grind_k) {
-            // We locate the thread index by enumerating the `pthreads_` array
+            // Find our own slot in the `pthreads_` array. POSIX matches on the `pthread_t` the parent
+            // stored; Windows matches on the thread id the parent published at creation - a `HANDLE`
+            // is not reliable identity, since one thread may own several.
             auto &numa_pthreads = pool->pthreads_;
             thread_index_t const numa_pthreads_count = pool->pthreads_.size();
+#if FU_ON_WINDOWS
+            std::uint64_t const self_id = current_thread_id();
+            for (local_thread_index = 0; local_thread_index < numa_pthreads_count; ++local_thread_index)
+                if (numa_pthreads[local_thread_index].id.load(std::memory_order_acquire) == self_id) break;
+#else
             pthread_t const thread_handle = ::pthread_self();
             for (local_thread_index = 0; local_thread_index < numa_pthreads_count; ++local_thread_index)
                 if (::pthread_equal(numa_pthreads[local_thread_index].handle.load(std::memory_order_relaxed),
                                     thread_handle))
                     break;
+#endif
             assert(local_thread_index < numa_pthreads_count && "Thread index must be in [0, threads_count)");
 
-            // Assign the pthread ID to the shared memory
+            // Publish the kernel thread id to shared memory. On Windows it already holds this value;
+            // re-storing it is harmless and keeps the release-publish uniform across platforms.
             std::uint64_t const pthread_id = current_thread_id();
             numa_pthreads[local_thread_index].id.store(pthread_id, std::memory_order_release);
 
@@ -1025,9 +1232,20 @@ struct colocated_pool {
             }
             last_epoch = new_epoch;
         }
+    }
 
+    // Platform thread entry points: same body, different ABI. Only the one this build spawns exists.
+#if FU_ON_WINDOWS
+    static DWORD WINAPI _win_worker_loop(LPVOID arg) noexcept {
+        _worker_loop_body(static_cast<colocated_pool *>(arg));
+        return 0;
+    }
+#else
+    static void *_posix_worker_loop(void *arg) noexcept {
+        _worker_loop_body(static_cast<colocated_pool *>(arg));
         return nullptr;
     }
+#endif
 
 #if FU_WITH_THREAD_QOS
     /**
@@ -1240,7 +1458,7 @@ struct distributed_pool {
     using numa_topology_t = numa_topology<>;
 
 #if FU_WITH_NUMA_MEMORY
-    using allocator_t = linux_numa_allocator_t; // ? Places the pool's own state on its node
+    using allocator_t = numa_allocator_t; // ? Places the pool's own state on its node
 #else
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
 #endif

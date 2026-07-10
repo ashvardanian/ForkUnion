@@ -7,6 +7,21 @@
 #if defined(_MSC_VER)
 #pragma warning(disable : 4505) // unreferenced function with internal linkage has been removed
 #pragma warning(disable : 4324) // structure was padded due to alignment specifier
+#pragma warning(disable : 4996) // `strncpy` etc. flagged "unsafe"; a preceding CRT include may have
+                                // already marked them deprecated, so the define below cannot undo it
+#pragma warning(disable : 4191) // `GetProcAddress` -> typed function pointer is the documented idiom
+#endif
+
+/*  Must precede the first CRT header below: `strncpy` and friends are only "unsafe" to MSVC, and the
+ *  suppression is inert once `<cstring>` has already been parsed. `NOMINMAX` is hoisted for the same
+ *  reason - it has to be set before the eventual `<windows.h>`. */
+#if defined(_WIN32)
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #endif
 
 #include <memory>  // `std::allocator`
@@ -101,7 +116,9 @@
 
 /** @brief Can we enumerate this machine's cores, compute domains, and memory domains? */
 #if !defined(FU_WITH_TOPOLOGY)
-#define FU_WITH_TOPOLOGY (FU_ON_APPLE || (FU_ON_LINUX && FU_HAS_LIBNUMA_))
+/*  Windows needs no separate library for this: `GetLogicalProcessorInformationEx` ships with the
+ *  kernel since Vista and reports NUMA nodes, cores, processor groups, and caches in one call. */
+#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || (FU_ON_LINUX && FU_HAS_LIBNUMA_))
 #endif
 
 /** @brief Can we see which cores share a cache, so a compute domain can be cut at a cluster? */
@@ -138,12 +155,16 @@
 
 /** @brief Can we place pages on a chosen memory domain? */
 #if !defined(FU_WITH_NUMA_MEMORY)
-#define FU_WITH_NUMA_MEMORY (FU_ON_LINUX && FU_WITH_TOPOLOGY)
+/*  Linux places with `mbind`; Windows with `VirtualAllocExNuma`. Same capability, named for the
+ *  facility, not the library - so both kernels answer it without a second macro. */
+#define FU_WITH_NUMA_MEMORY ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_TOPOLOGY)
 #endif
 
 /** @brief Can we request pages larger than the base page? */
 #if !defined(FU_WITH_HUGE_PAGES)
-#define FU_WITH_HUGE_PAGES (FU_ON_LINUX && FU_WITH_NUMA_MEMORY)
+/*  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
+ *  gated behind the `SeLockMemoryPrivilege` the caller must already hold. */
+#define FU_WITH_HUGE_PAGES ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_NUMA_MEMORY)
 #endif
 
 /*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
@@ -183,18 +204,19 @@
 #include <numa.h> // `numa_available`, `numa_node_to_cpus`, `numa_distance`
 #endif
 
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
 #include <numa.h>     // `numa_alloc_onnode`, `numa_free`
 #include <numaif.h>   // `mbind` manual assignment of `mmap` pages
 #include <sys/mman.h> // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`
 #endif
 
-#if FU_WITH_HUGE_PAGES
+#if FU_WITH_HUGE_PAGES && FU_ON_LINUX
 #include <linux/mman.h> // `MAP_HUGE_2MB`, `MAP_HUGE_1GB`
 #endif
 
-/*  Both the huge-page inventory and the memory-tier probe walk sysfs directories. */
-#if FU_WITH_HUGE_PAGES || (FU_WITH_TOPOLOGY && FU_ON_LINUX)
+/*  Both the huge-page inventory and the memory-tier probe walk sysfs directories - a Linux-only
+ *  concern. Windows has no `<dirent.h>` under MSVC, and its large pages are probed by size, not path. */
+#if (FU_WITH_HUGE_PAGES || FU_WITH_TOPOLOGY) && FU_ON_LINUX
 #include <dirent.h> // `opendir`, `readdir`, `closedir`
 #endif
 
@@ -220,10 +242,13 @@
 #endif
 
 #if defined(_WIN32)
-#define NOMINMAX                // Disable `max` macros conflicting with STL symbols
-#define _CRT_SECURE_NO_WARNINGS // Disable "This function or variable may be unsafe" warnings
-#include <windows.h>            // `GlobalMemoryStatusEx`
-#include <io.h>                 // `_isatty`, `_fileno`
+// `NOMINMAX` and `_CRT_SECURE_NO_WARNINGS` are already defined at the top of this header, before the
+// CRT includes, where they can still take effect.
+#include <windows.h> // `GlobalMemoryStatusEx`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`
+#include <io.h>      // `_isatty`, `_fileno`
+#if defined(_MSC_VER)
+#pragma comment(lib, "advapi32.lib") // `OpenProcessToken`, `LookupPrivilegeValueW` for large pages
+#endif
 #endif
 
 /**
@@ -247,6 +272,7 @@
 
 #if FU_DETECT_CPP_20_
 #include <concepts> // `std::same_as`, `std::invocable`
+#include <bit>      // `std::popcount`
 #endif
 
 #if FU_DETECT_CPP_17_
@@ -364,6 +390,32 @@ inline scalar_type_ add_sat(scalar_type_ a, scalar_type_ b) noexcept {
 constexpr bool is_power_of_two(std::size_t x) noexcept { return x && ((x & (x - 1)) == 0); }
 
 /**
+ *  @brief Counts the set bits in @p value.
+ *  @see https://en.cppreference.com/w/cpp/numeric/popcount
+ */
+template <typename scalar_type_>
+constexpr int popcount(scalar_type_ value) noexcept {
+    static_assert(std::is_unsigned<scalar_type_>::value, "Scalar type must be an unsigned integer");
+#if FU_DETECT_CPP_20_
+    return std::popcount(value); // In C++20
+#else
+    // Kernighan's trick: each `value &= value - 1` clears the lowest set bit, so the loop runs once
+    // per set bit rather than once per bit width.
+    int count = 0;
+    for (; value; value &= static_cast<scalar_type_>(value - 1)) ++count;
+    return count;
+#endif
+}
+
+/**
+ *  @brief Smallest multiple of @p multiple that is not less than @p value.
+ *  @note @p multiple must be non-zero; overflow of @p value near the type maximum is not guarded.
+ */
+constexpr std::size_t round_up_to_multiple(std::size_t value, std::size_t multiple) noexcept {
+    return (value + multiple - 1) / multiple * multiple;
+}
+
+/**
  *  @brief The kernel's own identifier for the calling thread, or 0 where there is none.
  *  @sa `numa_pthread_t::id`, which caches it so other threads can read it.
  *
@@ -378,6 +430,9 @@ FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
     std::uint64_t thread_id = 0;
     ::pthread_threadid_np(nullptr, &thread_id);
     return thread_id;
+#elif FU_ON_WINDOWS && FU_WITH_THREADS
+    // A `DWORD` that a debugger or Task Manager will show you; distinct from the `HANDLE`.
+    return static_cast<std::uint64_t>(::GetCurrentThreadId());
 #else
     return 0;
 #endif
@@ -395,6 +450,26 @@ FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ cha
     (void)::pthread_setname_np(::pthread_self(), thread_name);
 #elif FU_ON_APPLE
     (void)::pthread_setname_np(thread_name);
+#elif FU_ON_WINDOWS && FU_WITH_THREADS
+    // `SetThreadDescription` wants UTF-16 and only exists on Windows 10 1607+. Resolve it at runtime
+    // so a binary keeps loading on older Windows, where the name is simply not applied - the same
+    // "best effort, never fatal" contract the POSIX paths keep.
+    using set_thread_description_t = HRESULT(WINAPI *)(HANDLE, PCWSTR);
+    HMODULE const kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32) return;
+    // The `FARPROC`-to-typed-pointer cast is the documented `GetProcAddress` idiom; MSVC's C4191 for it
+    // is suppressed with the other Windows pragmas up top, and it is clean under `-Wextra`/clang-tidy.
+    auto const set_thread_description =
+        reinterpret_cast<set_thread_description_t>(::GetProcAddress(kernel32, "SetThreadDescription"));
+    if (!set_thread_description) return;
+
+    // POSIX thread names cap at 16 bytes; the same buffer never needs more than 16 wide chars.
+    wchar_t wide_name[16] = {};
+    int const written =
+        ::MultiByteToWideChar(CP_UTF8, 0, thread_name, -1, wide_name, static_cast<int>(std::size(wide_name)));
+    if (written <= 0) return; // ? Nothing usable to hand over
+    wide_name[std::size(wide_name) - 1] = L'\0';
+    (void)set_thread_description(::GetCurrentThread(), wide_name);
 #endif
 }
 
@@ -416,6 +491,31 @@ FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
 #endif
     return static_cast<std::size_t>(std::thread::hardware_concurrency());
 }
+
+#if FU_ON_WINDOWS
+/*  Windows addresses a logical processor by (processor group, bit within the group's 64-bit
+ *  `KAFFINITY` mask), not by a flat global id. A `numa_core_id_t` therefore packs both, so the free
+ *  function `pin_thread_to_cores` can rebuild a `GROUP_AFFINITY` from an id alone - no side table
+ *  threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits, so the
+ *  index is 0..63); the remaining bits hold the group number. Everywhere else a `numa_core_id_t` is
+ *  still just an opaque, comparable id - only the pinning path decodes it. */
+static constexpr int win_core_group_shift_k = 6;
+static constexpr numa_core_id_t win_core_index_mask_k = (numa_core_id_t {1} << win_core_group_shift_k) - 1;
+/** @brief Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap
+ *         of 64 @b per @b group, never a cap on total cores (a machine with more uses several groups). */
+static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
+
+FU_MAYBE_UNUSED_ static inline numa_core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
+    return (static_cast<numa_core_id_t>(group) << win_core_group_shift_k) |
+           (static_cast<numa_core_id_t>(bit) & win_core_index_mask_k);
+}
+FU_MAYBE_UNUSED_ static inline WORD win_core_group(numa_core_id_t id) noexcept {
+    return static_cast<WORD>(id >> win_core_group_shift_k);
+}
+FU_MAYBE_UNUSED_ static inline unsigned win_core_index(numa_core_id_t id) noexcept {
+    return static_cast<unsigned>(id & win_core_index_mask_k);
+}
+#endif // FU_ON_WINDOWS
 
 /**
  *  @brief Defines the in- and exclusivity of the calling thread in for the executing task.

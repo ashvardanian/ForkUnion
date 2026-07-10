@@ -32,7 +32,11 @@ struct ram_page_setting_t {
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t get_ram_page_size() noexcept {
-#if FU_WITH_NUMA_MEMORY
+#if FU_ON_WINDOWS
+    SYSTEM_INFO system_info;
+    ::GetSystemInfo(&system_info);
+    return static_cast<std::size_t>(system_info.dwPageSize);
+#elif FU_WITH_NUMA_MEMORY
     return static_cast<std::size_t>(::numa_pagesize());
 #elif defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
     return static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
@@ -145,7 +149,20 @@ class ram_page_settings {
     bool try_harvest(FU_MAYBE_UNUSED_ numa_node_id_t node_id) noexcept {
         assert(node_id >= 0 && "NUMA node ID must be non-negative");
 
-#if FU_WITH_HUGE_PAGES
+#if FU_WITH_HUGE_PAGES && FU_ON_WINDOWS
+        // Windows exposes exactly one large-page size, and only when the caller holds the
+        // `SeLockMemoryPrivilege`; there is no per-node pool to enumerate or reserve.
+        fu_unused_(node_id);
+        SIZE_T const large_page_bytes = ::GetLargePageMinimum();
+        if (large_page_bytes == 0) return false; // ? Large pages unavailable on this system
+        sizes_[0].bytes_per_page = static_cast<std::size_t>(large_page_bytes);
+        sizes_[0].available_pages = 0; // ? Windows commits large pages on demand, with no reserved pool
+        sizes_[0].free_pages = 0;
+        count_sizes_ = 1;
+        total_memory_bytes_ = 0;
+        return true;
+
+#elif FU_WITH_HUGE_PAGES && FU_ON_LINUX
 
         std::size_t count_sizes = 0; // ? Number of sizes found
 
@@ -546,6 +563,76 @@ FU_MAYBE_UNUSED_ static inline std::size_t read_hmat_metric(FU_MAYBE_UNUSED_ num
 #endif
 }
 
+#if FU_ON_WINDOWS
+/**
+ *  @brief One accumulator per (processor group, efficiency class): the union of that class's core masks
+ *         within the group, and the largest private cache seen for it.
+ *  @sa `try_harvest_windows` builds these from the processor-core and cache relationships, then reads
+ *      them back per NUMA node - so it never keeps a per-processor scratch table.
+ */
+struct win_group_class_cell_t {
+    KAFFINITY mask {0};          // ? OR of every core of this class in this group
+    std::size_t cache_bytes {0}; // ? Largest L1/L2 (private) cache seen for those cores
+};
+
+/**
+ *  @brief Detects whether this SDK's `NUMA_NODE_RELATIONSHIP` exposes the multi-group `GroupMasks[]`.
+ *  @note Version macros are unreliable here - MinGW reports Windows 7 yet defines the member - so we
+ *        probe the member itself. Older SDKs model a node as a single group, read by the fallback.
+ */
+template <typename numa_relationship_type_, typename = void>
+struct win_numa_has_group_masks : std::false_type {};
+template <typename numa_relationship_type_>
+struct win_numa_has_group_masks<numa_relationship_type_,
+                                std::void_t<decltype(std::declval<numa_relationship_type_ &>().GroupMasks)>>
+    : std::true_type {};
+
+/**
+ *  @brief Invokes @p visitor(group, mask) for every processor group a NUMA @p node owns.
+ *  @note Templated on the node type so the discarded `if constexpr` branch is dependent and only the
+ *        supported member is ever compiled. A node spanning several groups (the largest servers) is
+ *        thus enumerated in full on new SDKs, and read through its single group on old ones.
+ */
+template <typename numa_relationship_type_, typename visitor_type_>
+static inline void win_numa_for_each_group(numa_relationship_type_ const &node, visitor_type_ &&visitor) noexcept {
+    if constexpr (win_numa_has_group_masks<numa_relationship_type_>::value) {
+        if (node.GroupCount == 0) return visitor(node.GroupMask.Group, node.GroupMask.Mask);
+        for (WORD g = 0; g < node.GroupCount; ++g) visitor(node.GroupMasks[g].Group, node.GroupMasks[g].Mask);
+    }
+    else { visitor(node.GroupMask.Group, node.GroupMask.Mask); }
+}
+
+/**
+ *  @brief Best-effort socket id for a NUMA @p node: the processor package that owns its cores.
+ *  @retval @p fallback when package data is unavailable or no package matches.
+ *  @note Packages and nodes are both few, so scanning the package buffer per node needs no scratch.
+ */
+FU_MAYBE_UNUSED_ static inline numa_socket_id_t win_socket_for_node( //
+    BYTE const *package_buffer, DWORD package_len, NUMA_NODE_RELATIONSHIP const &node,
+    numa_socket_id_t fallback) noexcept {
+    if (!package_buffer) return fallback;
+    numa_socket_id_t socket_index = 0;
+    for (DWORD offset = 0; offset < package_len;) {
+        auto const *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX const *>(package_buffer + offset);
+        if (record->Relationship == RelationProcessorPackage) {
+            bool intersects = false;
+            PROCESSOR_RELATIONSHIP const &package = record->Processor;
+            for (WORD g = 0; g < package.GroupCount; ++g) {
+                GROUP_AFFINITY const package_affinity = package.GroupMask[g];
+                win_numa_for_each_group(node, [&](WORD node_group, KAFFINITY node_mask) noexcept {
+                    if (node_group == package_affinity.Group && (node_mask & package_affinity.Mask)) intersects = true;
+                });
+            }
+            if (intersects) return socket_index;
+            socket_index += 1;
+        }
+        if (record->Size == 0) break;
+        offset += record->Size;
+    }
+    return fallback;
+}
+#endif // FU_ON_WINDOWS
+
 #if defined(__APPLE__)
 /**
  *  @brief Reads an unsigned integer `sysctl` by name (e.g. "hw.nperflevels"), or 0 if unavailable.
@@ -897,6 +984,8 @@ struct numa_topology {
 #endif // FU_WITH_TOPOLOGY
 #if defined(__APPLE__)
         return try_harvest_apple();
+#elif FU_ON_WINDOWS
+        return try_harvest_windows();
 #else
         return false;
 #endif
@@ -1023,6 +1112,260 @@ struct numa_topology {
         return true;
     }
 #endif // defined(__APPLE__)
+
+#if FU_ON_WINDOWS
+    /**
+     *  @brief Harvests the Windows topology from `GetLogicalProcessorInformationEx`.
+     *  @retval false if the machine reports no NUMA node or an allocation failed.
+     *
+     *  Windows describes a machine in the same two axes this library already uses. A @b processor
+     *  @b group holds at most 64 logical processors sharing one `KAFFINITY` mask; groups are cut along
+     *  NUMA boundaries, so a NUMA node maps to one memory domain. Within a node the compute axis is cut
+     *  by @b efficiency @b class - the kernel's rank of a core's performance, where a higher class is
+     *  more performant - so a hybrid P/E chip yields one compute domain per class, exactly as Apple's
+     *  performance levels do. Non-hybrid chips report class 0 for every core and collapse to a single
+     *  compute domain per node.
+     *
+     *  Rather than a per-processor scratch table, the harvest accumulates one mask per (processor group,
+     *  efficiency class) - a @ref `win_group_class_cell_t` - so its working set is tiny and it reads the
+     *  compute domains straight out of masks, the unit Windows itself speaks in.
+     *
+     *  Efficiency class is an ordinal, not a magnitude - it ranks cores without rating them - so
+     *  `capacity` stays `capacity_unknown_k` and callers weigh domains by `core_count`, mirroring the
+     *  Apple path. `cache_bytes` is the largest private (L1/L2) cache the kernel reports for the class.
+     *
+     *  @note A `numa_core_id_t` here is not a flat index: it packs the (group, in-group bit) pair via
+     *        `win_encode_core_id`, which `pin_thread_to_cores` decodes back into a `GROUP_AFFINITY`.
+     *  @note A NUMA node spanning several processor groups (the largest servers) is enumerated in full
+     *        where the SDK exposes `GroupMasks[]`; @sa `win_numa_for_each_group`.
+     */
+    bool try_harvest_windows() noexcept {
+        // Pull one relationship class into a heap buffer the caller frees. The record layout is
+        // variable-length: every entry carries its own `Size`, and iteration advances by it.
+        auto query = [](LOGICAL_PROCESSOR_RELATIONSHIP relationship, DWORD &out_len) -> BYTE * {
+            DWORD len = 0;
+            ::GetLogicalProcessorInformationEx(relationship, nullptr, &len);
+            if (len == 0) return nullptr; // ! Nothing to report, or an unexpected failure
+            BYTE *buffer = static_cast<BYTE *>(std::malloc(len));
+            if (!buffer) return nullptr; // ! Out of memory
+            auto *typed = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buffer);
+            if (!::GetLogicalProcessorInformationEx(relationship, typed, &len)) {
+                std::free(buffer);
+                return nullptr; // ! The machine changed between the sizing and the fill
+            }
+            out_len = len;
+            return buffer;
+        };
+        using cell_allocator_t =
+            typename std::allocator_traits<allocator_t>::template rebind_alloc<win_group_class_cell_t>;
+
+        // Everything the `failed_harvest:` label frees must be declared and initialized before the
+        // first `goto`, so a jump there never skips an initializer - the shape the Linux harvest uses.
+        nodes_allocator_t nodes_alloc {allocator_};
+        cores_allocator_t cores_alloc {allocator_};
+        domains_allocator_t domains_alloc {allocator_};
+        cell_allocator_t cell_alloc {allocator_};
+        BYTE *numa_buf = nullptr, *package_buf = nullptr;
+        win_group_class_cell_t *cells = nullptr; // ? [group * class_count + class]: core mask + private cache
+        numa_node_t *nodes_ptr = nullptr;
+        numa_core_id_t *core_ids_ptr = nullptr;
+        compute_domain_t *domains_ptr = nullptr;
+        DWORD numa_len = 0, cores_len = 0, cache_len = 0, package_len = 0;
+        std::size_t class_count = 1, cell_count = 0; // ? `class_count` starts at 1: a non-hybrid machine
+        std::size_t counted_nodes = 0, counted_cores = 0;
+        std::size_t core_cursor = 0, node_index = 0, domain_cursor = 0, levels = 1;
+
+        // A processor group holds at most 64 logical processors; `group_span` bounds the cell grid.
+        WORD const group_span = ::GetActiveProcessorGroupCount() ? ::GetActiveProcessorGroupCount() : 1;
+
+        // Pass 1: from the physical-core relationships, learn how many efficiency classes exist, then
+        // OR each core into its (group, class) cell. Two sweeps of one buffer - measure, then fill.
+        {
+            BYTE *cores_buf = query(RelationProcessorCore, cores_len);
+            if (!cores_buf) goto failed_harvest; // ! No processor information at all
+            for (DWORD offset = 0; offset < cores_len;) {
+                auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(cores_buf + offset);
+                if (record->Relationship == RelationProcessorCore &&
+                    static_cast<std::size_t>(record->Processor.EfficiencyClass) + 1 > class_count)
+                    class_count = static_cast<std::size_t>(record->Processor.EfficiencyClass) + 1;
+                if (record->Size == 0) break; // ! Malformed record; stop rather than spin
+                offset += record->Size;
+            }
+            cell_count = static_cast<std::size_t>(group_span) * class_count;
+            cells = cell_alloc.allocate(cell_count);
+            if (!cells) {
+                std::free(cores_buf);
+                goto failed_harvest; // ! Out of memory
+            }
+            for (std::size_t i = 0; i < cell_count; ++i) cells[i] = win_group_class_cell_t {};
+            for (DWORD offset = 0; offset < cores_len;) {
+                auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(cores_buf + offset);
+                if (record->Relationship == RelationProcessorCore) {
+                    std::size_t const cls = record->Processor.EfficiencyClass;
+                    for (WORD g = 0; g < record->Processor.GroupCount; ++g) {
+                        GROUP_AFFINITY const affinity = record->Processor.GroupMask[g];
+                        if (affinity.Group < group_span)
+                            cells[static_cast<std::size_t>(affinity.Group) * class_count + cls].mask |= affinity.Mask;
+                    }
+                }
+                if (record->Size == 0) break;
+                offset += record->Size;
+            }
+            std::free(cores_buf);
+        }
+
+        // Pass 2: attribute each private (L1/L2) cache to the (group, class) cells its cores belong to.
+        // L3 is shared across domains, so it would misreport a domain's private cache and is skipped.
+        if (BYTE *cache_buf = query(RelationCache, cache_len)) {
+            for (DWORD offset = 0; offset < cache_len;) {
+                auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(cache_buf + offset);
+                if (record->Relationship == RelationCache && record->Cache.Level <= 2) {
+                    GROUP_AFFINITY const affinity = record->Cache.GroupMask;
+                    std::size_t const size_bytes = static_cast<std::size_t>(record->Cache.CacheSize);
+                    if (affinity.Group < group_span)
+                        for (std::size_t c = 0; c < class_count; ++c) {
+                            win_group_class_cell_t &cell =
+                                cells[static_cast<std::size_t>(affinity.Group) * class_count + c];
+                            if ((affinity.Mask & cell.mask) && size_bytes > cell.cache_bytes)
+                                cell.cache_bytes = size_bytes;
+                        }
+                }
+                if (record->Size == 0) break;
+                offset += record->Size;
+            }
+            std::free(cache_buf);
+        }
+
+        // Packages are kept until the fill so each node can be tagged with its socket; null is fine.
+        package_buf = query(RelationProcessorPackage, package_len);
+
+        // Pass 3: count nodes and total cores - counting the exact bits pass 4 will emit (each node
+        // group intersected with the class cells), so the allocation matches the fill and `reset()`
+        // later frees the same length it was handed.
+        numa_buf = query(RelationNumaNode, numa_len);
+        if (!numa_buf) goto failed_harvest; // ! No NUMA information at all
+        for (DWORD offset = 0; offset < numa_len;) {
+            auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(numa_buf + offset);
+            if (record->Relationship == RelationNumaNode) {
+                counted_nodes += 1;
+                win_numa_for_each_group(record->NumaNode, [&](WORD group, KAFFINITY node_mask) noexcept {
+                    if (group >= group_span) return; // ? Beyond the cell grid; skip as the fill does
+                    for (std::size_t c = 0; c < class_count; ++c)
+                        counted_cores += popcount(static_cast<KAFFINITY>(
+                            node_mask & cells[static_cast<std::size_t>(group) * class_count + c].mask));
+                });
+            }
+            if (record->Size == 0) break;
+            offset += record->Size;
+        }
+        if (counted_nodes == 0 || counted_cores == 0) goto failed_harvest; // ! Nothing to spawn onto
+
+        // Allocate the committed arrays. `compute_domains_` is sized to the core count - at most one
+        // domain per core - so `reset()` can free it by `cores_count_`, matching every other path.
+        nodes_ptr = nodes_alloc.allocate(counted_nodes);
+        core_ids_ptr = cores_alloc.allocate(counted_cores);
+        domains_ptr = domains_alloc.allocate(counted_cores);
+        if (!nodes_ptr || !core_ids_ptr || !domains_ptr) goto failed_harvest; // ! Out of memory
+
+        // `allocate` hands back raw storage; begin each node's lifetime so the members the fill does not
+        // touch - the `page_sizes` inventory - hold their zeroed defaults rather than garbage the
+        // topology logger would then walk off the end of.
+        for (std::size_t i = 0; i < counted_nodes; ++i) ::new (static_cast<void *>(&nodes_ptr[i])) numa_node_t {};
+
+        // Pass 4: fill each node, emitting its cores one efficiency class at a time (most performant
+        // first) so a class's cores land contiguously and become one compute domain - reading the
+        // (group, class) cells rather than any per-core table.
+        for (DWORD offset = 0; offset < numa_len;) {
+            auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(numa_buf + offset);
+            if (record->Relationship != RelationNumaNode) {
+                if (record->Size == 0) break;
+                offset += record->Size;
+                continue;
+            }
+            NUMA_NODE_RELATIONSHIP const &numa_node = record->NumaNode;
+            std::size_t const node_first_core = core_cursor;
+
+            for (std::size_t class_step = 0; class_step < class_count; ++class_step) {
+                std::size_t const cls = class_count - 1 - class_step; // ? Fastest (highest) class first
+                std::size_t const domain_first_core = core_cursor;
+                std::size_t domain_cache_bytes = 0;
+                win_numa_for_each_group(numa_node, [&](WORD group, KAFFINITY node_mask) noexcept {
+                    if (group >= group_span) return; // ? Beyond the cell grid; should not happen
+                    win_group_class_cell_t const &cell = cells[static_cast<std::size_t>(group) * class_count + cls];
+                    KAFFINITY const domain_mask = node_mask & cell.mask;
+                    if (!domain_mask) return;
+                    if (cell.cache_bytes > domain_cache_bytes) domain_cache_bytes = cell.cache_bytes;
+                    for (unsigned bit = 0; bit < win_processors_per_group_k; ++bit)
+                        if (domain_mask & (static_cast<KAFFINITY>(1) << bit))
+                            core_ids_ptr[core_cursor++] = win_encode_core_id(group, bit);
+                });
+                if (core_cursor == domain_first_core) continue; // ? No cores of this class on this node
+
+                compute_domain_t &domain = domains_ptr[domain_cursor++];
+                domain.node_id = static_cast<numa_node_id_t>(numa_node.NodeNumber);
+                domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
+                domain.compute_level = cls; // ? Raw class now; dense-ranked below
+                domain.capacity = capacity_unknown_k;
+                domain.cache_bytes = domain_cache_bytes;
+                domain.first_core_id = core_ids_ptr + domain_first_core;
+                domain.core_count = core_cursor - domain_first_core;
+            }
+
+            ULONGLONG available_bytes = 0;
+            (void)::GetNumaAvailableMemoryNodeEx(static_cast<USHORT>(numa_node.NodeNumber), &available_bytes);
+
+            numa_node_t &node = nodes_ptr[node_index];
+            node.node_id = static_cast<numa_node_id_t>(numa_node.NodeNumber);
+            node.socket_id = win_socket_for_node(package_buf, package_len, numa_node,
+                                                 static_cast<numa_socket_id_t>(numa_node.NodeNumber));
+            node.memory_size =
+                static_cast<std::size_t>(available_bytes); // ? Available, not installed - Windows has no per-node total
+            node.memory_level = 0;
+            node.first_core_id = core_ids_ptr + node_first_core;
+            node.core_count = core_cursor - node_first_core;
+            node.page_sizes.try_harvest(node.node_id); // ! Optional: records the large-page size if available
+            node_index += 1;
+            if (record->Size == 0) break;
+            offset += record->Size;
+        }
+        std::free(package_buf);
+        package_buf = nullptr;
+        std::free(numa_buf);
+        numa_buf = nullptr; // ? Owned buffers released; keeps the label's blanket free safe on fall-through
+        cell_alloc.deallocate(cells, cell_count);
+        cells = nullptr;
+
+        // Collapse the raw efficiency classes into a dense 0..K-1 rank, least-performant first - the
+        // ordinal `compute_level` promises. A non-hybrid machine ranks every domain 0: one level.
+        if (domain_cursor != 0)
+            levels = dense_rank(
+                domain_cursor,
+                [domains_ptr](std::size_t i) noexcept {
+                    return static_cast<std::size_t>(domains_ptr[i].compute_level);
+                },
+                [domains_ptr](std::size_t i, std::size_t rank) noexcept { domains_ptr[i].compute_level = rank; });
+
+        reset(); // ? Free any prior state before committing
+        nodes_ = nodes_ptr;
+        node_core_ids_ = core_ids_ptr;
+        compute_domains_ = domains_ptr;
+        nodes_count_ = counted_nodes;
+        cores_count_ = core_cursor;
+        compute_domains_count_ = domain_cursor;
+        compute_levels_count_ = levels;
+        memory_levels_count_ = 1; // ? Windows exposes no memory-tiering ranking
+        return true;
+
+    failed_harvest: // ? Pointers stay null until owned, so a blanket free/deallocate is safe
+        if (nodes_ptr) nodes_alloc.deallocate(nodes_ptr, counted_nodes);
+        if (core_ids_ptr) cores_alloc.deallocate(core_ids_ptr, counted_cores);
+        if (domains_ptr) domains_alloc.deallocate(domains_ptr, counted_cores);
+        if (cells) cell_alloc.deallocate(cells, cell_count);
+        std::free(numa_buf);
+        std::free(package_buf);
+        return false;
+    }
+#endif // FU_ON_WINDOWS
 
     /**
      *  @brief Copy-assigns the topology from @p other.

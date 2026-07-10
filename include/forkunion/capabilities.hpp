@@ -206,7 +206,14 @@ inline capabilities_t cpu_capabilities() noexcept {
 inline capabilities_t ram_capabilities() noexcept {
     capabilities_t caps = capabilities_unknown_k;
 
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+    // Windows always exposes the NUMA placement API (`VirtualAllocExNuma`); a single-node box simply
+    // reports one node. Large-page availability hinges on a privilege the caller may not hold, so it
+    // is probed by its minimum page size rather than a directory.
+    caps = static_cast<capabilities_t>(caps | capability_numa_aware_k);
+    if (::GetLargePageMinimum() != 0) caps = static_cast<capabilities_t>(caps | capability_huge_pages_k);
+
+#elif FU_WITH_NUMA_MEMORY && FU_ON_LINUX
     // Check for NUMA support
     if (::numa_available() >= 0) caps = static_cast<capabilities_t>(caps | capability_numa_aware_k);
 

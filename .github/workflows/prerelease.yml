@@ -345,6 +345,16 @@ jobs:
           .\build_artifacts\forkunion_test_cpp20.exe
           .\build_artifacts\forkunion_test_cpp23.exe
 
+      # Guard the Windows port's headline capability: with topology/NUMA forced ON, a regression that
+      # silently drops Windows out of FU_WITH_TOPOLOGY fails to compile here instead of quietly
+      # reverting to a basic_pool-only build. Exercises try_harvest_windows and the domain-aware pools.
+      - name: Test C++ with topology forced ON
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -B build_topo -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_NUMA_MEMORY=ON
+          cmake --build build_topo --config RelWithDebInfo
+          .\build_topo\forkunion_test_cpp20.exe
+
       - name: Test C
         run: |
           Write-Host "MSVC still lacks <stdatomic.h>; skipping C test binary"
