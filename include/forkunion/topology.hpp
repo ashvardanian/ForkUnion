@@ -123,10 +123,8 @@ FU_MAYBE_UNUSED_ static inline std::size_t get_ram_total_volume() noexcept {
 template <std::size_t max_page_sizes_ = 4>
 class ram_page_settings {
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
-    /** Huge page sizes in bytes. */
-    std::array<ram_page_setting_t, max_page_sizes_k> sizes_ {0};
-    /** Number of supported huge page sizes. */
-    std::size_t count_sizes_ {0};
+    /** Huge page sizes in bytes; a machine offers a handful, so the storage is inline. */
+    limited_array<ram_page_setting_t, max_page_sizes_k> sizes_ {};
     /** Total memory available on this NUMA node. */
     std::size_t total_memory_bytes_ {0};
 
@@ -135,9 +133,9 @@ class ram_page_settings {
      *  @brief Finds the largest Huge Pages size available for the given NUMA node.
      */
     ram_page_setting_t largest_free() const noexcept {
-        if (!count_sizes_) return {};
+        if (sizes_.empty()) return {};
         ram_page_setting_t largest = sizes_[0];
-        for (std::size_t i = 1; i < count_sizes_; ++i)
+        for (std::size_t i = 1; i < sizes_.size(); ++i)
             if (sizes_[i].free_pages > largest.free_pages) largest = sizes_[i];
         return largest;
     }
@@ -155,16 +153,19 @@ class ram_page_settings {
         fu_unused_(node_id);
         SIZE_T const large_page_bytes = ::GetLargePageMinimum();
         if (large_page_bytes == 0) return false; // ? Large pages unavailable on this system
-        sizes_[0].bytes_per_page = static_cast<std::size_t>(large_page_bytes);
-        sizes_[0].available_pages = 0; // ? Windows commits large pages on demand, with no reserved pool
-        sizes_[0].free_pages = 0;
-        count_sizes_ = 1;
+        // ? Windows commits large pages on demand, with no reserved pool to report
+        ram_page_setting_t only {};
+        only.bytes_per_page = static_cast<std::size_t>(large_page_bytes);
+        only.available_pages = 0;
+        only.free_pages = 0;
+        sizes_.clear();
+        sizes_.try_push_back(only);
         total_memory_bytes_ = 0;
         return true;
 
 #elif FU_WITH_HUGE_PAGES && FU_ON_LINUX
 
-        std::size_t count_sizes = 0; // ? Number of sizes found
+        sizes_.clear();
 
         // Build path to NUMA node's hugepages directory
         char hugepages_path[256];
@@ -178,7 +179,7 @@ class ram_page_settings {
         if (!hugepages_dir) return false; // ? Can't open NUMA node hugepages directory
 
         struct dirent *entry;
-        while ((entry = ::readdir(hugepages_dir)) != nullptr && count_sizes < max_page_sizes_k) {
+        while ((entry = ::readdir(hugepages_dir)) != nullptr && !sizes_.full()) {
             // Look for directories named "hugepages-*kB"
             if (entry->d_type != DT_DIR) continue;
             if (::strncmp(entry->d_name, "hugepages-", 10) != 0) continue;
@@ -232,10 +233,11 @@ class ram_page_settings {
             }
 
             // Add to our list with NUMA node information
-            sizes_[count_sizes].bytes_per_page = bytes_per_page;
-            sizes_[count_sizes].available_pages = allocated_pages;
-            sizes_[count_sizes].free_pages = free_pages;
-            ++count_sizes;
+            ram_page_setting_t setting {};
+            setting.bytes_per_page = bytes_per_page;
+            setting.available_pages = allocated_pages;
+            setting.free_pages = free_pages;
+            sizes_.try_push_back(setting); // ? Guarded by `!sizes_.full()` above
         }
         ::closedir(hugepages_dir);
 
@@ -261,7 +263,6 @@ class ram_page_settings {
             }
         }
 
-        count_sizes_ = count_sizes;
         return true;
 #else
         fu_unused_(node_id);
@@ -269,12 +270,12 @@ class ram_page_settings {
 #endif
     }
 
-    std::size_t size() const noexcept { return count_sizes_; }
+    std::size_t size() const noexcept { return sizes_.size(); }
     std::size_t total_memory_bytes() const noexcept { return total_memory_bytes_; }
     ram_page_setting_t const *begin() const noexcept { return sizes_.data(); }
-    ram_page_setting_t const *end() const noexcept { return sizes_.data() + count_sizes_; }
+    ram_page_setting_t const *end() const noexcept { return sizes_.data() + sizes_.size(); }
     ram_page_setting_t const &operator[](std::size_t const index) const noexcept {
-        assert(index < count_sizes_ && "Index is out of bounds");
+        assert(index < sizes_.size() && "Index is out of bounds");
         return sizes_[index];
     }
 
@@ -289,14 +290,14 @@ class ram_page_settings {
         assert(node_id >= 0 && "NUMA node ID must be non-negative");
 
         // Find the matching page size entry
-        std::size_t page_index = count_sizes_;
-        for (std::size_t i = 0; i < count_sizes_; ++i) {
+        std::size_t page_index = sizes_.size();
+        for (std::size_t i = 0; i < sizes_.size(); ++i) {
             if (sizes_[i].bytes_per_page == page_size_bytes) {
                 page_index = i;
                 break;
             }
         }
-        if (page_index >= count_sizes_) return false; // ? Page size not found
+        if (page_index >= sizes_.size()) return false; // ? Page size not found
 
         // Calculate the page size in kB for the directory name
         std::size_t const page_size_kb = page_size_bytes / 1024;
@@ -397,6 +398,20 @@ struct compute_domain_t {
 static constexpr std::size_t capacity_unknown_k = 0;
 
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
+/**
+ *  @brief Owns a `libnuma` CPU mask - the one harvest resource an allocator-aware array cannot hold.
+ */
+struct numa_cpumask_guard {
+    struct bitmask *mask {nullptr};
+
+    numa_cpumask_guard() noexcept : mask(::numa_allocate_cpumask()) {}
+    numa_cpumask_guard(numa_cpumask_guard const &) = delete;
+    numa_cpumask_guard &operator=(numa_cpumask_guard const &) = delete;
+    ~numa_cpumask_guard() noexcept {
+        if (mask) ::numa_free_cpumask(mask);
+    }
+};
+
 /**
  *  @brief Clears from @p cpus every core that @p allowed does not hold.
  *  @note A node whose every core is masked away survives as a cpuless memory domain, which the rest
@@ -679,14 +694,17 @@ struct numa_topology {
 
   private:
     allocator_t allocator_ {};
-    numa_node_t *nodes_ {nullptr};                // ? Memory domains (one per NUMA node)
-    numa_core_id_t *node_core_ids_ {nullptr};     // ? Core IDs in [0, threads_count), grouped by node then QoS
-    compute_domain_t *compute_domains_ {nullptr}; // ? Compute domains (same-QoS core runs within a node)
+    /** Memory domains, one per NUMA node. */
+    dynamic_array<numa_node_t, nodes_allocator_t> nodes_;
+    /** Core IDs grouped by node then QoS; the nodes and domains below slice into this. */
+    dynamic_array<numa_core_id_t, cores_allocator_t> node_core_ids_;
+    /** Compute domains, one per same-QoS core run within a node; sized for the worst case. */
+    dynamic_array<compute_domain_t, domains_allocator_t> compute_domains_;
     /** Number of memory domains / NUMA nodes. */
     std::size_t nodes_count_ {0};
     /** Total number of cores in all nodes. */
     std::size_t cores_count_ {0};
-    /** Number of compute domains. */
+    /** Number of compute domains actually written, never more than `compute_domains_.size()`. */
     std::size_t compute_domains_count_ {0};
     /** Number of distinct QoS classes (>= 1). */
     std::size_t compute_levels_count_ {1};
@@ -695,28 +713,23 @@ struct numa_topology {
 
   public:
     constexpr numa_topology() noexcept = default;
+
+    // ! The arrays move their heap pointers, so the `first_core_id` slices the nodes and domains
+    // ! hold into `node_core_ids_` survive a move untouched.
     numa_topology(numa_topology &&o) noexcept
-        : allocator_(std::move(o.allocator_)), nodes_(o.nodes_), node_core_ids_(o.node_core_ids_),
-          compute_domains_(o.compute_domains_), nodes_count_(o.nodes_count_), cores_count_(o.cores_count_),
-          compute_domains_count_(o.compute_domains_count_), compute_levels_count_(o.compute_levels_count_),
-          memory_levels_count_(o.memory_levels_count_) {
-        o.nodes_ = nullptr;
-        o.node_core_ids_ = nullptr;
-        o.compute_domains_ = nullptr;
-        o.nodes_count_ = 0;
-        o.cores_count_ = 0;
-        o.compute_domains_count_ = 0;
-        o.compute_levels_count_ = 1;
-        o.memory_levels_count_ = 1;
-    }
+        : allocator_(std::move(o.allocator_)), nodes_(std::move(o.nodes_)), node_core_ids_(std::move(o.node_core_ids_)),
+          compute_domains_(std::move(o.compute_domains_)), nodes_count_(std::exchange(o.nodes_count_, 0)),
+          cores_count_(std::exchange(o.cores_count_, 0)),
+          compute_domains_count_(std::exchange(o.compute_domains_count_, 0)),
+          compute_levels_count_(std::exchange(o.compute_levels_count_, 1)),
+          memory_levels_count_(std::exchange(o.memory_levels_count_, 1)) {}
 
     numa_topology &operator=(numa_topology &&other) noexcept {
         if (this != &other) {
-            reset(); // ? Reset the current state
             allocator_ = std::move(other.allocator_);
-            nodes_ = std::exchange(other.nodes_, nullptr);
-            node_core_ids_ = std::exchange(other.node_core_ids_, nullptr);
-            compute_domains_ = std::exchange(other.compute_domains_, nullptr);
+            nodes_ = std::move(other.nodes_);
+            node_core_ids_ = std::move(other.node_core_ids_);
+            compute_domains_ = std::move(other.compute_domains_);
             nodes_count_ = std::exchange(other.nodes_count_, 0);
             cores_count_ = std::exchange(other.cores_count_, 0);
             compute_domains_count_ = std::exchange(other.compute_domains_count_, 0);
@@ -732,17 +745,9 @@ struct numa_topology {
     ~numa_topology() noexcept { reset(); }
 
     void reset() noexcept {
-        cores_allocator_t cores_alloc {allocator_};
-        nodes_allocator_t nodes_alloc {allocator_};
-        domains_allocator_t domains_alloc {allocator_};
-
-        if (node_core_ids_) cores_alloc.deallocate(node_core_ids_, cores_count_);
-        if (nodes_) nodes_alloc.deallocate(nodes_, nodes_count_);
-        if (compute_domains_) domains_alloc.deallocate(compute_domains_, cores_count_);
-
-        nodes_ = nullptr;
-        node_core_ids_ = nullptr;
-        compute_domains_ = nullptr;
+        nodes_.reset();
+        node_core_ids_.reset();
+        compute_domains_.reset();
         nodes_count_ = cores_count_ = compute_domains_count_ = 0;
         compute_levels_count_ = 1;
         memory_levels_count_ = 1;
@@ -820,36 +825,25 @@ struct numa_topology {
      */
     bool try_harvest() noexcept {
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
-        struct bitmask *numa_mask = nullptr;
+        reset();
 
         // The cores this process may actually run on. A cgroup `cpuset` or a `taskset` narrows it,
         // and a domain's CPU list must be intersected with it - otherwise we would size the pool
         // from the machine and pin workers onto cores the kernel will never schedule us on.
         affinity_mask allowed;
         bool const allowed_known = allowed.try_capture() && allowed.count() != 0;
-        numa_node_t *nodes_ptr = nullptr;
-        numa_core_id_t *core_ids_ptr = nullptr;
-        compute_domain_t *domains_ptr = nullptr;
-        std::size_t *core_capacities = nullptr; // ? Scheduler capacity keyed by core id, cached for the QoS split
-        numa_node_id_t max_numa_node_id = -1;
 
-        // Allocators must be visible to the cleanup path
-        nodes_allocator_t nodes_alloc {allocator_};
-        cores_allocator_t cores_alloc {allocator_};
-        domains_allocator_t domains_alloc {allocator_};
-        capacities_allocator_t capacities_alloc {allocator_};
+        if (::numa_available() < 0) return false; // ! Linux kernel lacks NUMA support
+        ::numa_node_to_cpu_update();              // ? Reset the outdated stale state
 
-        // These counters are reused in the failure handler
-        std::size_t fetched_nodes = 0, fetched_cores = 0, configured_cores = 0;
-
-        if (::numa_available() < 0) goto failed_harvest; // ! Linux kernel lacks NUMA support
-        ::numa_node_to_cpu_update();                     // ? Reset the outdated stale state
-
-        numa_mask = ::numa_allocate_cpumask();
-        if (!numa_mask) goto failed_harvest; // ! Allocation failed
+        // The only resource here the arrays below cannot own for us.
+        numa_cpumask_guard numa_mask_guard;
+        struct bitmask *const numa_mask = numa_mask_guard.mask;
+        if (!numa_mask) return false; // ! Allocation failed
 
         // First pass - measure
-        max_numa_node_id = ::numa_max_node();
+        std::size_t fetched_nodes = 0, fetched_cores = 0;
+        numa_node_id_t const max_numa_node_id = ::numa_max_node();
         for (numa_node_id_t node_id = 0; node_id <= max_numa_node_id; ++node_id) {
             long long dummy;
             if (::numa_node_size64(node_id, &dummy) < 0) continue; // ! Offline node
@@ -862,20 +856,27 @@ struct numa_topology {
             fetched_nodes += 1;
             fetched_cores += node_cores;
         }
-        if (fetched_nodes == 0) goto failed_harvest; // ! Zero nodes is not a valid state
+        if (fetched_nodes == 0) return false; // ! Zero nodes is not a valid state
 
         // Second pass - allocate. At most one compute domain per core (fully heterogeneous node).
-        nodes_ptr = nodes_alloc.allocate(fetched_nodes);
-        core_ids_ptr = cores_alloc.allocate(fetched_cores);
-        domains_ptr = domains_alloc.allocate(fetched_cores);
-        if (!nodes_ptr || !core_ids_ptr || !domains_ptr) goto failed_harvest; // ! Allocation failed
+        // A failed `try_resize` leaves its array empty, and every array frees itself on the way out.
+        dynamic_array<numa_node_t, nodes_allocator_t> nodes {nodes_allocator_t {allocator_}};
+        dynamic_array<numa_core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
+        dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
+        if (!nodes.try_resize(fetched_nodes)) return false;
+        if (!core_ids.try_resize(fetched_cores)) return false;
+        if (!domains.try_resize(fetched_cores)) return false;
+        numa_node_t *const nodes_ptr = nodes.data();
+        numa_core_id_t *const core_ids_ptr = core_ids.data();
+        compute_domain_t *const domains_ptr = domains.data();
 
         // A scratch table of every configured CPU's capacity, filled once below and read by the
         // per-node QoS split (which is O(n^2) in comparisons) instead of re-opening sysfs each time.
-        configured_cores = static_cast<std::size_t>(::numa_num_configured_cpus());
-        if (configured_cores == 0) goto failed_harvest; // ! No CPUs is not a valid state
-        core_capacities = capacities_alloc.allocate(configured_cores);
-        if (!core_capacities) goto failed_harvest; // ! Allocation failed
+        std::size_t const configured_cores = static_cast<std::size_t>(::numa_num_configured_cpus());
+        if (configured_cores == 0) return false; // ! No CPUs is not a valid state
+        dynamic_array<std::size_t, capacities_allocator_t> capacities {capacities_allocator_t {allocator_}};
+        if (!capacities.try_resize(configured_cores)) return false;
+        std::size_t *const core_capacities = capacities.data();
 
         // Populate
         for (numa_node_id_t node_id = 0, core_index = 0, node_index = 0; node_id <= max_numa_node_id; ++node_id) {
@@ -906,15 +907,15 @@ struct numa_topology {
             node_index++;
         }
 
-        // Commit
-        nodes_ = nodes_ptr;
-        node_core_ids_ = core_ids_ptr;
+        // Commit. The arrays keep their heap pointers across the move, so every `first_core_id`
+        // slice written above stays valid.
+        nodes_ = std::move(nodes);
+        node_core_ids_ = std::move(core_ids);
         nodes_count_ = fetched_nodes;
         cores_count_ = fetched_cores;
-        ::numa_free_cpumask(numa_mask); // ? Clean up
 
         // Let's sort all the nodes by their socket ID, then by number of cores, then by first core ID
-        bubble_sort(nodes_, nodes_count_, [](numa_node_t const &a, numa_node_t const &b) noexcept {
+        bubble_sort(nodes_.data(), nodes_count_, [](numa_node_t const &a, numa_node_t const &b) noexcept {
             if (a.socket_id != b.socket_id) return a.socket_id < b.socket_id;
             if (a.core_count != b.core_count) return a.core_count > b.core_count;  // ? Sort by descending core count
             numa_core_id_t const a_first = a.core_count ? a.first_core_id[0] : -1; // ? Cpuless slices are empty
@@ -971,7 +972,7 @@ struct numa_topology {
             }
 
             // Re-rank the raw capacities into dense QoS ordinals, sorted least-to-most performant.
-            compute_domains_ = domains_ptr;
+            compute_domains_ = std::move(domains);
             compute_domains_count_ = domains_written;
             compute_levels_count_ = dense_rank(
                 domains_written,
@@ -986,23 +987,18 @@ struct numa_topology {
         // Rank memory domains into dense tier ordinals, sorted fastest-to-slowest (lower = faster). Raw
         // tiers are snapshotted into scratch so ranking in place never corrupts a repeated tier. Absent
         // the memory-tiering sysfs, every node collapses to a single memory level.
-        if (std::size_t *raw_tiers = capacities_alloc.allocate(nodes_count_)) {
-            for (std::size_t i = 0; i < nodes_count_; ++i) raw_tiers[i] = get_memory_tier_for_node(nodes_[i].node_id);
-            memory_levels_count_ = dense_rank(
-                nodes_count_, [raw_tiers](std::size_t index) noexcept { return raw_tiers[index]; },
-                [this, raw_tiers](std::size_t index, std::size_t rank) noexcept { nodes_[index].memory_level = rank; });
-            capacities_alloc.deallocate(raw_tiers, nodes_count_);
+        {
+            dynamic_array<std::size_t, capacities_allocator_t> raw_tiers {capacities_allocator_t {allocator_}};
+            if (raw_tiers.try_resize(nodes_count_)) {
+                std::size_t *const tiers = raw_tiers.data();
+                for (std::size_t i = 0; i < nodes_count_; ++i) tiers[i] = get_memory_tier_for_node(nodes_[i].node_id);
+                memory_levels_count_ = dense_rank(
+                    nodes_count_, [tiers](std::size_t index) noexcept { return tiers[index]; },
+                    [this](std::size_t index, std::size_t rank) noexcept { nodes_[index].memory_level = rank; });
+            }
         }
 
-        capacities_alloc.deallocate(core_capacities, configured_cores); // ? Scratch, not part of the committed state
-        return true;
-
-    failed_harvest:
-        if (nodes_ptr) nodes_alloc.deallocate(nodes_ptr, fetched_nodes);
-        if (core_ids_ptr) cores_alloc.deallocate(core_ids_ptr, fetched_cores);
-        if (domains_ptr) domains_alloc.deallocate(domains_ptr, fetched_cores);
-        if (core_capacities) capacities_alloc.deallocate(core_capacities, configured_cores);
-        if (numa_mask) ::numa_free_cpumask(numa_mask);
+        return true; // ? Every scratch array above frees itself here
 #endif // FU_WITH_TOPOLOGY
 #if defined(__APPLE__)
         return try_harvest_apple();
@@ -1048,20 +1044,16 @@ struct numa_topology {
         }
         if (nonempty_levels == 0) nonempty_levels = 1; // ? One level covering every core
 
-        nodes_allocator_t nodes_alloc {allocator_};
-        cores_allocator_t cores_alloc {allocator_};
-        domains_allocator_t domains_alloc {allocator_};
-
         // `compute_domains_` is sized to `cores_count_` across the class (at most one domain per core).
-        numa_node_t *nodes_ptr = nodes_alloc.allocate(1);
-        numa_core_id_t *core_ids_ptr = cores_alloc.allocate(total_cores);
-        compute_domain_t *domains_ptr = domains_alloc.allocate(total_cores);
-        if (!nodes_ptr || !core_ids_ptr || !domains_ptr) {
-            if (nodes_ptr) nodes_alloc.deallocate(nodes_ptr, 1);
-            if (core_ids_ptr) cores_alloc.deallocate(core_ids_ptr, total_cores);
-            if (domains_ptr) domains_alloc.deallocate(domains_ptr, total_cores);
-            return false;
-        }
+        dynamic_array<numa_node_t, nodes_allocator_t> nodes {nodes_allocator_t {allocator_}};
+        dynamic_array<numa_core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
+        dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
+        if (!nodes.try_resize(1)) return false;
+        if (!core_ids.try_resize(total_cores)) return false;
+        if (!domains.try_resize(total_cores)) return false;
+        numa_node_t *const nodes_ptr = nodes.data();
+        numa_core_id_t *const core_ids_ptr = core_ids.data();
+        compute_domain_t *const domains_ptr = domains.data();
         for (std::size_t i = 0; i < total_cores; ++i) core_ids_ptr[i] = static_cast<numa_core_id_t>(i);
 
         numa_node_t &node = nodes_ptr[0];
@@ -1122,10 +1114,10 @@ struct numa_topology {
             levels_written = 1;
         }
 
-        reset(); // ? Free any prior state before committing
-        nodes_ = nodes_ptr;
-        node_core_ids_ = core_ids_ptr;
-        compute_domains_ = domains_ptr;
+        // Commit. Moving an array keeps its heap pointer, so every `first_core_id` stays valid.
+        nodes_ = std::move(nodes);
+        node_core_ids_ = std::move(core_ids);
+        compute_domains_ = std::move(domains);
         nodes_count_ = 1;
         cores_count_ = total_cores;
         compute_domains_count_ = domains_written;
@@ -1182,13 +1174,17 @@ struct numa_topology {
             typename std::allocator_traits<allocator_t>::template rebind_alloc<win_group_class_cell_t>;
 
         // Everything the `failed_harvest:` label frees must be declared and initialized before the
-        // first `goto`, so a jump there never skips an initializer - the shape the Linux harvest uses.
-        nodes_allocator_t nodes_alloc {allocator_};
-        cores_allocator_t cores_alloc {allocator_};
-        domains_allocator_t domains_alloc {allocator_};
+        // first `goto`, so a jump there never skips an initializer. Only the Win32 buffers still need
+        // the label; the arrays below own themselves.
         cell_allocator_t cell_alloc {allocator_};
         BYTE *numa_buf = nullptr, *package_buf = nullptr;
         win_group_class_cell_t *cells = nullptr; // ? [group * class_count + class]: core mask + private cache
+
+        // ! Declared before the first `goto`: jumping over a non-trivial destructor is ill-formed.
+        // ! They free themselves at every exit, so the label below need only mind the Win32 buffers.
+        dynamic_array<numa_node_t, nodes_allocator_t> nodes {nodes_allocator_t {allocator_}};
+        dynamic_array<numa_core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
+        dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
         numa_node_t *nodes_ptr = nullptr;
         numa_core_id_t *core_ids_ptr = nullptr;
         compute_domain_t *domains_ptr = nullptr;
@@ -1283,16 +1279,14 @@ struct numa_topology {
         if (counted_nodes == 0 || counted_cores == 0) goto failed_harvest; // ! Nothing to spawn onto
 
         // Allocate the committed arrays. `compute_domains_` is sized to the core count - at most one
-        // domain per core - so `reset()` can free it by `cores_count_`, matching every other path.
-        nodes_ptr = nodes_alloc.allocate(counted_nodes);
-        core_ids_ptr = cores_alloc.allocate(counted_cores);
-        domains_ptr = domains_alloc.allocate(counted_cores);
-        if (!nodes_ptr || !core_ids_ptr || !domains_ptr) goto failed_harvest; // ! Out of memory
-
-        // `allocate` hands back raw storage; begin each node's lifetime so the members the fill does not
-        // touch - the `page_sizes` inventory - hold their zeroed defaults rather than garbage the
-        // topology logger would then walk off the end of.
-        for (std::size_t i = 0; i < counted_nodes; ++i) ::new (static_cast<void *>(&nodes_ptr[i])) numa_node_t {};
+        // domain per core. `try_resize` value-initializes, so the members the fill below does not touch
+        // - the `page_sizes` inventory - hold their zeroed defaults rather than garbage.
+        if (!nodes.try_resize(counted_nodes)) goto failed_harvest;    // ! Out of memory
+        if (!core_ids.try_resize(counted_cores)) goto failed_harvest; // ! Out of memory
+        if (!domains.try_resize(counted_cores)) goto failed_harvest;  // ! Out of memory
+        nodes_ptr = nodes.data();
+        core_ids_ptr = core_ids.data();
+        domains_ptr = domains.data();
 
         // Pass 4: fill each node, emitting its cores one efficiency class at a time (most performant
         // first) so a class's cores land contiguously and become one compute domain - reading the
@@ -1367,10 +1361,10 @@ struct numa_topology {
                 },
                 [domains_ptr](std::size_t i, std::size_t rank) noexcept { domains_ptr[i].compute_level = rank; });
 
-        reset(); // ? Free any prior state before committing
-        nodes_ = nodes_ptr;
-        node_core_ids_ = core_ids_ptr;
-        compute_domains_ = domains_ptr;
+        // Commit. Moving an array keeps its heap pointer, so every `first_core_id` stays valid.
+        nodes_ = std::move(nodes);
+        node_core_ids_ = std::move(core_ids);
+        compute_domains_ = std::move(domains);
         nodes_count_ = counted_nodes;
         cores_count_ = core_cursor;
         compute_domains_count_ = domain_cursor;
@@ -1378,10 +1372,7 @@ struct numa_topology {
         memory_levels_count_ = 1; // ? Windows exposes no memory-tiering ranking
         return true;
 
-    failed_harvest: // ? Pointers stay null until owned, so a blanket free/deallocate is safe
-        if (nodes_ptr) nodes_alloc.deallocate(nodes_ptr, counted_nodes);
-        if (core_ids_ptr) cores_alloc.deallocate(core_ids_ptr, counted_cores);
-        if (domains_ptr) domains_alloc.deallocate(domains_ptr, counted_cores);
+    failed_harvest: // ? Only the Win32 buffers are ours to free; the arrays unwind themselves
         if (cells) cell_alloc.deallocate(cells, cell_count);
         std::free(numa_buf);
         std::free(package_buf);
@@ -1402,47 +1393,32 @@ struct numa_topology {
     bool try_assign(numa_topology const &other) noexcept {
         if (this == &other) return true; // ? Self-assignment is a no-op
 
-        // Prepare scratch
-        nodes_allocator_t nodes_alloc {allocator_};
-        cores_allocator_t cores_alloc {allocator_};
-        domains_allocator_t domains_alloc {allocator_};
-
-        numa_node_t *scratch_nodes = nullptr;
-        numa_core_id_t *scratch_core_ids = nullptr;
-        compute_domain_t *scratch_domains = nullptr;
-        if (other.nodes_count_) {
-            scratch_nodes = nodes_alloc.allocate(other.nodes_count_);
-            if (!scratch_nodes) return false; // ! OOM
-        }
-        if (other.cores_count_) {
-            scratch_core_ids = cores_alloc.allocate(other.cores_count_);
-            scratch_domains = domains_alloc.allocate(other.cores_count_);
-            if (!scratch_core_ids || !scratch_domains) {
-                if (scratch_nodes) nodes_alloc.deallocate(scratch_nodes, other.nodes_count_);
-                if (scratch_core_ids) cores_alloc.deallocate(scratch_core_ids, other.cores_count_);
-                if (scratch_domains) domains_alloc.deallocate(scratch_domains, other.cores_count_);
-                return false; // ! OOM
-            }
-        }
+        // Prepare scratch. Any `try_resize` that fails frees whatever the others took, on the way out.
+        dynamic_array<numa_node_t, nodes_allocator_t> scratch_nodes {nodes_allocator_t {allocator_}};
+        dynamic_array<numa_core_id_t, cores_allocator_t> scratch_core_ids {cores_allocator_t {allocator_}};
+        dynamic_array<compute_domain_t, domains_allocator_t> scratch_domains {domains_allocator_t {allocator_}};
+        if (!scratch_nodes.try_resize(other.nodes_count_)) return false;    // ! OOM
+        if (!scratch_core_ids.try_resize(other.cores_count_)) return false; // ! OOM
+        if (!scratch_domains.try_resize(other.cores_count_)) return false;  // ! OOM
 
         // Deep copy, re-basing every `first_core_id` into our own core-id block
+        numa_core_id_t const *const other_cores = other.node_core_ids_.data();
         if (other.cores_count_ > 0)
-            std::memcpy(scratch_core_ids, other.node_core_ids_, other.cores_count_ * sizeof(numa_core_id_t));
+            std::memcpy(scratch_core_ids.data(), other_cores, other.cores_count_ * sizeof(numa_core_id_t));
         for (std::size_t i = 0; i < other.nodes_count_; ++i) {
             scratch_nodes[i] = other.nodes_[i];
-            std::ptrdiff_t const offset = other.nodes_[i].first_core_id - other.node_core_ids_;
-            scratch_nodes[i].first_core_id = scratch_core_ids + offset;
+            std::ptrdiff_t const offset = other.nodes_[i].first_core_id - other_cores;
+            scratch_nodes[i].first_core_id = scratch_core_ids.data() + offset;
         }
         for (std::size_t i = 0; i < other.compute_domains_count_; ++i) {
             scratch_domains[i] = other.compute_domains_[i];
-            std::ptrdiff_t const offset = other.compute_domains_[i].first_core_id - other.node_core_ids_;
-            scratch_domains[i].first_core_id = scratch_core_ids + offset;
+            std::ptrdiff_t const offset = other.compute_domains_[i].first_core_id - other_cores;
+            scratch_domains[i].first_core_id = scratch_core_ids.data() + offset;
         }
 
-        reset(); // ? Free old buffers
-        nodes_ = scratch_nodes;
-        node_core_ids_ = scratch_core_ids;
-        compute_domains_ = scratch_domains;
+        nodes_ = std::move(scratch_nodes); // ? Assignment frees the old buffers
+        node_core_ids_ = std::move(scratch_core_ids);
+        compute_domains_ = std::move(scratch_domains);
         nodes_count_ = other.nodes_count_;
         cores_count_ = other.cores_count_;
         compute_domains_count_ = other.compute_domains_count_;

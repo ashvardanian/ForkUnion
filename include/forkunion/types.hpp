@@ -911,6 +911,137 @@ struct has_sized_allocate_at_least<
     : std::true_type {};
 
 /**
+ *  @brief A fixed-capacity array with inline storage, so it never allocates.
+ *  @sa `dynamic_array` when the count is only known at runtime.
+ *
+ *  Sized for the small, bounded lists a machine hands us - the huge page sizes of a NUMA node, the
+ *  processor groups of a Windows box. Refuses to grow past `capacity_k` rather than truncating in
+ *  silence, because a list quietly cut short is a topology quietly misreported.
+ */
+template <typename value_type_, std::size_t capacity_>
+class limited_array {
+    static_assert(std::is_nothrow_default_constructible_v<value_type_>,
+                  "limited_array requires noexcept-default-constructible values");
+
+    using value_t = value_type_;
+    std::array<value_t, capacity_> values_ {};
+    std::size_t size_ {0};
+
+  public:
+    static constexpr std::size_t capacity_k = capacity_;
+
+    constexpr limited_array() noexcept = default;
+
+    /** @retval false when already at capacity; the value is not stored. */
+    bool try_push_back(value_t const &value) noexcept {
+        if (size_ == capacity_k) return false;
+        values_[size_++] = value;
+        return true;
+    }
+
+    void clear() noexcept { size_ = 0; }
+    std::size_t size() const noexcept { return size_; }
+    bool empty() const noexcept { return size_ == 0; }
+    bool full() const noexcept { return size_ == capacity_k; }
+
+    value_t &operator[](std::size_t i) noexcept { return values_[i]; }
+    value_t const &operator[](std::size_t i) const noexcept { return values_[i]; }
+    value_t *begin() noexcept { return values_.data(); }
+    value_t *end() noexcept { return values_.data() + size_; }
+    value_t const *begin() const noexcept { return values_.data(); }
+    value_t const *end() const noexcept { return values_.data() + size_; }
+    value_t *data() noexcept { return values_.data(); }
+    value_t const *data() const noexcept { return values_.data(); }
+};
+
+/**
+ *  @brief An owning, allocator-aware array whose size is fixed once, at `try_resize`.
+ *  @sa `limited_array` for bounded counts, `unique_padded_buffer` when each element wants its own line.
+ *
+ *  Deliberately not a `std::vector`: there is no capacity, no growth policy, and no exception. A
+ *  `try_resize` either hands back a fully-constructed array or leaves an empty one, which is what
+ *  lets a harvest fail without a `goto` unwinding three raw pointers by hand.
+ *
+ *  Elements are value-initialized and never reallocated, so a pointer taken into the array stays
+ *  valid until the next `try_resize` - the topology relies on that to slice its core-id list.
+ */
+template <typename value_type_, typename allocator_type_ = std::allocator<value_type_>>
+class dynamic_array {
+    static_assert(std::is_nothrow_default_constructible_v<value_type_>,
+                  "dynamic_array requires noexcept-default-constructible values");
+    static_assert(std::is_nothrow_destructible_v<value_type_>, "dynamic_array requires noexcept-destructible values");
+
+    using value_t = value_type_;
+    using allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_t>;
+
+    allocator_t allocator_ {};
+    value_t *data_ {nullptr};
+    std::size_t size_ {0};
+
+    void destroy_all() noexcept {
+        if constexpr (!std::is_trivially_destructible_v<value_t>)
+            for (std::size_t i = 0; i < size_; ++i) data_[i].~value_t();
+    }
+
+  public:
+    using value_type = value_t;
+
+    constexpr dynamic_array() noexcept = default;
+    explicit dynamic_array(allocator_type_ const &allocator) noexcept : allocator_(allocator) {}
+
+    dynamic_array(dynamic_array &&other) noexcept
+        : allocator_(std::move(other.allocator_)), data_(std::exchange(other.data_, nullptr)),
+          size_(std::exchange(other.size_, 0)) {}
+
+    dynamic_array &operator=(dynamic_array &&other) noexcept {
+        if (this != &other) {
+            reset();
+            allocator_ = std::move(other.allocator_);
+            data_ = std::exchange(other.data_, nullptr);
+            size_ = std::exchange(other.size_, 0);
+        }
+        return *this;
+    }
+
+    dynamic_array(dynamic_array const &) = delete;
+    dynamic_array &operator=(dynamic_array const &) = delete;
+    ~dynamic_array() noexcept { reset(); }
+
+    void reset() noexcept {
+        if (data_) {
+            destroy_all();
+            allocator_.deallocate(data_, size_);
+            data_ = nullptr;
+        }
+        size_ = 0;
+    }
+
+    /** @retval false on allocation failure, leaving the array empty rather than half-built. */
+    bool try_resize(std::size_t const new_size) noexcept {
+        reset();
+        if (new_size == 0) return true;
+        value_t *fresh = allocator_.allocate(new_size);
+        if (!fresh) return false;
+        for (std::size_t i = 0; i < new_size; ++i) ::new (static_cast<void *>(fresh + i)) value_t();
+        data_ = fresh;
+        size_ = new_size;
+        return true;
+    }
+
+    std::size_t size() const noexcept { return size_; }
+    bool empty() const noexcept { return size_ == 0; }
+    value_t *data() noexcept { return data_; }
+    value_t const *data() const noexcept { return data_; }
+    value_t &operator[](std::size_t i) noexcept { return data_[i]; }
+    value_t const &operator[](std::size_t i) const noexcept { return data_[i]; }
+    value_t *begin() noexcept { return data_; }
+    value_t *end() noexcept { return data_ + size_; }
+    value_t const *begin() const noexcept { return data_; }
+    value_t const *end() const noexcept { return data_ + size_; }
+    explicit operator bool() const noexcept { return data_ != nullptr; }
+};
+
+/**
  *  @brief Analogous to `std::unique_ptr<T[]>`, but designed for large padded allocations.
  *  @see https://en.cppreference.com/w/cpp/memory/unique_ptr.html
  */
