@@ -286,7 +286,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Logical cores: {}", fu::count_logical_cores());
     println!("  Memory domains: {}", fu::count_memory_domains());
     println!("  Thread compute_domains: {}", fu::count_compute_domains());
-    println!("  NUMA enabled: {}", fu::numa_enabled());
+    println!(
+        "  NUMA enabled: {}",
+        fu::comptime_capabilities().contains(fu::Capabilities::COMPTIME_NUMA_MEMORY)
+    );
     println!("Configuration:");
     println!("  Embedding dimensions: {EMBEDDING_DIMENSIONS}");
     println!("  Memory scope: {memory_scope_percent}%");

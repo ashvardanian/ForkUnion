@@ -35,7 +35,6 @@ const c = struct {
     extern fn fu_version_major() c_int;
     extern fn fu_version_minor() c_int;
     extern fn fu_version_patch() c_int;
-    extern fn fu_numa_enabled() c_int;
     extern fn fu_comptime_capabilities() u32;
     extern fn fu_comptime_capabilities_string() [*:0]const u8;
     extern fn fu_runtime_capabilities() u32;
@@ -160,11 +159,6 @@ pub fn version() struct { major: u32, minor: u32, patch: u32 } {
         .minor = @intCast(c.fu_version_minor()),
         .patch = @intCast(c.fu_version_patch()),
     };
-}
-
-/// Returns true if NUMA support was compiled into the library
-pub fn numaEnabled() bool {
-    return c.fu_numa_enabled() != 0;
 }
 
 /// Everything the library can do, whether decided when it was compiled or found on this machine.
@@ -1134,7 +1128,7 @@ test "for_slices execution" {
 
 test "NUMA allocation" {
     std.debug.print("Running test: NUMA allocation\n", .{});
-    if (!numaEnabled()) return error.SkipZigTest;
+    if (!comptimeCapabilities().comptime_numa_memory) return error.SkipZigTest;
 
     const allocation = allocateAtLeast(0, 1024) orelse return error.SkipZigTest;
     defer allocation.free();
@@ -1151,7 +1145,7 @@ test "NUMA allocation" {
 
 test "NUMA allocator integrates with std collections" {
     std.debug.print("Running test: NUMA allocator integrates with std collections\n", .{});
-    if (!numaEnabled()) return error.SkipZigTest;
+    if (!comptimeCapabilities().comptime_numa_memory) return error.SkipZigTest;
 
     var numa_alloc = NumaAllocator.init(0);
     const allocator = numa_alloc.allocator();

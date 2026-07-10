@@ -366,7 +366,6 @@ extern "C" {
     fn fu_version_major() -> c_int;
     fn fu_version_minor() -> c_int;
     fn fu_version_patch() -> c_int;
-    fn fu_numa_enabled() -> c_int;
     fn fu_comptime_capabilities() -> u32;
     fn fu_comptime_capabilities_string() -> *const c_char;
     fn fu_runtime_capabilities() -> u32;
@@ -544,7 +543,11 @@ pub fn comptime_capabilities() -> Capabilities {
 /// The set [`comptime_capabilities`] bits, comma-separated, like `"threads,topology"`.
 #[cfg(feature = "std")]
 pub fn comptime_capabilities_string() -> Option<&'static str> {
-    unsafe { CStr::from_ptr(fu_comptime_capabilities_string()).to_str().ok() }
+    unsafe {
+        CStr::from_ptr(fu_comptime_capabilities_string())
+            .to_str()
+            .ok()
+    }
 }
 
 /// Which features this machine turned out to offer, probing the CPU and the memory system.
@@ -738,11 +741,6 @@ pub fn compute_capacity_in(compute_domain: ComputeDomain) -> usize {
 /// deserves - domains of equal throughput may back onto very differently sized caches.
 pub fn compute_cache_bytes_in(compute_domain: ComputeDomain) -> usize {
     unsafe { fu_compute_cache_bytes_in(compute_domain.get()) }
-}
-
-/// Returns true if NUMA support was compiled into the library.
-pub fn numa_enabled() -> bool {
-    unsafe { fu_numa_enabled() != 0 }
 }
 
 /// Returns the major version number of the ForkUnion library.
@@ -4987,8 +4985,16 @@ mod tests {
         }
 
         // The two halves live in one bit-space, and must never collide.
-        assert_eq!(comptime.0 & 0x0000_FFFF, 0, "a comptime bit leaked into the runtime range");
-        assert_eq!(runtime.0 & 0xFFFF_0000, 0, "a runtime bit leaked into the comptime range");
+        assert_eq!(
+            comptime.0 & 0x0000_FFFF,
+            0,
+            "a comptime bit leaked into the runtime range"
+        );
+        assert_eq!(
+            runtime.0 & 0xFFFF_0000,
+            0,
+            "a runtime bit leaked into the comptime range"
+        );
     }
 
     #[cfg_attr(miri, ignore)]

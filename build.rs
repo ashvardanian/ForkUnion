@@ -47,9 +47,7 @@ fn main() -> Result<(), cc::Error> {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let portable = std::env::var("CARGO_FEATURE_PORTABLE").is_ok();
     let force_huge_pages = std::env::var("CARGO_FEATURE_HUGE_PAGES").is_ok();
-    // `numa` is the old name, and meant several things at once. Honour it as the one it mostly meant.
-    let force_numa_memory =
-        std::env::var("CARGO_FEATURE_NUMA_MEMORY").is_ok() || std::env::var("CARGO_FEATURE_NUMA").is_ok();
+    let force_numa_memory = std::env::var("CARGO_FEATURE_NUMA_MEMORY").is_ok();
 
     build
         .cpp(true) // Enable C++ support

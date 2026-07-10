@@ -47,18 +47,6 @@ foreach (capability IN LISTS FORKUNION_CAPABILITIES)
     set_property(CACHE FORKUNION_WITH_${capability} PROPERTY STRINGS "AUTO;ON;OFF")
 endforeach ()
 
-# Deprecated, and honored only so an out-of-tree build that still sets it keeps working. It used to mean five things at
-# once; it now maps onto the one it mostly meant.
-set(FORKUNION_ENABLE_NUMA
-    "AUTO"
-    CACHE STRING "Deprecated: use FORKUNION_WITH_NUMA_MEMORY"
-)
-set_property(CACHE FORKUNION_ENABLE_NUMA PROPERTY STRINGS "AUTO;ON;OFF")
-if (NOT FORKUNION_ENABLE_NUMA STREQUAL "AUTO" AND FORKUNION_WITH_NUMA_MEMORY STREQUAL "AUTO")
-    message(WARNING "FORKUNION_ENABLE_NUMA is deprecated; forwarding to FORKUNION_WITH_NUMA_MEMORY")
-    set(FORKUNION_WITH_NUMA_MEMORY ${FORKUNION_ENABLE_NUMA})
-endif ()
-
 # Enforce C++17 as the minimum standard for the project.
 set(PROJECT_CXX_STANDARD 17)
 set(PROJECT_CXX_EXTENSIONS OFF)

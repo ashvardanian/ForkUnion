@@ -21,9 +21,6 @@ pub fn build(b: *std.Build) void {
     const with_topology = b.option(bool, "topology", "Enumerate compute and memory domains");
     const portable = b.option(bool, "portable", "Force every optional capability off") orelse false;
 
-    // Deprecated: `-Dnuma` used to mean five things at once. Forward it to the one it mostly meant.
-    const legacy_numa = b.option(bool, "numa", "Deprecated: use -Dnuma-memory");
-
     // Compile the C++ library from c/forkunion.cpp (like Rust's build.rs does)
     const lib = b.addLibrary(.{
         .name = "forkunion",
@@ -44,7 +41,7 @@ pub fn build(b: *std.Build) void {
         "FU_WITH_THREAD_QOS", "FU_WITH_THREAD_SCHED_CLASS", "FU_WITH_NUMA_MEMORY",      "FU_WITH_HUGE_PAGES",
     };
 
-    const numa_memory = with_numa_memory orelse legacy_numa;
+    const numa_memory = with_numa_memory;
     if (portable) {
         if (numa_memory == true or with_huge_pages == true or with_topology == true)
             @panic("-Dportable turns off the very capabilities the other options turn on");

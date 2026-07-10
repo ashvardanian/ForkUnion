@@ -89,12 +89,6 @@ int fu_version_major(void);
 int fu_version_minor(void);
 /** @brief Returns the patch version component of the ForkUnion library. */
 int fu_version_patch(void);
-/**
- *  @brief Returns non-zero if the library was compiled with NUMA support.
- *  @deprecated Prefer `fu_comptime_capabilities() & fu_capability_comptime_numa_memory_k`, which
- *              distinguishes page placement from the seven other facilities this once implied.
- */
-int fu_numa_enabled(void);
 
 #pragma region - Types
 

@@ -84,12 +84,6 @@
 #define FU_HAS_LIBNUMA_ 0
 #endif
 
-/*  Back-compatibility: `FU_ENABLE_NUMA` used to mean five different things at once. Where a build
- *  system still supplies it, honour it as an override of the one it mostly meant.  */
-#if defined(FU_ENABLE_NUMA) && !defined(FU_WITH_NUMA_MEMORY)
-#define FU_WITH_NUMA_MEMORY FU_ENABLE_NUMA
-#endif
-
 /*  ------------------------------------------------------------------------------------------------
  *  Layer 2: capabilities. Each answers exactly one question, and is named for the @b kernel @b
  *  facility rather than for the library that happens to provide it - so Windows' `VirtualAllocExNuma`
@@ -128,7 +122,7 @@
  *  @brief Can we bind a thread to a set of cores, and have the kernel honour it?
  *  @note Deliberately independent of `FU_WITH_NUMA_MEMORY`. `pthread_setaffinity_np` needs no
  *        `libnuma`, and a Linux box without it could pin perfectly well - it simply never did,
- *        because the old `FU_ENABLE_NUMA` guarded both.
+ *        because a single NUMA macro guarded both.
  *  @note False on Apple Silicon, where `thread_policy_set(THREAD_AFFINITY_POLICY)` answers
  *        `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_THREAD_QOS`.
  */
@@ -187,14 +181,6 @@
 #endif
 #if FU_WITH_HUGE_PAGES && FU_ON_LINUX && !FU_WITH_NUMA_MEMORY
 #error "On Linux the hugetlb path maps with `mmap` and places with `mbind`; it needs FU_WITH_NUMA_MEMORY"
-#endif
-
-/*  Deprecated. Kept so an out-of-tree build that still sets or tests them keeps working.  */
-#if !defined(FU_ENABLE_NUMA)
-#define FU_ENABLE_NUMA FU_WITH_NUMA_MEMORY
-#endif
-#if !defined(FU_ENABLE_COLOCATED_POOLS)
-#define FU_ENABLE_COLOCATED_POOLS FU_WITH_COLOCATED_POOLS
 #endif
 
 #if FU_ALLOW_UNSAFE

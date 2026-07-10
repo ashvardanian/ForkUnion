@@ -351,7 +351,6 @@ extern "C" {
 int fu_version_major(void) { return FORKUNION_VERSION_MAJOR; }
 int fu_version_minor(void) { return FORKUNION_VERSION_MINOR; }
 int fu_version_patch(void) { return FORKUNION_VERSION_PATCH; }
-int fu_numa_enabled(void) { return FU_WITH_NUMA_MEMORY; }
 
 #pragma region - Metadata
 
