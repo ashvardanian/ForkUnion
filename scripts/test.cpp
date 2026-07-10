@@ -22,9 +22,9 @@ template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t,
 template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
 template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
 
-#if FU_ENABLE_NUMA
-template struct fu::linux_compute_domain_pool<>;
-template struct fu::linux_distributed_pool<>;
+#if FU_WITH_COLOCATED_POOLS
+template struct fu::colocated_pool<>;
+template struct fu::distributed_pool<>;
 #endif
 
 template <typename index_type_ = std::uint8_t>
@@ -100,14 +100,16 @@ struct make_pool_t {
     }
 };
 
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
 static fu::numa_topology_t numa_topology;
-struct make_linux_compute_domain_pool_t {
-    fu::linux_compute_domain_pool_t construct() const noexcept { return fu::linux_compute_domain_pool_t("forkunion"); }
-    fu::compute_domain_t scope(std::size_t = 0) const noexcept { return numa_topology.compute_domain_at(0); }
+struct make_colocated_pool_t {
+    fu::colocated_pool_t construct() const noexcept { return fu::colocated_pool_t("forkunion"); }
+    fu::compute_domain_t scope(std::size_t = 0) const noexcept {
+        return numa_topology.compute_domain_at(fu::compute_domain_index_t {});
+    }
 };
-struct make_linux_distributed_pool_t {
-    fu::linux_distributed_pool_t construct() const noexcept { return fu::linux_distributed_pool_t("forkunion"); }
+struct make_distributed_pool_t {
+    fu::distributed_pool_t construct() const noexcept { return fu::distributed_pool_t("forkunion"); }
     fu::numa_topology_t const &scope(std::size_t = 0) const noexcept { return numa_topology; }
 };
 #endif
@@ -666,7 +668,7 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
 /**
  *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
  *
- *  Deliberately @b not gated on `FU_ENABLE_NUMA`: some platforms harvest a topology without
+ *  Deliberately @b not gated on `FU_WITH_NUMA_MEMORY`: some platforms harvest a topology without
  *  compiling the NUMA pools, so gating this on the pools leaves their harvest wholly untested.
  *  A host with no harvest at all reports `false` and is skipped rather than failed - the absence
  *  of a topology is not a broken topology.
@@ -693,7 +695,7 @@ static bool test_topology_invariants() noexcept {
 
     std::size_t cores_across_domains = 0;
     for (std::size_t i = 0; i < compute_domains; ++i) {
-        fu::compute_domain_t const &domain = topology.compute_domain_at(i);
+        fu::compute_domain_t const &domain = topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(i));
         if (domain.core_count == 0 || domain.first_core_id == nullptr) return false;
         if (domain.compute_level >= compute_levels) return false;
         if (domain.memory_domain_index >= memory_domains) return false;
@@ -704,7 +706,7 @@ static bool test_topology_invariants() noexcept {
     if (cores_across_domains != topology.threads_count()) return false;
 
     for (std::size_t i = 0; i < memory_domains; ++i) {
-        std::size_t const level = topology.memory_domain(i).memory_level;
+        std::size_t const level = topology.memory_domain(static_cast<fu::memory_domain_index_t>(i)).memory_level;
         if (level >= memory_levels) return false;
         memory_level_seen[level] = true;
     }
@@ -722,7 +724,7 @@ static bool test_topology_invariants() noexcept {
  */
 void log_numa_topology() noexcept {
     fu::logging_colors_t colors;
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     // Harvest topology
     if (!numa_topology.try_harvest()) {
         std::fprintf(stderr, "%sX Failed to harvest NUMA topology%s\n", colors.bold_red(), colors.reset());
@@ -738,7 +740,7 @@ void log_numa_topology() noexcept {
 
 #else
     std::printf("%sNUMA support not compiled in%s\n", colors.dim(), colors.reset());
-#endif // FU_ENABLE_NUMA
+#endif // FU_WITH_COLOCATED_POOLS
 }
 
 int main(void) {
@@ -776,42 +778,41 @@ int main(void) {
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads}, //
         {"`terminate` avoided", test_mixed_restart<false>},                      //
         {"`terminate` and re-spawn", test_mixed_restart<true>},                  //
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
         // Uniform Memory Access (UMA) tests for threads pinned to the same NUMA node
-        {"UMA `try_spawn` normal", test_try_spawn_success<make_linux_compute_domain_pool_t>},
-        {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_linux_compute_domain_pool_t>},
-        {"UMA `for_threads` dispatch", test_for_threads<make_linux_compute_domain_pool_t>},
-        {"UMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_linux_compute_domain_pool_t>},
-        {"UMA `generation` polling", test_generation_polling<make_linux_compute_domain_pool_t>},
-        {"UMA `broadcast_join` lifecycle", test_guard_lifecycle<make_linux_compute_domain_pool_t>},
-        {"UMA `generation` inclusive contract", test_generation_inclusive<make_linux_compute_domain_pool_t>},
-        {"UMA `generation` stress", test_generation_stress<make_linux_compute_domain_pool_t>},
-        {"UMA `caller_exclusive_k` calls", test_exclusivity<make_linux_compute_domain_pool_t>},
-        {"UMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_linux_compute_domain_pool_t>},
-        {"UMA `for_n` static scheduling", test_for_n<make_linux_compute_domain_pool_t>},
-        {"UMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_linux_compute_domain_pool_t>},
-        {"UMA `for_n_dynamic` stalled thread stolen from",
-         test_for_n_dynamic_stealing<make_linux_compute_domain_pool_t>},
-        {"UMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_linux_compute_domain_pool_t>},
-        {"UMA `terminate` avoided", test_mixed_restart<false, make_linux_compute_domain_pool_t>},
-        {"UMA `terminate` and re-spawn", test_mixed_restart<true, make_linux_compute_domain_pool_t>},
+        {"UMA `try_spawn` normal", test_try_spawn_success<make_colocated_pool_t>},
+        {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_colocated_pool_t>},
+        {"UMA `for_threads` dispatch", test_for_threads<make_colocated_pool_t>},
+        {"UMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_colocated_pool_t>},
+        {"UMA `generation` polling", test_generation_polling<make_colocated_pool_t>},
+        {"UMA `broadcast_join` lifecycle", test_guard_lifecycle<make_colocated_pool_t>},
+        {"UMA `generation` inclusive contract", test_generation_inclusive<make_colocated_pool_t>},
+        {"UMA `generation` stress", test_generation_stress<make_colocated_pool_t>},
+        {"UMA `caller_exclusive_k` calls", test_exclusivity<make_colocated_pool_t>},
+        {"UMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_colocated_pool_t>},
+        {"UMA `for_n` static scheduling", test_for_n<make_colocated_pool_t>},
+        {"UMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_colocated_pool_t>},
+        {"UMA `for_n_dynamic` stalled thread stolen from", test_for_n_dynamic_stealing<make_colocated_pool_t>},
+        {"UMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_colocated_pool_t>},
+        {"UMA `terminate` avoided", test_mixed_restart<false, make_colocated_pool_t>},
+        {"UMA `terminate` and re-spawn", test_mixed_restart<true, make_colocated_pool_t>},
         // Non-Uniform Memory Access (NUMA) tests for threads addressing all NUMA nodes
-        {"NUMA `try_spawn` normal", test_try_spawn_success<make_linux_distributed_pool_t>},
-        {"NUMA `caller_exclusivity` query", test_caller_exclusivity_query<make_linux_distributed_pool_t>},
-        {"NUMA `for_threads` dispatch", test_for_threads<make_linux_distributed_pool_t>},
-        {"NUMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_linux_distributed_pool_t>},
-        {"NUMA `generation` polling", test_generation_polling<make_linux_distributed_pool_t>},
-        {"NUMA `broadcast_join` lifecycle", test_guard_lifecycle<make_linux_distributed_pool_t>},
-        {"NUMA `generation` inclusive contract", test_generation_inclusive<make_linux_distributed_pool_t>},
-        {"NUMA `generation` stress", test_generation_stress<make_linux_distributed_pool_t>},
-        {"NUMA `caller_exclusive_k` calls", test_exclusivity<make_linux_distributed_pool_t>},
-        {"NUMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_linux_distributed_pool_t>},
-        {"NUMA `for_n` static scheduling", test_for_n<make_linux_distributed_pool_t>},
-        {"NUMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_linux_distributed_pool_t>},
-        {"NUMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_linux_distributed_pool_t>},
-        {"NUMA `terminate` avoided", test_mixed_restart<false, make_linux_distributed_pool_t>},
-        {"NUMA `terminate` and re-spawn", test_mixed_restart<true, make_linux_distributed_pool_t>},
-#endif // FU_ENABLE_NUMA
+        {"NUMA `try_spawn` normal", test_try_spawn_success<make_distributed_pool_t>},
+        {"NUMA `caller_exclusivity` query", test_caller_exclusivity_query<make_distributed_pool_t>},
+        {"NUMA `for_threads` dispatch", test_for_threads<make_distributed_pool_t>},
+        {"NUMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_distributed_pool_t>},
+        {"NUMA `generation` polling", test_generation_polling<make_distributed_pool_t>},
+        {"NUMA `broadcast_join` lifecycle", test_guard_lifecycle<make_distributed_pool_t>},
+        {"NUMA `generation` inclusive contract", test_generation_inclusive<make_distributed_pool_t>},
+        {"NUMA `generation` stress", test_generation_stress<make_distributed_pool_t>},
+        {"NUMA `caller_exclusive_k` calls", test_exclusivity<make_distributed_pool_t>},
+        {"NUMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_distributed_pool_t>},
+        {"NUMA `for_n` static scheduling", test_for_n<make_distributed_pool_t>},
+        {"NUMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_distributed_pool_t>},
+        {"NUMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_distributed_pool_t>},
+        {"NUMA `terminate` avoided", test_mixed_restart<false, make_distributed_pool_t>},
+        {"NUMA `terminate` and re-spawn", test_mixed_restart<true, make_distributed_pool_t>},
+#endif // FU_WITH_COLOCATED_POOLS
     };
 
     std::size_t const total_unit_tests = sizeof(unit_tests) / sizeof(unit_tests[0]);

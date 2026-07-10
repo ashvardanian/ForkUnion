@@ -48,28 +48,28 @@ struct pool_variants_t {
 #endif
 #endif // FU_WITH_ASM_YIELDS_
 
-#if FU_ENABLE_NUMA
-        fu::linux_compute_domain_pool<fu::standard_yield_t>, // ? Single-compute-domain pools
-        fu::linux_distributed_pool<fu::standard_yield_t>,    // ? Whole-machine pools
+#if FU_WITH_COLOCATED_POOLS
+        fu::colocated_pool<fu::standard_yield_t>,   // ? Single-compute-domain pools
+        fu::distributed_pool<fu::standard_yield_t>, // ? Whole-machine pools
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
-        fu::linux_compute_domain_pool<fu::x86_pause_t>,  //
-        fu::linux_compute_domain_pool<fu::x86_tpause_t>, //
-        fu::linux_distributed_pool<fu::x86_pause_t>,     //
-        fu::linux_distributed_pool<fu::x86_tpause_t>,    //
+        fu::colocated_pool<fu::x86_pause_t>,    //
+        fu::colocated_pool<fu::x86_tpause_t>,   //
+        fu::distributed_pool<fu::x86_pause_t>,  //
+        fu::distributed_pool<fu::x86_tpause_t>, //
 #endif
 #if FU_DETECT_ARCH_ARM64_
-        fu::linux_compute_domain_pool<fu::arm64_yield_t>, //
-        fu::linux_compute_domain_pool<fu::arm64_wfet_t>,  //
-        fu::linux_distributed_pool<fu::arm64_yield_t>,    //
-        fu::linux_distributed_pool<fu::arm64_wfet_t>,     //
+        fu::colocated_pool<fu::arm64_yield_t>,   //
+        fu::colocated_pool<fu::arm64_wfet_t>,    //
+        fu::distributed_pool<fu::arm64_yield_t>, //
+        fu::distributed_pool<fu::arm64_wfet_t>,  //
 #endif
 #if FU_DETECT_ARCH_RISC5_
-        fu::linux_compute_domain_pool<fu::risc5_pause_t>, //
-        fu::linux_distributed_pool<fu::risc5_pause_t>,    //
+        fu::colocated_pool<fu::risc5_pause_t>,   //
+        fu::distributed_pool<fu::risc5_pause_t>, //
 #endif
 #endif // FU_WITH_ASM_YIELDS_
-#endif // FU_ENABLE_NUMA
+#endif // FU_WITH_NUMA_MEMORY
 
         fu::basic_pool<thread_allocator_t, fu::standard_yield_t> //
         >;
@@ -118,49 +118,49 @@ struct pool_variants_t {
         }
 #endif
 #endif
-#if FU_ENABLE_NUMA
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::standard_yield_t>>) {
+#if FU_WITH_COLOCATED_POOLS
+        else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::standard_yield_t>>) {
             capabilities_ = fu::capability_compute_domain_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::standard_yield_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::standard_yield_t>>) {
             capabilities_ = fu::capability_numa_aware_k;
         }
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::x86_pause_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::x86_pause_t>>) {
             capabilities_ = fu::capability_x86_pause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::x86_tpause_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::x86_tpause_t>>) {
             capabilities_ = fu::capability_x86_tpause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::x86_pause_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::x86_pause_t>>) {
             capabilities_ = fu::capability_x86_pause_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::x86_tpause_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::x86_tpause_t>>) {
             capabilities_ = fu::capability_x86_tpause_k | fu::capability_numa_aware_k;
         }
 #endif
 #if FU_DETECT_ARCH_ARM64_
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::arm64_yield_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::arm64_yield_t>>) {
             capabilities_ =
                 fu::capability_arm64_yield_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::arm64_wfet_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::arm64_wfet_t>>) {
             capabilities_ = fu::capability_arm64_wfet_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::arm64_yield_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::arm64_yield_t>>) {
             capabilities_ = fu::capability_arm64_yield_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::arm64_wfet_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::arm64_wfet_t>>) {
             capabilities_ = fu::capability_arm64_wfet_k | fu::capability_numa_aware_k;
         }
 #endif
 #if FU_DETECT_ARCH_RISC5_
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_compute_domain_pool<fu::risc5_pause_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::risc5_pause_t>>) {
             capabilities_ =
                 fu::capability_risc5_pause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
         }
-        else if constexpr (std::is_same_v<pool_type_, fu::linux_distributed_pool<fu::risc5_pause_t>>) {
+        else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::risc5_pause_t>>) {
             capabilities_ = fu::capability_risc5_pause_k | fu::capability_numa_aware_k;
         }
 #endif
@@ -206,56 +206,54 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
 #endif
 #endif
     }
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     else {
         // ? Single-compute_domain pool pinned to one NUMA node, with its best busy-wait yield
         if (variants.capabilities_ & fu::capability_compute_domain_k) {
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
             if (variants.capabilities_ & fu::capability_x86_tpause_k)
-                return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::x86_tpause_t> *>(variants.storage_));
+                return visitor(*reinterpret_cast<fu::colocated_pool<fu::x86_tpause_t> *>(variants.storage_));
             if (variants.capabilities_ & fu::capability_x86_pause_k)
-                return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::x86_pause_t> *>(variants.storage_));
+                return visitor(*reinterpret_cast<fu::colocated_pool<fu::x86_pause_t> *>(variants.storage_));
 #endif
 #if FU_DETECT_ARCH_ARM64_
             if (variants.capabilities_ & fu::capability_arm64_wfet_k)
-                return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::arm64_wfet_t> *>(variants.storage_));
+                return visitor(*reinterpret_cast<fu::colocated_pool<fu::arm64_wfet_t> *>(variants.storage_));
             if (variants.capabilities_ & fu::capability_arm64_yield_k)
-                return visitor(
-                    *reinterpret_cast<fu::linux_compute_domain_pool<fu::arm64_yield_t> *>(variants.storage_));
+                return visitor(*reinterpret_cast<fu::colocated_pool<fu::arm64_yield_t> *>(variants.storage_));
 #endif
 #if FU_DETECT_ARCH_RISC5_
             if (variants.capabilities_ & fu::capability_risc5_pause_k)
-                return visitor(
-                    *reinterpret_cast<fu::linux_compute_domain_pool<fu::risc5_pause_t> *>(variants.storage_));
+                return visitor(*reinterpret_cast<fu::colocated_pool<fu::risc5_pause_t> *>(variants.storage_));
 #endif
 #endif
-            return visitor(*reinterpret_cast<fu::linux_compute_domain_pool<fu::standard_yield_t> *>(variants.storage_));
+            return visitor(*reinterpret_cast<fu::colocated_pool<fu::standard_yield_t> *>(variants.storage_));
         }
         // ? NUMA-aware distributed pools spanning all nodes
         else if (variants.capabilities_ == fu::capability_numa_aware_k) {
-            return visitor(*reinterpret_cast<fu::linux_distributed_pool<fu::standard_yield_t> *>(variants.storage_));
+            return visitor(*reinterpret_cast<fu::distributed_pool<fu::standard_yield_t> *>(variants.storage_));
         }
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         else if (variants.capabilities_ == (fu::capability_x86_pause_k | fu::capability_numa_aware_k)) {
-            return visitor(*reinterpret_cast<fu::linux_distributed_pool<fu::x86_pause_t> *>(variants.storage_));
+            return visitor(*reinterpret_cast<fu::distributed_pool<fu::x86_pause_t> *>(variants.storage_));
         }
         else if (variants.capabilities_ == (fu::capability_x86_tpause_k | fu::capability_numa_aware_k)) {
-            return visitor(*reinterpret_cast<fu::linux_distributed_pool<fu::x86_tpause_t> *>(variants.storage_));
+            return visitor(*reinterpret_cast<fu::distributed_pool<fu::x86_tpause_t> *>(variants.storage_));
         }
 #endif
 #if FU_DETECT_ARCH_ARM64_
         else if (variants.capabilities_ == (fu::capability_arm64_yield_k | fu::capability_numa_aware_k)) {
-            return visitor(*reinterpret_cast<fu::linux_distributed_pool<fu::arm64_yield_t> *>(variants.storage_));
+            return visitor(*reinterpret_cast<fu::distributed_pool<fu::arm64_yield_t> *>(variants.storage_));
         }
         else if (variants.capabilities_ == (fu::capability_arm64_wfet_k | fu::capability_numa_aware_k)) {
-            return visitor(*reinterpret_cast<fu::linux_distributed_pool<fu::arm64_wfet_t> *>(variants.storage_));
+            return visitor(*reinterpret_cast<fu::distributed_pool<fu::arm64_wfet_t> *>(variants.storage_));
         }
 #endif
 #if FU_DETECT_ARCH_RISC5_
         else if (variants.capabilities_ == (fu::capability_risc5_pause_k | fu::capability_numa_aware_k)) {
-            return visitor(*reinterpret_cast<fu::linux_distributed_pool<fu::risc5_pause_t> *>(variants.storage_));
+            return visitor(*reinterpret_cast<fu::distributed_pool<fu::risc5_pause_t> *>(variants.storage_));
         }
 #endif
 #endif
@@ -268,9 +266,9 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
 // ? Trait matching any yield specialization of the single-compute_domain pool
 template <typename pool_type_>
 struct is_compute_domain_pool : std::false_type {};
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
 template <typename yield_type_>
-struct is_compute_domain_pool<fu::linux_compute_domain_pool<yield_type_>> : std::true_type {};
+struct is_compute_domain_pool<fu::colocated_pool<yield_type_>> : std::true_type {};
 #endif
 
 struct opaque_pool_t {
@@ -289,15 +287,20 @@ struct opaque_pool_t {
     }
 };
 
-static bool global_initialized {false};
 static fu::numa_topology_t global_numa_topology {};
 static fu::capabilities_t global_capabilities {fu::capabilities_unknown_k};
 static char global_capabilities_string[128] {};
 
-bool globals_initialize(void) {
-    if (global_initialized) return true;
-
-#if FU_ENABLE_NUMA
+/**
+ *  @brief Harvests the machine's topology and capabilities, exactly once, on whichever thread asks first.
+ *  @note Never called directly; `globals_initialize` wraps it in the one-time initialization.
+ *
+ *  Two threads racing here would both run `try_harvest`, and the second `reset()` would free buffers
+ *  the first was still filling. The C ABI has no `fu_initialize`, so any entry point may be the first,
+ *  and callers routinely reach several of them from several threads at once.
+ */
+static bool globals_initialize_once(void) {
+#if FU_WITH_COLOCATED_POOLS
     if (!global_numa_topology.try_harvest()) return false;
 #endif
 
@@ -305,25 +308,42 @@ bool globals_initialize(void) {
     fu::capabilities_t ram_caps = fu::ram_capabilities();
 
     global_capabilities = static_cast<fu::capabilities_t>(cpu_caps | ram_caps);
-    global_initialized = true;
 
-    // Now, populate the capabilities string:
+    // Now, populate the capabilities string, comma-separated to match its compile-time twin.
+    struct named_capability_t {
+        fu::capabilities_t bit;
+        char const *name;
+    };
+    static named_capability_t const named[] = {
+        {fu::capability_x86_pause_k, "x86_pause"},
+        {fu::capability_x86_tpause_k, "x86_tpause"},
+        {fu::capability_arm64_yield_k, "arm64_yield"},
+        {fu::capability_arm64_wfet_k, "arm64_wfet"},
+        {fu::capability_risc5_pause_k, "risc5_pause"},
+        {fu::capability_numa_aware_k, "numa_aware"},
+        {fu::capability_huge_pages_k, "huge_pages"},
+        {fu::capability_huge_pages_transparent_k, "huge_pages_transparent"},
+    };
+
     char *pos = global_capabilities_string;
-    char *end = global_capabilities_string + sizeof(global_capabilities_string) - 1;
-    pos += std::snprintf(pos, end - pos, "serial");
-
-    // Start with base capability level
-    if (global_capabilities & fu::capability_numa_aware_k) pos += std::snprintf(pos, end - pos, "+numa");
-    if (global_capabilities & fu::capability_huge_pages_k) pos += std::snprintf(pos, end - pos, "+hp");
-    if (global_capabilities & fu::capability_huge_pages_transparent_k) pos += std::snprintf(pos, end - pos, "+thp");
-
-    // Add CPU-specific extensions
-    if (global_capabilities & fu::capability_x86_pause_k) pos += std::snprintf(pos, end - pos, "+x86_pause");
-    if (global_capabilities & fu::capability_x86_tpause_k) pos += std::snprintf(pos, end - pos, "+x86_tpause");
-    if (global_capabilities & fu::capability_arm64_yield_k) pos += std::snprintf(pos, end - pos, "+arm64_yield");
-    if (global_capabilities & fu::capability_arm64_wfet_k) pos += std::snprintf(pos, end - pos, "+arm64_wfet");
-    if (global_capabilities & fu::capability_risc5_pause_k) pos += std::snprintf(pos, end - pos, "+risc5_pause");
+    char *const end = global_capabilities_string + sizeof(global_capabilities_string) - 1;
+    for (named_capability_t const &entry : named) {
+        if ((global_capabilities & entry.bit) == 0) continue;
+        int const written = std::snprintf(pos, static_cast<size_t>(end - pos),
+                                          pos == global_capabilities_string ? "%s" : ",%s", entry.name);
+        if (written <= 0 || written >= end - pos) break; // ! Truncated; keep what fits
+        pos += written;
+    }
+    if (pos == global_capabilities_string) std::snprintf(pos, static_cast<size_t>(end - pos), "none");
     return true;
+}
+
+bool globals_initialize(void) {
+    // A function-local static is initialized exactly once, and every other thread blocks until the
+    // winner is done - which is precisely the guarantee `try_harvest` needs, and costs one relaxed
+    // load per call afterwards.
+    static bool const initialized = globals_initialize_once();
+    return initialized;
 }
 
 extern "C" {
@@ -331,17 +351,91 @@ extern "C" {
 int fu_version_major(void) { return FORKUNION_VERSION_MAJOR; }
 int fu_version_minor(void) { return FORKUNION_VERSION_MINOR; }
 int fu_version_patch(void) { return FORKUNION_VERSION_PATCH; }
-int fu_numa_enabled(void) { return FU_ENABLE_NUMA; }
+int fu_numa_enabled(void) { return FU_WITH_NUMA_MEMORY; }
 
 #pragma region - Metadata
 
-char const *fu_capabilities_string(void) {
+/*  The C enum and the C++ one are spelled out separately - one for callers who have no C++, one for
+ *  callers who want it `constexpr`. Nothing but these assertions keeps them from drifting apart.  */
+#define fu_assert_same_bit_(c_name, cpp_name)                                           \
+    static_assert(static_cast<unsigned>(c_name) == static_cast<unsigned>(fu::cpp_name), \
+                  #c_name " drifted from " #cpp_name)
+
+fu_assert_same_bit_(fu_capability_x86_pause_k, capability_x86_pause_k);
+fu_assert_same_bit_(fu_capability_x86_tpause_k, capability_x86_tpause_k);
+fu_assert_same_bit_(fu_capability_arm64_yield_k, capability_arm64_yield_k);
+fu_assert_same_bit_(fu_capability_arm64_wfet_k, capability_arm64_wfet_k);
+fu_assert_same_bit_(fu_capability_risc5_pause_k, capability_risc5_pause_k);
+fu_assert_same_bit_(fu_capability_compute_domain_k, capability_compute_domain_k);
+fu_assert_same_bit_(fu_capability_numa_aware_k, capability_numa_aware_k);
+fu_assert_same_bit_(fu_capability_huge_pages_k, capability_huge_pages_k);
+fu_assert_same_bit_(fu_capability_huge_pages_transparent_k, capability_huge_pages_transparent_k);
+fu_assert_same_bit_(fu_capability_comptime_threads_k, capability_comptime_threads_k);
+fu_assert_same_bit_(fu_capability_comptime_topology_k, capability_comptime_topology_k);
+fu_assert_same_bit_(fu_capability_comptime_topology_caches_k, capability_comptime_topology_caches_k);
+fu_assert_same_bit_(fu_capability_comptime_topology_metrics_k, capability_comptime_topology_metrics_k);
+fu_assert_same_bit_(fu_capability_comptime_thread_pinning_k, capability_comptime_thread_pinning_k);
+fu_assert_same_bit_(fu_capability_comptime_thread_qos_k, capability_comptime_thread_qos_k);
+fu_assert_same_bit_(fu_capability_comptime_thread_sched_class_k, capability_comptime_thread_sched_class_k);
+fu_assert_same_bit_(fu_capability_comptime_numa_memory_k, capability_comptime_numa_memory_k);
+fu_assert_same_bit_(fu_capability_comptime_huge_pages_k, capability_comptime_huge_pages_k);
+fu_assert_same_bit_(fu_capability_comptime_colocated_pools_k, capability_comptime_colocated_pools_k);
+
+#undef fu_assert_same_bit_
+
+fu_capabilities_t fu_comptime_capabilities(void) { return static_cast<fu_capabilities_t>(fu::comptime_capabilities()); }
+
+char const *fu_comptime_capabilities_string(void) {
+    /*  Every bit is a macro, so the answer is a string literal. Each name carries a leading comma
+     *  and we skip it on the way out, which beats trimming a trailing one - and beats `std::string`,
+     *  which this library does not use and does not want to start allocating from.  */
+    static char const joined[] =
+#if FU_WITH_THREADS
+        ",threads"
+#endif
+#if FU_WITH_TOPOLOGY
+        ",topology"
+#endif
+#if FU_WITH_TOPOLOGY_CACHES
+        ",topology_caches"
+#endif
+#if FU_WITH_TOPOLOGY_METRICS
+        ",topology_metrics"
+#endif
+#if FU_WITH_THREAD_PINNING
+        ",thread_pinning"
+#endif
+#if FU_WITH_THREAD_QOS
+        ",thread_qos"
+#endif
+#if FU_WITH_THREAD_SCHED_CLASS
+        ",thread_sched_class"
+#endif
+#if FU_WITH_NUMA_MEMORY
+        ",numa_memory"
+#endif
+#if FU_WITH_HUGE_PAGES
+        ",huge_pages"
+#endif
+#if FU_WITH_COLOCATED_POOLS
+        ",colocated_pools"
+#endif
+        ;
+    return sizeof(joined) > 1 ? &joined[1] : "none";
+}
+
+fu_capabilities_t fu_runtime_capabilities(void) {
+    if (!globals_initialize()) return fu_capabilities_unknown_k;
+    return static_cast<fu_capabilities_t>(global_capabilities);
+}
+
+char const *fu_runtime_capabilities_string(void) {
     if (!globals_initialize()) return nullptr;
     return &global_capabilities_string[0];
 }
 
 size_t fu_count_logical_cores(void) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     return global_numa_topology.threads_count();
 #else
@@ -350,7 +444,7 @@ size_t fu_count_logical_cores(void) {
 }
 
 size_t fu_count_compute_domains(void) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     return global_numa_topology.compute_domains_count();
 #else
@@ -359,7 +453,7 @@ size_t fu_count_compute_domains(void) {
 }
 
 size_t fu_count_memory_domains(void) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     return global_numa_topology.memory_domains_count();
 #else
@@ -368,7 +462,7 @@ size_t fu_count_memory_domains(void) {
 }
 
 size_t fu_count_compute_levels(void) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     return global_numa_topology.compute_levels_count();
 #else
@@ -377,37 +471,40 @@ size_t fu_count_compute_levels(void) {
 }
 
 size_t fu_compute_level_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
-    return global_numa_topology.compute_domain_at(compute_domain_index).compute_level;
+    return global_numa_topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index))
+        .compute_level;
 #else
     return 0;
 #endif
 }
 
 size_t fu_compute_capacity_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
-    return global_numa_topology.compute_domain_at(compute_domain_index).capacity;
+    return global_numa_topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index))
+        .capacity;
 #else
     return 0; // ? No per-core throughput without a harvested topology
 #endif
 }
 
 size_t fu_compute_cache_bytes_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
-    return global_numa_topology.compute_domain_at(compute_domain_index).cache_bytes;
+    return global_numa_topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index))
+        .cache_bytes;
 #else
     return 0;
 #endif
 }
 
 size_t fu_count_memory_levels(void) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     return global_numa_topology.memory_levels_count();
 #else
@@ -416,46 +513,49 @@ size_t fu_count_memory_levels(void) {
 }
 
 size_t fu_memory_level_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     if (memory_domain_index >= global_numa_topology.memory_domains_count()) return 0;
-    return global_numa_topology.memory_domain(memory_domain_index).memory_level;
+    return global_numa_topology.memory_domain(static_cast<fu::memory_domain_index_t>(memory_domain_index)).memory_level;
 #else
     return 0;
 #endif
 }
 
 size_t fu_local_memory_of(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
-    return global_numa_topology.local_memory_of(compute_domain_index);
+    return global_numa_topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain_index));
 #else
     return 0;
 #endif
 }
 
 size_t fu_memory_distance(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
-    return global_numa_topology.distance(compute_domain_index, memory_domain_index);
+    return global_numa_topology.distance(static_cast<fu::compute_domain_index_t>(compute_domain_index),
+                                         static_cast<fu::memory_domain_index_t>(memory_domain_index));
 #else
     return compute_domain_index == 0 && memory_domain_index == 0 ? 10 : 0;
 #endif
 }
 
 size_t fu_memory_bandwidth(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
-    return global_numa_topology.memory_bandwidth(compute_domain_index, memory_domain_index);
+    return global_numa_topology.memory_bandwidth(static_cast<fu::compute_domain_index_t>(compute_domain_index),
+                                                 static_cast<fu::memory_domain_index_t>(memory_domain_index));
 #else
     return 0;
 #endif
 }
 
 size_t fu_memory_latency(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
-    return global_numa_topology.memory_latency(compute_domain_index, memory_domain_index);
+    return global_numa_topology.memory_latency(static_cast<fu::compute_domain_index_t>(compute_domain_index),
+                                               static_cast<fu::memory_domain_index_t>(memory_domain_index));
 #else
     return 0;
 #endif
@@ -464,21 +564,21 @@ size_t fu_memory_latency(FU_MAYBE_UNUSED_ size_t compute_domain_index, FU_MAYBE_
 size_t fu_volume_ram(void) { return fu::get_ram_total_volume(); }
 
 size_t fu_volume_ram_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     if (memory_domain_index >= global_numa_topology.nodes_count()) return 0;
-    return global_numa_topology.node(memory_domain_index).memory_size;
+    return global_numa_topology.node(static_cast<fu::memory_domain_index_t>(memory_domain_index)).memory_size;
 #else
     return memory_domain_index == 0 ? fu::get_ram_total_volume() : 0;
 #endif
 }
 
 size_t fu_volume_huge_pages_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_NUMA_MEMORY
     if (!globals_initialize()) return 0;
     if (memory_domain_index >= global_numa_topology.nodes_count()) return 0;
     size_t total_volume = 0;
-    auto const &node = global_numa_topology.node(memory_domain_index);
+    auto const &node = global_numa_topology.node(static_cast<fu::memory_domain_index_t>(memory_domain_index));
     for (auto const &page_size : node.page_sizes) total_volume += page_size.bytes_per_page * page_size.free_pages;
     return total_volume;
 #else
@@ -487,7 +587,7 @@ size_t fu_volume_huge_pages_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
 }
 
 size_t fu_volume_huge_pages(void) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_NUMA_MEMORY
     if (!globals_initialize()) return 0;
     size_t total_volume = 0;
     for (size_t memory_domain = 0; memory_domain < global_numa_topology.nodes_count(); ++memory_domain)
@@ -499,11 +599,11 @@ size_t fu_volume_huge_pages(void) {
 }
 
 size_t fu_count_huge_pages_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_NUMA_MEMORY
     if (!globals_initialize()) return 0;
     if (memory_domain_index >= global_numa_topology.nodes_count()) return 0;
     size_t total_pages = 0;
-    auto const &node = global_numa_topology.node(memory_domain_index);
+    auto const &node = global_numa_topology.node(static_cast<fu::memory_domain_index_t>(memory_domain_index));
     for (auto const &page_size : node.page_sizes) total_pages += page_size.free_pages;
     return total_pages;
 #else
@@ -512,7 +612,7 @@ size_t fu_count_huge_pages_in(FU_MAYBE_UNUSED_ size_t memory_domain_index) {
 }
 
 size_t fu_count_huge_pages(void) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_NUMA_MEMORY
     if (!globals_initialize()) return 0;
     size_t total_pages = 0;
     for (size_t memory_domain = 0; memory_domain < global_numa_topology.nodes_count(); ++memory_domain)
@@ -531,8 +631,8 @@ void *fu_allocate_at_least_in(                                         //
     FU_MAYBE_UNUSED_ size_t memory_domain_index, size_t minimum_bytes, //
     size_t *allocated_bytes, size_t *bytes_per_page) {
 
-#if FU_ENABLE_NUMA
-    auto const &node = global_numa_topology.node(memory_domain_index);
+#if FU_WITH_NUMA_MEMORY
+    auto const &node = global_numa_topology.node(static_cast<fu::memory_domain_index_t>(memory_domain_index));
     fu::linux_numa_allocator_t allocator(node.node_id);
     auto result = allocator.allocate_at_least(minimum_bytes);
     if (!result) return nullptr;
@@ -550,8 +650,8 @@ void *fu_allocate_at_least_in(                                         //
 
 void *fu_allocate_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, size_t bytes) {
 
-#if FU_ENABLE_NUMA
-    auto const &node = global_numa_topology.node(memory_domain_index);
+#if FU_WITH_NUMA_MEMORY
+    auto const &node = global_numa_topology.node(static_cast<fu::memory_domain_index_t>(memory_domain_index));
     fu::linux_numa_allocator_t allocator(node.node_id);
     return allocator.allocate(bytes);
 #else
@@ -560,8 +660,8 @@ void *fu_allocate_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, size_t bytes) 
 }
 
 void fu_free_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, void *pointer, FU_MAYBE_UNUSED_ size_t bytes) {
-#if FU_ENABLE_NUMA
-    auto const &node = global_numa_topology.node(memory_domain_index);
+#if FU_WITH_NUMA_MEMORY
+    auto const &node = global_numa_topology.node(static_cast<fu::memory_domain_index_t>(memory_domain_index));
     fu::linux_numa_allocator_t allocator(node.node_id);
     allocator.deallocate(reinterpret_cast<char *>(pointer), bytes);
 #else
@@ -592,10 +692,10 @@ inline void *fu_aligned_malloc(std::size_t size, std::size_t alignment) noexcept
  *  @brief Cross-platform aligned memory deallocation.
  *  @note Matches fu_aligned_malloc - must use same alignment value.
  */
-inline void fu_aligned_free(void *ptr, std::size_t alignment) noexcept {
-#if defined(_MSC_VER)
+inline void fu_aligned_free(void *ptr, FU_MAYBE_UNUSED_ std::size_t alignment) noexcept {
+#if FU_ON_WINDOWS
     _aligned_free(ptr);
-#elif defined(__unix__) || defined(__unix) || defined(unix) || defined(__APPLE__)
+#elif FU_ON_POSIX
     std::free(ptr);
 #else
     ::operator delete(ptr, std::align_val_t {alignment}, std::nothrow);
@@ -610,7 +710,7 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
     if (!opaque) return nullptr;
 
     // Best case, use the NUMA-aware distributed pool
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     fu::numa_topology_t copied_topology;
     if (!copied_topology.try_assign(global_numa_topology)) {
         fu_aligned_free(opaque, alignof(opaque_pool_t));
@@ -620,37 +720,37 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
     if (global_capabilities & fu::capability_x86_tpause_k) {
-        new (opaque) opaque_pool_t(std::in_place_type<fu::linux_distributed_pool<fu::x86_tpause_t>>, name,
-                                   std::move(copied_topology));
+        new (opaque)
+            opaque_pool_t(std::in_place_type<fu::distributed_pool<fu::x86_tpause_t>>, name, std::move(copied_topology));
         return reinterpret_cast<fu_pool_t *>(opaque);
     }
     if (global_capabilities & fu::capability_x86_pause_k) {
-        new (opaque) opaque_pool_t(std::in_place_type<fu::linux_distributed_pool<fu::x86_pause_t>>, name,
-                                   std::move(copied_topology));
+        new (opaque)
+            opaque_pool_t(std::in_place_type<fu::distributed_pool<fu::x86_pause_t>>, name, std::move(copied_topology));
         return reinterpret_cast<fu_pool_t *>(opaque);
     }
 #endif
 #if FU_DETECT_ARCH_ARM64_
     if (global_capabilities & fu::capability_arm64_wfet_k) {
-        new (opaque) opaque_pool_t(std::in_place_type<fu::linux_distributed_pool<fu::arm64_wfet_t>>, name,
-                                   std::move(copied_topology));
+        new (opaque)
+            opaque_pool_t(std::in_place_type<fu::distributed_pool<fu::arm64_wfet_t>>, name, std::move(copied_topology));
         return reinterpret_cast<fu_pool_t *>(opaque);
     }
     if (global_capabilities & fu::capability_arm64_yield_k) {
-        new (opaque) opaque_pool_t(std::in_place_type<fu::linux_distributed_pool<fu::arm64_yield_t>>, name,
+        new (opaque) opaque_pool_t(std::in_place_type<fu::distributed_pool<fu::arm64_yield_t>>, name,
                                    std::move(copied_topology));
         return reinterpret_cast<fu_pool_t *>(opaque);
     }
 #endif
 #if FU_DETECT_ARCH_RISC5_
     if (global_capabilities & fu::capability_risc5_pause_k) {
-        new (opaque) opaque_pool_t(std::in_place_type<fu::linux_distributed_pool<fu::risc5_pause_t>>, name,
+        new (opaque) opaque_pool_t(std::in_place_type<fu::distributed_pool<fu::risc5_pause_t>>, name,
                                    std::move(copied_topology));
         return reinterpret_cast<fu_pool_t *>(opaque);
     }
 #endif
 #endif // FU_WITH_ASM_YIELDS_
-#endif // FU_ENABLE_NUMA
+#endif // FU_WITH_NUMA_MEMORY
 
     // Common case of using modern hardware, but not having Linux installed
 #if FU_WITH_ASM_YIELDS_
@@ -696,11 +796,11 @@ fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, FU_MAYBE_UNUSED_ size_t compute_doma
     opaque_pool_t *opaque = upcast_pool(pool);
     auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
 
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
 
     // `fu_pool_new` builds a distributed pool for the whole machine; rebuild it in place as a
-    // single `linux_compute_domain_pool` bound to this compute domain, then spawn it there.
+    // single `colocated_pool` bound to this compute domain, then spawn it there.
     visit(
         [](auto &variant) {
             using variant_t = std::remove_reference_t<decltype(variant)>;
@@ -712,33 +812,34 @@ fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, FU_MAYBE_UNUSED_ size_t compute_doma
 #if FU_WITH_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
     if (global_capabilities & fu::capability_x86_tpause_k)
-        opaque->variants.construct<fu::linux_compute_domain_pool<fu::x86_tpause_t>>("forkunion");
+        opaque->variants.construct<fu::colocated_pool<fu::x86_tpause_t>>("forkunion");
     else if (global_capabilities & fu::capability_x86_pause_k)
-        opaque->variants.construct<fu::linux_compute_domain_pool<fu::x86_pause_t>>("forkunion");
+        opaque->variants.construct<fu::colocated_pool<fu::x86_pause_t>>("forkunion");
     else
 #endif
 #if FU_DETECT_ARCH_ARM64_
         if (global_capabilities & fu::capability_arm64_wfet_k)
-        opaque->variants.construct<fu::linux_compute_domain_pool<fu::arm64_wfet_t>>("forkunion");
+        opaque->variants.construct<fu::colocated_pool<fu::arm64_wfet_t>>("forkunion");
     else if (global_capabilities & fu::capability_arm64_yield_k)
-        opaque->variants.construct<fu::linux_compute_domain_pool<fu::arm64_yield_t>>("forkunion");
+        opaque->variants.construct<fu::colocated_pool<fu::arm64_yield_t>>("forkunion");
     else
 #endif
 #if FU_DETECT_ARCH_RISC5_
         if (global_capabilities & fu::capability_risc5_pause_k)
-        opaque->variants.construct<fu::linux_compute_domain_pool<fu::risc5_pause_t>>("forkunion");
+        opaque->variants.construct<fu::colocated_pool<fu::risc5_pause_t>>("forkunion");
     else
 #endif
 #endif // FU_WITH_ASM_YIELDS_
-        opaque->variants.construct<fu::linux_compute_domain_pool<fu::standard_yield_t>>("forkunion");
+        opaque->variants.construct<fu::colocated_pool<fu::standard_yield_t>>("forkunion");
 
     opaque->compute_domain_index = compute_domain_index;
     return visit(
         [&](auto &variant) -> fu_bool_t {
             using variant_t = std::remove_reference_t<decltype(variant)>;
             if constexpr (is_compute_domain_pool<variant_t>::value)
-                return variant.try_spawn(global_numa_topology.compute_domain_at(compute_domain_index), threads,
-                                         exclusivity);
+                return variant.try_spawn(global_numa_topology.compute_domain_at(
+                                             static_cast<fu::compute_domain_index_t>(compute_domain_index)),
+                                         threads, exclusivity);
             else
                 return 0;
         },
@@ -751,10 +852,11 @@ fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, FU_MAYBE_UNUSED_ size_t compute_doma
 }
 
 size_t fu_count_logical_cores_in(FU_MAYBE_UNUSED_ size_t compute_domain_index) {
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     if (!globals_initialize()) return 0;
     if (compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
-    return global_numa_topology.compute_domain_at(compute_domain_index).core_count;
+    return global_numa_topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index))
+        .core_count;
 #else
     return compute_domain_index == 0 ? std::thread::hardware_concurrency() : 0;
 #endif
@@ -783,13 +885,14 @@ fu_bool_t fu_pool_spawn(fu_pool_t *pool, size_t threads, fu_caller_exclusivity_t
     auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
     return visit(
         [&](auto &variant) -> fu_bool_t {
+#if FU_WITH_COLOCATED_POOLS
             using variant_t = std::remove_reference_t<decltype(variant)>;
-#if FU_ENABLE_NUMA
             // A compute-domain pool binds to a specific compute domain rather than a bare thread count.
             if constexpr (is_compute_domain_pool<variant_t>::value) {
                 if (opaque->compute_domain_index >= global_numa_topology.compute_domains_count()) return 0;
-                return variant.try_spawn(global_numa_topology.compute_domain_at(opaque->compute_domain_index), threads,
-                                         exclusivity);
+                return variant.try_spawn(global_numa_topology.compute_domain_at(
+                                             static_cast<fu::compute_domain_index_t>(opaque->compute_domain_index)),
+                                         threads, exclusivity);
             }
             else
 #endif

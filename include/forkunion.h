@@ -28,7 +28,7 @@
  *  }
  *
  *  int main(int argc, char *argv[]) {
- *      char const *caps = fu_capabilities_string();
+ *      char const *caps = fu_runtime_capabilities_string();
  *      if (!caps) return EXIT_FAILURE; // ! Thread pool is not supported
  *      printf("ForkUnion capabilities: %s\n", caps);
  *
@@ -47,7 +47,7 @@
  *
  *  Unlike the C++ version, the C header wraps the best-fit pre-compiled platform-specific instantiation
  *  of C++ templates. It also uses a singleton state to store the NUMA topology and other OS/machine specs.
- *  Under the hood, the `fu_pool_t` maps to a `basic_pool` or `linux_distributed_pool`.
+ *  Under the hood, the `fu_pool_t` maps to a `basic_pool` or `distributed_pool`.
  *  For advanced usage, prefer the core C++ library.
  *
  *  The next layer of logic is for basic index-addressable tasks. It includes basic parallel loops:
@@ -70,7 +70,7 @@
  *
  *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
  *  exposes cheaper @b "busy-waiting" mechanisms, such as `tpause`, `wfet`, & `yield` instructions.
- *  @sa `fu_capabilities_string`
+ *  @sa `fu_runtime_capabilities_string`
  *
  *  Minimum version of C 99 is needed to allow for `size_t` and other standard types.
  *  This significantly reduces complexity compared to the C++ templated version.
@@ -89,7 +89,11 @@ int fu_version_major(void);
 int fu_version_minor(void);
 /** @brief Returns the patch version component of the ForkUnion library. */
 int fu_version_patch(void);
-/** @brief Returns non-zero if the library was compiled with NUMA support. */
+/**
+ *  @brief Returns non-zero if the library was compiled with NUMA support.
+ *  @deprecated Prefer `fu_comptime_capabilities() & fu_capability_comptime_numa_memory_k`, which
+ *              distinguishes page placement from the seven other facilities this once implied.
+ */
 int fu_numa_enabled(void);
 
 #pragma region - Types
@@ -147,23 +151,79 @@ typedef enum fu_caller_exclusivity_t {
 #pragma region - Metadata
 
 /**
- *  @brief Describes available OS+CPU capabilities used by the thread pools.
- *  @retval `NULL`, if the thread pool is not supported on the current platform.
- *  @retval "serial" for the default C++ STL-powered thread pool without NUMA awareness.
- *  @retval "numa" for the NUMA-aware thread pool on Linux-based systems.
- *  @retval "numa+x86_pause" for the NUMA-aware pool with `pause` instruction on x86.
- *  @retval "numa+arm64_yield" for the NUMA-aware pool with `yield` instruction on AArch64.
- *  @retval "numa+x86_tpause" for the NUMA-aware pool with `tpause` instruction with "waitpkg" CPU feature.
- *  @retval "numa+arm64_wfet" for the NUMA-aware pool with `wfet` instruction on AArch64.
- *  @retval "numa+risc5_pause" for the NUMA-aware pool with `pause` instruction on RISC-V.
+ *  @brief Describes all the special library features, both those compiled in and those found here.
+ *  @sa `fu_comptime_capabilities` and `fu_runtime_capabilities`
  *
- *  The string describes both the memory topology awareness and the CPU-specific optimizations
- *  available for busy-waiting. These capabilities directly affect performance characteristics:
- *  - Basic "serial" pools are suitable for single-NUMA-node systems or when portability is key.
- *  - "numa" pools reduce memory access latency by ~35% on multi-socket servers.
- *  - CPU-specific extensions like "tpause" and "wfet" reduce power consumption during busy-waits.
+ *  Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
+ *  about @b this @b machine: `fu_capability_huge_pages_k` means the kernel is offering them. A bit
+ *  marked `comptime` is a fact about @b this @b build: `fu_capability_comptime_huge_pages_k` means
+ *  we compiled the code that would ask for them.
+ *
+ *  Neither implies the other. A binary carrying `fu_capability_comptime_numa_memory_k` runs
+ *  perfectly well on a single-node box, where `fu_capability_numa_aware_k` never appears; and a
+ *  machine with four NUMA nodes reports none of them to a build that left the topology out.
  */
-char const *fu_capabilities_string(void);
+typedef enum fu_capabilities_t {
+    fu_capabilities_unknown_k = 0,
+
+    /// CPU-specific capabilities, detected at runtime
+    fu_capability_x86_pause_k = 1 << 1,   /// x86
+    fu_capability_x86_tpause_k = 1 << 2,  /// x86-64 with `WAITPKG` support
+    fu_capability_arm64_yield_k = 1 << 3, /// Arm
+    fu_capability_arm64_wfet_k = 1 << 4,  /// AArch64 with `WFET` support
+    fu_capability_risc5_pause_k = 1 << 5, /// RISC-V
+
+    /// Pool-topology capabilities, detected at runtime
+    fu_capability_compute_domain_k = 1 << 6, /// Pinned to a single compute domain
+
+    /// RAM-specific capabilities, detected at runtime
+    fu_capability_numa_aware_k = 1 << 10,             /// NUMA-aware memory allocations
+    fu_capability_huge_pages_k = 1 << 11,             /// Reducing TLB pressure with huge pages
+    fu_capability_huge_pages_transparent_k = 1 << 12, /// ... doing the same "transparently"
+
+    /// Kernel facilities this build may use, one bit per `FU_WITH_*` macro
+    fu_capability_comptime_threads_k = 1 << 16,            /// Can spawn OS threads directly
+    fu_capability_comptime_topology_k = 1 << 17,           /// Can enumerate compute and memory domains
+    fu_capability_comptime_topology_caches_k = 1 << 18,    /// Can see which cores share a cache
+    fu_capability_comptime_topology_metrics_k = 1 << 19,   /// Can read inter-domain distance and bandwidth
+    fu_capability_comptime_thread_pinning_k = 1 << 20,     /// Can bind a thread to a set of cores
+    fu_capability_comptime_thread_qos_k = 1 << 21,         /// Can hint a thread's core class at creation
+    fu_capability_comptime_thread_sched_class_k = 1 << 22, /// Can change another thread's scheduling class
+    fu_capability_comptime_numa_memory_k = 1 << 23,        /// Can place pages on a chosen memory domain
+    fu_capability_comptime_huge_pages_k = 1 << 24,         /// Can request pages larger than the base page
+    fu_capability_comptime_colocated_pools_k = 1 << 25,    /// `fu_pool_spawn_in` & the distributed pool exist
+} fu_capabilities_t;
+
+/**
+ *  @brief Which kernel facilities this build of ForkUnion was compiled to use.
+ *
+ *  Consult it before reaching for a domain-aware API. `fu_pool_spawn_in`, `fu_allocate_in`, and the
+ *  rest of that surface fail on a build without `fu_capability_comptime_colocated_pools_k`, and a C,
+ *  Rust, or Zig caller has no other way to tell that apart from a machine with one compute domain.
+ */
+fu_capabilities_t fu_comptime_capabilities(void);
+
+/**
+ *  @brief The set `fu_comptime_capabilities` bits, comma-separated, like "threads,topology".
+ *  @retval "none" if nothing beyond the portable STL pool was compiled in. Never `NULL`.
+ */
+char const *fu_comptime_capabilities_string(void);
+
+/**
+ *  @brief Which features this machine turned out to offer, probing the CPU and the memory system.
+ *
+ *  These affect performance rather than availability:
+ *  - `fu_capability_numa_aware_k` pools reduce memory access latency by ~35% on multi-socket servers.
+ *  - `fu_capability_x86_tpause_k` and `fu_capability_arm64_wfet_k` cut power draw during busy-waits.
+ */
+fu_capabilities_t fu_runtime_capabilities(void);
+
+/**
+ *  @brief The set `fu_runtime_capabilities` bits, comma-separated, like "arm64_yield,numa_aware".
+ *  @retval `NULL` if the thread pool is not supported on the current platform.
+ *  @retval "none" if this machine offers nothing beyond a plain, portable thread pool.
+ */
+char const *fu_runtime_capabilities_string(void);
 
 /**
  *  @brief Describes the number of logical CPU cores available on the system.

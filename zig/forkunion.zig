@@ -36,7 +36,10 @@ const c = struct {
     extern fn fu_version_minor() c_int;
     extern fn fu_version_patch() c_int;
     extern fn fu_numa_enabled() c_int;
-    extern fn fu_capabilities_string() [*:0]const u8;
+    extern fn fu_comptime_capabilities() u32;
+    extern fn fu_comptime_capabilities_string() [*:0]const u8;
+    extern fn fu_runtime_capabilities() u32;
+    extern fn fu_runtime_capabilities_string() [*:0]const u8;
 
     // Compute topology
     extern fn fu_count_logical_cores() usize;
@@ -164,9 +167,84 @@ pub fn numaEnabled() bool {
     return c.fu_numa_enabled() != 0;
 }
 
-/// Returns a string describing available platform capabilities
-pub fn capabilitiesString() [*:0]const u8 {
-    return c.fu_capabilities_string();
+/// Everything the library can do, whether decided when it was compiled or found on this machine.
+///
+/// Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
+/// about _this machine_: `huge_pages` means the kernel is offering them. A bit marked `comptime_`
+/// is a fact about _this build_: `comptime_huge_pages` means we compiled the code that would ask.
+///
+/// Neither implies the other. A binary carrying `comptime_numa_memory` runs perfectly well on a
+/// single-node box, where `numa_aware` never appears; and a machine with four NUMA nodes reports
+/// none of them to a build that left the topology out.
+pub const Capabilities = packed struct(u32) {
+    _unused_0: u1 = 0,
+
+    /// x86 `pause` instruction
+    x86_pause: bool = false,
+    /// x86-64 `tpause` instruction, with `WAITPKG` support
+    x86_tpause: bool = false,
+    /// Arm `yield` instruction
+    arm64_yield: bool = false,
+    /// AArch64 `wfet` instruction, with `FEAT_WFxT` support
+    arm64_wfet: bool = false,
+    /// RISC-V `pause` instruction
+    risc5_pause: bool = false,
+    /// This pool is pinned to a single compute domain
+    compute_domain: bool = false,
+
+    _unused_7: u3 = 0,
+
+    /// This machine has NUMA nodes to allocate on
+    numa_aware: bool = false,
+    /// This kernel offers pages larger than the base page
+    huge_pages: bool = false,
+    /// ... and offers them transparently
+    huge_pages_transparent: bool = false,
+
+    _unused_13: u3 = 0,
+
+    /// Can spawn OS threads directly, rather than through the C++ standard library
+    comptime_threads: bool = false,
+    /// Can enumerate this machine's cores, compute domains, and memory domains
+    comptime_topology: bool = false,
+    /// Can see which cores share a cache, so a compute domain can be cut at a cluster
+    comptime_topology_caches: bool = false,
+    /// Can read inter-domain distance, bandwidth, and latency
+    comptime_topology_metrics: bool = false,
+    /// Can bind a thread to a set of cores, and have the kernel honour it
+    comptime_thread_pinning: bool = false,
+    /// Can hint which class of core a thread should run on, at creation time
+    comptime_thread_qos: bool = false,
+    /// Can change another thread's scheduling class, to sleep or wake it cheaply
+    comptime_thread_sched_class: bool = false,
+    /// Can place pages on a chosen memory domain
+    comptime_numa_memory: bool = false,
+    /// Can request pages larger than the base page
+    comptime_huge_pages: bool = false,
+    /// The domain-aware pools and allocators are compiled in
+    comptime_colocated_pools: bool = false,
+
+    _unused_26: u6 = 0,
+};
+
+/// Which kernel facilities this build of ForkUnion was compiled to use.
+pub fn comptimeCapabilities() Capabilities {
+    return @bitCast(c.fu_comptime_capabilities());
+}
+
+/// The set `comptimeCapabilities` bits, comma-separated, like `"threads,topology"`.
+pub fn comptimeCapabilitiesString() [*:0]const u8 {
+    return c.fu_comptime_capabilities_string();
+}
+
+/// Which features this machine turned out to offer, probing the CPU and the memory system.
+pub fn runtimeCapabilities() Capabilities {
+    return @bitCast(c.fu_runtime_capabilities());
+}
+
+/// The set `runtimeCapabilities` bits, comma-separated, like `"arm64_yield,numa_aware"`.
+pub fn runtimeCapabilitiesString() [*:0]const u8 {
+    return c.fu_runtime_capabilities_string();
 }
 
 /// Returns the number of logical CPU cores available
@@ -860,8 +938,33 @@ test "version info" {
 
 test "system capabilities" {
     std.debug.print("Running test: system capabilities\n", .{});
-    const caps = capabilitiesString();
-    try std.testing.expect(std.mem.len(caps) > 0);
+    const comptime_caps = comptimeCapabilities();
+    const runtime_caps = runtimeCapabilities();
+    std.debug.print("  comptime: {s}\n", .{comptimeCapabilitiesString()});
+    std.debug.print("  runtime:  {s}\n", .{runtimeCapabilitiesString()});
+    try std.testing.expect(std.mem.len(runtimeCapabilitiesString()) > 0);
+
+    // Threads are the one facility every supported platform has.
+    try std.testing.expect(comptime_caps.comptime_threads);
+
+    // The aggregate is implied, never hand-set: pools need threads and a topology to spawn onto.
+    try std.testing.expectEqual(
+        comptime_caps.comptime_threads and comptime_caps.comptime_topology,
+        comptime_caps.comptime_colocated_pools,
+    );
+
+    // Placing pages on a node presumes we discovered the nodes.
+    if (comptime_caps.comptime_numa_memory) try std.testing.expect(comptime_caps.comptime_topology);
+
+    // Without the pools, the library can still see exactly one domain, and never more.
+    if (!comptime_caps.comptime_colocated_pools) try std.testing.expectEqual(@as(usize, 1), countComputeDomains());
+
+    // A machine cannot report NUMA nodes to a build that never learned to look for them.
+    if (runtime_caps.numa_aware) try std.testing.expect(comptime_caps.comptime_numa_memory);
+
+    // The two halves live in one bit-space, and must never collide.
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(comptime_caps)) & 0x0000_FFFF);
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(runtime_caps)) & 0xFFFF_0000);
 }
 
 test "system metadata" {

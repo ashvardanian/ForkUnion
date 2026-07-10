@@ -440,13 +440,14 @@ static bool test_clang_blocks(void) {
 int main(void) {
     printf("Welcome to the ForkUnion library test suite (C API)!\n");
 
-    char const *caps = fu_capabilities_string();
+    char const *caps = fu_runtime_capabilities_string();
     if (!caps) {
         fprintf(stderr, "Thread pool not supported on this platform\n");
         return EXIT_FAILURE;
     }
 
-    printf("Capabilities: %s\n", caps);
+    printf("Compiled with: %s\n", fu_comptime_capabilities_string());
+    printf("Running on:    %s\n", caps);
     printf("Logical cores: %zu\n", fu_count_logical_cores());
     printf("NUMA nodes: %zu\n", fu_count_memory_domains());
     printf("ComputeDomains: %zu\n", fu_count_compute_domains());

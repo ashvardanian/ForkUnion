@@ -367,7 +367,10 @@ extern "C" {
     fn fu_version_minor() -> c_int;
     fn fu_version_patch() -> c_int;
     fn fu_numa_enabled() -> c_int;
-    fn fu_capabilities_string() -> *const c_char;
+    fn fu_comptime_capabilities() -> u32;
+    fn fu_comptime_capabilities_string() -> *const c_char;
+    fn fu_runtime_capabilities() -> u32;
+    fn fu_runtime_capabilities_string() -> *const c_char;
 
     // Compute topology
     fn fu_count_logical_cores() -> usize;
@@ -463,11 +466,97 @@ extern "C" {
     fn fu_pool_unsafe_join(pool: *mut c_void, generation: usize);
 }
 
-/// Returns a string describing available platform capabilities.
+/// Everything the library can do, whether decided when it was compiled or found on this machine.
+///
+/// Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
+/// about _this machine_: [`Capabilities::HUGE_PAGES`] means the kernel is offering them. A bit
+/// marked `COMPTIME_` is a fact about _this build_: [`Capabilities::COMPTIME_HUGE_PAGES`] means we
+/// compiled the code that would ask for them.
+///
+/// Neither implies the other. A binary carrying [`Capabilities::COMPTIME_NUMA_MEMORY`] runs
+/// perfectly well on a single-node box, where [`Capabilities::NUMA_AWARE`] never appears; and a
+/// machine with four NUMA nodes reports none of them to a build that left the topology out.
+///
+/// ```
+/// use forkunion::{comptime_capabilities, Capabilities};
+/// if comptime_capabilities().contains(Capabilities::COMPTIME_COLOCATED_POOLS) {
+///     // `spawn_in`, `PinnedAllocator`, and friends are real here.
+/// }
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Capabilities(pub u32);
+
+impl Capabilities {
+    /// Nothing detected, or nothing compiled in.
+    pub const NONE: Capabilities = Capabilities(0);
+
+    /// x86 `pause` instruction.
+    pub const X86_PAUSE: Capabilities = Capabilities(1 << 1);
+    /// x86-64 `tpause` instruction, with `WAITPKG` support.
+    pub const X86_TPAUSE: Capabilities = Capabilities(1 << 2);
+    /// Arm `yield` instruction.
+    pub const ARM64_YIELD: Capabilities = Capabilities(1 << 3);
+    /// AArch64 `wfet` instruction, with `FEAT_WFxT` support.
+    pub const ARM64_WFET: Capabilities = Capabilities(1 << 4);
+    /// RISC-V `pause` instruction.
+    pub const RISC5_PAUSE: Capabilities = Capabilities(1 << 5);
+    /// This pool is pinned to a single compute domain.
+    pub const COMPUTE_DOMAIN: Capabilities = Capabilities(1 << 6);
+    /// This machine has NUMA nodes to allocate on.
+    pub const NUMA_AWARE: Capabilities = Capabilities(1 << 10);
+    /// This kernel offers pages larger than the base page.
+    pub const HUGE_PAGES: Capabilities = Capabilities(1 << 11);
+    /// ... and offers them transparently.
+    pub const HUGE_PAGES_TRANSPARENT: Capabilities = Capabilities(1 << 12);
+
+    /// Can spawn OS threads directly, rather than through the C++ standard library.
+    pub const COMPTIME_THREADS: Capabilities = Capabilities(1 << 16);
+    /// Can enumerate this machine's cores, compute domains, and memory domains.
+    pub const COMPTIME_TOPOLOGY: Capabilities = Capabilities(1 << 17);
+    /// Can see which cores share a cache, so a compute domain can be cut at a cluster.
+    pub const COMPTIME_TOPOLOGY_CACHES: Capabilities = Capabilities(1 << 18);
+    /// Can read inter-domain distance, bandwidth, and latency.
+    pub const COMPTIME_TOPOLOGY_METRICS: Capabilities = Capabilities(1 << 19);
+    /// Can bind a thread to a set of cores, and have the kernel honour it.
+    pub const COMPTIME_THREAD_PINNING: Capabilities = Capabilities(1 << 20);
+    /// Can hint which class of core a thread should run on, at creation time.
+    pub const COMPTIME_THREAD_QOS: Capabilities = Capabilities(1 << 21);
+    /// Can change another thread's scheduling class, to sleep or wake it cheaply.
+    pub const COMPTIME_THREAD_SCHED_CLASS: Capabilities = Capabilities(1 << 22);
+    /// Can place pages on a chosen memory domain.
+    pub const COMPTIME_NUMA_MEMORY: Capabilities = Capabilities(1 << 23);
+    /// Can request pages larger than the base page.
+    pub const COMPTIME_HUGE_PAGES: Capabilities = Capabilities(1 << 24);
+    /// The domain-aware pools and allocators are compiled in.
+    pub const COMPTIME_COLOCATED_POOLS: Capabilities = Capabilities(1 << 25);
+
+    /// Whether every bit of `other` is set in `self`.
+    pub const fn contains(self, other: Capabilities) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+/// Which kernel facilities this build of ForkUnion was compiled to use.
+pub fn comptime_capabilities() -> Capabilities {
+    Capabilities(unsafe { fu_comptime_capabilities() })
+}
+
+/// The set [`comptime_capabilities`] bits, comma-separated, like `"threads,topology"`.
 #[cfg(feature = "std")]
-pub fn capabilities_string() -> Option<&'static str> {
+pub fn comptime_capabilities_string() -> Option<&'static str> {
+    unsafe { CStr::from_ptr(fu_comptime_capabilities_string()).to_str().ok() }
+}
+
+/// Which features this machine turned out to offer, probing the CPU and the memory system.
+pub fn runtime_capabilities() -> Capabilities {
+    Capabilities(unsafe { fu_runtime_capabilities() })
+}
+
+/// The set [`runtime_capabilities`] bits, comma-separated, like `"arm64_yield,numa_aware"`.
+#[cfg(feature = "std")]
+pub fn runtime_capabilities_string() -> Option<&'static str> {
     unsafe {
-        let ptr = fu_capabilities_string();
+        let ptr = fu_runtime_capabilities_string();
         if ptr.is_null() {
             None
         } else {
@@ -476,9 +565,9 @@ pub fn capabilities_string() -> Option<&'static str> {
     }
 }
 
-/// Returns a raw pointer to the capabilities string for no_std environments.
-pub fn capabilities_string_ptr() -> *const c_char {
-    unsafe { fu_capabilities_string() }
+/// Returns a raw pointer to the runtime capabilities string, for `no_std` environments.
+pub fn runtime_capabilities_string_ptr() -> *const c_char {
+    unsafe { fu_runtime_capabilities_string() }
 }
 
 /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
@@ -486,9 +575,43 @@ pub fn volume_ram() -> usize {
     unsafe { fu_volume_ram() }
 }
 
+/// A position in the topology's array of **compute** domains, in `[0, count_compute_domains())`.
+///
+/// Distinct from [`MemoryDomain`], and deliberately not interchangeable with it. The two axes are
+/// indexed independently: an Apple M5 Pro reports three compute domains over a single memory domain,
+/// so a compute index of `2` names no memory domain at all.
+///
+/// This is not hypothetical. `RoundRobinVec` handed a compute-domain index to `PinnedAllocator::new`,
+/// which expects a memory-domain index. It compiled, and it worked on every machine where the two
+/// counts happened to match. Unlike a C++ `enum`, a newtype also refuses `slice[compute_domain]`,
+/// because `Index<usize>` will not accept it - which is the other half of the same bug.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComputeDomain(pub usize);
+
+/// A position in the topology's array of **memory** domains, in `[0, count_memory_domains())`.
+/// See [`ComputeDomain`] for why these are separate types.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemoryDomain(pub usize);
+
+impl ComputeDomain {
+    /// The raw index, for the FFI boundary and for arithmetic.
+    #[inline]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl MemoryDomain {
+    /// The raw index, for the FFI boundary and for arithmetic.
+    #[inline]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
 /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
-pub fn volume_ram_in(memory_domain_index: usize) -> usize {
-    unsafe { fu_volume_ram_in(memory_domain_index) }
+pub fn volume_ram_in(memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_volume_ram_in(memory_domain.get()) }
 }
 
 /// Returns the total huge-page volume (bytes) across all memory domains.
@@ -497,8 +620,8 @@ pub fn volume_huge_pages() -> usize {
 }
 
 /// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
-pub fn volume_huge_pages_in(memory_domain_index: usize) -> usize {
-    unsafe { fu_volume_huge_pages_in(memory_domain_index) }
+pub fn volume_huge_pages_in(memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_volume_huge_pages_in(memory_domain.get()) }
 }
 
 /// Returns the total number of free huge pages across all memory domains.
@@ -507,8 +630,8 @@ pub fn count_huge_pages() -> usize {
 }
 
 /// Returns the number of free huge pages in a given memory domain (0 if out of range).
-pub fn count_huge_pages_in(memory_domain_index: usize) -> usize {
-    unsafe { fu_count_huge_pages_in(memory_domain_index) }
+pub fn count_huge_pages_in(memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_count_huge_pages_in(memory_domain.get()) }
 }
 
 /// Returns the number of logical CPU cores available on the system.
@@ -541,38 +664,38 @@ pub fn count_compute_domains() -> usize {
 ///
 /// Zero if `compute_domain_index` is out of range. Use it to size a per-compute-domain pool
 /// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
-pub fn count_logical_cores_in(compute_domain_index: usize) -> usize {
-    unsafe { fu_count_logical_cores_in(compute_domain_index) }
+pub fn count_logical_cores_in(compute_domain: ComputeDomain) -> usize {
+    unsafe { fu_count_logical_cores_in(compute_domain.get()) }
 }
 
 /// Returns the performance level of a compute domain (higher = more performant).
-pub fn compute_level_in(compute_domain_index: usize) -> usize {
-    unsafe { fu_compute_level_in(compute_domain_index) }
+pub fn compute_level_in(compute_domain: ComputeDomain) -> usize {
+    unsafe { fu_compute_level_in(compute_domain.get()) }
 }
 
 /// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
-pub fn memory_level_in(memory_domain_index: usize) -> usize {
-    unsafe { fu_memory_level_in(memory_domain_index) }
+pub fn memory_level_in(memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_memory_level_in(memory_domain.get()) }
 }
 
 /// Returns the memory domain nearest a given compute domain (its local allocation target).
-pub fn local_memory_of(compute_domain_index: usize) -> usize {
-    unsafe { fu_local_memory_of(compute_domain_index) }
+pub fn local_memory_of(compute_domain: ComputeDomain) -> MemoryDomain {
+    MemoryDomain(unsafe { fu_local_memory_of(compute_domain.get()) })
 }
 
 /// Returns the relative access distance from a compute domain to a memory domain (10 = local).
-pub fn memory_distance(compute_domain_index: usize, memory_domain_index: usize) -> usize {
-    unsafe { fu_memory_distance(compute_domain_index, memory_domain_index) }
+pub fn memory_distance(compute_domain: ComputeDomain, memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_memory_distance(compute_domain.get(), memory_domain.get()) }
 }
 
 /// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
-pub fn memory_bandwidth(compute_domain_index: usize, memory_domain_index: usize) -> usize {
-    unsafe { fu_memory_bandwidth(compute_domain_index, memory_domain_index) }
+pub fn memory_bandwidth(compute_domain: ComputeDomain, memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_memory_bandwidth(compute_domain.get(), memory_domain.get()) }
 }
 
 /// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
-pub fn memory_latency(compute_domain_index: usize, memory_domain_index: usize) -> usize {
-    unsafe { fu_memory_latency(compute_domain_index, memory_domain_index) }
+pub fn memory_latency(compute_domain: ComputeDomain, memory_domain: MemoryDomain) -> usize {
+    unsafe { fu_memory_latency(compute_domain.get(), memory_domain.get()) }
 }
 
 /// Defines whether the calling thread participates in task execution.
@@ -605,16 +728,16 @@ pub fn count_memory_levels() -> usize {
 /// This is the number to weight work by - [`compute_level_in`] is a dense ordinal and must
 /// never be divided by. Platforms that rank cores without rating them report 0 here; fall back
 /// to [`count_threads_in`](ThreadPool::count_threads_in) when they do.
-pub fn compute_capacity_in(compute_domain_index: usize) -> usize {
-    unsafe { fu_compute_capacity_in(compute_domain_index) }
+pub fn compute_capacity_in(compute_domain: ComputeDomain) -> usize {
+    unsafe { fu_compute_capacity_in(compute_domain.get()) }
 }
 
 /// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
 ///
 /// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
 /// deserves - domains of equal throughput may back onto very differently sized caches.
-pub fn compute_cache_bytes_in(compute_domain_index: usize) -> usize {
-    unsafe { fu_compute_cache_bytes_in(compute_domain_index) }
+pub fn compute_cache_bytes_in(compute_domain: ComputeDomain) -> usize {
+    unsafe { fu_compute_cache_bytes_in(compute_domain.get()) }
 }
 
 /// Returns true if NUMA support was compiled into the library.
@@ -758,7 +881,7 @@ impl ThreadPool {
     /// use forkunion::*;
     /// // One pool per compute domain, sized to that domain's core count.
     /// let pools: Vec<ThreadPool> = (0..count_compute_domains())
-    ///     .map(|c| ThreadPool::try_spawn_on(c, count_logical_cores_in(c).max(1), CallerExclusivity::Exclusive).unwrap())
+    ///     .map(|c| ThreadPool::try_spawn_on(c, count_logical_cores_in(ComputeDomain(c)).max(1), CallerExclusivity::Exclusive).unwrap())
     ///     .collect();
     /// assert_eq!(pools.len(), count_compute_domains());
     /// ```
@@ -1340,7 +1463,7 @@ unsafe impl Sync for AllocationResult {}
 ///
 /// ```rust
 /// use forkunion::*;
-/// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc for NUMA node 0");
+/// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc for NUMA node 0");
 /// let allocation = allocator.allocate(1024).expect("Failed to allocate 1024 bytes");
 ///
 /// // Access the allocated memory
@@ -1371,21 +1494,23 @@ impl PinnedAllocator {
     /// use forkunion::*;
     ///
     /// // Create allocator for the first NUMA node
-    /// let allocator = PinnedAllocator::new(0).expect("NUMA node 0 should be available");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("NUMA node 0 should be available");
     ///
     /// // Check if a specific NUMA node exists
     /// let numa_count = count_memory_domains();
     /// if numa_count > 1 {
-    ///     let allocator2 = PinnedAllocator::new(1).expect("NUMA node 1 should be available");
+    ///     let allocator2 = PinnedAllocator::new(MemoryDomain(1)).expect("NUMA node 1 should be available");
     ///     println!("Created allocator for NUMA node: {}", allocator2.memory_domain());
     /// }
     /// ```
-    pub fn new(memory_domain: usize) -> Option<Self> {
-        if memory_domain >= count_memory_domains() {
+    pub fn new(memory_domain: MemoryDomain) -> Option<Self> {
+        if memory_domain.get() >= count_memory_domains() {
             return None;
         }
 
-        Some(Self { memory_domain })
+        Some(Self {
+            memory_domain: memory_domain.get(),
+        })
     }
 
     /// Returns the NUMA node this allocator is pinned to.
@@ -1421,7 +1546,7 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).unwrap();
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
     /// let allocation = allocator.allocate_at_least(1024).expect("Failed to allocate memory");
     ///
     /// println!("Requested 1024 bytes, got {} bytes on {} byte pages",
@@ -1480,7 +1605,7 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).unwrap();
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
     /// let allocation = allocator.allocate(1024).expect("Failed to allocate memory");
     /// assert_eq!(allocation.allocated_bytes(), 1024);
     ///
@@ -1528,7 +1653,7 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).unwrap();
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
     /// let mut allocation = allocator.allocate_for::<u64>(100).expect("Failed to allocate");
     ///
     /// // Verify the allocation size first
@@ -1590,7 +1715,7 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).unwrap();
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
     /// let mut allocation = allocator.allocate_for_at_least::<u32>(1000).expect("Failed to allocate");
     /// let actual_count = allocation.allocated_bytes() / std::mem::size_of::<u32>();
     /// println!("Requested {} u32s, got space for {} u32s", 1000, actual_count);
@@ -1635,13 +1760,13 @@ impl PinnedAllocator {
 /// println!("System has {} NUMA nodes available", numa_count);
 ///
 /// if numa_count > 1 {
-///     let allocator_node1 = PinnedAllocator::new(1).expect("NUMA node 1 available");
+///     let allocator_node1 = PinnedAllocator::new(MemoryDomain(1)).expect("NUMA node 1 available");
 ///     let allocation2 = allocator_node1.allocate(2048).expect("Failed to allocate on node 1");
 ///     assert_eq!(allocation2.memory_domain(), 1);
 /// }
 /// ```
 pub fn default_numa_allocator() -> Option<PinnedAllocator> {
-    PinnedAllocator::new(0)
+    PinnedAllocator::new(MemoryDomain(0))
 }
 
 /// A Vec-like container that uses NUMA-aware pinned memory allocation.
@@ -1656,7 +1781,7 @@ pub fn default_numa_allocator() -> Option<PinnedAllocator> {
 /// use forkunion::*;
 ///
 /// // Create a vector on NUMA node 0
-/// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+/// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
 /// let mut vec = PinnedVec::<u64>::new_in(allocator);
 ///
 /// // Add elements
@@ -1694,7 +1819,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::new_in(allocator);
     /// assert_eq!(vec.len(), 0);
     /// assert_eq!(vec.capacity(), 0);
@@ -1725,7 +1850,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::with_capacity_in(allocator, 100).expect("Failed to create vec");
     /// assert_eq!(vec.len(), 0);
     /// assert_eq!(vec.capacity(), 100);
@@ -1781,7 +1906,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.reserve(10).expect("Failed to reserve");
     /// assert!(vec.capacity() >= 10);
@@ -1839,7 +1964,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// assert_eq!(vec.len(), 1);
@@ -1869,7 +1994,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// assert_eq!(vec.pop(), Some(42));
@@ -1894,7 +2019,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// vec.clear();
@@ -2166,7 +2291,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
     /// vec.resize(5, 0).expect("Failed to resize");
     /// vec.fill(42);
@@ -2190,7 +2315,7 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
     /// vec.resize(5, 0).expect("Failed to resize");
     /// vec.fill_with(|| 42);
@@ -2271,13 +2396,17 @@ impl<T> RoundRobinVec<T> {
         }
 
         // Use the first NUMA node to allocate the container
-        let container_allocator = PinnedAllocator::new(0)?;
+        let container_allocator = PinnedAllocator::new(MemoryDomain(0))?;
         let mut compute_domains =
             PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
 
         // Create a PinnedVec for each NUMA node
         for compute_domain_index in 0..compute_domains_count {
-            let allocator = PinnedAllocator::new(compute_domain_index)?;
+            // A compute-domain index is not a memory-domain index. They coincide only when the
+            // machine has one memory domain per compute domain; an Apple M5 Pro has three compute
+            // domains over one memory domain, and `PinnedAllocator::new(MemoryDomain(1))` would simply fail.
+            let allocator =
+                PinnedAllocator::new(local_memory_of(ComputeDomain(compute_domain_index)))?;
             let vec = PinnedVec::new_in(allocator);
             compute_domains.push(vec).ok()?;
         }
@@ -2323,13 +2452,17 @@ impl<T> RoundRobinVec<T> {
         }
 
         // Use the first NUMA node to allocate the container
-        let container_allocator = PinnedAllocator::new(0)?;
+        let container_allocator = PinnedAllocator::new(MemoryDomain(0))?;
         let mut compute_domains =
             PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
 
         // Create a PinnedVec with capacity for each NUMA node
         for compute_domain_index in 0..compute_domains_count {
-            let allocator = PinnedAllocator::new(compute_domain_index)?;
+            // A compute-domain index is not a memory-domain index. They coincide only when the
+            // machine has one memory domain per compute domain; an Apple M5 Pro has three compute
+            // domains over one memory domain, and `PinnedAllocator::new(MemoryDomain(1))` would simply fail.
+            let allocator =
+                PinnedAllocator::new(local_memory_of(ComputeDomain(compute_domain_index)))?;
             let vec = PinnedVec::with_capacity_in(allocator, capacity_per_compute_domain)?;
             compute_domains.push(vec).ok()?;
         }
@@ -3813,7 +3946,7 @@ where
         // but for simplicity we use a contiguous allocation here. The OS will still
         // tend to place this on the NUMA node of the allocating thread.
         let mut scratch = PinnedVec::with_capacity_in(
-            PinnedAllocator::new(0).expect("failed to get allocator"),
+            PinnedAllocator::new(MemoryDomain(0)).expect("failed to get allocator"),
             threads,
         )
         .expect("failed to allocate scratch");
@@ -4822,9 +4955,40 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn capabilities() {
-        let caps = capabilities_string();
-        std::println!("Capabilities: {caps:?}");
-        assert!(caps.is_some());
+        let comptime = comptime_capabilities();
+        let runtime = runtime_capabilities();
+        std::println!("Comptime: {:?}", comptime_capabilities_string());
+        std::println!("Runtime:  {:?}", runtime_capabilities_string());
+        assert!(runtime_capabilities_string().is_some());
+
+        // Threads are the one facility every supported platform has.
+        assert!(comptime.contains(Capabilities::COMPTIME_THREADS));
+
+        // The aggregate is implied, never hand-set: pools need threads and a topology to spawn onto.
+        assert_eq!(
+            comptime.contains(Capabilities::COMPTIME_COLOCATED_POOLS),
+            comptime.contains(Capabilities::COMPTIME_THREADS)
+                && comptime.contains(Capabilities::COMPTIME_TOPOLOGY)
+        );
+
+        // Placing pages on a node presumes we discovered the nodes.
+        if comptime.contains(Capabilities::COMPTIME_NUMA_MEMORY) {
+            assert!(comptime.contains(Capabilities::COMPTIME_TOPOLOGY));
+        }
+
+        // Whatever we can construct, we can only construct because a capability was compiled in.
+        if !comptime.contains(Capabilities::COMPTIME_COLOCATED_POOLS) {
+            assert_eq!(count_compute_domains(), 1);
+        }
+
+        // A machine cannot report NUMA nodes to a build that never learned to look for them.
+        if runtime.contains(Capabilities::NUMA_AWARE) {
+            assert!(comptime.contains(Capabilities::COMPTIME_NUMA_MEMORY));
+        }
+
+        // The two halves live in one bit-space, and must never collide.
+        assert_eq!(comptime.0 & 0x0000_FFFF, 0, "a comptime bit leaked into the runtime range");
+        assert_eq!(runtime.0 & 0xFFFF_0000, 0, "a runtime bit leaked into the comptime range");
     }
 
     #[cfg_attr(miri, ignore)]
@@ -4854,20 +5018,23 @@ mod tests {
         assert!(compute_levels <= compute_domains);
         assert!(memory_levels <= memory_domains);
 
-        for domain in 0..compute_domains {
+        for domain in (0..compute_domains).map(ComputeDomain) {
             assert!(compute_level_in(domain) < compute_levels.max(1));
-            assert!(local_memory_of(domain) < memory_domains);
+            assert!(local_memory_of(domain).get() < memory_domains);
             // Capacity and cache are magnitudes, unknown as 0 - never negative, never asserted nonzero.
             let _capacity = compute_capacity_in(domain);
             let _cache_bytes = compute_cache_bytes_in(domain);
         }
-        for domain in 0..memory_domains {
+        for domain in (0..memory_domains).map(MemoryDomain) {
             assert!(memory_level_in(domain) < memory_levels.max(1));
         }
 
         // Out-of-range indices must saturate to 0 rather than trap or read past the topology.
-        assert_eq!(compute_capacity_in(compute_domains + 64), 0);
-        assert_eq!(compute_cache_bytes_in(compute_domains + 64), 0);
+        assert_eq!(compute_capacity_in(ComputeDomain(compute_domains + 64)), 0);
+        assert_eq!(
+            compute_cache_bytes_in(ComputeDomain(compute_domains + 64)),
+            0
+        );
     }
 
     #[cfg_attr(miri, ignore)]
@@ -4903,7 +5070,7 @@ mod tests {
 
         let mut pools: Vec<ThreadPool> = (0..compute_domains)
             .map(|c| {
-                let cores = count_logical_cores_in(c).max(1);
+                let cores = count_logical_cores_in(ComputeDomain(c)).max(1);
                 ThreadPool::try_spawn_on(c, cores, CallerExclusivity::Exclusive)
                     .expect("failed to spawn per-compute_domain pool")
             })
@@ -5151,11 +5318,12 @@ mod tests {
         assert!(numa_count > 0, "System should have at least one NUMA node");
 
         // Test valid NUMA node
-        let allocator = PinnedAllocator::new(0).expect("NUMA node 0 should be available");
+        let allocator =
+            PinnedAllocator::new(MemoryDomain(0)).expect("NUMA node 0 should be available");
         assert_eq!(allocator.memory_domain(), 0);
 
         // Test invalid NUMA node
-        let invalid_allocator = PinnedAllocator::new(numa_count + 10);
+        let invalid_allocator = PinnedAllocator::new(MemoryDomain(numa_count + 10));
         assert!(
             invalid_allocator.is_none(),
             "Invalid NUMA node should return None"
@@ -5165,7 +5333,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn basic_allocation() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let allocation = allocator
             .allocate(1024)
             .expect("Failed to allocate 1024 bytes");
@@ -5181,7 +5349,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn allocate_zero_bytes() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let allocation = allocator.allocate(0);
         assert!(
             allocation.is_none(),
@@ -5192,7 +5360,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn allocate_at_least() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let allocation = allocator
             .allocate_at_least(1000)
             .expect("Failed to allocate at least 1000 bytes");
@@ -5209,7 +5377,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_creation() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 0);
@@ -5220,7 +5388,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_with_capacity() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::with_capacity_in(allocator, 10).expect("Failed to create vec");
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 10);
@@ -5231,7 +5399,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_push_pop() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
         // Test push
@@ -5255,7 +5423,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_indexing() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(10).expect("Failed to push");
         vec.push(20).expect("Failed to push");
@@ -5274,7 +5442,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_clear() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
         vec.push(2).expect("Failed to push");
@@ -5289,7 +5457,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_insert_remove() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
         vec.push(3).expect("Failed to push");
@@ -5312,7 +5480,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_reserve() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.capacity(), 0);
 
@@ -5330,7 +5498,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_extend_from_slice() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         let data = [1, 2, 3, 4, 5];
 
@@ -5503,7 +5671,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_iterators() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
             vec.push(i).expect("Failed to push");
@@ -5528,7 +5696,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_slices() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
             vec.push(i).expect("Failed to push");
@@ -5548,7 +5716,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_growth() {
-        let allocator = PinnedAllocator::new(0).expect("Failed to create alloc");
+        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
         // Push many elements to test growth
@@ -5566,7 +5734,7 @@ mod tests {
     #[test]
     fn pinned_vec_invalid_memory_domain() {
         let numa_count = count_memory_domains();
-        let allocator = PinnedAllocator::new(numa_count + 1);
+        let allocator = PinnedAllocator::new(MemoryDomain(numa_count + 1));
         assert!(allocator.is_none());
     }
 

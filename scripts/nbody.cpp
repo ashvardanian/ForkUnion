@@ -180,20 +180,31 @@ void iteration_forkunion_dynamic(pool_t &pool, body_t *_FU_RESTRICT bodies, vect
     pool.for_n_dynamic(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
 }
 
-#if FU_ENABLE_NUMA
-using linux_numa_bodies_allocator_t = fu::linux_numa_allocator<body_t>;
-using linux_numa_bodies_t = std::vector<body_t, linux_numa_bodies_allocator_t>;
-using linux_distributed_pool_t = fu::linux_distributed_pool<fu::standard_yield_t>;
+#if FU_WITH_COLOCATED_POOLS
+/*  The distributed pool exists wherever we can harvest a topology and spawn POSIX threads onto it -
+ *  Linux and Apple both. Only the @b memory placement is NUMA-specific: `linux_numa_allocator` hands
+ *  back `nullptr` where `numa_alloc_onnode` does not exist, so a machine with one memory domain uses
+ *  the plain allocator and the per-node replicas collapse to one. The pool is the same either way.  */
+#if FU_WITH_NUMA_MEMORY
+using numa_bodies_allocator_t = fu::linux_numa_allocator<body_t>;
+inline numa_bodies_allocator_t make_bodies_allocator(fu::numa_node_id_t node_id) noexcept {
+    return numa_bodies_allocator_t(node_id);
+}
+#else
+using numa_bodies_allocator_t = std::allocator<body_t>;
+inline numa_bodies_allocator_t make_bodies_allocator(fu::numa_node_id_t) noexcept { return {}; }
+#endif
+using linux_numa_bodies_t = std::vector<body_t, numa_bodies_allocator_t>;
+using distributed_pool_t = fu::distributed_pool<fu::standard_yield_t>;
 
-std::vector<linux_numa_bodies_t> make_buffers_for_forkunion_numa(linux_distributed_pool_t &pool,
-                                                                 std::size_t n) noexcept {
+std::vector<linux_numa_bodies_t> make_buffers_for_forkunion_numa(distributed_pool_t &pool, std::size_t n) noexcept {
     fu::numa_topology_t const &topology = pool.topology();
     std::size_t const numa_nodes_count = topology.nodes_count();
 
     std::vector<linux_numa_bodies_t> result;
     for (std::size_t i = 0; i < numa_nodes_count; ++i) {
-        fu::numa_node_id_t const node_id = topology.node(i).node_id;
-        linux_numa_bodies_allocator_t allocator(node_id);
+        fu::numa_node_id_t const node_id = topology.node(static_cast<fu::memory_domain_index_t>(i)).node_id;
+        numa_bodies_allocator_t allocator = make_bodies_allocator(node_id);
         linux_numa_bodies_t bodies(n, allocator);
         result.emplace_back(std::move(bodies));
     }
@@ -201,20 +212,25 @@ std::vector<linux_numa_bodies_t> make_buffers_for_forkunion_numa(linux_distribut
     return result;
 }
 
-void iteration_forkunion_numa_static(linux_distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
+void iteration_forkunion_numa_static(distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
                                      vector3_t *_FU_RESTRICT forces, std::size_t n,
                                      body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
-    using local_prong_t = typename linux_distributed_pool_t::prong_t;
+    using local_prong_t = typename distributed_pool_t::prong_t;
+    fu::numa_topology_t const &topology = pool.topology();
 
     // This is a quadratic complexity all-to-all interaction, and it's not clear how
     // it can "shard" to take advantage of NUMA locality, especially for a small `n` world.
     // Still, at least we can replicate the body positions onto every node just once per iteration,
     // to reduce the number of remote accesses, even if they are cached.
     pool.for_threads([&](auto thread_index) noexcept {
-        std::size_t const numa_node_index = pool.thread_compute_domain(thread_index);
-        std::size_t const threads_next_to_numa_node = pool.threads_count(numa_node_index);
-        std::size_t const thread_local_index = pool.thread_local_index(thread_index, numa_node_index);
+        // ! A compute-domain index is not a memory-domain index. The replicas below are one per
+        // ! memory domain, and a machine may hold several compute domains over one of them.
+        std::size_t const compute_domain_index = pool.thread_compute_domain(thread_index);
+        std::size_t const numa_node_index =
+            pool.topology().local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain_index));
+        std::size_t const threads_next_to_numa_node = pool.threads_count(compute_domain_index);
+        std::size_t const thread_local_index = pool.thread_local_index(thread_index, compute_domain_index);
 
         fu::indexed_split_t const n_split {n, threads_next_to_numa_node};
         fu::indexed_range_t const n_subrange = n_split[thread_local_index];
@@ -225,7 +241,9 @@ void iteration_forkunion_numa_static(linux_distributed_pool_t &pool, body_t *_FU
     });
 
     pool.for_n(n, [&](local_prong_t prong) noexcept {
-        std::size_t const numa_node_index = prong.compute_domain;
+        // ! `prong.compute_domain` indexes compute domains; the replicas are per memory domain.
+        std::size_t const numa_node_index =
+            topology.local_memory_of(static_cast<fu::compute_domain_index_t>(prong.compute_domain));
         body_t const *numa_bodies = bodies_numa_copies[numa_node_index];
         body_t const body_i = numa_bodies[prong.task];
 
@@ -236,17 +254,22 @@ void iteration_forkunion_numa_static(linux_distributed_pool_t &pool, body_t *_FU
     pool.for_n(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
 }
 
-void iteration_forkunion_numa_dynamic(linux_distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
+void iteration_forkunion_numa_dynamic(distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
                                       vector3_t *_FU_RESTRICT forces, std::size_t n,
                                       body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
 
-    using local_prong_t = typename linux_distributed_pool_t::prong_t;
+    using local_prong_t = typename distributed_pool_t::prong_t;
+    fu::numa_topology_t const &topology = pool.topology();
 
     // This expressions is same as in `iteration_forkunion_numa_static` static version:
     pool.for_threads([&](auto thread_index) noexcept {
-        std::size_t const numa_node_index = pool.thread_compute_domain(thread_index);
-        std::size_t const threads_next_to_numa_node = pool.threads_count(numa_node_index);
-        std::size_t const thread_local_index = pool.thread_local_index(thread_index, numa_node_index);
+        // ! A compute-domain index is not a memory-domain index. The replicas below are one per
+        // ! memory domain, and a machine may hold several compute domains over one of them.
+        std::size_t const compute_domain_index = pool.thread_compute_domain(thread_index);
+        std::size_t const numa_node_index =
+            pool.topology().local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain_index));
+        std::size_t const threads_next_to_numa_node = pool.threads_count(compute_domain_index);
+        std::size_t const thread_local_index = pool.thread_local_index(thread_index, compute_domain_index);
 
         fu::indexed_split_t const n_split {n, threads_next_to_numa_node};
         fu::indexed_range_t const n_subrange = n_split[thread_local_index];
@@ -258,7 +281,9 @@ void iteration_forkunion_numa_dynamic(linux_distributed_pool_t &pool, body_t *_F
 
     // The rest only differs in the `for_n_dynamic` usage over `for_n`:
     pool.for_n_dynamic(n, [&](local_prong_t prong) noexcept {
-        std::size_t const numa_node_index = prong.compute_domain;
+        // ! `prong.compute_domain` indexes compute domains; the replicas are per memory domain.
+        std::size_t const numa_node_index =
+            topology.local_memory_of(static_cast<fu::compute_domain_index_t>(prong.compute_domain));
         body_t const *numa_bodies = bodies_numa_copies[numa_node_index];
         body_t const body_i = numa_bodies[prong.task];
 
@@ -269,7 +294,7 @@ void iteration_forkunion_numa_dynamic(linux_distributed_pool_t &pool, body_t *_F
     pool.for_n_dynamic(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
 }
 
-#endif // FU_ENABLE_NUMA
+#endif // FU_WITH_COLOCATED_POOLS
 
 #pragma endregion - Backends
 
@@ -358,14 +383,14 @@ int main(void) {
         return EXIT_SUCCESS;
     }
 
-#if FU_ENABLE_NUMA
+#if FU_WITH_COLOCATED_POOLS
     fu::numa_topology_t topology;
     if (!topology.try_harvest()) {
         std::fprintf(stderr, "Failed to harvest NUMA topology\n");
         return EXIT_FAILURE;
     }
 
-    linux_distributed_pool_t numa_pool(std::move(topology));
+    distributed_pool_t numa_pool(std::move(topology));
     std::vector<linux_numa_bodies_t> bodies_numa_arrays = make_buffers_for_forkunion_numa(numa_pool, n);
     std::vector<body_t *> bodies_numa_buffers(bodies_numa_arrays.size());
     for (std::size_t i = 0; i < bodies_numa_arrays.size(); ++i) bodies_numa_buffers[i] = bodies_numa_arrays[i].data();
@@ -388,7 +413,7 @@ int main(void) {
             iteration_forkunion_numa_dynamic(numa_pool, bodies.data(), forces.data(), n, bodies_numa_buffers.data());
         return EXIT_SUCCESS;
     }
-#endif // FU_ENABLE_NUMA
+#endif // FU_WITH_COLOCATED_POOLS
 
     std::fprintf(stderr, "Unsupported backend: %s\n", backend.data());
     return EXIT_FAILURE;
