@@ -35,6 +35,7 @@ project(
 
 # Control strict interface warnings for consumers
 option(FORKUNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
+option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL pool" OFF)
 
 # Each kernel facility the library can use is a tri-state: AUTO, ON, or OFF.
 #
@@ -43,24 +44,42 @@ option(FORKUNION_STRICT "Propagate strict warnings (including -Werror) to consum
 # and build.zig, where they would drift.
 #
 # ON and OFF pass `-DFU_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say - is
-# rejected by an `#error` in `types.hpp`, not by a check duplicated here.
-set(FORKUNION_CAPABILITIES
-    TOPOLOGY # ? Enumerate cores, compute domains, and memory domains
-    TOPOLOGY_CACHES # ? See which cores share a cache
-    TOPOLOGY_METRICS # ? Read inter-domain distance and bandwidth
-    THREAD_PINNING # ? Bind a thread to a set of cores
-    THREAD_QOS # ? Hint a thread's core class at creation
-    THREAD_SCHED_CLASS # ? Change another thread's scheduling class
-    NUMA_MEMORY # ? Place pages on a chosen memory domain
-    HUGE_PAGES # ? Request pages larger than the base page
+# rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
+# realistically toggles, each a tri-state cache entry. The finer ones - cache sharing, HMAT metrics, thread QoS,
+# scheduling class - are AUTO-only: the header derives them, and only `FORKUNION_PORTABLE` forces them off. Rust and Zig
+# expose this same set.
+set(FORKUNION_WITH_TOPOLOGY
+    "AUTO"
+    CACHE STRING "Enumerate cores and domains: AUTO, ON, or OFF"
 )
-foreach (capability IN LISTS FORKUNION_CAPABILITIES)
-    set(FORKUNION_WITH_${capability}
-        "AUTO"
-        CACHE STRING "ForkUnion ${capability} support: AUTO, ON, or OFF"
-    )
-    set_property(CACHE FORKUNION_WITH_${capability} PROPERTY STRINGS "AUTO;ON;OFF")
-endforeach ()
+set(FORKUNION_WITH_NUMA_MEMORY
+    "AUTO"
+    CACHE STRING "Place pages on a memory domain: AUTO, ON, or OFF"
+)
+set(FORKUNION_WITH_HUGE_PAGES
+    "AUTO"
+    CACHE STRING "Request larger pages: AUTO, ON, or OFF"
+)
+set(FORKUNION_WITH_THREAD_PINNING
+    "AUTO"
+    CACHE STRING "Bind threads to cores: AUTO, ON, or OFF"
+)
+set_property(CACHE FORKUNION_WITH_TOPOLOGY PROPERTY STRINGS "AUTO;ON;OFF")
+set_property(CACHE FORKUNION_WITH_NUMA_MEMORY PROPERTY STRINGS "AUTO;ON;OFF")
+set_property(CACHE FORKUNION_WITH_HUGE_PAGES PROPERTY STRINGS "AUTO;ON;OFF")
+set_property(CACHE FORKUNION_WITH_THREAD_PINNING PROPERTY STRINGS "AUTO;ON;OFF")
+
+# Every optional capability macro, coarse and fine - the set `FORKUNION_PORTABLE` zeroes.
+set(FORKUNION_OPTIONAL_MACROS
+    FU_WITH_TOPOLOGY
+    FU_WITH_TOPOLOGY_CACHES
+    FU_WITH_TOPOLOGY_METRICS
+    FU_WITH_THREAD_PINNING
+    FU_WITH_THREAD_QOS
+    FU_WITH_THREAD_SCHED_CLASS
+    FU_WITH_NUMA_MEMORY
+    FU_WITH_HUGE_PAGES
+)
 
 # Enforce C++17 as the minimum standard for the project.
 set(PROJECT_CXX_STANDARD 17)
@@ -330,26 +349,47 @@ if (UNIX AND NOT APPLE)
     endif ()
 endif ()
 
-# These four are the ones libnuma actually backs. Demanding any of them without it is an error we can catch now, with a
-# sentence, rather than at link time with a list of missing symbols.
-set(FORKUNION_LIBNUMA_CAPABILITIES TOPOLOGY TOPOLOGY_METRICS NUMA_MEMORY HUGE_PAGES)
-
-foreach (capability IN LISTS FORKUNION_CAPABILITIES)
-    set(mode ${FORKUNION_WITH_${capability}})
-    if (mode STREQUAL "AUTO")
-        continue() # ? Let the header decide, and say nothing
-    elseif (mode STREQUAL "ON")
-        if (UNIX
-            AND NOT APPLE
-            AND NOT NUMA_FOUND
-            AND capability IN_LIST FORKUNION_LIBNUMA_CAPABILITIES
-        )
-            message(FATAL_ERROR "FORKUNION_WITH_${capability}=ON, but libnuma was not found")
-        endif ()
-        target_compile_definitions(forkunion INTERFACE FU_WITH_${capability}=1)
+# Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
+# 0. Knows nothing of the environment - the libnuma check is its own concern, below.
+function (forkunion_apply mode macro)
+    if (mode STREQUAL "ON")
+        target_compile_definitions(forkunion INTERFACE ${macro}=1)
     elseif (mode STREQUAL "OFF")
-        target_compile_definitions(forkunion INTERFACE FU_WITH_${capability}=0)
-    else ()
-        message(FATAL_ERROR "FORKUNION_WITH_${capability} must be AUTO, ON, or OFF - got '${mode}'")
+        target_compile_definitions(forkunion INTERFACE ${macro}=0)
+    elseif (NOT mode STREQUAL "AUTO")
+        message(FATAL_ERROR "${macro} tri-state must be AUTO, ON, or OFF - got '${mode}'")
     endif ()
-endforeach ()
+endfunction ()
+
+# `FORKUNION_PORTABLE` is the umbrella off-switch: it zeroes every optional capability and so cannot coexist with a
+# forced-on one. Prerequisites between capabilities (huge pages need NUMA, which needs topology) are the header's
+# business, enforced by its `#error`s - never re-encoded here.
+if (FORKUNION_PORTABLE)
+    if (FORKUNION_WITH_TOPOLOGY STREQUAL "ON"
+        OR FORKUNION_WITH_NUMA_MEMORY STREQUAL "ON"
+        OR FORKUNION_WITH_HUGE_PAGES STREQUAL "ON"
+        OR FORKUNION_WITH_THREAD_PINNING STREQUAL "ON"
+    )
+        message(FATAL_ERROR "FORKUNION_PORTABLE is ON, but a FORKUNION_WITH_* capability is forced ON")
+    endif ()
+    foreach (macro IN LISTS FORKUNION_OPTIONAL_MACROS)
+        target_compile_definitions(forkunion INTERFACE ${macro}=0)
+    endforeach ()
+else ()
+    # Forcing a libnuma-backed capability on without libnuma fails here, with a sentence, rather than at link time with
+    # a list of missing symbols. AUTO is fine - the header derives it off when libnuma is absent.
+    if (UNIX
+        AND NOT APPLE
+        AND NOT NUMA_FOUND
+        AND (FORKUNION_WITH_TOPOLOGY STREQUAL "ON"
+             OR FORKUNION_WITH_NUMA_MEMORY STREQUAL "ON"
+             OR FORKUNION_WITH_HUGE_PAGES STREQUAL "ON")
+    )
+        message(FATAL_ERROR "topology/numa-memory/huge-pages forced ON, but libnuma was not found")
+    endif ()
+
+    forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FU_WITH_TOPOLOGY)
+    forkunion_apply("${FORKUNION_WITH_NUMA_MEMORY}" FU_WITH_NUMA_MEMORY)
+    forkunion_apply("${FORKUNION_WITH_HUGE_PAGES}" FU_WITH_HUGE_PAGES)
+    forkunion_apply("${FORKUNION_WITH_THREAD_PINNING}" FU_WITH_THREAD_PINNING)
+endif ()

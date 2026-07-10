@@ -41,24 +41,24 @@ const c = struct {
     extern fn fu_runtime_capabilities_string() [*:0]const u8;
 
     // Compute topology
-    extern fn fu_count_logical_cores() usize;
-    extern fn fu_count_compute_domains() usize;
-    extern fn fu_count_compute_levels() usize;
-    extern fn fu_count_logical_cores_in(compute_domain_index: usize) usize;
+    extern fn fu_logical_cores_count() usize;
+    extern fn fu_compute_domains_count() usize;
+    extern fn fu_compute_levels_count() usize;
+    extern fn fu_logical_cores_count_in(compute_domain_index: usize) usize;
     extern fn fu_compute_level_in(compute_domain_index: usize) usize;
     extern fn fu_compute_capacity_in(compute_domain_index: usize) usize;
     extern fn fu_compute_cache_bytes_in(compute_domain_index: usize) usize;
 
     // Memory topology
-    extern fn fu_count_memory_domains() usize;
-    extern fn fu_count_memory_levels() usize;
+    extern fn fu_memory_domains_count() usize;
+    extern fn fu_memory_levels_count() usize;
     extern fn fu_memory_level_in(memory_domain_index: usize) usize;
     extern fn fu_volume_ram() usize;
     extern fn fu_volume_ram_in(memory_domain_index: usize) usize;
     extern fn fu_volume_huge_pages() usize;
     extern fn fu_volume_huge_pages_in(memory_domain_index: usize) usize;
-    extern fn fu_count_huge_pages() usize;
-    extern fn fu_count_huge_pages_in(memory_domain_index: usize) usize;
+    extern fn fu_huge_pages_count() usize;
+    extern fn fu_huge_pages_count_in(memory_domain_index: usize) usize;
 
     // Affinity
     extern fn fu_local_memory_of(compute_domain_index: usize) usize;
@@ -84,9 +84,9 @@ const c = struct {
     extern fn fu_pool_terminate(pool: *anyopaque) void;
     extern fn fu_pool_sleep(pool: *anyopaque, micros: usize) void;
     extern fn fu_pool_caller_exclusivity(pool: *anyopaque) c_int;
-    extern fn fu_pool_count_threads(pool: *anyopaque) usize;
-    extern fn fu_pool_count_compute_domains(pool: *anyopaque) usize;
-    extern fn fu_pool_count_threads_in(pool: *anyopaque, compute_domain_index: usize) usize;
+    extern fn fu_pool_threads_count(pool: *anyopaque) usize;
+    extern fn fu_pool_compute_domains_count(pool: *anyopaque) usize;
+    extern fn fu_pool_threads_count_in(pool: *anyopaque, compute_domain_index: usize) usize;
     extern fn fu_pool_locate_thread_in(pool: *anyopaque, global_thread_index: usize, compute_domain_index: usize) usize;
 
     // Parallel dispatch
@@ -246,22 +246,22 @@ pub fn runtimeCapabilitiesString() [*:0]const u8 {
 
 /// Returns the number of logical CPU cores available
 pub fn countLogicalCores() usize {
-    return c.fu_count_logical_cores();
+    return c.fu_logical_cores_count();
 }
 
 /// Returns the number of NUMA nodes available
 pub fn countMemoryDomains() usize {
-    return c.fu_count_memory_domains();
+    return c.fu_memory_domains_count();
 }
 
 /// Returns the number of distinct thread compute_domains
 pub fn countComputeDomains() usize {
-    return c.fu_count_compute_domains();
+    return c.fu_compute_domains_count();
 }
 
 /// Returns the number of logical cores backing a given compute domain (0 if out of range).
 pub fn countLogicalCoresIn(compute_domain_index: usize) usize {
-    return c.fu_count_logical_cores_in(compute_domain_index);
+    return c.fu_logical_cores_count_in(compute_domain_index);
 }
 
 /// Returns the performance level of a compute domain (higher = more performant).
@@ -299,12 +299,12 @@ pub fn memoryLatency(compute_domain_index: usize, memory_domain_index: usize) us
 /// May be smaller than `countComputeDomains`, as several domains can share one level - equally-fast
 /// cores may still be split across cache clusters, or across NUMA nodes.
 pub fn countComputeLevels() usize {
-    return c.fu_count_compute_levels();
+    return c.fu_compute_levels_count();
 }
 
 /// Returns the number of distinct memory tiers, the memory-axis twin of `countComputeLevels`.
 pub fn countMemoryLevels() usize {
-    return c.fu_count_memory_levels();
+    return c.fu_memory_levels_count();
 }
 
 /// Returns the relative throughput of one core in a compute domain (0 if unknown).
@@ -346,12 +346,12 @@ pub fn volumeHugePagesIn(memory_domain_index: usize) usize {
 
 /// Returns the total number of free huge pages across all memory domains.
 pub fn countHugePages() usize {
-    return c.fu_count_huge_pages();
+    return c.fu_huge_pages_count();
 }
 
 /// Returns the number of free huge pages in a given memory domain (0 if out of range).
 pub fn countHugePagesIn(memory_domain_index: usize) usize {
-    return c.fu_count_huge_pages_in(memory_domain_index);
+    return c.fu_huge_pages_count_in(memory_domain_index);
 }
 
 /// NUMA-aware memory allocation result
@@ -585,7 +585,7 @@ pub const Pool = struct {
 
     /// Returns the number of threads in the pool
     pub fn threads(self: *const Pool) usize {
-        return c.fu_pool_count_threads(self.handle);
+        return c.fu_pool_threads_count(self.handle);
     }
 
     /// Returns whether the calling thread participates in the workload.
@@ -598,12 +598,12 @@ pub const Pool = struct {
 
     /// Returns the number of compute_domains in the pool
     pub fn compute_domains(self: *const Pool) usize {
-        return c.fu_pool_count_compute_domains(self.handle);
+        return c.fu_pool_compute_domains_count(self.handle);
     }
 
     /// Returns the number of threads in a specific compute_domain
     pub fn countThreadsIn(self: *const Pool, compute_domain_index: usize) usize {
-        return c.fu_pool_count_threads_in(self.handle, compute_domain_index);
+        return c.fu_pool_threads_count_in(self.handle, compute_domain_index);
     }
 
     /// Converts global thread index to local index within compute_domain

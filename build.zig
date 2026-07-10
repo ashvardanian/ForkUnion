@@ -2,9 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    // Check Zig version compatibility (requires 0.15.0 or later)
-    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 15) {
-        @panic("ForkUnion requires Zig 0.15.0 or later. Please upgrade your Zig toolchain.");
+    // Check Zig version compatibility (requires 0.16.0 or later)
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+        @panic("ForkUnion requires Zig 0.16.0 or later. Please upgrade your Zig toolchain.");
     }
 
     const target = b.standardTargetOptions(.{});
@@ -16,9 +16,10 @@ pub fn build(b: *std.Build) void {
     // is `null` and we pass no `-DFU_WITH_*` at all, so the header decides from the platform and
     // from whether `<numa.h>` is there to include. `-Dnuma-memory=true` and friends only override
     // that; an override the platform cannot honour stops at an `#error`, not at link time.
+    const with_topology = b.option(bool, "topology", "Enumerate compute and memory domains");
     const with_numa_memory = b.option(bool, "numa-memory", "Place pages on a chosen memory domain");
     const with_huge_pages = b.option(bool, "huge-pages", "Request pages larger than the base page");
-    const with_topology = b.option(bool, "topology", "Enumerate compute and memory domains");
+    const with_thread_pinning = b.option(bool, "thread-pinning", "Bind worker threads to cores");
     const portable = b.option(bool, "portable", "Force every optional capability off") orelse false;
 
     // Compile the C++ library from c/forkunion.cpp (like Rust's build.rs does)
@@ -43,7 +44,7 @@ pub fn build(b: *std.Build) void {
 
     const numa_memory = with_numa_memory;
     if (portable) {
-        if (numa_memory == true or with_huge_pages == true or with_topology == true)
+        if (with_topology == true or numa_memory == true or with_huge_pages == true or with_thread_pinning == true)
             @panic("-Dportable turns off the very capabilities the other options turn on");
         for (optional_capabilities) |capability|
             cpp_flags.append(b.allocator, b.fmt("-D{s}=0", .{capability})) catch @panic("OOM");
@@ -51,6 +52,7 @@ pub fn build(b: *std.Build) void {
         if (with_topology) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_TOPOLOGY={d}", .{@intFromBool(on)})) catch @panic("OOM");
         if (numa_memory) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_NUMA_MEMORY={d}", .{@intFromBool(on)})) catch @panic("OOM");
         if (with_huge_pages) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_HUGE_PAGES={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (with_thread_pinning) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_THREAD_PINNING={d}", .{@intFromBool(on)})) catch @panic("OOM");
     }
 
     // We link `libnuma` whenever the target could want it, and let the header decide whether to call
@@ -58,13 +60,13 @@ pub fn build(b: *std.Build) void {
     // wall of undefined symbols the caller cannot trace back to a missing package.
     const link_numa = target.result.os.tag == .linux and !portable and numa_memory != false;
 
-    lib.addCSourceFile(.{
+    lib.root_module.addCSourceFile(.{
         .file = b.path("c/forkunion.cpp"),
         .flags = cpp_flags.items,
     });
 
-    lib.addIncludePath(b.path("include"));
-    lib.linkLibCpp(); // Use Zig's bundled `libc++` instead of system `libstdc++`
+    lib.root_module.addIncludePath(b.path("include"));
+    lib.root_module.link_libcpp = true; // Use Zig's bundled `libc++` instead of system `libstdc++`
 
     b.installArtifact(lib);
 
@@ -84,8 +86,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    lib_tests.addIncludePath(b.path("include"));
-    lib_tests.linkLibrary(lib);
+    lib_tests.root_module.addIncludePath(b.path("include"));
+    lib_tests.root_module.linkLibrary(lib);
     if (target.result.os.tag == .linux) {
         lib_tests.root_module.linkSystemLibrary("pthread", .{});
         if (link_numa) {
