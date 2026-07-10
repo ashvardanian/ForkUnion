@@ -186,7 +186,10 @@ pub const Capabilities = packed struct(u32) {
     /// This pool is pinned to a single compute domain
     compute_domain: bool = false,
 
-    _unused_7: u3 = 0,
+    /// RISC-V `WRS.STO` monitored wait, from the `Zawrs` extension
+    risc5_wrs: bool = false,
+
+    _unused_8: u2 = 0,
 
     /// This machine has NUMA nodes to allocate on
     numa_aware: bool = false,

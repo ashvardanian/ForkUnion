@@ -45,6 +45,7 @@ struct pool_variants_t {
 #endif
 #if FU_DETECT_ARCH_RISC5_
         fu::basic_pool<thread_allocator_t, fu::risc5_pause_t>, //
+        fu::basic_pool<thread_allocator_t, fu::risc5_wrs_t>,   //
 #endif
 #endif // FU_DETECT_ASM_YIELDS_
 
@@ -66,7 +67,9 @@ struct pool_variants_t {
 #endif
 #if FU_DETECT_ARCH_RISC5_
         fu::colocated_pool<fu::risc5_pause_t>,   //
+        fu::colocated_pool<fu::risc5_wrs_t>,     //
         fu::distributed_pool<fu::risc5_pause_t>, //
+        fu::distributed_pool<fu::risc5_wrs_t>,   //
 #endif
 #endif // FU_DETECT_ASM_YIELDS_
 #endif // FU_WITH_NUMA_MEMORY
@@ -117,6 +120,9 @@ struct pool_variants_t {
         else if constexpr (std::is_same_v<pool_type_, fu::basic_pool<thread_allocator_t, fu::risc5_pause_t>>) {
             capabilities_ = fu::capability_risc5_pause_k;
         }
+        else if constexpr (std::is_same_v<pool_type_, fu::basic_pool<thread_allocator_t, fu::risc5_wrs_t>>) {
+            capabilities_ = fu::capability_risc5_wrs_k;
+        }
 #endif
 #endif
 #if FU_WITH_COLOCATED_POOLS
@@ -161,8 +167,14 @@ struct pool_variants_t {
             capabilities_ =
                 fu::capability_risc5_pause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
         }
+        else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::risc5_wrs_t>>) {
+            capabilities_ = fu::capability_risc5_wrs_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
+        }
         else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::risc5_pause_t>>) {
             capabilities_ = fu::capability_risc5_pause_k | fu::capability_numa_aware_k;
+        }
+        else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::risc5_wrs_t>>) {
+            capabilities_ = fu::capability_risc5_wrs_k | fu::capability_numa_aware_k;
         }
 #endif
 #endif
@@ -200,6 +212,9 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
         }
 #endif
 #if FU_DETECT_ARCH_RISC5_
+        else if (variants.capabilities_ == fu::capability_risc5_wrs_k) {
+            return visitor(*reinterpret_cast<fu::basic_pool<thread_allocator_t, fu::risc5_wrs_t> *>(variants.storage_));
+        }
         else if (variants.capabilities_ == fu::capability_risc5_pause_k) {
             return visitor(
                 *reinterpret_cast<fu::basic_pool<thread_allocator_t, fu::risc5_pause_t> *>(variants.storage_));
@@ -225,6 +240,8 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
                 return visitor(*reinterpret_cast<fu::colocated_pool<fu::arm64_yield_t> *>(variants.storage_));
 #endif
 #if FU_DETECT_ARCH_RISC5_
+            if (variants.capabilities_ & fu::capability_risc5_wrs_k)
+                return visitor(*reinterpret_cast<fu::colocated_pool<fu::risc5_wrs_t> *>(variants.storage_));
             if (variants.capabilities_ & fu::capability_risc5_pause_k)
                 return visitor(*reinterpret_cast<fu::colocated_pool<fu::risc5_pause_t> *>(variants.storage_));
 #endif
@@ -253,6 +270,9 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
         }
 #endif
 #if FU_DETECT_ARCH_RISC5_
+        else if (variants.capabilities_ == (fu::capability_risc5_wrs_k | fu::capability_numa_aware_k)) {
+            return visitor(*reinterpret_cast<fu::distributed_pool<fu::risc5_wrs_t> *>(variants.storage_));
+        }
         else if (variants.capabilities_ == (fu::capability_risc5_pause_k | fu::capability_numa_aware_k)) {
             return visitor(*reinterpret_cast<fu::distributed_pool<fu::risc5_pause_t> *>(variants.storage_));
         }
@@ -331,6 +351,7 @@ static bool globals_initialize_once(void) {
         {fu::capability_arm64_yield_k, "arm64_yield"},
         {fu::capability_arm64_wfet_k, "arm64_wfet"},
         {fu::capability_risc5_pause_k, "risc5_pause"},
+        {fu::capability_risc5_wrs_k, "risc5_wrs"},
         {fu::capability_numa_aware_k, "numa_aware"},
         {fu::capability_huge_pages_k, "huge_pages"},
         {fu::capability_huge_pages_transparent_k, "huge_pages_transparent"},
@@ -376,6 +397,7 @@ fu_assert_same_bit_(fu_capability_x86_tpause_k, capability_x86_tpause_k);
 fu_assert_same_bit_(fu_capability_arm64_yield_k, capability_arm64_yield_k);
 fu_assert_same_bit_(fu_capability_arm64_wfet_k, capability_arm64_wfet_k);
 fu_assert_same_bit_(fu_capability_risc5_pause_k, capability_risc5_pause_k);
+fu_assert_same_bit_(fu_capability_risc5_wrs_k, capability_risc5_wrs_k);
 fu_assert_same_bit_(fu_capability_compute_domain_k, capability_compute_domain_k);
 fu_assert_same_bit_(fu_capability_numa_aware_k, capability_numa_aware_k);
 fu_assert_same_bit_(fu_capability_huge_pages_k, capability_huge_pages_k);
@@ -763,6 +785,11 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
     }
 #endif
 #if FU_DETECT_ARCH_RISC5_
+    if (global_capabilities & fu::capability_risc5_wrs_k) {
+        new (opaque)
+            opaque_pool_t(std::in_place_type<fu::distributed_pool<fu::risc5_wrs_t>>, name, std::move(copied_topology));
+        return reinterpret_cast<fu_pool_t *>(opaque);
+    }
     if (global_capabilities & fu::capability_risc5_pause_k) {
         new (opaque) opaque_pool_t(std::in_place_type<fu::distributed_pool<fu::risc5_pause_t>>, name,
                                    std::move(copied_topology));
@@ -795,6 +822,10 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
     }
 #endif
 #if FU_DETECT_ARCH_RISC5_
+    if (global_capabilities & fu::capability_risc5_wrs_k) {
+        new (opaque) opaque_pool_t(std::in_place_type<fu::basic_pool<thread_allocator_t, fu::risc5_wrs_t>>);
+        return reinterpret_cast<fu_pool_t *>(opaque);
+    }
     if (global_capabilities & fu::capability_risc5_pause_k) {
         new (opaque) opaque_pool_t(std::in_place_type<fu::basic_pool<thread_allocator_t, fu::risc5_pause_t>>);
         return reinterpret_cast<fu_pool_t *>(opaque);
@@ -882,7 +913,9 @@ fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, FU_MAYBE_UNUSED_ size_t compute_doma
     else
 #endif
 #if FU_DETECT_ARCH_RISC5_
-        if (global_capabilities & fu::capability_risc5_pause_k)
+        if (global_capabilities & fu::capability_risc5_wrs_k)
+        opaque->variants.construct<fu::colocated_pool<fu::risc5_wrs_t>>("forkunion");
+    else if (global_capabilities & fu::capability_risc5_pause_k)
         opaque->variants.construct<fu::colocated_pool<fu::risc5_pause_t>>("forkunion");
     else
 #endif

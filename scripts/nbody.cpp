@@ -74,7 +74,7 @@ namespace fu = ashvardanian::forkunion;
 #define FU_RESTRICT
 #endif
 
-using pool_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t>;
+using pool_t = fu::basic_pool<std::allocator<std::thread>, fu::preferred_yield_t>;
 
 #pragma region Shared Logic
 
@@ -195,7 +195,7 @@ using numa_bodies_allocator_t = std::allocator<body_t>;
 inline numa_bodies_allocator_t make_bodies_allocator(fu::memory_domain_id_t) noexcept { return {}; }
 #endif
 using linux_numa_bodies_t = std::vector<body_t, numa_bodies_allocator_t>;
-using distributed_pool_t = fu::distributed_pool<fu::standard_yield_t>;
+using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t>;
 
 std::vector<linux_numa_bodies_t> make_buffers_for_forkunion_numa(distributed_pool_t &pool, std::size_t n) noexcept {
     fu::machine_topology_t const &topology = pool.topology();

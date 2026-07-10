@@ -486,8 +486,8 @@ struct colocated_pool {
     using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, local_thread_t); // ? Wraps lambda's `operator()`
 
-    using micro_yield_traits_t = yield_traits<micro_yield_t, thread_index_t>;
-    static_assert(micro_yield_traits_t::valid, "Yield must be invocable w/out args or with a thread index");
+    static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
+                  "Yield must be callable as `yield(watched_atomic, observed_value, thread_index)`");
 
   private:
     using allocator_traits_t = std::allocator_traits<allocator_t>;
@@ -1047,10 +1047,11 @@ struct colocated_pool {
             if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
         }
 
-        // Wait for the last contributor's completion increment
+        // Wait for the last contributor's completion increment. Only `epoch_` moves here, so a
+        // monitored waiter arms exactly the right line and the completing store wakes it as an event.
         micro_yield_t micro_yield;
         while (epoch_.load(std::memory_order_acquire) == generation)
-            call_yield_(micro_yield, static_cast<thread_index_t>(0));
+            micro_yield(epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
     }
 
     /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
@@ -1122,9 +1123,10 @@ struct colocated_pool {
         // so spin-loop for a bit until the pool is ready.
         mood_t mood;
         micro_yield_t micro_yield;
+        // Only `mood_` moves here, so a monitored waiter arms it and wakes on the store out of `chill_k`.
         while ((mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::chill_k)
             // Technically, we are not on the zero thread index, but we don't know our index yet.
-            call_yield_(micro_yield, static_cast<thread_index_t>(0));
+            micro_yield(pool->mood_, mood_t::chill_k, static_cast<thread_index_t>(0), wait_uncapped_k);
 
         // If we are ready to start grinding, export this threads metadata to make it externally
         // observable and controllable.
@@ -1169,9 +1171,11 @@ struct colocated_pool {
         epoch_index_t new_epoch;
         while (true) {
             // Wait for either: a new ticket or a stop flag
+            // Two independent lines guard this loop - arm the hot one (`epoch_`, bumped by a dispatch)
+            // and let the waiter's timeout cap bound how late a rare `mood_` change is noticed.
             while ((new_epoch = pool->epoch_.load(std::memory_order_acquire)) == last_epoch &&
                    (mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                call_yield_(micro_yield, global_thread_index);
+                micro_yield(pool->epoch_, last_epoch, global_thread_index);
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {

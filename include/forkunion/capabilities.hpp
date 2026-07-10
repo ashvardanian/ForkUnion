@@ -6,6 +6,22 @@
 #pragma once
 #include "types.hpp"
 
+#if FU_DETECT_ARCH_X86_64_
+#include <chrono> // `std::chrono::steady_clock` for the one-shot TSC calibration
+#endif
+
+/*  Runtime `Zawrs` detection on Linux RISC-V goes through the `riscv_hwprobe` syscall, but only when
+ *  this kernel's headers actually define it. Without them we fall back to the compile-time
+ *  `__riscv_zawrs` macro, and claim nothing if neither is available. */
+#if FU_DETECT_ARCH_RISC5_ && FU_ON_LINUX && defined(__has_include)
+#if __has_include(<asm/hwprobe.h>) && __has_include(<sys/syscall.h>) && __has_include(<unistd.h>)
+#include <asm/hwprobe.h> // `riscv_hwprobe`, `RISCV_HWPROBE_KEY_IMA_EXT_0`, `RISCV_HWPROBE_EXT_ZAWRS`
+#include <sys/syscall.h> // `SYS_riscv_hwprobe`
+#include <unistd.h>      // `syscall`
+#define FU_DETECT_RISCV_HWPROBE_ 1
+#endif
+#endif
+
 namespace ashvardanian {
 namespace forkunion {
 
@@ -15,7 +31,11 @@ namespace forkunion {
 
 /** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
 struct x86_pause_t {
-    inline void operator()() const noexcept { __asm__ __volatile__("pause"); }
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
+                           bound_type_ = {}) const noexcept {
+        __asm__ __volatile__("pause");
+    }
 };
 
 #if defined(__clang__)
@@ -26,40 +46,138 @@ struct x86_pause_t {
 #endif
 
 /**
- *  @brief On x86 uses the `TPAUSE` instruction to yield for 1 microsecond if `WAITPKG` is supported.
+ *  @brief The TSC rate in cycles per microsecond, detected once from `CPUID.15h` or by calibration.
  *
- *  There are several newer ways to yield on x86, but they may require different privileges:
+ *  `x86_tpause_t` turns a microsecond into a TSC deadline, and the invariant TSC does @b not tick at
+ *  the core's frequency - it tracks the nominal base clock, which differs from part to part. Leaf
+ *  `0x15` reports it exactly as `crystal_hz * numerator / denominator`, but many CPUs leave the
+ *  crystal field zero, so we then time a short `RDTSC` span against the steady clock.
+ */
+inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
+    // Ask leaf 0x15 for the TSC-to-crystal ratio. Using intrinsics from `<cpuid.h>` it may look like:
+    //
+    //      unsigned denominator, numerator, crystal_hz, unused;
+    //      __get_cpuid(0x15, &denominator, &numerator, &crystal_hz, &unused);
+    //
+    // To avoid includes, using inline Assembly:
+    std::uint32_t denominator, numerator, crystal_hz, unused;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(denominator), "=b"(numerator), "=c"(crystal_hz), "=d"(unused)
+                         : "a"(0x15u), "c"(0u));
+    if (denominator != 0 && numerator != 0 && crystal_hz != 0) {
+        std::uint64_t const tsc_hz = static_cast<std::uint64_t>(crystal_hz) * numerator / denominator;
+        std::uint64_t const cycles_per_us = tsc_hz / 1'000'000ull;
+        if (cycles_per_us != 0) return cycles_per_us;
+    }
+
+    // The leaf was blank, as on many parts: measure how many TSC cycles pass over a fixed wall span.
+    std::uint32_t start_lo, start_hi, end_lo, end_hi;
+    auto const started_at = std::chrono::steady_clock::now();
+    __asm__ __volatile__("rdtsc" : "=a"(start_lo), "=d"(start_hi));
+    while (std::chrono::steady_clock::now() - started_at < std::chrono::milliseconds(2)) {}
+    __asm__ __volatile__("rdtsc" : "=a"(end_lo), "=d"(end_hi));
+    std::uint64_t const start_cycles = (static_cast<std::uint64_t>(start_hi) << 32) | start_lo;
+    std::uint64_t const end_cycles = (static_cast<std::uint64_t>(end_hi) << 32) | end_lo;
+    std::uint64_t const elapsed_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at).count());
+
+    // Guess 3 GHz only if the calibration itself degenerated - it never should.
+    if (elapsed_ns == 0) return 3'000ull;
+    std::uint64_t const cycles_per_us = (end_cycles - start_cycles) * 1'000ull / elapsed_ns;
+    return cycles_per_us != 0 ? cycles_per_us : 3'000ull;
+}
+
+/** @brief Memoizes `x86_detect_tsc_cycles_per_micro`; the rate is fixed for the life of the process. */
+inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
+    static std::uint64_t const cycles_per_us = x86_detect_tsc_cycles_per_micro();
+    return cycles_per_us;
+}
+
+/**
+ *  @brief On x86 `WAITPKG`, a monitored wait built on `UMONITOR` + `UMWAIT`.
+ *
+ *  `UMONITOR` arms an address-range monitor on the watched line; `UMWAIT` drops the logical processor
+ *  into an optimized sleep until @b any agent's store to that line, an interrupt, or the TSC deadline.
+ *  The store @b pushes the waiter awake as an event, so a fork-join handoff is observed rather than
+ *  polled, and on an SMT core the sibling reclaims the freed pipeline slots for the duration.
+ *
+ *  There are several older ways to wait on x86, but they may require different privileges:
  *  - `MONITOR` and `MWAIT` in SSE - used for power management, require RING 0 privilege.
- *  - `UMONITOR` and `UMWAIT` in `WAITPKG` - are the user-space variants.
  *  - `MWAITX` in `MONITORX` ISA on AMD - used for power management, requires RING 0 privilege.
- *  - `TPAUSE` in `WAITPKG` - time-based pause instruction, available in RING 3.
+ *  - `TPAUSE` in `WAITPKG` - a blind timed pause that watches @b no address, so a store never wakes
+ *    it early. It is what this used to be; `UMWAIT` is strictly better when there is a word to watch.
+ *
+ *  @note `UMWAIT`'s control selects the sleep depth: bit 0 = 1 picks @b C0.1,
+ *        shallow and fast-waking; bit 0 = 0 picks @b C0.2, deeper and slower. A fork-join barrier resolves in
+ *        tens of nanoseconds, so we ask for C0.1. Neither lowers voltage: like ARM's `WFE`, this
+ *        clock-gates and saves dynamic power only, and never releases the core to the scheduler.
+ *
+ *  @warning The `UMONITOR` and `UMWAIT` opcodes are hand-encoded and, unlike the AArch64 path, have
+ *           not been exercised on `WAITPKG` silicon in this tree. Gated at runtime by `capability_x86_tpause_k`.
  */
 struct x86_tpause_t {
-    inline void operator()() const noexcept {
-        // Around 3K cycles per microsecond
-        constexpr std::uint64_t cycles_per_us = 3ull * 1000ull;
-        // The deepest "C0.2" state
-        constexpr std::uint32_t sleep_level = 0;
+    /** @brief Waits until a deadline ~1 micro-second ahead, for a loop that also guards another line. */
+    template <typename value_type_, typename thread_index_type_>
+    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+                           wait_capped_t = {}) const noexcept {
+        if (!arm_monitor_(watched, observed)) return;
 
-        // Now we need to fetch the current time in cycles, add a delay, and sleep until that time is reached.
-        // Using intrinsics from `<x86intrin.h>` it may look like:
-        //
-        //      std::uint64_t const deadline = __rdtsc() + cycles_per_us;
-        //      _tpause(sleep_level, deadline);
-        //
-        // To avoid includes, using inline Assembly:
+        // Build a deadline one microsecond of TSC cycles ahead of now.
         std::uint32_t rdtsc_lo, rdtsc_hi;
         __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
-        std::uint64_t const deadline = ((static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo) + cycles_per_us;
+        std::uint64_t const deadline =
+            ((static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo) + x86_tsc_cycles_per_micro();
+        umwait_until_(deadline);
+    }
+
+    /** @brief Waits for the store with no effective cap, for a single-word loop. */
+    template <typename value_type_, typename thread_index_type_>
+    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+                           wait_uncapped_t) const noexcept {
+        if (!arm_monitor_(watched, observed)) return;
+        // A TSC deadline centuries away: the monitor-clearing store or an interrupt ends the wait first.
+        umwait_until_(~std::uint64_t {0});
+    }
+
+  private:
+    /**
+     *  @brief Arms this core's address-range monitor on @p watched and reports whether to enter the wait.
+     *  @retval true if the monitor is armed and @p watched still holds @p observed - proceed to wait.
+     *  @retval false if @p watched already moved - the caller must re-check.
+     */
+    template <typename value_type_>
+    static inline bool arm_monitor_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
+        void const *const watched_address = &watched;
+
+        // Arm this core's address-range monitor on the watched line. Using intrinsics from
+        // `<x86intrin.h>` it may look like:
+        //
+        //      _umonitor(const_cast<void *>(watched_address));
+        //
+        // To avoid includes, hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
+        __asm__ __volatile__(".byte 0xf3, 0x0f, 0xae, 0xf0" : : "a"(watched_address) : "memory");
+
+        // A normal load does not disarm the monitor, so re-check: if the word already moved, don't wait.
+        return watched.load(std::memory_order_acquire) == observed;
+    }
+
+    /** @brief Sleeps in the shallow C0.1 state until @p deadline as a TSC value, an interrupt, or a store. */
+    static inline void umwait_until_(std::uint64_t const deadline) noexcept {
         std::uint32_t const deadline_lo = static_cast<std::uint32_t>(deadline);
         std::uint32_t const deadline_hi = static_cast<std::uint32_t>(deadline >> 32);
-        __asm__ __volatile__(               //
-            "mov    %[lo], %%eax\n\t"       // deadline_lo
-            "mov    %[hi], %%edx\n\t"       // deadline_hi
-            ".byte  0x66, 0x0F, 0xAE, 0xF3" // TPAUSE EBX
-            :
-            : [lo] "r"(deadline_lo), [hi] "r"(deadline_hi), "b"(sleep_level)
-            : "eax", "edx", "memory", "cc");
+
+        // Sleep in the shallow, fast-waking C0.1 state via control bit 0 = 1. Using intrinsics it may
+        // look like:
+        //
+        //      _umwait(shallow_c0_1_state, deadline);
+        //
+        // To avoid includes, hand-encoding UMWAIT r32 as `F2 0F AE /6` with the control in ECX and
+        // the deadline in EDX:EAX:
+        constexpr std::uint32_t shallow_c0_1_state = 1;
+        __asm__ __volatile__(".byte 0xf2, 0x0f, 0xae, 0xf1"
+                             :
+                             : "a"(deadline_lo), "d"(deadline_hi), "c"(shallow_c0_1_state)
+                             : "cc", "memory");
     }
 };
 
@@ -75,7 +193,11 @@ struct x86_tpause_t {
 
 /** @brief On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
 struct arm64_yield_t {
-    inline void operator()() const noexcept { __asm__ __volatile__("yield"); }
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
+                           bound_type_ = {}) const noexcept {
+        __asm__ __volatile__("yield");
+    }
 };
 
 #if defined(__clang__)
@@ -86,21 +208,32 @@ struct arm64_yield_t {
 #endif
 
 /**
- *  @brief On AArch64 uses the `WFET` instruction to "Wait For Event (Timed)".
+ *  @brief On AArch64, a monitored wait built on the `WFET` "Wait For Event, Timed" instruction.
  *
- *  Places the core into light sleep mode, waiting for an event to wake it up,
- *  or the timeout to expire.
+ *  `LDAXR` arms this core's exclusive monitor on the watched word; `WFET` then places the core into
+ *  light sleep until @b any core's store to that line clears the monitor as an event, or the timeout
+ *  expires. The store @b pushes the waiter awake through the cache-coherence transaction, rather than
+ *  the waiter polling for it - on an Apple M5 this wakes in ~42ns, faster than a bare `YIELD` spin,
+ *  while the core is clock-gated. The timeout is the belt: a fork-join loop can watch two independent
+ *  lines while the monitor arms only one, and the cap bounds how late a change to the @b other line
+ *  is noticed.
  *
- *  @note The WFET instruction is @b manually encoded using `.inst` to avoid
- *  compiler-specific target attributes that may not be recognized on all
- *  ARM64 platforms - using @b `target("arch=armv8-a+wfxt")` breaks compilation
- *  on Apple Clang. Compiler feature detection like `__ARM_FEATURE_NEON`, but
- *  for `WFxT` is not available at the time of writing.
+ *  @note `WFET` clock-gates the core to save @b dynamic power. It does @b not lower voltage, so it
+ *  saves no @b static leakage power, and it does @b not release the core to the OS scheduler: the
+ *  thread stays runnable and no sibling can be placed on it. A real retention or power-down C-state
+ *  needs firmware - `PSCI CPU_SUSPEND` via `SMC` at EL3. This is a power hint for a busy core.
  *
- *  Runtime detection via `capability_arm64_wfet_k` ensures this is only used when `FEAT_WFxT` is actually available.
+ *  @note `WFET` is hand-encoded with `.inst` because `target("arch=armv8-a+wfxt")` breaks Apple
+ *  Clang and neither compiler defines a `WFxT` feature macro. It is reached only when
+ *  `capability_arm64_wfet_k` reports `FEAT_WFxT` at runtime.
  */
 struct arm64_wfet_t {
-    inline void operator()() const noexcept {
+    /** @brief Waits with a ~1 micro-second cap, for a loop that also guards another line. */
+    template <typename value_type_, typename thread_index_type_>
+    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+                           wait_capped_t = {}) const noexcept {
+        if (!arm_monitor_(watched, observed)) return;
+
         std::uint64_t cntfrq_el0, cntvct_el0;
         // Read the timer frequency (ticks per second)
         __asm__ __volatile__("mrs %0, CNTFRQ_EL0" : "=r"(cntfrq_el0));
@@ -109,18 +242,67 @@ struct arm64_wfet_t {
         // Fetch current counter value and build the deadline
         __asm__ __volatile__("mrs %0, CNTVCT_EL0" : "=r"(cntvct_el0));
         std::uint64_t const deadline = cntvct_el0 + ticks_per_us;
-        // We want to enter a timed wait as `WFET <Xt>`, but Clang 15 doesn't recognize it yet.
+        // We want to enter a timed wait as `WFET <Xt>`, but current compilers reject the mnemonic:
         //
         //      __asm__ __volatile__("wfet %x0\n\t" : : "r"(deadline) : "memory", "cc");
         //
-        // So instead, we can encode the instruction manually as `D50310XX`,
-        // where XX encodes the lower bits of Xt - the deadline register number.
+        // So instead, we encode the instruction manually as `D50310XX`, where XX encodes the lower
+        // bits of Xt - the deadline register number.
         __asm__ __volatile__(    //
             "mov x0, %0\n"       // move the deadline to x0
             ".inst 0xD5031000\n" // wfet x0
             :
             : "r"(deadline)
             : "x0", "memory", "cc");
+    }
+
+    /** @brief Waits with no cap, for a single-word loop where the armed line is the only wake source. */
+    template <typename value_type_, typename thread_index_type_>
+    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+                           wait_uncapped_t) const noexcept {
+        if (!arm_monitor_(watched, observed)) return;
+        // `WFE` returns on the monitor-clearing store; Apple's event stream is a periodic safety net.
+        __asm__ __volatile__("wfe" ::: "memory");
+    }
+
+  private:
+    /**
+     *  @brief Arms this core's exclusive monitor on @p watched and reports whether to enter the wait.
+     *  @retval true if the monitor is armed and @p watched still holds @p observed - proceed to wait.
+     *  @retval false if @p watched already moved - the monitor is dropped and the caller must re-check.
+     */
+    template <typename value_type_>
+    static inline bool arm_monitor_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
+        static_assert(sizeof(value_type_) <= 8, "The exclusive monitor watches at most a 64-bit word");
+        void const *const watched_address = &watched;
+
+        // Compare bit patterns, so an enum like `mood_t`, or any trivially-copyable word, works unchanged.
+        std::uint64_t observed_bits = 0;
+        std::memcpy(&observed_bits, &observed, sizeof(value_type_));
+
+        // Arm the monitor with a single-copy-atomic exclusive load of the matching width. A store from
+        // any core clears the monitor, and that is what releases the wait below without a timeout. The
+        // sub-word and word widths share one 32-bit destination, so only the instruction suffix differs.
+        std::uint64_t current_bits;
+        if constexpr (sizeof(value_type_) <= 4) {
+            std::uint32_t narrow;
+            if constexpr (sizeof(value_type_) == 1)
+                __asm__ __volatile__("ldaxrb %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
+            else if constexpr (sizeof(value_type_) == 2)
+                __asm__ __volatile__("ldaxrh %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
+            else
+                __asm__ __volatile__("ldaxr %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
+            current_bits = narrow;
+        }
+        else
+            __asm__ __volatile__("ldaxr %0, [%1]" : "=r"(current_bits) : "r"(watched_address) : "memory");
+
+        // The word moved between the caller's check and our load: drop the monitor and re-check.
+        if (current_bits != observed_bits) {
+            __asm__ __volatile__("clrex" ::: "memory");
+            return false;
+        }
+        return true;
     }
 };
 
@@ -136,11 +318,125 @@ struct arm64_wfet_t {
 
 /** @brief On RISC-V, the `Zihintpause` spin-wait hint. */
 struct risc5_pause_t {
-    inline void operator()() const noexcept { __asm__ __volatile__("pause"); }
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
+                           bound_type_ = {}) const noexcept {
+        __asm__ __volatile__("pause");
+    }
+};
+
+/**
+ *  @brief On RISC-V `Zawrs`, a monitored wait built on `LR` + `WRS.STO`.
+ *
+ *  `LR.W` / `LR.D` arms a reservation on the watched word - the same reservation an `LR`/`SC` pair
+ *  would use - and reads its current value; `WRS.STO` "Wait-for-Reservation-Set, Short TimeOut" then
+ *  parks the hart until @b any other hart's store breaks the reservation as an event, an interrupt
+ *  arrives, or an implementation-bounded timeout elapses. The store @b pushes the waiter awake,
+ *  exactly like AArch64's `LDAXR` + `WFET`, and the bounded timeout is the same belt for a loop that
+ *  guards two words while the reservation covers one.
+ *
+ *  RISC-V has `LR` only at word and double-word width, so a 1- or 2-byte watch falls back to the
+ *  `Zihintpause` spin - which the pool never needs, as its loops watch the 32-bit mood and the
+ *  register-width epoch.
+ *
+ *  @note Like ARM's `WFE`, this clock-gates and saves dynamic power only; it never releases the hart
+ *        to a scheduler. The sibling `WRS.NTO` "No TimeOut" waits unbounded, for a single-word loop.
+ *
+ *  @note `WRS.STO` is @b manually encoded as `.4byte 0x01d00073` so the surrounding build needs no
+ *        `-march=...+zawrs` assembler support; `LR` is plain `A`-extension, present on any core that
+ *        would carry `Zawrs`.
+ *
+ *  @warning Hand-encoded and not exercised on `Zawrs` silicon in this tree; it needs a runtime
+ *           `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe (not yet wired) before it
+ *           may be selected.
+ */
+struct risc5_wrs_t {
+    /** @brief Waits with the implementation-bounded short timeout, for a loop that also guards another line. */
+    template <typename value_type_, typename thread_index_type_>
+    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+                           wait_capped_t = {}) const noexcept {
+        if (!arm_reservation_(watched, observed)) return;
+        // WRS.STO: wait for the reservation set, short bounded timeout.
+        __asm__ __volatile__(".4byte 0x01d00073" ::: "memory");
+    }
+
+    /** @brief Waits unbounded, for a single-word loop where the reservation is the only wake source. */
+    template <typename value_type_, typename thread_index_type_>
+    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+                           wait_uncapped_t) const noexcept {
+        if (!arm_reservation_(watched, observed)) return;
+        // WRS.NTO: wait for the reservation set, no timeout.
+        __asm__ __volatile__(".4byte 0x00d00073" ::: "memory");
+    }
+
+  private:
+    /**
+     *  @brief Arms a reservation on @p watched and reports whether to enter the wait.
+     *  @retval true if the reservation is set and @p watched still holds @p observed - proceed to `WRS`.
+     *  @retval false if @p watched moved, or the width has no `LR` (a `pause` spin was emitted instead).
+     */
+    template <typename value_type_>
+    static inline bool arm_reservation_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
+        void const *const watched_address = &watched;
+
+        // Compare bit patterns, so an enum like `mood_t`, or any trivially-copyable word, works unchanged.
+        std::uint64_t observed_bits = 0;
+        std::memcpy(&observed_bits, &observed, sizeof(value_type_));
+
+        if constexpr (sizeof(value_type_) == 8) {
+            // Arm the reservation and read the double-word.
+            std::uint64_t current_bits;
+            __asm__ __volatile__("lr.d %0, (%1)" : "=r"(current_bits) : "r"(watched_address) : "memory");
+            // The word moved between the caller's check and our load: return and let the caller re-check.
+            return current_bits == observed_bits;
+        }
+        else if constexpr (sizeof(value_type_) == 4) {
+            // LR.W sign-extends into the register, so mask to 32 bits before comparing.
+            std::uint64_t current_bits;
+            __asm__ __volatile__("lr.w %0, (%1)" : "=r"(current_bits) : "r"(watched_address) : "memory");
+            return (current_bits & 0xffffffffull) == (observed_bits & 0xffffffffull);
+        }
+        else {
+            // No sub-word LR exists, so fall back to the pause hint and skip the `WRS`.
+            __asm__ __volatile__("pause");
+            return false;
+        }
+    }
 };
 
 #endif // FU_DETECT_ARCH_RISC5_
 
+#endif
+
+/**
+ *  @brief The fastest waiter this build may use with @b no runtime feature probe.
+ *
+ *  Upgrades to the monitored waiter - `x86_tpause_t`, `risc5_wrs_t` - exactly when the compiler
+ *  @b guarantees the feature through a predefined macro, so the choice needs no runtime check: if
+ *  `__WAITPKG__` or `__riscv_zawrs` is defined, the build targets a CPU that has the instruction, and
+ *  running it can never be illegal. Otherwise it stays on the plain architectural hint every CPU runs.
+ *
+ *  AArch64 has no such upgrade: neither GCC nor Clang defines a `WFxT` feature macro - not even under
+ *  `-march=armv8.7-a+wfxt` - so there is nothing to key on, and it stays `arm64_yield_t`. `FEAT_WFxT`
+ *  is a runtime fact there, detected via `sysctl` on Apple or `HWCAP2_WFXT` on Linux, so a caller
+ *  reaches `arm64_wfet_t` through the C ABI's runtime capability dispatch rather than at compile time.
+ */
+#if FU_DETECT_ASM_YIELDS_ && FU_DETECT_ARCH_X86_64_
+#if defined(__WAITPKG__)
+using preferred_yield_t = x86_tpause_t;
+#else
+using preferred_yield_t = x86_pause_t;
+#endif
+#elif FU_DETECT_ASM_YIELDS_ && FU_DETECT_ARCH_ARM64_
+using preferred_yield_t = arm64_yield_t;
+#elif FU_DETECT_ASM_YIELDS_ && FU_DETECT_ARCH_RISC5_
+#if defined(__riscv_zawrs)
+using preferred_yield_t = risc5_wrs_t;
+#else
+using preferred_yield_t = risc5_pause_t;
+#endif
+#else
+using preferred_yield_t = standard_yield_t;
 #endif
 
 /**
@@ -192,9 +488,21 @@ inline capabilities_t cpu_capabilities() noexcept {
 
 #elif FU_DETECT_ARCH_RISC5_
 
-    // Basic PAUSE is available on RISC-V with Zihintpause extension
-    // For now, we assume it's available if we're on RISC-V
+    // Basic PAUSE is available on RISC-V with the Zihintpause extension
     caps = static_cast<capabilities_t>(caps | capability_risc5_pause_k);
+
+    // Zawrs (`WRS.STO` / `WRS.NTO`) is learned one of two ways:
+#if defined(__riscv_zawrs)
+    // The compiler was told the target has it (`-march=...+zawrs`), so it is guaranteed present here.
+    caps = static_cast<capabilities_t>(caps | capability_risc5_wrs_k);
+#elif defined(FU_DETECT_RISCV_HWPROBE_) && defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_EXT_ZAWRS)
+    // Otherwise ask the kernel. With no CPU set, the value is the AND across all online harts.
+    riscv_hwprobe probe {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
+    long const probe_result = ::syscall(SYS_riscv_hwprobe, &probe, static_cast<std::size_t>(1),
+                                        static_cast<std::size_t>(0), static_cast<void *>(nullptr), 0u);
+    if (probe_result == 0 && (probe.value & RISCV_HWPROBE_EXT_ZAWRS) != 0)
+        caps = static_cast<capabilities_t>(caps | capability_risc5_wrs_k);
+#endif
 
 #endif
 

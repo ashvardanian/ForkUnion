@@ -502,6 +502,8 @@ impl Capabilities {
     pub const RISC5_PAUSE: Capabilities = Capabilities(1 << 5);
     /// This pool is pinned to a single compute domain.
     pub const COMPUTE_DOMAIN: Capabilities = Capabilities(1 << 6);
+    /// RISC-V `WRS.STO` monitored wait, from the `Zawrs` extension.
+    pub const RISC5_WRS: Capabilities = Capabilities(1 << 7);
     /// This machine has NUMA nodes to allocate on.
     pub const NUMA_AWARE: Capabilities = Capabilities(1 << 10);
     /// This kernel offers pages larger than the base page.

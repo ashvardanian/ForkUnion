@@ -161,8 +161,8 @@ class basic_pool {
     using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, thread_index_t); // ? Wraps lambda's `operator()`
 
-    using micro_yield_traits_t = yield_traits<micro_yield_t, thread_index_t>;
-    static_assert(micro_yield_traits_t::valid, "Yield must be invocable w/out args or with a thread index");
+    static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
+                  "Yield must be callable as `yield(watched_atomic, observed_value, thread_index)`");
 
   private:
     // Thread-pool-specific variables:
@@ -511,10 +511,11 @@ class basic_pool {
             if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
         }
 
-        // Wait for the last contributor's completion increment
+        // Wait for the last contributor's completion increment. Only `epoch_` moves here, so a
+        // monitored waiter arms exactly the right line and the completing store wakes it as an event.
         micro_yield_t micro_yield;
         while (epoch_.load(std::memory_order_acquire) == generation)
-            call_yield_(micro_yield, static_cast<thread_index_t>(0));
+            micro_yield(epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
     }
 
     /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
@@ -587,9 +588,12 @@ class basic_pool {
             epoch_index_t new_epoch;       // Will definitely be initialized in the loop
             mood_t mood = mood_t::grind_k; // May not be initialized in the loop
             micro_yield_t micro_yield;
+            // This loop guards two independent lines - the epoch and the mood. A monitor can arm only
+            // one, so arm the hot one (a dispatch bumps `epoch_`) and let the waiter's timeout cap
+            // bound how late a `mood_` change - a `sleep` or a `terminate`, both rare - is noticed.
             while ((new_epoch = epoch_.load(std::memory_order_acquire)) == last_epoch &&
                    (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                call_yield_(micro_yield, thread_index);
+                micro_yield(epoch_, last_epoch, thread_index);
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {

@@ -172,6 +172,8 @@ typedef enum fu_capabilities_t {
     fu_capability_arm64_wfet_k = 1 << 4,
     /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
     fu_capability_risc5_pause_k = 1 << 5,
+    /** `WRS.STO` sleeps the hart until a reservation breaks or a timeout. Needs the `Zawrs` extension. */
+    fu_capability_risc5_wrs_k = 1 << 7,
 
     /** Pinned to a single compute domain. */
     fu_capability_compute_domain_k = 1 << 6,

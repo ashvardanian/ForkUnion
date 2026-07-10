@@ -413,6 +413,8 @@ enum capabilities_t : unsigned int {
     capability_arm64_wfet_k = 1 << 4,
     /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
     capability_risc5_pause_k = 1 << 5,
+    /** `WRS.STO` sleeps the hart until a reservation breaks or a timeout. Needs the `Zawrs` extension. */
+    capability_risc5_wrs_k = 1 << 7,
 
     /**
      *  @brief A @b pool is pinned to a single compute domain (a same-QoS core cluster).
@@ -1362,84 +1364,93 @@ FU_MAYBE_UNUSED_ static inline bool try_restore_thread_cores(FU_MAYBE_UNUSED_ co
  */
 struct dummy_lambda_t {};
 
-/** @brief The portable busy-wait hint: hands the core back to the scheduler. Works everywhere, cheap nowhere. */
-struct standard_yield_t {
-    inline void operator()() const noexcept { std::this_thread::yield(); }
-};
-
 /**
- *  @brief Which call shapes a busy-wait functor accepts, so `call_yield_` can pick one.
+ *  @brief How long a monitored waiter may sleep before it must re-check on its own.
+ *  @sa `wait_capped_k`, `wait_uncapped_k`
  *
- *  A yield may want the calling thread's index - to back off proportionally to it, or to log - and
- *  may equally ignore it. Rather than force every functor to take an argument it will not read, we
- *  detect both shapes and dispatch, rejecting anything that supports neither.
+ *  The choice is a property of the @b loop, not the machine, so it is a compile-time tag rather than a
+ *  runtime argument: the value is constant at each call site, and capped-versus-uncapped selects a
+ *  different @b instruction - `WFET` vs `WFE`, `WRS.STO` vs `WRS.NTO` - not merely a different number.
+ *
+ *  - @b Capped: the loop guards more than one word, but the monitor arms only one. A change to the
+ *    @b other word lands on a line nobody is watching, so the wait must time out and re-check. The
+ *    cap bounds how late that change is noticed.
+ *  - @b Uncapped: the loop guards a single word, so the monitor covers @b every wake source and the
+ *    store that ends the wait always lands on the armed line. A timeout would only wake the core to
+ *    learn nothing and sleep again, wasting power on a long wait.
+ *
+ *  A spin waiter ignores the tag entirely.
  */
-template <typename yield_type_, typename thread_index_type_>
-struct yield_traits {
-    static constexpr bool supports_no_arg = std::is_nothrow_invocable_r_v<void, yield_type_>;
-    static constexpr bool supports_thread_index = std::is_nothrow_invocable_r_v<void, yield_type_, thread_index_type_>;
-    static constexpr bool valid = supports_no_arg || supports_thread_index;
-};
-
-template <typename yield_type_, typename thread_index_type_>
-inline void call_yield_(yield_type_ &yield, thread_index_type_ thread_index) noexcept {
-    if constexpr (yield_traits<yield_type_, thread_index_type_>::supports_thread_index) { yield(thread_index); }
-    else { yield(); }
-}
+struct wait_capped_t {};
+struct wait_uncapped_t {};
+inline constexpr wait_capped_t wait_capped_k {};
+inline constexpr wait_uncapped_t wait_uncapped_k {};
 
 /**
- *  @brief A trivial minimalistic lock-free "mutex" implementation using `std::atomic_flag`.
- *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
+ *  @brief The portable busy-wait: hands the core back to the scheduler. Works everywhere, cheap nowhere.
+ *
+ *  A spin waiter ignores the watched word - the caller's loop already re-checks its own condition, so
+ *  this only needs to emit one backoff hint per turn. The monitored waiters (`arm64_wfet_t`,
+ *  `x86_tpause_t`, `risc5_wrs_t`) use the word to sleep the core until that line changes.
+ */
+struct standard_yield_t {
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
+                           bound_type_ = {}) const noexcept {
+        std::this_thread::yield();
+    }
+};
+
+/**
+ *  @brief Whether @p yield_type_ is a valid waiter: callable as `yield(watched, observed, thread_index)`.
+ *
+ *  Every waiter takes the atomic being watched, the value last seen, and the calling thread's index.
+ *  A spin functor ignores the first two; a monitored functor arms a hardware address monitor on the
+ *  watched line and sleeps the core until it changes. The thread index is carried for a future
+ *  adaptive backoff, and dropped by every waiter today.
+ */
+template <typename yield_type_, typename value_type_, typename thread_index_type_>
+struct is_wait_functor {
+    static constexpr bool value =
+        std::is_nothrow_invocable_v<yield_type_ &, std::atomic<value_type_> const &, value_type_, thread_index_type_>;
+};
+
+/**
+ *  @brief A trivial minimalistic lock-free "mutex" implementation over a single `std::atomic<bool>`.
+ *  @tparam micro_yield_type_ The type of the waiter to be used for busy-waiting.
  *  @tparam alignment_ The alignment of the mutex. Defaults to `default_alignment_k`.
  *
  *  The C++ standard would recommend using `std::hardware_destructive_interference_size`
  *  alignment, as well as `std::atomic_flag::notify_one` and `std::this_thread::yield` APIs,
  *  but our solution is better despite being more primitive.
  *
+ *  A `std::atomic<bool>` is used rather than `std::atomic_flag` so the flag has an @b address a
+ *  monitored waiter can arm: the lock loop is test-and-test-and-set, spinning on a plain load, so a
+ *  monitored `micro_yield` sleeps the core until `unlock`'s store to that line wakes it. On every
+ *  platform we target `std::atomic<bool>` is lock-free, so the `atomic_flag` guarantee buys nothing.
+ *
  *  @see Compatible with STL unique locks: https://en.cppreference.com/w/cpp/thread/unique_lock.html
  */
-#if FU_DETECT_CPP_20_
-
 template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ = default_alignment_k>
 class spin_mutex {
     using micro_yield_t = micro_yield_type_;
     static constexpr std::size_t alignment_k = alignment_;
-    alignas(alignment_k) std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
+    alignas(alignment_k) std::atomic<bool> flag_ {false};
 
   public:
     void lock() noexcept {
         micro_yield_t micro_yield;
-        while (flag_.test_and_set(std::memory_order_acquire)) call_yield_(micro_yield);
-    }
-    bool try_lock() noexcept { return !flag_.test_and_set(std::memory_order_acquire); }
-    void unlock() noexcept { flag_.clear(std::memory_order_release); }
-};
-
-#else // FU_DETECT_CPP_20_
-
-template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ = default_alignment_k>
-class spin_mutex {
-    using micro_yield_t = micro_yield_type_;
-    static constexpr std::size_t alignment_k = alignment_;
-
-    /**
-     *  Theoretically, the choice of `std::atomic<bool>` is suboptimal in the presence of `std::atomic_flag`.
-     *  The latter is guaranteed to be lock-free, while the former is not. But until C++20, the flag doesn't
-     *  have a non-modifying load operation - the `std::atomic_flag::test` was added in C++20.
-     *  @see https://en.cppreference.com/w/cpp/atomic/atomic_flag.html
-     */
-    std::atomic<bool> flag_ {false};
-
-  public:
-    void lock() noexcept {
-        micro_yield_t micro_yield;
-        while (flag_.exchange(true, std::memory_order_acquire)) call_yield_(micro_yield);
+        while (true) {
+            // Claim the lock with the only store in the loop, so a monitored waiter is woken once per
+            // `unlock` rather than by every contender's attempt.
+            if (!flag_.exchange(true, std::memory_order_acquire)) return;
+            // Contended: spin on a non-writing load until the line looks free, sleeping the core meanwhile.
+            while (flag_.load(std::memory_order_relaxed)) micro_yield(flag_, true, static_cast<std::size_t>(0));
+        }
     }
     bool try_lock() noexcept { return !flag_.exchange(true, std::memory_order_acquire); }
     void unlock() noexcept { flag_.store(false, std::memory_order_release); }
 };
-
-#endif // FU_DETECT_CPP_20_
 
 using spin_mutex_t = spin_mutex<>;
 
