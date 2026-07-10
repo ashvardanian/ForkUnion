@@ -69,9 +69,9 @@
 namespace fu = ashvardanian::forkunion;
 
 #if defined(__GNUC__) || defined(__clang__)
-#define _FU_RESTRICT __restrict__
+#define FU_RESTRICT __restrict__
 #else
-#define _FU_RESTRICT
+#define FU_RESTRICT
 #endif
 
 using pool_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t>;
@@ -132,8 +132,8 @@ inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
 
 #pragma region Backends
 
-void iteration_openmp_static(FU_MAYBE_UNUSED_ body_t *_FU_RESTRICT bodies,
-                             FU_MAYBE_UNUSED_ vector3_t *_FU_RESTRICT forces, FU_MAYBE_UNUSED_ std::size_t n) noexcept {
+void iteration_openmp_static(FU_MAYBE_UNUSED_ body_t *FU_RESTRICT bodies,
+                             FU_MAYBE_UNUSED_ vector3_t *FU_RESTRICT forces, FU_MAYBE_UNUSED_ std::size_t n) noexcept {
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
     for (std::size_t i = 0; i < n; ++i) {
@@ -146,9 +146,8 @@ void iteration_openmp_static(FU_MAYBE_UNUSED_ body_t *_FU_RESTRICT bodies,
 #endif
 }
 
-void iteration_openmp_dynamic(FU_MAYBE_UNUSED_ body_t *_FU_RESTRICT bodies,
-                              FU_MAYBE_UNUSED_ vector3_t *_FU_RESTRICT forces,
-                              FU_MAYBE_UNUSED_ std::size_t n) noexcept {
+void iteration_openmp_dynamic(FU_MAYBE_UNUSED_ body_t *FU_RESTRICT bodies,
+                              FU_MAYBE_UNUSED_ vector3_t *FU_RESTRICT forces, FU_MAYBE_UNUSED_ std::size_t n) noexcept {
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(dynamic, 1)
     for (std::size_t i = 0; i < n; ++i) {
@@ -161,7 +160,7 @@ void iteration_openmp_dynamic(FU_MAYBE_UNUSED_ body_t *_FU_RESTRICT bodies,
 #endif
 }
 
-void iteration_forkunion_static(pool_t &pool, body_t *_FU_RESTRICT bodies, vector3_t *_FU_RESTRICT forces,
+void iteration_forkunion_static(pool_t &pool, body_t *FU_RESTRICT bodies, vector3_t *FU_RESTRICT forces,
                                 std::size_t n) noexcept {
     pool.for_n(n, [=](std::size_t i) noexcept {
         vector3_t f {0.0, 0.0, 0.0};
@@ -171,7 +170,7 @@ void iteration_forkunion_static(pool_t &pool, body_t *_FU_RESTRICT bodies, vecto
     pool.for_n(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
 }
 
-void iteration_forkunion_dynamic(pool_t &pool, body_t *_FU_RESTRICT bodies, vector3_t *_FU_RESTRICT forces,
+void iteration_forkunion_dynamic(pool_t &pool, body_t *FU_RESTRICT bodies, vector3_t *FU_RESTRICT forces,
                                  std::size_t n) noexcept {
     pool.for_n_dynamic(n, [=](std::size_t i) noexcept {
         vector3_t f {0.0, 0.0, 0.0};
@@ -214,9 +213,9 @@ std::vector<linux_numa_bodies_t> make_buffers_for_forkunion_numa(distributed_poo
     return result;
 }
 
-void iteration_forkunion_numa_static(distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
-                                     vector3_t *_FU_RESTRICT forces, std::size_t n,
-                                     body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
+void iteration_forkunion_numa_static(distributed_pool_t &pool, body_t *FU_RESTRICT bodies,
+                                     vector3_t *FU_RESTRICT forces, std::size_t n,
+                                     body_t **FU_RESTRICT bodies_numa_copies) noexcept {
 
     using local_prong_t = typename distributed_pool_t::prong_t;
     fu::machine_topology_t const &topology = pool.topology();
@@ -256,9 +255,9 @@ void iteration_forkunion_numa_static(distributed_pool_t &pool, body_t *_FU_RESTR
     pool.for_n(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
 }
 
-void iteration_forkunion_numa_dynamic(distributed_pool_t &pool, body_t *_FU_RESTRICT bodies,
-                                      vector3_t *_FU_RESTRICT forces, std::size_t n,
-                                      body_t **_FU_RESTRICT bodies_numa_copies) noexcept {
+void iteration_forkunion_numa_dynamic(distributed_pool_t &pool, body_t *FU_RESTRICT bodies,
+                                      vector3_t *FU_RESTRICT forces, std::size_t n,
+                                      body_t **FU_RESTRICT bodies_numa_copies) noexcept {
 
     using local_prong_t = typename distributed_pool_t::prong_t;
     fu::machine_topology_t const &topology = pool.topology();

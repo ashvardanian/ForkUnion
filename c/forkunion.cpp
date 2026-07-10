@@ -34,7 +34,7 @@ struct pool_variants_t {
     };
 
     using pool_traits_t = max_size_align< //
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         fu::basic_pool<thread_allocator_t, fu::x86_pause_t>,  //
         fu::basic_pool<thread_allocator_t, fu::x86_tpause_t>, //
@@ -46,12 +46,12 @@ struct pool_variants_t {
 #if FU_DETECT_ARCH_RISC5_
         fu::basic_pool<thread_allocator_t, fu::risc5_pause_t>, //
 #endif
-#endif // FU_WITH_ASM_YIELDS_
+#endif // FU_DETECT_ASM_YIELDS_
 
 #if FU_WITH_COLOCATED_POOLS
         fu::colocated_pool<fu::standard_yield_t>,   // ? Single-compute-domain pools
         fu::distributed_pool<fu::standard_yield_t>, // ? Whole-machine pools
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         fu::colocated_pool<fu::x86_pause_t>,    //
         fu::colocated_pool<fu::x86_tpause_t>,   //
@@ -68,7 +68,7 @@ struct pool_variants_t {
         fu::colocated_pool<fu::risc5_pause_t>,   //
         fu::distributed_pool<fu::risc5_pause_t>, //
 #endif
-#endif // FU_WITH_ASM_YIELDS_
+#endif // FU_DETECT_ASM_YIELDS_
 #endif // FU_WITH_NUMA_MEMORY
 
         fu::basic_pool<thread_allocator_t, fu::standard_yield_t> //
@@ -96,7 +96,7 @@ struct pool_variants_t {
         if constexpr (std::is_same_v<pool_type_, fu::basic_pool<thread_allocator_t, fu::standard_yield_t>>) {
             capabilities_ = fu::capabilities_unknown_k;
         }
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         else if constexpr (std::is_same_v<pool_type_, fu::basic_pool<thread_allocator_t, fu::x86_pause_t>>) {
             capabilities_ = fu::capability_x86_pause_k;
@@ -126,7 +126,7 @@ struct pool_variants_t {
         else if constexpr (std::is_same_v<pool_type_, fu::distributed_pool<fu::standard_yield_t>>) {
             capabilities_ = fu::capability_numa_aware_k;
         }
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         else if constexpr (std::is_same_v<pool_type_, fu::colocated_pool<fu::x86_pause_t>>) {
             capabilities_ = fu::capability_x86_pause_k | fu::capability_compute_domain_k | fu::capability_numa_aware_k;
@@ -179,7 +179,7 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
             return visitor(
                 *reinterpret_cast<fu::basic_pool<thread_allocator_t, fu::standard_yield_t> *>(variants.storage_));
         }
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         else if (variants.capabilities_ == fu::capability_x86_pause_k) {
             return visitor(*reinterpret_cast<fu::basic_pool<thread_allocator_t, fu::x86_pause_t> *>(variants.storage_));
@@ -211,7 +211,7 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
     else {
         // ? Single-compute_domain pool pinned to one NUMA node, with its best busy-wait yield
         if (variants.capabilities_ & fu::capability_compute_domain_k) {
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
             if (variants.capabilities_ & fu::capability_x86_tpause_k)
                 return visitor(*reinterpret_cast<fu::colocated_pool<fu::x86_tpause_t> *>(variants.storage_));
@@ -235,7 +235,7 @@ auto visit(visitor_type_ &&visitor, pool_variants_t &variants) {
         else if (variants.capabilities_ == fu::capability_numa_aware_k) {
             return visitor(*reinterpret_cast<fu::distributed_pool<fu::standard_yield_t> *>(variants.storage_));
         }
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         else if (variants.capabilities_ == (fu::capability_x86_pause_k | fu::capability_numa_aware_k)) {
             return visitor(*reinterpret_cast<fu::distributed_pool<fu::x86_pause_t> *>(variants.storage_));
@@ -737,7 +737,7 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
         return nullptr;
     }
 
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
     if (global_capabilities & fu::capability_x86_tpause_k) {
         new (opaque)
@@ -769,11 +769,11 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
         return reinterpret_cast<fu_pool_t *>(opaque);
     }
 #endif
-#endif // FU_WITH_ASM_YIELDS_
+#endif // FU_DETECT_ASM_YIELDS_
 #endif // FU_WITH_NUMA_MEMORY
 
     // Common case of using modern hardware, but not having Linux installed
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
     if (global_capabilities & fu::capability_x86_tpause_k) {
         new (opaque) opaque_pool_t(std::in_place_type<fu::basic_pool<thread_allocator_t, fu::x86_tpause_t>>);
@@ -800,7 +800,7 @@ fu_pool_t *fu_pool_new(FU_MAYBE_UNUSED_ char const *name) {
         return reinterpret_cast<fu_pool_t *>(opaque);
     }
 #endif
-#endif // FU_WITH_ASM_YIELDS_
+#endif // FU_DETECT_ASM_YIELDS_
 
     // Worst case, use the standard yield pool
     new (opaque) opaque_pool_t(std::in_place_type<fu::basic_pool<thread_allocator_t, fu::standard_yield_t>>);
@@ -866,7 +866,7 @@ fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, FU_MAYBE_UNUSED_ size_t compute_doma
         },
         opaque->variants);
 
-#if FU_WITH_ASM_YIELDS_
+#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
     if (global_capabilities & fu::capability_x86_tpause_k)
         opaque->variants.construct<fu::colocated_pool<fu::x86_tpause_t>>("forkunion");
@@ -886,7 +886,7 @@ fu_bool_t fu_pool_spawn_on(fu_pool_t *pool, FU_MAYBE_UNUSED_ size_t compute_doma
         opaque->variants.construct<fu::colocated_pool<fu::risc5_pause_t>>("forkunion");
     else
 #endif
-#endif // FU_WITH_ASM_YIELDS_
+#endif // FU_DETECT_ASM_YIELDS_
         opaque->variants.construct<fu::colocated_pool<fu::standard_yield_t>>("forkunion");
 
     opaque->compute_domain_index = compute_domain_index;

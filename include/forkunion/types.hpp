@@ -89,12 +89,12 @@
 #include <features.h> // `__GLIBC__`, `__GLIBC_PREREQ`
 #endif
 #if defined(__GLIBC__) && defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 30) && __has_include(<numa.h>)
-#define FU_HAS_LIBNUMA_ 1
+#define FU_DETECT_LIBNUMA_ 1
 #else
-#define FU_HAS_LIBNUMA_ 0
+#define FU_DETECT_LIBNUMA_ 0
 #endif
 #else
-#define FU_HAS_LIBNUMA_ 0
+#define FU_DETECT_LIBNUMA_ 0
 #endif
 
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
@@ -118,7 +118,7 @@
 #if !defined(FU_WITH_TOPOLOGY)
 /*  Windows needs no separate library for this: `GetLogicalProcessorInformationEx` ships with the
  *  kernel since Vista and reports NUMA nodes, cores, processor groups, and caches in one call. */
-#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || (FU_ON_LINUX && FU_HAS_LIBNUMA_))
+#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || (FU_ON_LINUX && FU_DETECT_LIBNUMA_))
 #endif
 
 /** @brief Can we see which cores share a cache, so a compute domain can be cut at a cluster? */
@@ -322,9 +322,9 @@
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
-#define FU_WITH_ASM_YIELDS_ 1
+#define FU_DETECT_ASM_YIELDS_ 1
 #else
-#define FU_WITH_ASM_YIELDS_ 0
+#define FU_DETECT_ASM_YIELDS_ 0
 #endif
 
 namespace ashvardanian {

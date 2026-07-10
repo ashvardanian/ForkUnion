@@ -9,7 +9,7 @@
 namespace ashvardanian {
 namespace forkunion {
 
-#if FU_WITH_ASM_YIELDS_ // We need inline assembly support
+#if FU_DETECT_ASM_YIELDS_ // We need inline assembly support
 
 #if FU_DETECT_ARCH_X86_64_
 
@@ -155,7 +155,7 @@ inline capabilities_t cpu_capabilities() noexcept {
     // Check for basic PAUSE instruction support (always available on x86-64)
     caps = static_cast<capabilities_t>(caps | capability_x86_pause_k);
 
-#if FU_WITH_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
+#if FU_DETECT_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
     // CPUID to check for WAITPKG support (TPAUSE instruction)
     std::uint32_t eax, __attribute__((unused)) ebx, ecx, __attribute__((unused)) edx;
 
@@ -180,7 +180,7 @@ inline capabilities_t cpu_capabilities() noexcept {
     size_t size = sizeof(wfet_support);
     if (sysctlbyname("hw.optional.arm.FEAT_WFxT", &wfet_support, &size, NULL, 0) == 0 && wfet_support)
         caps = static_cast<capabilities_t>(caps | capability_arm64_wfet_k);
-#elif FU_WITH_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
+#elif FU_DETECT_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
     // On non-Apple ARM systems, try to read the system register
     // Note: This may fail on some systems where userspace access is restricted
     std::uint64_t id_aa64isar2_el0 = 0;
