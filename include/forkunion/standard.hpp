@@ -149,7 +149,8 @@ class basic_pool {
      */
     struct worker_cell_t {
         claim_t claim {};
-        std::thread worker {}; // ? Default-constructed, and left so for the caller's own cell
+        /** Default-constructed, and left so for the caller's own cell. */
+        std::thread worker {};
     };
     static_assert(sizeof(worker_cell_t) <= alignment_k, "A worker cell must fit within one stride");
 
@@ -165,15 +166,20 @@ class basic_pool {
   private:
     // Thread-pool-specific variables:
     allocator_t allocator_ {};
-    worker_cells_t workers_ {}; // ? One padded cell per thread: its `std::thread` and its claim cursor
+    /** One padded cell per thread: its `std::thread` and its claim cursor. */
+    worker_cells_t workers_ {};
     thread_index_t threads_count_ {0};
-    caller_exclusivity_t exclusivity_ {caller_inclusive_k}; // ? Whether the caller thread is included in the count
-    std::size_t sleep_length_micros_ {0}; // ? How long to sleep in microseconds when waiting for tasks
+    /** Whether the caller thread is included in the count. */
+    caller_exclusivity_t exclusivity_ {caller_inclusive_k};
+    /** How long to sleep in microseconds when waiting for tasks. */
+    std::size_t sleep_length_micros_ {0};
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
     // Task-specific variables:
-    punned_fork_context_t fork_state_ {nullptr}; // ? Pointer to the users lambda
-    trampoline_t fork_trampoline_ {nullptr};     // ? Calls the lambda
+    /** Pointer to the users lambda. */
+    punned_fork_context_t fork_state_ {nullptr};
+    /** Calls the lambda. */
+    trampoline_t fork_trampoline_ {nullptr};
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
@@ -603,6 +609,7 @@ using basic_pool_t = basic_pool<>;
 #pragma region Concepts
 #if FU_DETECT_CONCEPTS_
 
+/** @brief Does nothing on every thread. The default fork for a `broadcast_join` that only needs the join. */
 struct broadcasted_noop_t {
     template <typename index_type_>
     void operator()(index_type_) const noexcept

@@ -13,6 +13,7 @@ namespace forkunion {
 
 #if FU_DETECT_ARCH_ARM64_
 
+/** @brief On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
 struct arm64_yield_t {
     inline void operator()() const noexcept { __asm__ __volatile__("yield"); }
 };
@@ -73,6 +74,7 @@ struct arm64_wfet_t {
 
 #if FU_DETECT_ARCH_X86_64_
 
+/** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
 struct x86_pause_t {
     inline void operator()() const noexcept { __asm__ __volatile__("pause"); }
 };
@@ -130,6 +132,7 @@ struct x86_tpause_t {
 
 #if FU_DETECT_ARCH_RISC5_
 
+/** @brief On RISC-V, the `Zihintpause` spin-wait hint. */
 struct risc5_pause_t {
     inline void operator()() const noexcept { __asm__ __volatile__("pause"); }
 };

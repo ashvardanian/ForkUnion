@@ -26,7 +26,7 @@ using thread_allocator_t = std::allocator<std::thread>;
  */
 struct pool_variants_t {
 
-    // ? Helper to compute max size and alignment of types
+    /** @brief The largest `sizeof` and the strictest `alignof` across @p types_, for the union's storage. */
     template <typename... types_>
     struct max_size_align {
         static constexpr std::size_t size_k = std::max({sizeof(types_)...});
@@ -75,7 +75,8 @@ struct pool_variants_t {
         >;
 
     alignas(pool_traits_t::alignment_k) std::uint8_t storage_[pool_traits_t::size_k];
-    fu::capabilities_t capabilities_ {fu::capabilities_unknown_k}; // ? Which pool type is stored
+    /** Which pool type is stored. */
+    fu::capabilities_t capabilities_ {fu::capabilities_unknown_k};
 
     pool_variants_t() = default;
     ~pool_variants_t() = default;
@@ -271,11 +272,21 @@ template <typename yield_type_>
 struct is_compute_domain_pool<fu::colocated_pool<yield_type_>> : std::true_type {};
 #endif
 
+/**
+ *  @brief What a `fu_pool_t` actually points at: a pool, plus the state the C callbacks need.
+ *
+ *  The C ABI passes a lambda as a context pointer and a function pointer, and the unsafe dispatch
+ *  APIs return before the callback runs - so both must outlive the call and live here rather than
+ *  on the caller's stack.
+ */
 struct opaque_pool_t {
     pool_variants_t variants;
-    fu_lambda_context_t current_context; // ? Current context for the unsafe callbacks
-    fu_for_threads_t current_callback;   // ? Current callback for the unsafe callbacks
-    size_t compute_domain_index {0};     // ? Target compute domain for a spawn-on pool, else 0
+    /** Current context for the unsafe callbacks. */
+    fu_lambda_context_t current_context;
+    /** Current callback for the unsafe callbacks. */
+    fu_for_threads_t current_callback;
+    /** Target compute domain for a spawn-on pool, else 0. */
+    size_t compute_domain_index {0};
 
     template <typename pool_type_, typename... args_types_>
     opaque_pool_t(std::in_place_type_t<pool_type_> inplace, args_types_ &&...args) noexcept

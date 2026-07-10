@@ -11,6 +11,21 @@ if (POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW) # MSVC runtime library flags are selected by an abstraction
 endif ()
 
+# Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
+# execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
+# Skipped when there is no `.git` (tarball / export builds).
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND git config core.hooksPath .githooks
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE _fu_hooks_status
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if (_fu_hooks_status EQUAL 0)
+        message(STATUS "forkunion: Git hooks enabled (core.hooksPath -> .githooks)")
+    endif ()
+endif ()
+
 project(
     forkunion
     VERSION 2.3.1

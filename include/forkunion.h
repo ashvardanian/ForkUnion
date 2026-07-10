@@ -136,8 +136,10 @@ typedef void (*fu_for_slices_t)(fu_lambda_context_t context, size_t first, size_
  *  inside of the calling scope.
  */
 typedef enum fu_caller_exclusivity_t {
-    fu_caller_inclusive_k, // ? The calling thread participates in the workload
-    fu_caller_exclusive_k, // ? The calling thread only coordinates, doesn't execute tasks
+    /** The calling thread participates in the workload. */
+    fu_caller_inclusive_k,
+    /** The calling thread only coordinates, doesn't execute tasks. */
+    fu_caller_exclusive_k,
 } fu_caller_exclusivity_t;
 
 #pragma endregion - Types
@@ -160,32 +162,47 @@ typedef enum fu_caller_exclusivity_t {
 typedef enum fu_capabilities_t {
     fu_capabilities_unknown_k = 0,
 
-    /// CPU-specific capabilities, detected at runtime
-    fu_capability_x86_pause_k = 1 << 1,   /// x86
-    fu_capability_x86_tpause_k = 1 << 2,  /// x86-64 with `WAITPKG` support
-    fu_capability_arm64_yield_k = 1 << 3, /// Arm
-    fu_capability_arm64_wfet_k = 1 << 4,  /// AArch64 with `WFET` support
-    fu_capability_risc5_pause_k = 1 << 5, /// RISC-V
+    /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
+    fu_capability_x86_pause_k = 1 << 1,
+    /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
+    fu_capability_x86_tpause_k = 1 << 2,
+    /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
+    fu_capability_arm64_yield_k = 1 << 3,
+    /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
+    fu_capability_arm64_wfet_k = 1 << 4,
+    /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
+    fu_capability_risc5_pause_k = 1 << 5,
 
-    /// Pool-topology capabilities, detected at runtime
-    fu_capability_compute_domain_k = 1 << 6, /// Pinned to a single compute domain
+    /** Pinned to a single compute domain. */
+    fu_capability_compute_domain_k = 1 << 6,
 
-    /// RAM-specific capabilities, detected at runtime
-    fu_capability_numa_aware_k = 1 << 10,             /// NUMA-aware memory allocations
-    fu_capability_huge_pages_k = 1 << 11,             /// Reducing TLB pressure with huge pages
-    fu_capability_huge_pages_transparent_k = 1 << 12, /// ... doing the same "transparently"
+    /** NUMA-aware memory allocations. */
+    fu_capability_numa_aware_k = 1 << 10,
+    /** Reducing TLB pressure with huge pages. */
+    fu_capability_huge_pages_k = 1 << 11,
+    /** ... doing the same "transparently". */
+    fu_capability_huge_pages_transparent_k = 1 << 12,
 
-    /// Kernel facilities this build may use, one bit per `FU_WITH_*` macro
-    fu_capability_comptime_threads_k = 1 << 16,            /// Can spawn OS threads directly
-    fu_capability_comptime_topology_k = 1 << 17,           /// Can enumerate compute and memory domains
-    fu_capability_comptime_topology_caches_k = 1 << 18,    /// Can see which cores share a cache
-    fu_capability_comptime_topology_metrics_k = 1 << 19,   /// Can read inter-domain distance and bandwidth
-    fu_capability_comptime_thread_pinning_k = 1 << 20,     /// Can bind a thread to a set of cores
-    fu_capability_comptime_thread_qos_k = 1 << 21,         /// Can hint a thread's core class at creation
-    fu_capability_comptime_thread_sched_class_k = 1 << 22, /// Can change another thread's scheduling class
-    fu_capability_comptime_numa_memory_k = 1 << 23,        /// Can place pages on a chosen memory domain
-    fu_capability_comptime_huge_pages_k = 1 << 24,         /// Can request pages larger than the base page
-    fu_capability_comptime_colocated_pools_k = 1 << 25,    /// `fu_pool_spawn_in` & the distributed pool exist
+    /** Can spawn OS threads directly, rather than through the C++ standard library. `FU_WITH_THREADS`. */
+    fu_capability_comptime_threads_k = 1 << 16,
+    /** Can enumerate this machine's cores, compute domains, and memory domains. `FU_WITH_TOPOLOGY`. */
+    fu_capability_comptime_topology_k = 1 << 17,
+    /** Can see which cores share a cache, so a domain is cut at a cluster. `FU_WITH_TOPOLOGY_CACHES`. */
+    fu_capability_comptime_topology_caches_k = 1 << 18,
+    /** Can read inter-domain distance, bandwidth, and latency. `FU_WITH_TOPOLOGY_METRICS`. */
+    fu_capability_comptime_topology_metrics_k = 1 << 19,
+    /** Can bind a thread to a set of cores, and have the kernel honour it. `FU_WITH_THREAD_PINNING`. */
+    fu_capability_comptime_thread_pinning_k = 1 << 20,
+    /** Can hint which class of core a thread runs on, at creation. `FU_WITH_THREAD_QOS`. */
+    fu_capability_comptime_thread_qos_k = 1 << 21,
+    /** Can change another thread's scheduling class, to sleep or wake it. `FU_WITH_THREAD_SCHED_CLASS`. */
+    fu_capability_comptime_thread_sched_class_k = 1 << 22,
+    /** Can place pages on a chosen memory domain. `FU_WITH_NUMA_MEMORY`. */
+    fu_capability_comptime_numa_memory_k = 1 << 23,
+    /** Can request pages larger than the base page. `FU_WITH_HUGE_PAGES`. */
+    fu_capability_comptime_huge_pages_k = 1 << 24,
+    /** `fu_pool_spawn_in` and the distributed pool exist. `FU_WITH_COLOCATED_POOLS`. */
+    fu_capability_comptime_colocated_pools_k = 1 << 25,
 } fu_capabilities_t;
 
 /**

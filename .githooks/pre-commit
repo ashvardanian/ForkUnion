@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+#
+# ForkUnion pre-commit: enforce the house style on staged changes before they land.
+#
+# Each check inspects only the ADDED lines of a staged file, so legacy code migrates on its own
+# schedule while no new violation sneaks in, and each prints the specific reason when it fires.
+# Configuring the CMake build arms these hooks; see the `core.hooksPath` block in CMakeLists.txt.
+#
+# Bypass knowingly (you almost never should) with: git commit --no-verify
+
+set -u
+
+failed=0
+
+# Decorative comment separators - runs of three or more `-` or `=` used purely as visual dividers
+# inside a comment. Sections are named by `#pragma region`, and a paragraph that needs a heading gets
+# a sentence. A ruler carries no information that the sentence beneath it does not already carry.
+while IFS= read -r file; do
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.inl) ;;
+    *) continue ;;
+    esac
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    rulers=$(printf '%s\n' "$added" | grep -E '^\+.*(//|/\*|^\+[[:space:]]*\*).*[-=]{3,}' || true)
+    if [ -n "$rulers" ]; then
+        echo "pre-commit: $file adds a decorative comment separator (--- / ===) - name the section with"
+        echo "            a #pragma region, or write a plain sentence:"
+        printf '%s\n' "$rulers" | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# Documentation is Doxygen, and Doxygen only reads `/** */`. A `//`, `///`, or `///<` comment trailing
+# a member or an enumerator is either invisible (`//`) or attached to the WRONG entity (`///` documents
+# what follows, so every doc slides down one member and the last is silently lost). Declarations get a
+# hovering `/** @brief ... */`; `//` stays for implementation notes inside function bodies.
+while IFS= read -r file; do
+    case "$file" in
+    *.h | *.hpp) ;;
+    *) continue ;;
+    esac
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+
+    # A declaration line: indented, opens with an identifier, carries no call parentheses, and closes
+    # with `,` or `;` before the comment. Statement keywords are excluded so a `// ?` note beside a
+    # `return` inside an inline body stays legal.
+    trailing_docs=$(printf '%s\n' "$added" |
+        grep -vE '^\+[[:space:]]*(return|break|continue|else|do|goto|case|default|assert|throw|delete|using)\b' |
+        grep -E '^\+[[:space:]]+[A-Za-z_][^()]*[,;][[:space:]]*(///|//[[:space:]]*\?)' || true)
+    if [ -n "$trailing_docs" ]; then
+        echo "pre-commit: $file documents a declaration with a trailing comment - Doxygen either ignores"
+        echo "            it (//) or attaches it to the next entity (///). Hover a /** @brief ... */ above:"
+        printf '%s\n' "$trailing_docs" | head -5
+        failed=1
+    fi
+
+    own_line_slashes=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*///' || true)
+    if [ -n "$own_line_slashes" ]; then
+        echo "pre-commit: $file uses a /// doc-comment - this codebase documents with /** ... */ blocks:"
+        printf '%s\n' "$own_line_slashes" | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# `@sa` cross-references an identifier, `@see` cross-references a URL. Both tags mean the same thing to
+# Doxygen, so nothing but this check keeps the distinction alive - and it is the distinction that makes
+# either one scannable.
+while IFS= read -r file; do
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc) ;;
+    *) continue ;;
+    esac
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    sa_url=$(printf '%s\n' "$added" | grep -E '@sa[[:space:]].*https?://' || true)
+    see_ident=$(printf '%s\n' "$added" | grep -E '@see[[:space:]]' | grep -vE 'https?://' || true)
+    if [ -n "$sa_url" ] || [ -n "$see_ident" ]; then
+        echo "pre-commit: $file mixes the cross-reference tags - @sa names an identifier, @see names a URL:"
+        printf '%s\n' "$sa_url" "$see_ident" | grep -v '^$' | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# Nothing is deprecated: a symbol either exists or it was removed. Carrying a shim past a breaking
+# release means every consumer keeps two spellings alive, and neither ever wins.
+while IFS= read -r file; do
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.rs | *.zig) ;;
+    *) continue ;;
+    esac
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    deprecations=$(printf '%s\n' "$added" | grep -iE '@deprecated|#\[deprecated' || true)
+    if [ -n "$deprecations" ]; then
+        echo "pre-commit: $file adds a deprecation - remove the symbol instead, and say so in the commit:"
+        printf '%s\n' "$deprecations" | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# C/C++ - changed lines must satisfy .clang-format. `git clang-format --staged --diff` restricts to the
+# staged hunks, so legacy formatting is left untouched.
+if command -v git-clang-format > /dev/null 2>&1 && command -v clang-format > /dev/null 2>&1; then
+    cpp_staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.c' '*.h' '*.cc' '*.cpp' '*.hpp')
+    if [ -n "$cpp_staged" ]; then
+        clang_diff=$(git clang-format --staged --diff -- $cpp_staged 2> /dev/null)
+        case "$clang_diff" in
+        "" | "no modified files to format" | "clang-format did not modify any files"*) ;;
+        *)
+            echo "pre-commit: staged C/C++ changes are not clang-format clean on their changed lines - restage after:"
+            echo "            git clang-format --staged   (or clang-format -i <file> for the whole file)"
+            failed=1
+            ;;
+        esac
+    fi
+fi
+
+# Rust - the crate must stay rustfmt-clean (respects rustfmt.toml). Skips without cargo.
+if command -v cargo > /dev/null 2>&1; then
+    if git diff --cached --name-only --diff-filter=ACM -- '*.rs' | grep -q .; then
+        if ! cargo fmt --check > /dev/null 2>&1; then
+            echo "pre-commit: staged Rust changes are not rustfmt clean - run: cargo fmt"
+            failed=1
+        fi
+    fi
+fi
+
+# Zig - `zig fmt` is the law, and it is not configurable. Skips without zig.
+if command -v zig > /dev/null 2>&1; then
+    zig_staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.zig')
+    if [ -n "$zig_staged" ]; then
+        if ! zig fmt --check $zig_staged > /dev/null 2>&1; then
+            echo "pre-commit: staged Zig changes are not zig-fmt clean - run: zig fmt $zig_staged"
+            failed=1
+        fi
+    fi
+fi
+
+# CMake - CMakeLists.txt / *.cmake must satisfy the checked-in .cmake-format.py profile.
+if command -v cmake-format > /dev/null 2>&1; then
+    while IFS= read -r file; do
+        case "$file" in
+        CMakeLists.txt | *.cmake) ;;
+        *) continue ;;
+        esac
+        if ! cmake-format --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not cmake-format clean - run: cmake-format -i $file"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM)
+fi
+
+if [ "$failed" -ne 0 ]; then
+    echo ""
+    echo "Staged changes violate the house style (see the reasons above). Fix and re-stage, or bypass"
+    echo "knowingly with: git commit --no-verify"
+    exit 1
+fi
+exit 0

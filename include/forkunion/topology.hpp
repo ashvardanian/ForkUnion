@@ -9,10 +9,21 @@
 namespace ashvardanian {
 namespace forkunion {
 
+/**
+ *  @brief One page size the kernel offers, and how many pages of it exist.
+ *
+ *  A machine reports several: the base page every allocation uses by default, and whichever huge
+ *  page sizes the hardware and kernel agree on. `available_pages` counts what was reserved, and
+ *  `free_pages` what nobody has taken yet, so an allocator can tell "unsupported" from "exhausted".
+ *  @sa `ram_capabilities`
+ */
 struct ram_page_setting_t {
-    std::size_t bytes_per_page {0};  // ? Huge page size in bytes, e.g. 4 KB, 2 MB, or 1 GB
-    std::size_t available_pages {0}; // ? Number of pages available for this size, 0 if not available
-    std::size_t free_pages {0};      // ? Number of pages available and unused, 0 if not available
+    /** Huge page size in bytes, e.g. 4 KB, 2 MB, or 1 GB. */
+    std::size_t bytes_per_page {0};
+    /** Number of pages available for this size, 0 if not available. */
+    std::size_t available_pages {0};
+    /** Number of pages available and unused, 0 if not available. */
+    std::size_t free_pages {0};
 };
 
 /**
@@ -108,9 +119,13 @@ FU_MAYBE_UNUSED_ static inline std::size_t get_ram_total_volume() noexcept {
 template <std::size_t max_page_sizes_ = 4>
 class ram_page_settings {
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
-    std::array<ram_page_setting_t, max_page_sizes_k> sizes_ {0}; // ? Huge page sizes in bytes
-    std::size_t count_sizes_ {0};                                // ? Number of supported huge page sizes
-    std::size_t total_memory_bytes_ {0};                         // ? Total memory available on this NUMA node
+    /** Huge page sizes in bytes. */
+    std::array<ram_page_setting_t, max_page_sizes_k> sizes_ {0};
+    /** Number of supported huge page sizes. */
+    std::size_t count_sizes_ {0};
+    /** Total memory available on this NUMA node. */
+    std::size_t total_memory_bytes_ {0};
+
   public:
     /**
      *  @brief Finds the largest Huge Pages size available for the given NUMA node.
@@ -302,19 +317,19 @@ template <std::size_t max_page_sizes_ = 4>
 struct numa_node {
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
 
-    /** @brief Unique NUMA node ID, in [0, numa_max_node()). */
+    /** Unique NUMA node ID, in [0, numa_max_node()). */
     numa_node_id_t node_id {-1};
-    /** @brief Physical CPU socket ID. */
+    /** Physical CPU socket ID. */
     numa_socket_id_t socket_id {-1};
-    /** @brief RAM volume in bytes. */
+    /** RAM volume in bytes. */
     std::size_t memory_size {0};
-    /** @brief Memory tier ordinal, sorted fastest-to-slowest (0 = fastest). */
+    /** Memory tier ordinal, sorted fastest-to-slowest (0 = fastest). */
     std::size_t memory_level {0};
-    /** @brief Pointer to the first core ID in the `core_ids` array. */
+    /** Pointer to the first core ID in the `core_ids` array. */
     numa_core_id_t const *first_core_id {nullptr};
-    /** @brief Number of items in the `core_ids` array. */
+    /** Number of items in the `core_ids` array. */
     std::size_t core_count {0};
-    /** @brief Huge page sizes available on this NUMA node. */
+    /** Huge page sizes available on this NUMA node. */
     ram_page_settings<max_page_sizes_k> page_sizes {};
 };
 
@@ -330,11 +345,12 @@ using numa_node_t = numa_node<>;
  *  why compute and memory are separate axes rather than a single "colocation" cell.
  */
 struct compute_domain_t {
-    /** @brief The NUMA node these cores live on. */
+    /** The NUMA node these cores live on. */
     numa_node_id_t node_id {-1};
     /** @brief Index of the local memory domain (this node). */
-    memory_domain_index_t memory_domain_index {}; // ? Which memory domain these cores allocate from
-    /** @brief QoS ordinal, sorted least-to-most performant. */
+    /** Which memory domain these cores allocate from. */
+    memory_domain_index_t memory_domain_index {};
+    /** QoS ordinal, sorted least-to-most performant. */
     std::size_t compute_level {0};
     /**
      *  @brief Relative throughput of @b one core here; `capacity_unknown_k` when unavailable.
@@ -354,13 +370,13 @@ struct compute_domain_t {
      *  neither number can be derived from the other. Shared by every core in the domain.
      */
     std::size_t cache_bytes {0};
-    /** @brief Pointer to the first core ID in this domain. */
+    /** Pointer to the first core ID in this domain. */
     numa_core_id_t const *first_core_id {nullptr};
-    /** @brief Number of cores in this domain. */
+    /** Number of cores in this domain. */
     std::size_t core_count {0};
 };
 
-/** @brief Sentinel for `compute_domain_t::capacity` when the platform exposes no per-core throughput. */
+/** Sentinel for `compute_domain_t::capacity` when the platform exposes no per-core throughput. */
 static constexpr std::size_t capacity_unknown_k = 0;
 
 /**
@@ -565,11 +581,16 @@ struct numa_topology {
     numa_node_t *nodes_ {nullptr};                // ? Memory domains (one per NUMA node)
     numa_core_id_t *node_core_ids_ {nullptr};     // ? Core IDs in [0, threads_count), grouped by node then QoS
     compute_domain_t *compute_domains_ {nullptr}; // ? Compute domains (same-QoS core runs within a node)
-    std::size_t nodes_count_ {0};                 // ? Number of memory domains / NUMA nodes
-    std::size_t cores_count_ {0};                 // ? Total number of cores in all nodes
-    std::size_t compute_domains_count_ {0};       // ? Number of compute domains
-    std::size_t compute_levels_count_ {1};        // ? Number of distinct QoS classes (>= 1)
-    std::size_t memory_levels_count_ {1};         // ? Number of distinct memory tiers (>= 1)
+    /** Number of memory domains / NUMA nodes. */
+    std::size_t nodes_count_ {0};
+    /** Total number of cores in all nodes. */
+    std::size_t cores_count_ {0};
+    /** Number of compute domains. */
+    std::size_t compute_domains_count_ {0};
+    /** Number of distinct QoS classes (>= 1). */
+    std::size_t compute_levels_count_ {1};
+    /** Number of distinct memory tiers (>= 1). */
+    std::size_t memory_levels_count_ {1};
 
   public:
     constexpr numa_topology() noexcept = default;

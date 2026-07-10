@@ -16,8 +16,17 @@
 namespace ashvardanian {
 namespace forkunion {
 
+/**
+ *  @brief How tightly a spawned worker is bound to the hardware beneath it.
+ *
+ *  Pinning to a core keeps a thread's caches warm and its `capacity` predictable, at the cost of
+ *  letting it idle while a sibling core is busy. Pinning to a node hands the kernel the whole
+ *  domain to schedule within, which survives a core going offline and suits oversubscribed hosts.
+ */
 enum numa_pin_granularity_t {
+    /** Bind each worker to exactly one logical core. */
     numa_pin_to_core_k = 0,
+    /** Bind each worker to every core of its NUMA node, and let the kernel choose among them. */
     numa_pin_to_node_k,
 };
 
@@ -130,8 +139,10 @@ struct linux_numa_allocator {
     using propagate_on_container_move_assignment = std::true_type;
 
   private:
-    numa_node_id_t node_id_ {-1};     // ? Unique NUMA node ID, in [0, numa_max_node())
-    size_type default_page_size_ {0}; // ? RAM page size in bytes, typically 4 KB
+    /** Unique NUMA node ID, in [0, numa_max_node()). */
+    numa_node_id_t node_id_ {-1};
+    /** RAM page size in bytes, typically 4 KB. */
+    size_type default_page_size_ {0};
 
   public:
     numa_node_id_t node_id() const noexcept { return node_id_; }
@@ -406,21 +417,29 @@ struct colocated_pool {
      */
     unique_padded_buffer<numa_pthread_t, numa_pthread_allocator_t> pthreads_ {};
 
-    thread_index_t first_thread_ {0};                       // ? The index of the first thread to start from
-    caller_exclusivity_t exclusivity_ {caller_inclusive_k}; // ? Whether the caller thread is included in the count
-    std::size_t sleep_length_micros_ {0}; // ? How long to sleep in microseconds when waiting for tasks
+    /** The index of the first thread to start from. */
+    thread_index_t first_thread_ {0};
+    /** Whether the caller thread is included in the count. */
+    caller_exclusivity_t exclusivity_ {caller_inclusive_k};
+    /** How long to sleep in microseconds when waiting for tasks. */
+    std::size_t sleep_length_micros_ {0};
 
-    using char16_name_t = char[16];    // ? Fixed-size thread name buffer, for POSIX thread naming
-    char16_name_t name_ {};            // ? Thread name buffer, for POSIX thread naming
-    numa_node_id_t numa_node_id_ {-1}; // ? Unique NUMA node ID, in [0, numa_max_node())
-    index_t compute_domain_index_ {0}; // ? Unique {NUMA node + QoS level} compute_domain ID, defined externally
+    using char16_name_t = char[16]; // ? Fixed-size thread name buffer, for POSIX thread naming
+    /** Thread name buffer, for POSIX thread naming. */
+    char16_name_t name_ {};
+    /** Unique NUMA node ID, in [0, numa_max_node()). */
+    numa_node_id_t numa_node_id_ {-1};
+    /** Unique {NUMA node + QoS level} compute_domain ID, defined externally. */
+    index_t compute_domain_index_ {0};
     numa_pin_granularity_t pin_granularity_ {numa_pin_to_core_k};
 
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
     // Task-specific variables:
-    punned_fork_context_t fork_state_ {nullptr}; // ? Pointer to the users lambda
-    trampoline_t fork_trampoline_ {nullptr};     // ? Calls the lambda
+    /** Pointer to the users lambda. */
+    punned_fork_context_t fork_state_ {nullptr};
+    /** Calls the lambda. */
+    trampoline_t fork_trampoline_ {nullptr};
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
@@ -1250,8 +1269,10 @@ struct distributed_pool {
     numa_topology_t topology_ {};
     char name_[16] {}; // ? Thread name buffer, for POSIX thread naming
     thread_index_t threads_count_ {0};
-    caller_exclusivity_t exclusivity_ {caller_inclusive_k}; // ? Whether the caller thread is included in the count
+    /** Whether the caller thread is included in the count. */
+    caller_exclusivity_t exclusivity_ {caller_inclusive_k};
 
+    /** @brief One `colocated_pool_t`, padded so neighbouring domains never share a cache line. */
     struct compute_domain_cell_t {
         alignas(alignment_k) colocated_pool_t pool {};
     };

@@ -33,10 +33,8 @@
 #endif
 #endif
 
-/*  ------------------------------------------------------------------------------------------------
- *  Layer 1: identity. Where are we? Derived once, from compiler predefines, and used only to derive
- *  the capabilities below. Nothing else in the library may ask `__linux__` again.
- *  ------------------------------------------------------------------------------------------------ */
+/*  Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to derive
+ *  the capabilities below. Nothing else in the library may ask `__linux__` again.  */
 /*  Android is Linux, but Bionic has neither `libnuma` nor GLibC; it must not take the Linux path. */
 #if defined(__linux__) && !defined(__ANDROID__)
 #define FU_ON_LINUX 1
@@ -84,8 +82,7 @@
 #define FU_HAS_LIBNUMA_ 0
 #endif
 
-/*  ------------------------------------------------------------------------------------------------
- *  Layer 2: capabilities. Each answers exactly one question, and is named for the @b kernel @b
+/*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
  *  facility rather than for the library that happens to provide it - so Windows' `VirtualAllocExNuma`
  *  satisfies `FU_WITH_NUMA_MEMORY` without inventing a second macro.
  *
@@ -95,8 +92,7 @@
  *  ever fire on a contradiction the caller wrote out by hand.
  *
  *  A build system may @b override, never re-derive: that keeps the default in exactly one place,
- *  instead of duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift.
- *  ------------------------------------------------------------------------------------------------ */
+ *  instead of duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift.  */
 
 /** @brief Can we create operating-system threads directly, rather than through `std::thread`? */
 #if !defined(FU_WITH_THREADS)
@@ -150,9 +146,7 @@
 #define FU_WITH_HUGE_PAGES (FU_ON_LINUX && FU_WITH_NUMA_MEMORY)
 #endif
 
-/*  ------------------------------------------------------------------------------------------------
- *  Layer 3: aggregates. Never hand-written, always implied, so they cannot drift.
- *  ------------------------------------------------------------------------------------------------ */
+/*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
 
 /**
  *  @brief Whether the domain-aware `colocated_pool` and `distributed_pool` are compiled at all.
@@ -164,9 +158,7 @@
  */
 #define FU_WITH_COLOCATED_POOLS (FU_WITH_THREADS && FU_WITH_TOPOLOGY)
 
-/*  ------------------------------------------------------------------------------------------------
- *  Consistency. A bad override should fail at the `#include`, not at link time.
- *  ------------------------------------------------------------------------------------------------ */
+/*  A bad override should fail at the `#include`, not at link time.  */
 #if FU_WITH_THREAD_PINNING && FU_ON_APPLE
 #error "FU_WITH_THREAD_PINNING: Apple answers KERN_NOT_SUPPORTED to thread_policy_set; pinning cannot be forced on"
 #endif
@@ -443,9 +435,12 @@ enum caller_exclusivity_t : unsigned int {
  *  @sa `mood_t::grind_k`, `mood_t::chill_k`, `mood_t::die_k`
  */
 enum class mood_t : unsigned int {
-    grind_k = 0, // ? That's our default ;)
-    chill_k,     // ? Sleepy and tired, but just a wake-up call away
-    die_k,       // ? The thread is about to die, we must exit the loop peacefully
+    /** That's our default ;) */
+    grind_k = 0,
+    /** Sleepy and tired, but just a wake-up call away. */
+    chill_k,
+    /** The thread is about to die, we must exit the loop peacefully. */
+    die_k,
 };
 
 /**
@@ -464,38 +459,54 @@ enum class mood_t : unsigned int {
 enum capabilities_t : unsigned int {
     capabilities_unknown_k = 0,
 
-    // CPU-specific capabilities, detected at runtime:
-    capability_x86_pause_k = 1 << 1,   // ? x86
-    capability_x86_tpause_k = 1 << 2,  // ? x86-64 with `WAITPKG` support
-    capability_arm64_yield_k = 1 << 3, // ? Arm
-    capability_arm64_wfet_k = 1 << 4,  // ? AArch64 with `WFET` support
-    capability_risc5_pause_k = 1 << 5, // ? RISC-V
+    /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
+    capability_x86_pause_k = 1 << 1,
+    /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
+    capability_x86_tpause_k = 1 << 2,
+    /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
+    capability_arm64_yield_k = 1 << 3,
+    /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
+    capability_arm64_wfet_k = 1 << 4,
+    /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
+    capability_risc5_pause_k = 1 << 5,
 
-    // Pool-topology capabilities, detected at runtime:
-    capability_compute_domain_k = 1 << 6, // ? Pinned to a single compute_domain (a same-QoS core cluster)
+    /** Pinned to a single compute_domain (a same-QoS core cluster). */
+    capability_compute_domain_k = 1 << 6,
 
-    // RAM-specific capabilities, detected at runtime:
-    capability_numa_aware_k = 1 << 10,             // ? NUMA-aware memory allocations
-    capability_huge_pages_k = 1 << 11,             // ? Reducing TLB pressure with huge pages
-    capability_huge_pages_transparent_k = 1 << 12, // ? ... doing the same "transparently"
+    /** NUMA-aware memory allocations. */
+    capability_numa_aware_k = 1 << 10,
+    /** Reducing TLB pressure with huge pages. */
+    capability_huge_pages_k = 1 << 11,
+    /** ... doing the same "transparently". */
+    capability_huge_pages_transparent_k = 1 << 12,
 
-    // Kernel facilities this build may use, one bit per `FU_WITH_*` macro:
-    capability_comptime_threads_k = 1 << 16,            // ? `FU_WITH_THREADS`
-    capability_comptime_topology_k = 1 << 17,           // ? `FU_WITH_TOPOLOGY`
-    capability_comptime_topology_caches_k = 1 << 18,    // ? `FU_WITH_TOPOLOGY_CACHES`
-    capability_comptime_topology_metrics_k = 1 << 19,   // ? `FU_WITH_TOPOLOGY_METRICS`
-    capability_comptime_thread_pinning_k = 1 << 20,     // ? `FU_WITH_THREAD_PINNING`
-    capability_comptime_thread_qos_k = 1 << 21,         // ? `FU_WITH_THREAD_QOS`
-    capability_comptime_thread_sched_class_k = 1 << 22, // ? `FU_WITH_THREAD_SCHED_CLASS`
-    capability_comptime_numa_memory_k = 1 << 23,        // ? `FU_WITH_NUMA_MEMORY`
-    capability_comptime_huge_pages_k = 1 << 24,         // ? `FU_WITH_HUGE_PAGES`
-    capability_comptime_colocated_pools_k = 1 << 25,    // ? `FU_WITH_COLOCATED_POOLS`
+    /** Can spawn OS threads directly, rather than through `std::thread`. `FU_WITH_THREADS`. */
+    capability_comptime_threads_k = 1 << 16,
+    /** Can enumerate this machine's cores, compute domains, and memory domains. `FU_WITH_TOPOLOGY`. */
+    capability_comptime_topology_k = 1 << 17,
+    /** Can see which cores share a cache, so a domain is cut at a cluster. `FU_WITH_TOPOLOGY_CACHES`. */
+    capability_comptime_topology_caches_k = 1 << 18,
+    /** Can read inter-domain distance, bandwidth, and latency. `FU_WITH_TOPOLOGY_METRICS`. */
+    capability_comptime_topology_metrics_k = 1 << 19,
+    /** Can bind a thread to a set of cores, and have the kernel honour it. `FU_WITH_THREAD_PINNING`. */
+    capability_comptime_thread_pinning_k = 1 << 20,
+    /** Can hint which class of core a thread runs on, at creation. `FU_WITH_THREAD_QOS`. */
+    capability_comptime_thread_qos_k = 1 << 21,
+    /** Can change another thread's scheduling class, to sleep or wake it. `FU_WITH_THREAD_SCHED_CLASS`. */
+    capability_comptime_thread_sched_class_k = 1 << 22,
+    /** Can place pages on a chosen memory domain. `FU_WITH_NUMA_MEMORY`. */
+    capability_comptime_numa_memory_k = 1 << 23,
+    /** Can request pages larger than the base page. `FU_WITH_HUGE_PAGES`. */
+    capability_comptime_huge_pages_k = 1 << 24,
+    /** The `colocated_pool` and `distributed_pool` are compiled in. `FU_WITH_COLOCATED_POOLS`. */
+    capability_comptime_colocated_pools_k = 1 << 25,
 };
 
 inline capabilities_t operator|(capabilities_t a, capabilities_t b) {
     return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
 }
 
+/** @brief The portable busy-wait hint: hands the core back to the scheduler. Works everywhere, cheap nowhere. */
 struct standard_yield_t {
     inline void operator()() const noexcept { std::this_thread::yield(); }
 };
@@ -528,8 +539,10 @@ struct broadcast_join {
 
   private:
     pool_t &pool_ref_;
-    fork_t fork_;                 // ? We need this to extend the lifetime of the lambda object
-    generation_t generation_ {0}; // ? Real tokens are odd; zero means "not yet dispatched"
+    /** We need this to extend the lifetime of the lambda object. */
+    fork_t fork_;
+    /** Real tokens are odd; zero means "not yet dispatched". */
+    generation_t generation_ {0};
 
   public:
     broadcast_join(pool_t &pool_ref, fork_t &&f) noexcept : pool_ref_(pool_ref), fork_(std::forward<fork_t>(f)) {
@@ -650,10 +663,14 @@ struct allocation_result {
     using pointer_type = pointer_type_;
     using size_type = size_type_;
 
-    pointer_type ptr {nullptr}; // ? Pointer to the allocated memory, or nullptr if allocation failed
-    size_type count {0};        // ? Number of elements allocated, or 0 if allocation failed
-    size_type bytes {0};        // ? Reports the total volume of memory allocated, in bytes
-    size_type pages {0};        // ? Reports the number of memory pages allocated
+    /** Pointer to the allocated memory, or nullptr if allocation failed. */
+    pointer_type ptr {nullptr};
+    /** Number of elements allocated, or 0 if allocation failed. */
+    size_type count {0};
+    /** Reports the total volume of memory allocated, in bytes. */
+    size_type bytes {0};
+    /** Reports the number of memory pages allocated. */
+    size_type pages {0};
 
     constexpr allocation_result() noexcept = default;
     constexpr allocation_result(pointer_type ptr_address, size_type count_index, size_type bytes_index,
@@ -844,6 +861,13 @@ class unique_padded_buffer {
  */
 struct dummy_lambda_t {};
 
+/**
+ *  @brief Which call shapes a busy-wait functor accepts, so `call_yield_` can pick one.
+ *
+ *  A yield may want the calling thread's index - to back off proportionally to it, or to log - and
+ *  may equally ignore it. Rather than force every functor to take an argument it will not read, we
+ *  detect both shapes and dispatch, rejecting anything that supports neither.
+ */
 template <typename yield_type_, typename thread_index_type_>
 struct yield_traits {
     static constexpr bool supports_no_arg = std::is_nothrow_invocable_r_v<void, yield_type_>;
@@ -913,11 +937,14 @@ class spin_mutex {
 
 using spin_mutex_t = spin_mutex<>;
 
+/** @brief A half-open slice `[first, first + count)` of a task index space. */
 template <typename index_type_ = std::size_t>
 struct indexed_range {
     using index_t = index_type_;
 
+    /** The first task index in the slice. */
     index_t first {0};
+    /** How many tasks the slice covers; zero means an empty slice. */
     index_t count {0};
 };
 
@@ -1077,7 +1104,8 @@ struct coprime_permutation_range {
     index_t start_ {0};
     index_t length_ {1};
     index_t stride_ {1};
-    index_t first_offset_ {0}; // ? Where this seed's walk begins, in [0, length_)
+    /** Where this seed's walk begins, in [0, length_). */
+    index_t first_offset_ {0};
 };
 
 using coprime_permutation_range_t = coprime_permutation_range<>;
@@ -1131,9 +1159,9 @@ class invoke_for_n {
  */
 template <typename index_type_ = std::size_t>
 struct dynamic_claim {
-    /** @brief Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
+    /** Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
     std::atomic<index_type_> next {0};
-    /** @brief One past this slice's last task. Written once before the dispatch, then read-only. */
+    /** One past this slice's last task. Written once before the dispatch, then read-only. */
     index_type_ end {0};
 };
 
