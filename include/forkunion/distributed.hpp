@@ -340,6 +340,23 @@ struct windows_numa_allocator {
         : memory_domain_id_(o.memory_domain_id()), default_page_size_(o.default_page_size()),
           large_pages_(o.large_pages()) {}
 
+    /**
+     *  @brief Allocates memory for at least `size` elements of `value_type`.
+     *  @param[in] size The number of elements to allocate.
+     *  @return allocation_result with a pointer to the allocated memory and the number of elements allocated.
+     *  @retval empty object if the allocation failed.
+     *  @note Unlike `linux_numa_allocator` there is no huge-page ladder: `VirtualAllocExNuma` commits at
+     *        the base page size, or the large-page size when `large_pages` is set on this allocator.
+     */
+    allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
+        size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();
+        size_type const aligned_size_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        void *result_ptr = windows_numa_allocate(aligned_size_bytes, memory_domain_id_, large_pages_);
+        if (!result_ptr) return {}; // ! Allocation failed
+        size_type const pages_count = (page_size_bytes == 0) ? 0 : (aligned_size_bytes / page_size_bytes);
+        return {static_cast<value_type *>(result_ptr), size, aligned_size_bytes, pages_count};
+    }
+
     value_type *allocate(size_type size) noexcept {
         return static_cast<value_type *>(
             windows_numa_allocate(size * sizeof(value_type), memory_domain_id_, large_pages_));
@@ -1345,7 +1362,7 @@ class invoke_distributed_for_n_dynamic {
 
   public:
     invoke_distributed_for_n_dynamic(pool_type_ &pool, index_type_ n, fork_type_ &&fork) noexcept
-        : pool_(pool), n_(n), fork_(std::forward<fork_type_>(fork)) {
+        : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n) {
 
         // Reset the local progress to zero in each compute_domain
         index_type_ const compute_domains_count = pool_.compute_domains_count();

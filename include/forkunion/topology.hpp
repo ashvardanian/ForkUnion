@@ -36,8 +36,8 @@ static constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t ram_page_size() noexcept {
-#if FU_WITH_NUMA_MEMORY
-    return static_cast<std::size_t>(::numa_pagesize());
+#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+    return static_cast<std::size_t>(::numa_pagesize()); // ! `numa_pagesize` is libnuma, Linux-only
 #elif defined(__unix__) || defined(__unix) || defined(unix) || FU_ON_APPLE
     return static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
 #elif FU_ON_WINDOWS

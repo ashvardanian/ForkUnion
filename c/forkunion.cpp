@@ -675,7 +675,7 @@ void *fu_allocate_at_least_in(                                         //
 
 #if FU_WITH_NUMA_MEMORY
     auto const &node = global_topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(memory_domain_index));
-    fu::linux_numa_allocator_t allocator(node.memory_domain_id);
+    fu::memory_domain_allocator_t allocator(node.memory_domain_id);
     auto result = allocator.allocate_at_least(minimum_bytes);
     if (!result) return nullptr;
     *allocated_bytes = result.count;
@@ -694,7 +694,7 @@ void *fu_allocate_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, size_t bytes) 
 
 #if FU_WITH_NUMA_MEMORY
     auto const &node = global_topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(memory_domain_index));
-    fu::linux_numa_allocator_t allocator(node.memory_domain_id);
+    fu::memory_domain_allocator_t allocator(node.memory_domain_id);
     return allocator.allocate(bytes);
 #else
     return std::malloc(bytes);
@@ -704,7 +704,7 @@ void *fu_allocate_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, size_t bytes) 
 void fu_free_in(FU_MAYBE_UNUSED_ size_t memory_domain_index, void *pointer, FU_MAYBE_UNUSED_ size_t bytes) {
 #if FU_WITH_NUMA_MEMORY
     auto const &node = global_topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(memory_domain_index));
-    fu::linux_numa_allocator_t allocator(node.memory_domain_id);
+    fu::memory_domain_allocator_t allocator(node.memory_domain_id);
     allocator.deallocate(reinterpret_cast<char *>(pointer), bytes);
 #else
     std::free(pointer);
