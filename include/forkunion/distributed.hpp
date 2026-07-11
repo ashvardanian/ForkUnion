@@ -5,13 +5,13 @@
  *
  *  These are the only pools that touch an operating system beyond `std::thread`: they pin threads to
  *  cores, place their own state on a memory domain, and steal work across domains. The concurrency
- *  protocol - epochs, generation tokens, claim cursors, the invokers - is the same one `basic_pool`
+ *  protocol - epochs, generation tokens, claim cursors, the invokers - is the same one `flat_pool`
  *  runs, so it is not repeated per platform. Where a kernel call is unavoidable, it appears inline,
  *  guarded, rather than behind a trait: there are three call sites, not thirty.
  */
 #pragma once
 #include "topology.hpp"
-#include "standard.hpp"
+#include "flat.hpp"
 
 namespace ashvardanian {
 namespace forkunion {
@@ -22,7 +22,7 @@ namespace forkunion {
  */
 FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_bytes,
                                                     memory_domain_id_t memory_domain_id) noexcept {
-#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     // Pin the memory - that may require an extra allocation for `node_mask` on some systems
     ::nodemask_t node_mask;
     ::bitmask node_mask_as_bitset;
@@ -45,7 +45,7 @@ FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_
     fu_unused_(size_bytes);
     fu_unused_(memory_domain_id);
     return false;
-#endif // FU_WITH_NUMA_MEMORY
+#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
 /**
@@ -57,20 +57,20 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
                                                          memory_domain_id_t memory_domain_id) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
-#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
     // Fast path: regular pages – let `libnuma` handle any rounding internally.
     if (page_size_bytes == static_cast<std::size_t>(::numa_pagesize()))
         return ::numa_alloc_onnode(size_bytes, memory_domain_id);
 
-#if FU_WITH_HUGE_PAGES
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
 
     // Huge/explicit page sizes must be exact multiples
     assert(size_bytes % page_size_bytes == 0 && "Size must be a multiple of page size");
 
     // Make sure the page size makes sense for Linux
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    if (page_size_bytes == page_size_4k) { mmap_flags |= MAP_HUGETLB; }
+    if (page_size_bytes == page_size_4k_k) { mmap_flags |= MAP_HUGETLB; }
     else if (page_size_bytes == page_size_2m_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_2MB); }
     else if (page_size_bytes == page_size_1g_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_1GB); }
     else { return nullptr; } // ! Unsupported page size
@@ -93,13 +93,13 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
     fu_unused_(page_size_bytes);
     fu_unused_(memory_domain_id);
     return nullptr;
-#endif // FU_WITH_NUMA_MEMORY
+#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
 FU_MAYBE_UNUSED_ static inline void linux_numa_free(void *ptr, std::size_t size_bytes) noexcept {
     assert(ptr != nullptr && "Pointer must not be null");
     assert(size_bytes > 0 && "Size must be greater than zero");
-#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     numa_free(ptr, size_bytes);
 #else
     fu_unused_(ptr);
@@ -276,7 +276,7 @@ FU_MAYBE_UNUSED_ static inline bool windows_enable_lock_memory_privilege() noexc
 FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_bytes, memory_domain_id_t memory_domain_id,
                                                            bool large_pages = false) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
-#if FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
     if (size_bytes == 0) return nullptr;
     DWORD allocation_type = MEM_RESERVE | MEM_COMMIT;
     if (large_pages) {
@@ -296,7 +296,7 @@ FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_byte
 }
 
 FU_MAYBE_UNUSED_ static inline void windows_numa_free(void *ptr) noexcept {
-#if FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
     if (ptr) ::VirtualFree(ptr, 0, MEM_RELEASE); // ? Size must be 0 with MEM_RELEASE
 #else
     fu_unused_(ptr);
@@ -308,7 +308,7 @@ FU_MAYBE_UNUSED_ static inline void windows_numa_free(void *ptr) noexcept {
  *  @sa `linux_numa_allocator` is the Linux counterpart; both satisfy the pool's allocator needs.
  *
  *  Deliberately plainer than the Linux allocator: it exposes only `allocate`/`deallocate`, so
- *  `unique_padded_buffer` takes its ordinary `allocate(total)` path rather than the sized
+ *  `dynamic_padded_array` takes its ordinary `allocate(total)` path rather than the sized
  *  `allocate_at_least` one. Large pages are opt-in per allocator instance (`large_pages` ctor flag);
  *  they need `SeLockMemoryPrivilege` first (@sa `windows_enable_lock_memory_privilege`) and round every
  *  request up to `GetLargePageMinimum()`. The pool constructs the allocator without them, since its own
@@ -381,13 +381,13 @@ using windows_numa_allocator_t = windows_numa_allocator<>;
  *  @brief The NUMA-placing allocator for this platform, or `std::allocator` where there is none.
  *  @sa Selected as `colocated_pool::allocator_t` so the pool's own state lands on its node.
  */
-#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 using memory_domain_allocator_t = linux_numa_allocator_t;
-#elif FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
 using memory_domain_allocator_t = windows_numa_allocator_t;
 #endif
 
-#if FU_WITH_COLOCATED_POOLS
+#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 
 /**
  *  @brief Sleeps the calling thread for @p micros microseconds.
@@ -442,14 +442,14 @@ struct alignas(default_alignment_k) pinned_thread_t {
         id {}; // ? `gettid` on Linux, `pthread_threadid_np` on Apple, `GetCurrentThreadId` on Windows
     core_id_t core_id {-1};
     char name[16] {};           // ? Written by the spawner, applied by the worker to itself
-    qos_level_t qos_level {-1}; // TODO: Populate from VFS, if available
+    core_quality_t qos_level {-1}; // TODO: Populate from VFS, if available
     /**
      *  @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`.
      *  @note Lives here, rather than in a second array, so the pool allocates once and the cursor
      *        inherits both this record's cache-line padding and its NUMA node.
      *  @note Fixed to `std::size_t` because `colocated_pool` is not templated on an index
-     *        width, unlike `basic_pool`. The narrow-index debug configs, and the cursor's overflow
-     *        argument, therefore only ever exercise `basic_pool`.
+     *        width, unlike `flat_pool`. The narrow-index debug configs, and the cursor's overflow
+     *        argument, therefore only ever exercise `flat_pool`.
      */
     dynamic_claim<std::size_t> claim {};
 };
@@ -459,7 +459,7 @@ struct alignas(default_alignment_k) pinned_thread_t {
 /**
  *  @brief A Linux-only thread-pool pinned to one NUMA node and same QoS level physical cores.
  *
- *  Differs from the `basic_pool` template in the following ways:
+ *  Differs from the `flat_pool` template in the following ways:
  *  - constructor API: receives a name for the threads.
  *  - implementation & API of `try_spawn`: uses POSIX APIs to allocate, name, & pin threads.
  *  - worker loop: using Linux-specific napping mechanism to reduce power consumption.
@@ -477,13 +477,13 @@ struct alignas(default_alignment_k) pinned_thread_t {
  *  - avoid recreating the @b `machine_topology`, as it's expensive to harvest.
  *
  *  The synchronization protocol - epochs, generations, contributor counting, and the memory
- *  ordering rules - is identical to `basic_pool`; @sa @ref pool_concurrency_model.
+ *  ordering rules - is identical to `flat_pool`; @sa @ref pool_concurrency_model.
  */
 template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ = default_alignment_k>
 struct colocated_pool {
 
   public:
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN
     using allocator_t = memory_domain_allocator_t; // ? Places the pool's own state on its node
 #else
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
@@ -522,7 +522,7 @@ struct colocated_pool {
      *  at the first position. If the @b `pin_to_core_k` granularity is used, the `pinned_thread_t::core_id`
      *  will be set to the individual core IDs.
      */
-    unique_padded_buffer<pinned_thread_t, pinned_threads_allocator_t> pthreads_ {};
+    dynamic_padded_array<pinned_thread_t, pinned_threads_allocator_t> pthreads_ {};
 
     /** @brief The global index of this pool's first thread, offsetting its local indices. */
     thread_index_t first_thread_ {0};
@@ -688,11 +688,11 @@ struct colocated_pool {
         if (pthreads_.size() != 0) return false; // ! Already initialized
 
         // Allocate the thread pool of `pinned_thread_t` objects
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN
         allocator_ = memory_domain_allocator_t {domain.memory_domain_id};
 #endif
         pinned_threads_allocator_t pthread_allocator {allocator_};
-        unique_padded_buffer<pinned_thread_t, pinned_threads_allocator_t> pthreads {pthread_allocator};
+        dynamic_padded_array<pinned_thread_t, pinned_threads_allocator_t> pthreads {pthread_allocator};
         if (!pthreads.try_resize(threads)) return false; // ! Allocation failed
 
         // Core IDs may outrun the online core count where cores can be hot-plugged.
@@ -730,7 +730,7 @@ struct colocated_pool {
             pthreads_[0].id.store(current_thread_id(), std::memory_order_release);
         }
 
-        // The startup sequence for the POSIX threads differs from the `basic_pool`,
+        // The startup sequence for the POSIX threads differs from the `flat_pool`,
         // where at start up there is a race condition to read the `pthreads_`.
         // So we mark the threads as "chilling" until the
         mood_.store(mood_t::chill_k, std::memory_order_release);
@@ -755,7 +755,7 @@ struct colocated_pool {
             pthread_t new_pthread_handle;
             pthread_attr_t attributes;
             ::pthread_attr_init(&attributes);
-#if FU_WITH_THREAD_QOS
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
             // Apple offers no pinning; a Quality-of-Service class is the whole placement story, and
             // it must be chosen before the thread exists. On a chip with efficiency cores, `UTILITY`
             // is what confines a thread to them; on an all-performance chip the class is inert.
@@ -909,7 +909,7 @@ struct colocated_pool {
         for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
             std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
             if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
-#if FU_WITH_THREAD_SCHED_CLASS
+#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
             sched_param param {};
             ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_IDLE, &param);
 #else
@@ -1018,7 +1018,7 @@ struct colocated_pool {
             for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
                 std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
                 if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
-#if FU_WITH_THREAD_SCHED_CLASS
+#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
                 // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
                 // for another thread; its QoS class is fixed at creation.
                 sched_param param {};
@@ -1233,7 +1233,7 @@ struct colocated_pool {
     }
 #endif
 
-#if FU_WITH_THREAD_QOS
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
     /**
      *  @brief Maps a compute level onto the only placement control Darwin offers.
      *  @param[in] level The domain's `compute_level`, where higher is more performant.
@@ -1426,7 +1426,7 @@ class invoke_distributed_for_n_dynamic {
 /**
  *  @brief A Linux-only pool over all distributed "thread compute_domains", NUMA nodes, and QoS levels.
  *
- *  Differs from the `basic_pool` template in the following ways:
+ *  Differs from the `flat_pool` template in the following ways:
  *  - constructor API: receives the NUMA nodes topology, & a name for threads.
  *  - implementation of `try_spawn`: redirects to individual `colocated_pool` instances.
  *
@@ -1444,7 +1444,7 @@ struct distributed_pool {
     using colocated_pool_t = colocated_pool<micro_yield_type_, alignment_>;
     using machine_topology_t = machine_topology<>;
 
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN
     using allocator_t = memory_domain_allocator_t; // ? Places the pool's own state on its node
 #else
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
@@ -1465,8 +1465,8 @@ struct distributed_pool {
         alignas(alignment_k) colocated_pool_t pool {};
     };
 
-    using unique_domain_cell_buffer_t = unique_padded_buffer<compute_domain_cell_t, allocator_t>;
-    using compute_domain_cells_t = unique_padded_buffer<unique_domain_cell_buffer_t, allocator_t>;
+    using unique_domain_cell_buffer_t = dynamic_padded_array<compute_domain_cell_t, allocator_t>;
+    using compute_domain_cells_t = dynamic_padded_array<unique_domain_cell_buffer_t, allocator_t>;
 
     /** @brief The machine topology this pool spans: memory domains, cores, and QoS levels. */
     machine_topology_t topology_ {};
@@ -1909,7 +1909,7 @@ struct distributed_pool {
      *  @note On a machine without NUMA memory the node is meaningless and the argument is dropped.
      */
     static allocator_t allocator_for_node(FU_MAYBE_UNUSED_ memory_domain_id_t const memory_domain_id) noexcept {
-#if FU_WITH_NUMA_MEMORY
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN
         return allocator_t {memory_domain_id};
 #else
         return allocator_t {};
@@ -1921,13 +1921,13 @@ using colocated_pool_t = colocated_pool<>;
 using distributed_pool_t = distributed_pool<>;
 
 #if FU_DETECT_CONCEPTS_
-static_assert(is_unsafe_pool<basic_pool_t> && is_unsafe_pool<colocated_pool_t>,
+static_assert(is_unsafe_pool<flat_pool_t> && is_unsafe_pool<colocated_pool_t>,
               "These thread pools must be flexible and support unsafe operations");
-static_assert(is_pool<basic_pool_t> && is_pool<colocated_pool_t> && is_pool<distributed_pool_t>,
+static_assert(is_pool<flat_pool_t> && is_pool<colocated_pool_t> && is_pool<distributed_pool_t>,
               "These thread pools must be fully compatible with the high-level APIs");
 #endif // FU_DETECT_CONCEPTS_
 
-#endif // FU_WITH_COLOCATED_POOLS
+#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 
 #pragma endregion Distributed Pool
 

@@ -69,79 +69,73 @@ endforeach ()
 
 enable_language(C)
 
-# Standard C11 test
+# Builds one `test.c` C-API test target, sharing the C11 / output-dir / libatomic wiring. Callers add the one flag that
+# distinguishes their variant (GNU nested functions, Clang blocks).
+function (add_forkunion_c_test target extensions)
+    add_executable(${target} test.c)
+    set_target_properties(
+        ${target}
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS ${extensions}
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(${target} PRIVATE forkunion_static)
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(${target} PRIVATE -latomic)
+    endif ()
+    add_test(NAME ${target} COMMAND ${target})
+endfunction ()
+
 if (CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     message(STATUS "Skipping C11 C API tests on MSVC due to missing <stdatomic.h> support")
 else ()
-    add_executable(forkunion_test_c11 test.c)
-    set_target_properties(
-        forkunion_test_c11
-        PROPERTIES C_STANDARD 11
-                   C_STANDARD_REQUIRED ON
-                   C_EXTENSIONS OFF
-                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    )
-    target_link_libraries(forkunion_test_c11 PRIVATE forkunion_static)
-    add_test(NAME forkunion_test_c11 COMMAND forkunion_test_c11)
-
-    if (CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-        if (UNIX AND NOT APPLE)
-            target_link_libraries(forkunion_test_c11 PRIVATE -latomic)
-        endif ()
-    endif ()
+    add_forkunion_c_test(forkunion_test_c11 OFF)
 endif ()
 
 # GCC nested functions extension test
 if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    add_executable(forkunion_test_c_gcc_nested test.c)
-    set_target_properties(
-        forkunion_test_c_gcc_nested
-        PROPERTIES C_STANDARD 11
-                   C_STANDARD_REQUIRED ON
-                   C_EXTENSIONS ON
-                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    )
-    target_link_libraries(forkunion_test_c_gcc_nested PRIVATE forkunion_static)
-    add_test(NAME forkunion_test_c_gcc_nested COMMAND forkunion_test_c_gcc_nested)
-
-    if (UNIX AND NOT APPLE)
-        target_link_libraries(forkunion_test_c_gcc_nested PRIVATE -latomic)
-    endif ()
+    add_forkunion_c_test(forkunion_test_c_gcc_nested ON)
 endif ()
 
 # Clang blocks extension test
 if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
-    add_executable(forkunion_test_c_clang_blocks test.c)
-    set_target_properties(
-        forkunion_test_c_clang_blocks
-        PROPERTIES C_STANDARD 11
-                   C_STANDARD_REQUIRED ON
-                   C_EXTENSIONS ON
-                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    )
+    add_forkunion_c_test(forkunion_test_c_clang_blocks ON)
     target_compile_options(forkunion_test_c_clang_blocks PRIVATE -fblocks)
-    target_link_libraries(forkunion_test_c_clang_blocks PRIVATE forkunion_static)
-    add_test(NAME forkunion_test_c_clang_blocks COMMAND forkunion_test_c_clang_blocks)
-
-    if (APPLE)
-        # Apple's `libSystem` already ships the Blocks runtime, so no extra linkage is required
-    elseif (UNIX)
-        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE -latomic -lBlocksRuntime)
+    # Apple's `libSystem` ships the Blocks runtime; other UNIX needs it linked explicitly.
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE -lBlocksRuntime)
     endif ()
 endif ()
 
-# Include the N-body benchmark
+# The N-body benchmark: C++ for clear state ownership, but linking the pre-compiled C ABI so it resolves the busy-wait
+# waiter at runtime - the whole point, since AArch64 `WFET` is unreachable through the compile-time C++
+# `preferred_yield_t`.
 add_executable(forkunion_nbody nbody.cpp)
-target_link_libraries(forkunion_nbody PRIVATE forkunion)
 set_target_properties(
     forkunion_nbody
-    PROPERTIES CXX_STANDARD 20
+    PROPERTIES CXX_STANDARD 17
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
+               RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+target_link_libraries(forkunion_nbody PRIVATE forkunion_static)
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(forkunion_nbody PRIVATE -latomic)
+    endif ()
+endif ()
+
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(
+        forkunion_nbody PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+    )
+endif ()
+
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(STATUS "Enabling OpenMP for forkunion_nbody on GCC")
-    target_compile_options(forkunion_nbody PRIVATE -fopenmp -flto -ffast-math)
+    target_compile_options(forkunion_nbody PRIVATE -fopenmp -ffast-math)
     target_link_options(forkunion_nbody PRIVATE -fopenmp)
 elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     find_program(BREW_EXECUTABLE brew)
@@ -164,4 +158,3 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STR
         message(STATUS "Homebrew not found - OpenMP disabled for forkunion_nbody")
     endif ()
 endif ()
-set_target_properties_for_forkunion_script(forkunion_nbody)

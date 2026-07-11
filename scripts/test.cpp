@@ -8,21 +8,21 @@
 /* Namespaces, constants, and explicit type instantiations. */
 namespace fu = ashvardanian::forkunion;
 
-using fu32_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
-using fu16_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
-using fu8_t = fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
+using fu32_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
+using fu16_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
+using fu8_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
 
 /*
  *  Explicitly instantiate the thread-pools to cover all of their logic, but avoid the
  *  "duplicate explicit instantiation" error on platforms where `std::size_t` is `uint64_t`.
  *
- *  template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::size_t>
+ *  template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::size_t>
  */
-template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
-template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
-template class fu::basic_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
 
-#if FU_WITH_COLOCATED_POOLS
+#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 template struct fu::colocated_pool<>;
 template struct fu::distributed_pool<>;
 #endif
@@ -94,7 +94,7 @@ bool test_coprime_permutation() noexcept {
 /**
  *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
  *
- *  Deliberately @b not gated on `FU_WITH_NUMA_MEMORY`: some platforms harvest a topology without
+ *  Deliberately @b not gated on `FU_WITH_PLACE_MEMORY_ON_DOMAIN`: some platforms harvest a topology without
  *  compiling the NUMA pools, so gating this on the pools leaves their harvest wholly untested.
  *  A host with no harvest at all reports `false` and is skipped rather than failed - the absence
  *  of a topology is not a broken topology.
@@ -148,13 +148,13 @@ static bool test_topology_invariants() noexcept {
 constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
 
 struct make_pool_t {
-    fu::basic_pool_t construct() const noexcept { return fu::basic_pool_t(); }
+    fu::flat_pool_t construct() const noexcept { return fu::flat_pool_t(); }
     std::size_t scope(std::size_t oversubscription = 1) const noexcept {
         return fu::allowed_cores_count() * oversubscription;
     }
 };
 
-#if FU_WITH_COLOCATED_POOLS
+#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 static fu::machine_topology_t machine_topology;
 struct make_colocated_pool_t {
     fu::colocated_pool_t construct() const noexcept { return fu::colocated_pool_t("forkunion"); }
@@ -169,7 +169,7 @@ struct make_distributed_pool_t {
 #endif
 
 static bool test_try_spawn_zero() noexcept {
-    fu::basic_pool_t pool;
+    fu::flat_pool_t pool;
     return !pool.try_spawn(0u);
 }
 
@@ -346,7 +346,7 @@ static bool test_generation_inclusive() noexcept {
 
 /** @brief Degenerate single-thread inclusive pool: the caller is the only contributor. */
 static bool test_generation_single_thread() noexcept {
-    fu::basic_pool_t pool;
+    fu::flat_pool_t pool;
     if (!pool.try_spawn(1)) return false; // ? Default is caller-inclusive: zero workers
 
     std::atomic<bool> visited {false};
@@ -724,7 +724,7 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
  */
 void log_numa_topology() noexcept {
     fu::logging_colors_t colors;
-#if FU_WITH_COLOCATED_POOLS
+#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
     // Harvest topology
     if (!machine_topology.try_harvest()) {
         std::fprintf(stderr, "%sX Failed to harvest NUMA topology%s\n", colors.bold_red(), colors.reset());
@@ -740,10 +740,10 @@ void log_numa_topology() noexcept {
 
 #else
     std::printf("%sNUMA support not compiled in%s\n", colors.dim(), colors.reset());
-#endif // FU_WITH_COLOCATED_POOLS
+#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 }
 
-#if FU_WITH_COLOCATED_POOLS && FU_ON_LINUX && FU_WITH_THREAD_PINNING
+#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
 /**
  *  @brief A pool must size itself from the cores we were given, and hand the caller back its own mask.
  *
@@ -784,7 +784,7 @@ static bool test_caller_affinity_preserved() noexcept {
     (void)fu::try_restore_thread_cores(original); // ? Leave the process as we found it
     return succeeded;
 }
-#endif // FU_WITH_COLOCATED_POOLS && FU_ON_LINUX && FU_WITH_THREAD_PINNING
+#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
 
 int main(void) {
 
@@ -821,7 +821,7 @@ int main(void) {
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads}, //
         {"`terminate` avoided", test_mixed_restart<false>},                      //
         {"`terminate` and re-spawn", test_mixed_restart<true>},                  //
-#if FU_WITH_COLOCATED_POOLS
+#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
         // Uniform Memory Access (UMA) tests for threads pinned to the same NUMA node
         {"UMA `try_spawn` normal", test_try_spawn_success<make_colocated_pool_t>},
         {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_colocated_pool_t>},
@@ -855,10 +855,10 @@ int main(void) {
         {"NUMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_distributed_pool_t>},
         {"NUMA `terminate` avoided", test_mixed_restart<false, make_distributed_pool_t>},
         {"NUMA `terminate` and re-spawn", test_mixed_restart<true, make_distributed_pool_t>},
-#if FU_ON_LINUX && FU_WITH_THREAD_PINNING
+#if FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
         {"NUMA caller affinity preserved", test_caller_affinity_preserved},
 #endif
-#endif // FU_WITH_COLOCATED_POOLS
+#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
     };
 
     std::size_t const total_unit_tests = sizeof(unit_tests) / sizeof(unit_tests[0]);

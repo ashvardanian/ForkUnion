@@ -13,12 +13,12 @@
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.hpp> // `fu::basic_pool_t`
+ *  #include <forkunion.hpp> // `fu::flat_pool_t`
  *
  *  using fu = ashvardanian::forkunion;
  *  int main(int argc, char *argv[]) {
  *
- *      fu::basic_pool_t pool;
+ *      fu::flat_pool_t pool;
  *      if (!pool.try_spawn(fu::allowed_cores_count()))
  *          return EXIT_FAILURE;
  *
@@ -48,7 +48,7 @@
  *  performance, efficiency, and power-saving cores. Each group will have vastly different speed,
  *  so considering them equal in tasks scheduling is a bad idea... and separating them automatically
  *  isn't feasible either. It's up to the user to isolate those groups into individual pools.
- *  @sa `qos_level_t`
+ *  @sa `core_quality_t`
  *
  *  On x86, Arm, and RISC-V (internally referred to as RISC5) architectures, depending on the CPU
  *  features available, the library also exposes cheaper @b "busy-waiting" mechanisms, such as
@@ -72,6 +72,6 @@
 #include "forkunion/types.hpp"        // Vocabulary: prongs, buffers, index splitting, claim cursors
 #include "forkunion/capabilities.hpp" // Yields, `cpu_capabilities`, `ram_capabilities`
 #include "forkunion/topology.hpp"     // `memory_domain`, `compute_domain_t`, `machine_topology`, the harvests
-#include "forkunion/standard.hpp"     // `basic_pool`, the portable STL thread-pool
+#include "forkunion/flat.hpp"         // `flat_pool`, the portable STL thread-pool
 #include "forkunion/distributed.hpp"  // `colocated_pool`, `distributed_pool`, NUMA memory
 #include "forkunion/logging.hpp"      // Human-readable topology dumps

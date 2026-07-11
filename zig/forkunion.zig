@@ -77,7 +77,7 @@ const c = struct {
     extern fn fu_free_in(memory_domain_index: usize, pointer: *anyopaque, bytes: usize) void;
 
     // Pool lifecycle & introspection
-    extern fn fu_pool_new(name: ?[*:0]const u8) ?*anyopaque;
+    extern fn fu_pool_new(name: ?[*:0]const u8, allowed: u32) ?*anyopaque;
     extern fn fu_pool_delete(pool: *anyopaque) void;
     extern fn fu_pool_spawn(pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
     extern fn fu_pool_spawn_on(pool: *anyopaque, compute_domain_index: usize, threads: usize, exclusivity: c_int) c_int;
@@ -163,16 +163,14 @@ pub fn version() struct { major: u32, minor: u32, patch: u32 } {
 
 /// Everything the library can do, whether decided when it was compiled or found on this machine.
 ///
-/// Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
-/// about _this machine_: `huge_pages` means the kernel is offering them. A bit marked `comptime_`
-/// is a fact about _this build_: `comptime_huge_pages` means we compiled the code that would ask.
+/// One bit per facility, and two accessors ask two questions of the same bit. `comptimeCapabilities`
+/// reports whether the code was _built_: a set `place_huge_pages_on_domain` means we compiled the
+/// path that asks for them. `runtimeCapabilities` reports whether the machine _offers_ it now.
 ///
-/// Neither implies the other. A binary carrying `comptime_numa_memory` runs perfectly well on a
-/// single-node box, where `numa_aware` never appears; and a machine with four NUMA nodes reports
-/// none of them to a build that left the topology out.
+/// Neither implies the other. A binary that built `place_memory_on_domain` runs perfectly well on a
+/// single-node box, where the runtime accessor never sets that bit; and a machine with four NUMA
+/// nodes reports none of them to a build that left the topology out.
 pub const Capabilities = packed struct(u32) {
-    _unused_0: u1 = 0,
-
     /// x86 `pause` instruction
     x86_pause: bool = false,
     /// x86-64 `tpause` instruction, with `WAITPKG` support
@@ -183,45 +181,34 @@ pub const Capabilities = packed struct(u32) {
     arm64_wfet: bool = false,
     /// RISC-V `pause` instruction
     risc5_pause: bool = false,
-    /// This pool is pinned to a single compute domain
-    compute_domain: bool = false,
-
     /// RISC-V `WRS.STO` monitored wait, from the `Zawrs` extension
     risc5_wrs: bool = false,
 
-    _unused_8: u2 = 0,
+    /// Own the raw OS thread handle instead of a `std::thread`
+    os_threads: bool = false,
+    /// Enumerate this machine's cores, compute domains, and memory domains
+    topology: bool = false,
+    /// Bind a thread to a set of cores, choosing where it runs
+    place_threads_by_affinity: bool = false,
+    /// Steer a thread onto a class of core at creation, choosing where it runs
+    place_threads_by_core_class: bool = false,
+    /// Reclass a thread's scheduler to sleep or wake it, choosing when it runs
+    reschedule_threads_by_class: bool = false,
+    /// Place a buffer's pages on a chosen memory domain
+    place_memory_on_domain: bool = false,
+    /// Place larger-than-base pages on a chosen memory domain
+    place_huge_pages_on_domain: bool = false,
+    /// The kernel promotes base pages to huge pages on its own
+    huge_transparent_pages: bool = false,
+    /// The domain-aware `colocated_pool` and `distributed_pool` are compiled in
+    colocate_pools_on_domain: bool = false,
 
-    /// This machine has NUMA nodes to allocate on
-    numa_aware: bool = false,
-    /// This kernel offers pages larger than the base page
-    huge_pages: bool = false,
-    /// ... and offers them transparently
-    huge_pages_transparent: bool = false,
+    _unused: u17 = 0,
 
-    _unused_13: u3 = 0,
-
-    /// Can spawn OS threads directly, rather than through the C++ standard library
-    comptime_threads: bool = false,
-    /// Can enumerate this machine's cores, compute domains, and memory domains
-    comptime_topology: bool = false,
-    /// Can see which cores share a cache, so a compute domain can be cut at a cluster
-    comptime_topology_caches: bool = false,
-    /// Can read inter-domain distance, bandwidth, and latency
-    comptime_topology_metrics: bool = false,
-    /// Can bind a thread to a set of cores, and have the kernel honour it
-    comptime_thread_pinning: bool = false,
-    /// Can hint which class of core a thread should run on, at creation time
-    comptime_thread_qos: bool = false,
-    /// Can change another thread's scheduling class, to sleep or wake it cheaply
-    comptime_thread_sched_class: bool = false,
-    /// Can place pages on a chosen memory domain
-    comptime_numa_memory: bool = false,
-    /// Can request pages larger than the base page
-    comptime_huge_pages: bool = false,
-    /// The domain-aware pools and allocators are compiled in
-    comptime_colocated_pools: bool = false,
-
-    _unused_26: u6 = 0,
+    /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
+    pub fn all() Capabilities {
+        return @bitCast(@as(u32, 0xFFFF_FFFF));
+    }
 };
 
 /// Which kernel facilities this build of ForkUnion was compiled to use.
@@ -239,7 +226,7 @@ pub fn runtimeCapabilities() Capabilities {
     return @bitCast(c.fu_runtime_capabilities());
 }
 
-/// The set `runtimeCapabilities` bits, comma-separated, like `"arm64_yield,numa_aware"`.
+/// The set `runtimeCapabilities` bits, comma-separated, like `"arm64_yield,place_memory_on_domain"`.
 pub fn runtimeCapabilitiesString() [*:0]const u8 {
     return c.fu_runtime_capabilities_string();
 }
@@ -544,6 +531,17 @@ pub const Pool = struct {
         thread_count: usize,
         exclusivity: CallerExclusivity,
     ) Error!Pool {
+        return initNamedWithCapabilities(name, thread_count, exclusivity, Capabilities.all());
+    }
+
+    /// As `initNamed`, but constrains the pool to `allowed`: clear a waiter bit to force a
+    /// lower-priority busy-wait, or clear `place_memory_on_domain` to force the flat (non-NUMA) pool.
+    pub fn initNamedWithCapabilities(
+        name: ?[]const u8,
+        thread_count: usize,
+        exclusivity: CallerExclusivity,
+        allowed: Capabilities,
+    ) Error!Pool {
         // Convert name to null-terminated string if provided
         // SAFETY: C library copies name into internal buffer immediately
         var name_buf: [16:0]u8 = undefined;
@@ -552,7 +550,7 @@ pub const Pool = struct {
         else
             null;
 
-        const handle = c.fu_pool_new(name_z) orelse return Error.CreationFailed;
+        const handle = c.fu_pool_new(name_z, @bitCast(allowed)) orelse return Error.CreationFailed;
         errdefer c.fu_pool_delete(handle);
 
         // C++ validates threads > 0 and returns false if invalid
@@ -569,7 +567,17 @@ pub const Pool = struct {
     /// single thread with the generation-token API. On builds without NUMA, only compute
     /// domain 0 is valid.
     pub fn spawnOn(compute_domain_index: usize, thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
-        const handle = c.fu_pool_new(null) orelse return Error.CreationFailed;
+        return spawnOnWithCapabilities(compute_domain_index, thread_count, exclusivity, Capabilities.all());
+    }
+
+    /// As `spawnOn`, but constrains the colocated pool to `allowed`.
+    pub fn spawnOnWithCapabilities(
+        compute_domain_index: usize,
+        thread_count: usize,
+        exclusivity: CallerExclusivity,
+        allowed: Capabilities,
+    ) Error!Pool {
+        const handle = c.fu_pool_new(null, @bitCast(allowed)) orelse return Error.CreationFailed;
         errdefer c.fu_pool_delete(handle);
 
         const success = c.fu_pool_spawn_on(handle, compute_domain_index, thread_count, @intFromEnum(exclusivity));
@@ -942,26 +950,23 @@ test "system capabilities" {
     try std.testing.expect(std.mem.len(runtimeCapabilitiesString()) > 0);
 
     // Threads are the one facility every supported platform has.
-    try std.testing.expect(comptime_caps.comptime_threads);
+    try std.testing.expect(comptime_caps.os_threads);
 
     // The aggregate is implied, never hand-set: pools need threads and a topology to spawn onto.
     try std.testing.expectEqual(
-        comptime_caps.comptime_threads and comptime_caps.comptime_topology,
-        comptime_caps.comptime_colocated_pools,
+        comptime_caps.os_threads and comptime_caps.topology,
+        comptime_caps.colocate_pools_on_domain,
     );
 
     // Placing pages on a node presumes we discovered the nodes.
-    if (comptime_caps.comptime_numa_memory) try std.testing.expect(comptime_caps.comptime_topology);
+    if (comptime_caps.place_memory_on_domain) try std.testing.expect(comptime_caps.topology);
 
     // Without the pools, the library can still see exactly one domain, and never more.
-    if (!comptime_caps.comptime_colocated_pools) try std.testing.expectEqual(@as(usize, 1), countComputeDomains());
+    if (!comptime_caps.colocate_pools_on_domain) try std.testing.expectEqual(@as(usize, 1), countComputeDomains());
 
-    // A machine cannot report NUMA nodes to a build that never learned to look for them.
-    if (runtime_caps.numa_aware) try std.testing.expect(comptime_caps.comptime_numa_memory);
-
-    // The two halves live in one bit-space, and must never collide.
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(comptime_caps)) & 0x0000_FFFF);
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(runtime_caps)) & 0xFFFF_0000);
+    // One facility, two questions of the same bit: a machine can only _offer_ page placement if this
+    // build compiled the path that asks for it.
+    if (runtime_caps.place_memory_on_domain) try std.testing.expect(comptime_caps.place_memory_on_domain);
 }
 
 test "system metadata" {

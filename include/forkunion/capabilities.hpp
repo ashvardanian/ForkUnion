@@ -441,7 +441,7 @@ using preferred_yield_t = standard_yield_t;
 
 /**
  *  @brief Represents the CPU capabilities for hardware-friendly yielding.
- *  @note Combine with @b `ram_capabilities()` to get the full set of library capabilities.
+ *  @sa `ram_capabilities` to get the full set of library capabilities.
  */
 inline capabilities_t cpu_capabilities() noexcept {
     capabilities_t caps = capabilities_unknown_k;
@@ -449,18 +449,18 @@ inline capabilities_t cpu_capabilities() noexcept {
 #if FU_DETECT_ARCH_X86_64_
 
     // Check for basic PAUSE instruction support (always available on x86-64)
-    caps = static_cast<capabilities_t>(caps | capability_x86_pause_k);
+    caps |= capability_x86_pause_k;
 
 #if FU_DETECT_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
     // CPUID to check for WAITPKG support (TPAUSE instruction)
-    std::uint32_t eax, __attribute__((unused)) ebx, ecx, __attribute__((unused)) edx;
+    std::uint32_t eax, ebx, ecx, edx;
 
     // CPUID leaf 7, sub-leaf 0 for structured extended feature flags
     eax = 7, ecx = 0;
     __asm__ __volatile__("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax), "c"(ecx) : "memory");
 
     // WAITPKG is bit 5 in ECX
-    if (ecx & (1u << 5)) caps = static_cast<capabilities_t>(caps | capability_x86_tpause_k);
+    if (ecx & (1u << 5)) caps |= capability_x86_tpause_k;
     fu_unused_(ebx);
     fu_unused_(edx);
 #endif
@@ -468,14 +468,14 @@ inline capabilities_t cpu_capabilities() noexcept {
 #elif FU_DETECT_ARCH_ARM64_
 
     // Basic YIELD is always available on AArch64
-    caps = static_cast<capabilities_t>(caps | capability_arm64_yield_k);
+    caps |= capability_arm64_yield_k;
 
     // Use sysctl to check for WFET support on Apple platforms
 #if defined(__APPLE__)
     int wfet_support = 0;
     size_t size = sizeof(wfet_support);
     if (sysctlbyname("hw.optional.arm.FEAT_WFxT", &wfet_support, &size, NULL, 0) == 0 && wfet_support)
-        caps = static_cast<capabilities_t>(caps | capability_arm64_wfet_k);
+        caps |= capability_arm64_wfet_k;
 #elif FU_DETECT_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
     // On non-Apple ARM systems, try to read the system register
     // Note: This may fail on some systems where userspace access is restricted
@@ -483,25 +483,24 @@ inline capabilities_t cpu_capabilities() noexcept {
     __asm__ __volatile__("mrs %0, ID_AA64ISAR2_EL0" : "=r"(id_aa64isar2_el0) : : "memory");
     // WFET is bits [3:0], value 2 indicates WFET support
     std::uint64_t const wfet_field = id_aa64isar2_el0 & 0xF;
-    if (wfet_field >= 2) caps = static_cast<capabilities_t>(caps | capability_arm64_wfet_k);
+    if (wfet_field >= 2) caps |= capability_arm64_wfet_k;
 #endif
 
 #elif FU_DETECT_ARCH_RISC5_
 
     // Basic PAUSE is available on RISC-V with the Zihintpause extension
-    caps = static_cast<capabilities_t>(caps | capability_risc5_pause_k);
+    caps |= capability_risc5_pause_k;
 
     // Zawrs (`WRS.STO` / `WRS.NTO`) is learned one of two ways:
 #if defined(__riscv_zawrs)
     // The compiler was told the target has it (`-march=...+zawrs`), so it is guaranteed present here.
-    caps = static_cast<capabilities_t>(caps | capability_risc5_wrs_k);
+    caps |= capability_risc5_wrs_k;
 #elif defined(FU_DETECT_RISCV_HWPROBE_) && defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_EXT_ZAWRS)
     // Otherwise ask the kernel. With no CPU set, the value is the AND across all online harts.
     riscv_hwprobe probe {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
     long const probe_result = ::syscall(SYS_riscv_hwprobe, &probe, static_cast<std::size_t>(1),
                                         static_cast<std::size_t>(0), static_cast<void *>(nullptr), 0u);
-    if (probe_result == 0 && (probe.value & RISCV_HWPROBE_EXT_ZAWRS) != 0)
-        caps = static_cast<capabilities_t>(caps | capability_risc5_wrs_k);
+    if (probe_result == 0 && (probe.value & RISCV_HWPROBE_EXT_ZAWRS) != 0) caps |= capability_risc5_wrs_k;
 #endif
 
 #endif
@@ -510,28 +509,28 @@ inline capabilities_t cpu_capabilities() noexcept {
 }
 
 /**
- *  @brief Represents the memory-system capabilities, retrieved from the Linux Sysfs.
- *  @note Combine with @b `cpu_capabilities()` to get the full set of library capabilities.
+ *  @brief The memory-placement facilities this machine offers - NUMA and huge/large pages.
+ *  @sa `cpu_capabilities` for the busy-wait side; together they form `runtime_capabilities`.
  */
 inline capabilities_t ram_capabilities() noexcept {
     capabilities_t caps = capabilities_unknown_k;
 
-#if FU_WITH_NUMA_MEMORY && FU_ON_WINDOWS
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
     // Windows always exposes the NUMA placement API (`VirtualAllocExNuma`); a single-node box simply
     // reports one node. Large-page availability hinges on a privilege the caller may not hold, so it
     // is probed by its minimum page size rather than a directory.
-    caps = static_cast<capabilities_t>(caps | capability_numa_aware_k);
-    if (::GetLargePageMinimum() != 0) caps = static_cast<capabilities_t>(caps | capability_huge_pages_k);
+    caps |= capability_place_memory_on_domain_k;
+    if (::GetLargePageMinimum() != 0) caps |= capability_place_huge_pages_on_domain_k;
 
-#elif FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     // Check for NUMA support
-    if (::numa_available() >= 0) caps = static_cast<capabilities_t>(caps | capability_numa_aware_k);
+    if (::numa_available() >= 0) caps |= capability_place_memory_on_domain_k;
 
     // Check for huge pages support - simplest method is checking if the global directory exists
     {
         DIR *hugepages_dir = ::opendir("/sys/kernel/mm/hugepages");
         if (hugepages_dir) {
-            caps = static_cast<capabilities_t>(caps | capability_huge_pages_k);
+            caps |= capability_place_huge_pages_on_domain_k;
             ::closedir(hugepages_dir);
         }
     }
@@ -545,12 +544,12 @@ inline capabilities_t ram_capabilities() noexcept {
                 // THP is enabled if we see "[always]" or "[madvise]" in the output
                 if (::strstr(thp_status, "[always]") || ::strstr(thp_status, "[madvise]"))
                     // THP is available and enabled - huge pages capability confirmed
-                    caps = static_cast<capabilities_t>(caps | capability_huge_pages_transparent_k);
+                    caps |= capability_huge_transparent_pages_k;
             ::fclose(thp_enabled);
         }
     }
 
-#endif // FU_WITH_HUGE_PAGES
+#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
 
     return caps;
 }
@@ -563,33 +562,30 @@ inline capabilities_t runtime_capabilities() noexcept {
     return static_cast<capabilities_t>(cpu_capabilities() | ram_capabilities());
 }
 
-#pragma region Compile Time Capabilities
-
 /**
  *  @brief Which kernel facilities this translation unit was compiled to use, one bit per `FU_WITH_*`.
  *  @sa `runtime_capabilities` for what the machine underneath turned out to offer.
  *
- *  Consult it before reaching for a domain-aware API. Without `capability_comptime_colocated_pools_k`
+ *  Consult it before reaching for a domain-aware API. Without `capability_colocate_pools_on_domain_k`
  *  there is no `colocated_pool` to spawn and no `linux_numa_allocator` to construct, and a caller has
  *  no other way to tell that apart from a machine that merely has one compute domain.
+ *
+ *  These are the @b same facility bits `runtime_capabilities` reports, asked the other way: this says
+ *  the code was compiled, that says the machine offers it. A facility is usable only where both agree.
  */
 constexpr capabilities_t comptime_capabilities() noexcept {
-    // Each term is widened to `unsigned` before the `?:`, because GCC's `-Wextra` rightly objects to
-    // a conditional whose arms are an enumerator and a plain `0`.
-    return static_cast<capabilities_t>(                                                                   //
-        (FU_WITH_THREADS ? static_cast<unsigned>(capability_comptime_threads_k) : 0u) |                   //
-        (FU_WITH_TOPOLOGY ? static_cast<unsigned>(capability_comptime_topology_k) : 0u) |                 //
-        (FU_WITH_TOPOLOGY_CACHES ? static_cast<unsigned>(capability_comptime_topology_caches_k) : 0u) |   //
-        (FU_WITH_TOPOLOGY_METRICS ? static_cast<unsigned>(capability_comptime_topology_metrics_k) : 0u) | //
-        (FU_WITH_THREAD_PINNING ? static_cast<unsigned>(capability_comptime_thread_pinning_k) : 0u) |     //
-        (FU_WITH_THREAD_QOS ? static_cast<unsigned>(capability_comptime_thread_qos_k) : 0u) |             //
-        (FU_WITH_THREAD_SCHED_CLASS ? static_cast<unsigned>(capability_comptime_thread_sched_class_k) : 0u) |
-        (FU_WITH_NUMA_MEMORY ? static_cast<unsigned>(capability_comptime_numa_memory_k) : 0u) | //
-        (FU_WITH_HUGE_PAGES ? static_cast<unsigned>(capability_comptime_huge_pages_k) : 0u) |   //
-        (FU_WITH_COLOCATED_POOLS ? static_cast<unsigned>(capability_comptime_colocated_pools_k) : 0u));
+    // Both arms of each `?:` are `capabilities_t`, so there is no enumerator-versus-`0` mismatch for
+    // `-Wextra` to object to, and `operator|` folds them into the result.
+    return                                                                        //
+        (FU_WITH_OS_THREADS ? capability_os_threads_k : capabilities_unknown_k) | //
+        (FU_WITH_TOPOLOGY ? capability_topology_k : capabilities_unknown_k) |     //
+        (FU_WITH_PLACE_THREADS_BY_AFFINITY ? capability_place_threads_by_affinity_k : capabilities_unknown_k) |
+        (FU_WITH_PLACE_THREADS_BY_CORE_CLASS ? capability_place_threads_by_core_class_k : capabilities_unknown_k) |
+        (FU_WITH_RESCHEDULE_THREADS_BY_CLASS ? capability_reschedule_threads_by_class_k : capabilities_unknown_k) |
+        (FU_WITH_PLACE_MEMORY_ON_DOMAIN ? capability_place_memory_on_domain_k : capabilities_unknown_k) | //
+        (FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN ? capability_place_huge_pages_on_domain_k : capabilities_unknown_k) |
+        (FU_WITH_COLOCATE_POOLS_ON_DOMAIN ? capability_colocate_pools_on_domain_k : capabilities_unknown_k);
 }
-
-#pragma endregion Compile Time Capabilities
 
 } // namespace forkunion
 } // namespace ashvardanian

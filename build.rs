@@ -16,15 +16,13 @@
 use std::path::Path;
 
 /// Every optional capability, in the order `types.hpp` declares them.
-const OPTIONAL_CAPABILITIES: [&str; 8] = [
+const OPTIONAL_CAPABILITIES: [&str; 6] = [
     "FU_WITH_TOPOLOGY",
-    "FU_WITH_TOPOLOGY_CACHES",
-    "FU_WITH_TOPOLOGY_METRICS",
-    "FU_WITH_THREAD_PINNING",
-    "FU_WITH_THREAD_QOS",
-    "FU_WITH_THREAD_SCHED_CLASS",
-    "FU_WITH_NUMA_MEMORY",
-    "FU_WITH_HUGE_PAGES",
+    "FU_WITH_PLACE_THREADS_BY_AFFINITY",
+    "FU_WITH_PLACE_THREADS_BY_CORE_CLASS",
+    "FU_WITH_RESCHEDULE_THREADS_BY_CLASS",
+    "FU_WITH_PLACE_MEMORY_ON_DOMAIN",
+    "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
 ];
 
 /// Whether `<numa.h>` sits somewhere the compiler will find it.
@@ -48,9 +46,12 @@ fn main() -> Result<(), cc::Error> {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let portable = std::env::var("CARGO_FEATURE_PORTABLE").is_ok();
     let force_topology = std::env::var("CARGO_FEATURE_TOPOLOGY").is_ok();
-    let force_numa_memory = std::env::var("CARGO_FEATURE_NUMA_MEMORY").is_ok();
-    let force_huge_pages = std::env::var("CARGO_FEATURE_HUGE_PAGES").is_ok();
-    let force_thread_pinning = std::env::var("CARGO_FEATURE_THREAD_PINNING").is_ok();
+    let force_place_memory_on_domain =
+        std::env::var("CARGO_FEATURE_PLACE_MEMORY_ON_DOMAIN").is_ok();
+    let force_place_huge_pages_on_domain =
+        std::env::var("CARGO_FEATURE_PLACE_HUGE_PAGES_ON_DOMAIN").is_ok();
+    let force_place_threads_by_affinity =
+        std::env::var("CARGO_FEATURE_PLACE_THREADS_BY_AFFINITY").is_ok();
 
     build
         .cpp(true) // Enable C++ support
@@ -62,7 +63,10 @@ fn main() -> Result<(), cc::Error> {
 
     if portable {
         assert!(
-            !force_topology && !force_numa_memory && !force_huge_pages && !force_thread_pinning,
+            !force_topology
+                && !force_place_memory_on_domain
+                && !force_place_huge_pages_on_domain
+                && !force_place_threads_by_affinity,
             "`portable` turns off the very capabilities the other features turn on"
         );
         for capability in OPTIONAL_CAPABILITIES {
@@ -72,14 +76,14 @@ fn main() -> Result<(), cc::Error> {
         if force_topology {
             build.define("FU_WITH_TOPOLOGY", "1");
         }
-        if force_numa_memory {
-            build.define("FU_WITH_NUMA_MEMORY", "1");
+        if force_place_memory_on_domain {
+            build.define("FU_WITH_PLACE_MEMORY_ON_DOMAIN", "1");
         }
-        if force_huge_pages {
-            build.define("FU_WITH_HUGE_PAGES", "1");
+        if force_place_huge_pages_on_domain {
+            build.define("FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN", "1");
         }
-        if force_thread_pinning {
-            build.define("FU_WITH_THREAD_PINNING", "1");
+        if force_place_threads_by_affinity {
+            build.define("FU_WITH_PLACE_THREADS_BY_AFFINITY", "1");
         }
     }
 
@@ -103,7 +107,8 @@ fn main() -> Result<(), cc::Error> {
     if target_os == "linux" && !portable {
         if has_libnuma_header() {
             println!("cargo:rustc-link-lib=numa");
-        } else if force_topology || force_numa_memory || force_huge_pages {
+        } else if force_topology || force_place_memory_on_domain || force_place_huge_pages_on_domain
+        {
             panic!(
                 "`topology`/`numa-memory`/`huge-pages` were requested, but `numa.h` was not found"
             );

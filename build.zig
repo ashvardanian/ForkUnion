@@ -17,9 +17,9 @@ pub fn build(b: *std.Build) void {
     // from whether `<numa.h>` is there to include. `-Dnuma-memory=true` and friends only override
     // that; an override the platform cannot honour stops at an `#error`, not at link time.
     const with_topology = b.option(bool, "topology", "Enumerate compute and memory domains");
-    const with_numa_memory = b.option(bool, "numa-memory", "Place pages on a chosen memory domain");
-    const with_huge_pages = b.option(bool, "huge-pages", "Request pages larger than the base page");
-    const with_thread_pinning = b.option(bool, "thread-pinning", "Bind worker threads to cores");
+    const with_place_memory_on_domain = b.option(bool, "place-memory-on-domain", "Place pages on a chosen memory domain");
+    const with_place_huge_pages_on_domain = b.option(bool, "place-huge-pages-on-domain", "Request pages larger than the base page");
+    const with_place_threads_by_affinity = b.option(bool, "place-threads-by-affinity", "Bind worker threads to cores");
     const portable = b.option(bool, "portable", "Force every optional capability off") orelse false;
 
     // Compile the C++ library from c/forkunion.cpp (like Rust's build.rs does)
@@ -38,21 +38,22 @@ pub fn build(b: *std.Build) void {
     cpp_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-exceptions", "-fno-rtti" }) catch @panic("OOM");
 
     const optional_capabilities = [_][]const u8{
-        "FU_WITH_TOPOLOGY",   "FU_WITH_TOPOLOGY_CACHES",    "FU_WITH_TOPOLOGY_METRICS", "FU_WITH_THREAD_PINNING",
-        "FU_WITH_THREAD_QOS", "FU_WITH_THREAD_SCHED_CLASS", "FU_WITH_NUMA_MEMORY",      "FU_WITH_HUGE_PAGES",
+        "FU_WITH_TOPOLOGY",                    "FU_WITH_PLACE_THREADS_BY_AFFINITY",
+        "FU_WITH_PLACE_THREADS_BY_CORE_CLASS", "FU_WITH_RESCHEDULE_THREADS_BY_CLASS",
+        "FU_WITH_PLACE_MEMORY_ON_DOMAIN",      "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
     };
 
-    const numa_memory = with_numa_memory;
+    const numa_memory = with_place_memory_on_domain;
     if (portable) {
-        if (with_topology == true or numa_memory == true or with_huge_pages == true or with_thread_pinning == true)
+        if (with_topology == true or numa_memory == true or with_place_huge_pages_on_domain == true or with_place_threads_by_affinity == true)
             @panic("-Dportable turns off the very capabilities the other options turn on");
         for (optional_capabilities) |capability|
             cpp_flags.append(b.allocator, b.fmt("-D{s}=0", .{capability})) catch @panic("OOM");
     } else {
         if (with_topology) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_TOPOLOGY={d}", .{@intFromBool(on)})) catch @panic("OOM");
-        if (numa_memory) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_NUMA_MEMORY={d}", .{@intFromBool(on)})) catch @panic("OOM");
-        if (with_huge_pages) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_HUGE_PAGES={d}", .{@intFromBool(on)})) catch @panic("OOM");
-        if (with_thread_pinning) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_THREAD_PINNING={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (numa_memory) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_PLACE_MEMORY_ON_DOMAIN={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (with_place_huge_pages_on_domain) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (with_place_threads_by_affinity) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_PLACE_THREADS_BY_AFFINITY={d}", .{@intFromBool(on)})) catch @panic("OOM");
     }
 
     // We link `libnuma` whenever the target could want it, and let the header decide whether to call

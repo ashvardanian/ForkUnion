@@ -409,7 +409,7 @@ extern "C" {
     fn fu_free_in(memory_domain_index: usize, pointer: *mut c_void, bytes: usize);
 
     // Pool lifecycle & introspection
-    fn fu_pool_new(name: *const c_char) -> *mut c_void;
+    fn fu_pool_new(name: *const c_char, allowed: u32) -> *mut c_void;
     fn fu_pool_delete(pool: *mut c_void);
     fn fu_pool_spawn(pool: *mut c_void, threads: usize, exclusivity: c_int) -> c_int;
     fn fu_pool_spawn_on(
@@ -468,18 +468,18 @@ extern "C" {
 
 /// Everything the library can do, whether decided when it was compiled or found on this machine.
 ///
-/// Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
-/// about _this machine_: [`Capabilities::HUGE_PAGES`] means the kernel is offering them. A bit
-/// marked `COMPTIME_` is a fact about _this build_: [`Capabilities::COMPTIME_HUGE_PAGES`] means we
-/// compiled the code that would ask for them.
+/// One bit per facility, and two accessors ask two questions of the same bit.
+/// [`comptime_capabilities`] reports whether the code was _built_: a set
+/// [`Capabilities::PLACE_HUGE_PAGES_ON_DOMAIN`] means we compiled the path that asks for them.
+/// [`runtime_capabilities`] reports whether the machine _offers_ it now.
 ///
-/// Neither implies the other. A binary carrying [`Capabilities::COMPTIME_NUMA_MEMORY`] runs
-/// perfectly well on a single-node box, where [`Capabilities::NUMA_AWARE`] never appears; and a
+/// Neither implies the other. A binary that built [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] runs
+/// perfectly well on a single-node box, where the runtime accessor never sets that bit; and a
 /// machine with four NUMA nodes reports none of them to a build that left the topology out.
 ///
 /// ```
 /// use forkunion::{comptime_capabilities, Capabilities};
-/// if comptime_capabilities().contains(Capabilities::COMPTIME_COLOCATED_POOLS) {
+/// if comptime_capabilities().contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN) {
 ///     // `spawn_in`, `PinnedAllocator`, and friends are real here.
 /// }
 /// ```
@@ -491,46 +491,39 @@ impl Capabilities {
     pub const NONE: Capabilities = Capabilities(0);
 
     /// x86 `pause` instruction.
-    pub const X86_PAUSE: Capabilities = Capabilities(1 << 1);
+    pub const X86_PAUSE: Capabilities = Capabilities(1 << 0);
     /// x86-64 `tpause` instruction, with `WAITPKG` support.
-    pub const X86_TPAUSE: Capabilities = Capabilities(1 << 2);
+    pub const X86_TPAUSE: Capabilities = Capabilities(1 << 1);
     /// Arm `yield` instruction.
-    pub const ARM64_YIELD: Capabilities = Capabilities(1 << 3);
+    pub const ARM64_YIELD: Capabilities = Capabilities(1 << 2);
     /// AArch64 `wfet` instruction, with `FEAT_WFxT` support.
-    pub const ARM64_WFET: Capabilities = Capabilities(1 << 4);
+    pub const ARM64_WFET: Capabilities = Capabilities(1 << 3);
     /// RISC-V `pause` instruction.
-    pub const RISC5_PAUSE: Capabilities = Capabilities(1 << 5);
-    /// This pool is pinned to a single compute domain.
-    pub const COMPUTE_DOMAIN: Capabilities = Capabilities(1 << 6);
+    pub const RISC5_PAUSE: Capabilities = Capabilities(1 << 4);
     /// RISC-V `WRS.STO` monitored wait, from the `Zawrs` extension.
-    pub const RISC5_WRS: Capabilities = Capabilities(1 << 7);
-    /// This machine has NUMA nodes to allocate on.
-    pub const NUMA_AWARE: Capabilities = Capabilities(1 << 10);
-    /// This kernel offers pages larger than the base page.
-    pub const HUGE_PAGES: Capabilities = Capabilities(1 << 11);
-    /// ... and offers them transparently.
-    pub const HUGE_PAGES_TRANSPARENT: Capabilities = Capabilities(1 << 12);
+    pub const RISC5_WRS: Capabilities = Capabilities(1 << 5);
 
-    /// Can spawn OS threads directly, rather than through the C++ standard library.
-    pub const COMPTIME_THREADS: Capabilities = Capabilities(1 << 16);
-    /// Can enumerate this machine's cores, compute domains, and memory domains.
-    pub const COMPTIME_TOPOLOGY: Capabilities = Capabilities(1 << 17);
-    /// Can see which cores share a cache, so a compute domain can be cut at a cluster.
-    pub const COMPTIME_TOPOLOGY_CACHES: Capabilities = Capabilities(1 << 18);
-    /// Can read inter-domain distance, bandwidth, and latency.
-    pub const COMPTIME_TOPOLOGY_METRICS: Capabilities = Capabilities(1 << 19);
-    /// Can bind a thread to a set of cores, and have the kernel honour it.
-    pub const COMPTIME_THREAD_PINNING: Capabilities = Capabilities(1 << 20);
-    /// Can hint which class of core a thread should run on, at creation time.
-    pub const COMPTIME_THREAD_QOS: Capabilities = Capabilities(1 << 21);
-    /// Can change another thread's scheduling class, to sleep or wake it cheaply.
-    pub const COMPTIME_THREAD_SCHED_CLASS: Capabilities = Capabilities(1 << 22);
-    /// Can place pages on a chosen memory domain.
-    pub const COMPTIME_NUMA_MEMORY: Capabilities = Capabilities(1 << 23);
-    /// Can request pages larger than the base page.
-    pub const COMPTIME_HUGE_PAGES: Capabilities = Capabilities(1 << 24);
-    /// The domain-aware pools and allocators are compiled in.
-    pub const COMPTIME_COLOCATED_POOLS: Capabilities = Capabilities(1 << 25);
+    /// Own the raw OS thread handle instead of a `std::thread`.
+    pub const OS_THREADS: Capabilities = Capabilities(1 << 6);
+    /// Enumerate this machine's cores, compute domains, and memory domains.
+    pub const TOPOLOGY: Capabilities = Capabilities(1 << 7);
+    /// Bind a thread to a set of cores, choosing where it runs.
+    pub const PLACE_THREADS_BY_AFFINITY: Capabilities = Capabilities(1 << 8);
+    /// Steer a thread onto a class of core at creation, choosing where it runs.
+    pub const PLACE_THREADS_BY_CORE_CLASS: Capabilities = Capabilities(1 << 9);
+    /// Reclass a thread's scheduler to sleep or wake it, choosing when it runs.
+    pub const RESCHEDULE_THREADS_BY_CLASS: Capabilities = Capabilities(1 << 10);
+    /// Place a buffer's pages on a chosen memory domain.
+    pub const PLACE_MEMORY_ON_DOMAIN: Capabilities = Capabilities(1 << 11);
+    /// Place larger-than-base pages on a chosen memory domain.
+    pub const PLACE_HUGE_PAGES_ON_DOMAIN: Capabilities = Capabilities(1 << 12);
+    /// The kernel promotes base pages to huge pages on its own.
+    pub const HUGE_TRANSPARENT_PAGES: Capabilities = Capabilities(1 << 13);
+    /// The domain-aware `colocated_pool` and `distributed_pool` are compiled in.
+    pub const COLOCATE_POOLS_ON_DOMAIN: Capabilities = Capabilities(1 << 14);
+
+    /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
+    pub const ALL: Capabilities = Capabilities(u32::MAX);
 
     /// Whether every bit of `other` is set in `self`.
     pub const fn contains(self, other: Capabilities) -> bool {
@@ -837,6 +830,18 @@ impl ThreadPool {
         threads: usize,
         exclusivity: CallerExclusivity,
     ) -> Result<Self, Error> {
+        Self::try_named_spawn_with_capabilities(name, threads, exclusivity, Capabilities::ALL)
+    }
+
+    /// As [`try_named_spawn_with_exclusivity`](Self::try_named_spawn_with_exclusivity), but constrains
+    /// the pool to `allowed`: clear a waiter bit to force a lower-priority busy-wait, or clear
+    /// [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] to force the flat (non-NUMA) pool.
+    pub fn try_named_spawn_with_capabilities(
+        name: Option<&str>,
+        threads: usize,
+        exclusivity: CallerExclusivity,
+        allowed: Capabilities,
+    ) -> Result<Self, Error> {
         if threads == 0 {
             return Err(Error::InvalidParameter);
         }
@@ -853,7 +858,7 @@ impl ThreadPool {
                 core::ptr::null()
             };
 
-            let inner = fu_pool_new(name_ptr);
+            let inner = fu_pool_new(name_ptr, allowed.0);
             if inner.is_null() {
                 return Err(Error::CreationFailed);
             }
@@ -891,11 +896,26 @@ impl ThreadPool {
         threads: usize,
         exclusivity: CallerExclusivity,
     ) -> Result<Self, Error> {
+        Self::try_spawn_on_with_capabilities(
+            compute_domain_index,
+            threads,
+            exclusivity,
+            Capabilities::ALL,
+        )
+    }
+
+    /// As [`try_spawn_on`](Self::try_spawn_on), but constrains the colocated pool to `allowed`.
+    pub fn try_spawn_on_with_capabilities(
+        compute_domain_index: usize,
+        threads: usize,
+        exclusivity: CallerExclusivity,
+        allowed: Capabilities,
+    ) -> Result<Self, Error> {
         if threads == 0 {
             return Err(Error::InvalidParameter);
         }
         unsafe {
-            let inner = fu_pool_new(core::ptr::null());
+            let inner = fu_pool_new(core::ptr::null(), allowed.0);
             if inner.is_null() {
                 return Err(Error::CreationFailed);
             }
@@ -4999,41 +5019,30 @@ mod tests {
         assert!(runtime_capabilities_string().is_some());
 
         // Threads are the one facility every supported platform has.
-        assert!(comptime.contains(Capabilities::COMPTIME_THREADS));
+        assert!(comptime.contains(Capabilities::OS_THREADS));
 
         // The aggregate is implied, never hand-set: pools need threads and a topology to spawn onto.
         assert_eq!(
-            comptime.contains(Capabilities::COMPTIME_COLOCATED_POOLS),
-            comptime.contains(Capabilities::COMPTIME_THREADS)
-                && comptime.contains(Capabilities::COMPTIME_TOPOLOGY)
+            comptime.contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN),
+            comptime.contains(Capabilities::OS_THREADS)
+                && comptime.contains(Capabilities::TOPOLOGY)
         );
 
         // Placing pages on a node presumes we discovered the nodes.
-        if comptime.contains(Capabilities::COMPTIME_NUMA_MEMORY) {
-            assert!(comptime.contains(Capabilities::COMPTIME_TOPOLOGY));
+        if comptime.contains(Capabilities::PLACE_MEMORY_ON_DOMAIN) {
+            assert!(comptime.contains(Capabilities::TOPOLOGY));
         }
 
         // Whatever we can construct, we can only construct because a capability was compiled in.
-        if !comptime.contains(Capabilities::COMPTIME_COLOCATED_POOLS) {
+        if !comptime.contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN) {
             assert_eq!(compute_domains_count(), 1);
         }
 
-        // A machine cannot report NUMA nodes to a build that never learned to look for them.
-        if runtime.contains(Capabilities::NUMA_AWARE) {
-            assert!(comptime.contains(Capabilities::COMPTIME_NUMA_MEMORY));
+        // One facility, two questions of the same bit: a machine can only _offer_ page placement if
+        // this build compiled the path that asks for it.
+        if runtime.contains(Capabilities::PLACE_MEMORY_ON_DOMAIN) {
+            assert!(comptime.contains(Capabilities::PLACE_MEMORY_ON_DOMAIN));
         }
-
-        // The two halves live in one bit-space, and must never collide.
-        assert_eq!(
-            comptime.0 & 0x0000_FFFF,
-            0,
-            "a comptime bit leaked into the runtime range"
-        );
-        assert_eq!(
-            runtime.0 & 0xFFFF_0000,
-            0,
-            "a runtime bit leaked into the comptime range"
-        );
     }
 
     #[cfg_attr(miri, ignore)]

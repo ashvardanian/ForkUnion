@@ -10,6 +10,356 @@ namespace ashvardanian {
 namespace forkunion {
 
 /**
+ *  @brief The kernel's own identifier for the calling thread, or 0 where there is none.
+ *  @sa `pinned_thread_t::id`, which caches it so other threads can read it.
+ *
+ *  Linux calls it a `pid_t` and hands it out through `gettid`. Darwin has no `gettid` at all, and
+ *  spells the same idea `pthread_threadid_np`, returning 64 bits. Both are the number a scheduler
+ *  or a profiler will show you; neither is a `pthread_t`.
+ */
+FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
+#if FU_ON_LINUX && FU_WITH_OS_THREADS
+    return static_cast<std::uint64_t>(::gettid());
+#elif FU_ON_APPLE
+    std::uint64_t thread_id = 0;
+    ::pthread_threadid_np(nullptr, &thread_id);
+    return thread_id;
+#elif FU_ON_WINDOWS && FU_WITH_OS_THREADS
+    // A `DWORD` that a debugger or Task Manager will show you; distinct from the `HANDLE`.
+    return static_cast<std::uint64_t>(::GetCurrentThreadId());
+#else
+    return 0;
+#endif
+}
+
+/**
+ *  @brief Names the @b calling thread, which is the only thread every platform lets us name.
+ *
+ *  Linux's `pthread_setname_np` takes a thread and a name, so a spawner can name its workers. Apple's
+ *  takes only a name and always renames the caller. Rather than branch on that at every call, the
+ *  worker names itself once it is running - the one shape both kernels agree on.
+ */
+FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ char const *thread_name) noexcept {
+#if FU_ON_LINUX && FU_WITH_OS_THREADS
+    (void)::pthread_setname_np(::pthread_self(), thread_name);
+#elif FU_ON_APPLE
+    (void)::pthread_setname_np(thread_name);
+#elif FU_ON_WINDOWS && FU_WITH_OS_THREADS
+    // `SetThreadDescription` wants UTF-16 and only exists on Windows 10 1607+. Resolve it at runtime
+    // so a binary keeps loading on older Windows, where the name is simply not applied - the same
+    // "best effort, never fatal" contract the POSIX paths keep.
+    using set_thread_description_t = HRESULT(WINAPI *)(HANDLE, PCWSTR);
+    HMODULE const kernel32 = ::GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32) return;
+    // The `FARPROC`-to-typed-pointer cast is the documented `GetProcAddress` idiom; MSVC's C4191 for it
+    // is suppressed with the other Windows pragmas up top, and it is clean under `-Wextra`/clang-tidy.
+    auto const set_thread_description =
+        reinterpret_cast<set_thread_description_t>(::GetProcAddress(kernel32, "SetThreadDescription"));
+    if (!set_thread_description) return;
+
+    // POSIX thread names cap at 16 bytes; the same buffer never needs more than 16 wide chars.
+    wchar_t wide_name[16] = {};
+    int const written =
+        ::MultiByteToWideChar(CP_UTF8, 0, thread_name, -1, wide_name, static_cast<int>(std::size(wide_name)));
+    if (written <= 0) return; // ? Nothing usable to hand over
+    wide_name[std::size(wide_name) - 1] = L'\0';
+    (void)set_thread_description(::GetCurrentThread(), wide_name);
+#endif
+}
+
+/**
+ *  @brief Upper bound on core IDs this machine may ever report, for sizing masks and names.
+ *
+ *  Not the same as `hardware_concurrency()` on Linux, where cores can be hot-plugged and the kernel
+ *  reserves IDs for cores that are offline right now. Elsewhere the distinction does not exist.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
+#if FU_ON_WINDOWS
+    DWORD const configured = ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (configured > 0) return static_cast<std::size_t>(configured);
+#elif FU_ON_POSIX
+    // ! Not `_SC_NPROCESSORS_ONLN`: a core that is offline right now still owns an ID, and a mask
+    // ! sized to the online count would refuse to name it.
+    long const configured = ::sysconf(_SC_NPROCESSORS_CONF);
+    if (configured > 0) return static_cast<std::size_t>(configured);
+#endif
+    return static_cast<std::size_t>(std::thread::hardware_concurrency());
+}
+
+#if FU_ON_WINDOWS
+/*  Windows addresses a logical processor by (processor group, bit within the group's 64-bit
+ *  `KAFFINITY` mask), not by a flat global id. A `core_id_t` therefore packs both, so the free
+ *  function `try_pin_thread_to_cores` can rebuild a `GROUP_AFFINITY` from an id alone - no side table
+ *  threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits, so the
+ *  index is 0..63); the remaining bits hold the group number. Everywhere else a `core_id_t` is
+ *  still just an opaque, comparable id - only the pinning path decodes it. */
+static constexpr int win_core_group_shift_k = 6;
+static constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
+/** @brief Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap
+ *         of 64 @b per @b group, never a cap on total cores (a machine with more uses several groups). */
+static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
+
+FU_MAYBE_UNUSED_ static inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
+    return (static_cast<core_id_t>(group) << win_core_group_shift_k) |
+           (static_cast<core_id_t>(bit) & win_core_index_mask_k);
+}
+FU_MAYBE_UNUSED_ static inline WORD win_core_group(core_id_t id) noexcept {
+    return static_cast<WORD>(id >> win_core_group_shift_k);
+}
+FU_MAYBE_UNUSED_ static inline unsigned win_core_index(core_id_t id) noexcept {
+    return static_cast<unsigned>(id & win_core_index_mask_k);
+}
+#endif // FU_ON_WINDOWS
+
+/*  The unit each kernel writes its affinity mask in. Deliberately not `std::uint64_t` everywhere:
+ *  a glibc `cpu_set_t` is an array of `__cpu_mask`, a FreeBSD `cpuset_t` an array of `long`, and a
+ *  Windows `GROUP_AFFINITY` carries one 64-bit `KAFFINITY`. Matching the word keeps the aliasing
+ *  below honest on 32-bit and big-endian targets alike. */
+#if FU_ON_WINDOWS
+using core_mask_word_t = KAFFINITY;
+#elif FU_ON_FREEBSD
+using core_mask_word_t = long;
+#elif FU_ON_POSIX
+using core_mask_word_t = unsigned long;
+#else
+using core_mask_word_t = std::uint64_t;
+#endif
+
+/**
+ *  @brief A dense bitset over `core_id_t` - the cores a thread may run on, or should be confined to.
+ *
+ *  A machine is not the same thing as the slice of it we were handed. `taskset`, a cgroup `cpuset`,
+ *  and a batch scheduler all narrow this set, and `hardware_concurrency` sees none of them. Sizing a
+ *  pool from the machine and pinning to cores outside the set either escapes the restriction, or -
+ *  where the kernel enforces it - crowds every spinning worker onto the few cores that remain.
+ *
+ *  Every platform hands out a dense core id, so one bitset covers them all: Linux and FreeBSD number
+ *  logical processors from zero, and Windows packs `(group << 6) | bit` into the same integer.
+ *
+ *  @note Not `CPU_ALLOC`. That macro is `malloc` behind a name - glibc's `__sched_cpualloc` rounds
+ *        the count up and tail-calls it - which would both bypass this allocator and contradict what
+ *        the library promises. A `dynamic_array` sized from `possible_cores()` costs one cold-path
+ *        allocation and, unlike a fixed `cpu_set_t`, does not stop at glibc's 1024-core `CPU_SETSIZE`.
+ */
+template <typename allocator_type_ = std::allocator<core_mask_word_t>>
+class core_mask {
+    static constexpr std::size_t bits_per_word_k = sizeof(core_mask_word_t) * 8;
+
+    /** @brief Backing words of the bitset, one bit per `core_id_t`. */
+    dynamic_array<core_mask_word_t, allocator_type_> words_;
+
+  public:
+    core_mask() noexcept = default;
+    explicit core_mask(allocator_type_ const &allocator) noexcept : words_(allocator) {}
+
+    /**
+     *  @brief Upper bound on the `core_id_t` values this machine can produce - the width a mask covers.
+     *  @note Not `possible_cores()`. Windows ids are `(group << 6) | bit`, so a two-group machine with
+     *        80 logical processors still emits ids up to 103. Sizing by the core count would drop them.
+     */
+    static std::size_t id_space() noexcept {
+#if FU_ON_WINDOWS
+        WORD const groups = ::GetActiveProcessorGroupCount();
+        return static_cast<std::size_t>(groups ? groups : 1) * win_processors_per_group_k;
+#else
+        return possible_cores();
+#endif
+    }
+
+    /** @retval false on allocation failure, leaving the mask unusable rather than half-sized. */
+    bool try_resize_for(std::size_t const cores) noexcept {
+        return words_.try_resize(divide_round_up(cores, bits_per_word_k));
+    }
+
+    /** @brief Sizes the mask to hold every id this machine can produce. @sa `id_space`. */
+    bool try_resize() noexcept { return try_resize_for(id_space()); }
+
+    void reset() noexcept { words_.reset(); }
+    void clear() noexcept { std::memset(words_.data(), 0, bytes()); }
+
+    bool valid() const noexcept { return !words_.empty(); }
+    std::size_t capacity() const noexcept { return words_.size() * bits_per_word_k; }
+    std::size_t bytes() const noexcept { return words_.size() * sizeof(core_mask_word_t); }
+    void *data() noexcept { return static_cast<void *>(words_.data()); }
+    void const *data() const noexcept { return static_cast<void const *>(words_.data()); }
+
+    void add(core_id_t const core) noexcept {
+        if (core < 0 || static_cast<std::size_t>(core) >= capacity()) return;
+        std::size_t const bit = static_cast<std::size_t>(core);
+        words_[bit / bits_per_word_k] |= static_cast<core_mask_word_t>(core_mask_word_t {1} << (bit % bits_per_word_k));
+    }
+
+    bool contains(core_id_t const core) const noexcept {
+        if (core < 0 || static_cast<std::size_t>(core) >= capacity()) return false;
+        std::size_t const bit = static_cast<std::size_t>(core);
+        return ((words_[bit / bits_per_word_k] >> (bit % bits_per_word_k)) & core_mask_word_t {1}) != 0;
+    }
+
+    std::size_t count() const noexcept {
+        std::size_t total = 0;
+        for (std::size_t i = 0; i < words_.size(); ++i)
+            total += static_cast<std::size_t>(popcount(static_cast<std::uint64_t>(words_[i])));
+        return total;
+    }
+};
+
+using core_mask_t = core_mask<>;
+
+/**
+ *  @brief Reads the cores the calling thread may run on into @p cores.
+ *  @retval false where the platform exposes no such mask, which is @b not an error.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_capture_thread_cores(FU_MAYBE_UNUSED_ core_mask_t &cores) noexcept {
+#if FU_ON_LINUX
+    // A `cpu_set_t` is an array of `__cpu_mask`, which is exactly `core_mask_word_t` here. The kernel
+    // rejects a buffer narrower than its own cpumask, so grow once rather than guess at `nr_cpu_ids`.
+    std::size_t cores_to_fit = core_mask_t::id_space();
+    for (int attempt = 0; attempt < 4; ++attempt, cores_to_fit *= 2) {
+        if (!cores.try_resize_for(cores_to_fit)) return false;
+        if (::sched_getaffinity(0, cores.bytes(), static_cast<cpu_set_t *>(cores.data())) == 0) return true;
+        if (errno != EINVAL) break; // ! Anything but "your buffer is too small" will not improve
+    }
+    cores.reset();
+    return false;
+
+#elif FU_ON_WINDOWS
+    // A thread lives in exactly one processor group at a time, so that group's mask is its allowed set.
+    if (!cores.try_resize()) return false;
+    GROUP_AFFINITY affinity = {};
+    if (!::GetThreadGroupAffinity(::GetCurrentThread(), &affinity)) return false;
+    for (unsigned bit = 0; bit < win_processors_per_group_k; ++bit)
+        if (affinity.Mask & (static_cast<KAFFINITY>(1) << bit)) cores.add(win_encode_core_id(affinity.Group, bit));
+    return true;
+
+#elif FU_ON_FREEBSD
+    // ! Not `sched_getaffinity`: FreeBSD spells it `cpuset_getaffinity`, and `-1` means "this thread".
+    if (!cores.try_resize()) return false;
+    if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, cores.bytes(),
+                             static_cast<cpuset_t *>(cores.data())) == 0)
+        return true;
+    cores.reset();
+    return false;
+
+#else
+    // Darwin exposes no CPU mask at all. `thread_policy_set(THREAD_AFFINITY_POLICY)` sets an affinity
+    // @b tag - a hint that threads want to share an L2 - not a set of cores, and Apple Silicon answers
+    // `KERN_NOT_SUPPORTED`. A pool there partitions the work by domain and lets the scheduler place it.
+    return false;
+#endif
+}
+
+/**
+ *  @brief Number of cores the calling thread may run on, or `possible_cores()` where unknowable.
+ *  @note Prefer this to `std::thread::hardware_concurrency` when sizing a pool: the latter counts
+ *        the machine's cores, not the ones this process was given.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
+    core_mask_t allowed;
+    if (try_capture_thread_cores(allowed)) {
+        std::size_t const allowed_count = allowed.count();
+        if (allowed_count > 0) return allowed_count;
+    }
+    return possible_cores();
+}
+
+/** @brief The OS thread handle a `colocated_pool` stores, joins, and pins - one per worker. */
+#if FU_ON_WINDOWS
+using native_thread_t = HANDLE; // ? From `CreateThread`; identity is tracked by thread id, not this
+#else
+using native_thread_t = pthread_t;
+#endif
+
+/**
+ *  @brief Confines @p thread to the cores held by @p cores. The one place placement actually happens.
+ *  @retval false when the platform exposes no thread placement, which is @b not an error.
+ *
+ *  Linux hands out a `cpu_set_t` and honours it. FreeBSD spells the same idea `cpuset_t`. Windows
+ *  addresses a core by (processor group, bit), packed into each `core_id_t`; a thread lives in exactly
+ *  one group, so a mask spanning two is a caller error. Apple Silicon answers `KERN_NOT_SUPPORTED` to
+ *  `thread_policy_set` - measured, not assumed - and offers only a Quality-of-Service class, chosen at
+ *  creation. So a pool there partitions the @b work by domain and lets the scheduler place the @b threads.
+ *  @sa `try_pin_thread_to_cores`, the adaptor that builds a mask from a core list.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
+                                                           FU_MAYBE_UNUSED_ core_mask_t const &cores) noexcept {
+#if FU_ON_WINDOWS
+    // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them,
+    // and a thread cannot span groups. Cores from another group are a caller error, not a mask.
+    GROUP_AFFINITY affinity = {};
+    bool group_chosen = false;
+    for (std::size_t core = 0; core < cores.capacity(); ++core) {
+        core_id_t const id = static_cast<core_id_t>(core);
+        if (!cores.contains(id)) continue;
+        WORD const group = win_core_group(id);
+        if (!group_chosen) affinity.Group = group, group_chosen = true;
+        else if (group != affinity.Group)
+            return false; // ! A thread lives in exactly one group
+        affinity.Mask |= static_cast<KAFFINITY>(1) << win_core_index(id);
+    }
+    return group_chosen && ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0;
+
+#elif FU_ON_FREEBSD
+    if (!cores.valid()) return false;
+    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpuset_t const *>(cores.data())) == 0;
+
+#elif FU_WITH_PLACE_THREADS_BY_AFFINITY
+    if (!cores.valid()) return false;
+    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpu_set_t const *>(cores.data())) == 0;
+
+#else
+    return false; // ? No placement here; the harvest still reports the domains
+#endif
+}
+
+/**
+ *  @brief Confines @p thread to the @p count cores listed in @p cores.
+ *  @retval false when the platform exposes no thread placement, which is @b not an error.
+ *  @note A thin adaptor: it builds a `core_mask` and defers to `try_apply_thread_cores`, which is
+ *        where the per-platform placement lives. It owns no platform logic of its own.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_pin_thread_to_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
+                                                            FU_MAYBE_UNUSED_ core_id_t const *cores,
+                                                            FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
+#if FU_WITH_PLACE_THREADS_BY_AFFINITY
+    if (count == 0) return false;
+    core_mask_t mask;
+    if (!mask.try_resize()) return false;
+    for (std::size_t i = 0; i < count; ++i) {
+        assert(cores[i] >= 0 && "Invalid CPU core ID");
+        mask.add(cores[i]);
+    }
+    return try_apply_thread_cores(thread, mask);
+#else
+    return false; // ? No placement here; the harvest still reports the domains
+#endif
+}
+
+/**
+ *  @brief Puts the calling thread back on the cores @p saved recorded before it was pinned.
+ *  @note A no-op where nothing was ever narrowed, or where @p saved was never captured.
+ *
+ *  A pool that narrows the caller owes it the mask it had, not the mask of the whole machine. The
+ *  two differ under `taskset`, a cgroup `cpuset`, or any batch scheduler, and widening to the
+ *  machine would hand the caller cores this process was never granted.
+ *
+ *  Note that no NUMA run-node policy is reset here: the pool never sets one. Memory placement goes
+ *  through `mbind` on the allocation, not through the calling thread's policy, and `numa_run_on_node`
+ *  would rewrite the very CPU mask we just restored.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_restore_thread_cores(FU_MAYBE_UNUSED_ core_mask_t const &saved) noexcept {
+#if FU_WITH_PLACE_THREADS_BY_AFFINITY
+    if (!saved.valid()) return false;
+#if FU_ON_WINDOWS
+    return try_apply_thread_cores(::GetCurrentThread(), saved);
+#else
+    return try_apply_thread_cores(::pthread_self(), saved);
+#endif
+#else
+    return false;
+#endif
+}
+
+/**
  *  @brief One page size the kernel offers, and how many pages of it exist.
  *
  *  A machine reports several: the base page every allocation uses by default, and whichever huge
@@ -26,7 +376,7 @@ struct ram_page_setting_t {
     std::size_t free_pages {0};
 };
 
-static constexpr std::size_t page_size_4k = 4ull * 1024ull;                       // 4 KB
+static constexpr std::size_t page_size_4k_k = 4ull * 1024ull;                     // 4 KB
 static constexpr std::size_t page_size_2m_k = 2ull * 1024ull * 1024ull;           // 2 MB
 static constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull; // 1 GB
 
@@ -36,7 +386,7 @@ static constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t ram_page_size() noexcept {
-#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     return static_cast<std::size_t>(::numa_pagesize()); // ! `numa_pagesize` is libnuma, Linux-only
 #elif defined(__unix__) || defined(__unix) || defined(unix) || FU_ON_APPLE
     return static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
@@ -160,7 +510,7 @@ class ram_page_settings {
     bool try_harvest(FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id) noexcept {
         assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
-#if FU_WITH_HUGE_PAGES && FU_ON_LINUX
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
 
         sizes_.clear();
 
@@ -262,7 +612,7 @@ class ram_page_settings {
 
         return true;
 
-#elif FU_WITH_HUGE_PAGES && FU_ON_WINDOWS
+#elif FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_WINDOWS
         // Windows exposes exactly one large-page size, and only when the caller holds the
         // `SeLockMemoryPrivilege`; there is no per-node pool to enumerate or reserve.
         fu_unused_(memory_domain_id);
@@ -839,14 +1189,10 @@ struct machine_topology {
     std::size_t distance(compute_domain_index_t const compute_domain_index,
                          memory_domain_index_t const memory_domain_index) const noexcept {
         if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= memory_domains_count_) return 0;
-#if FU_WITH_TOPOLOGY_METRICS
-        memory_domain_id_t const from = compute_domains_[compute_domain_index].memory_domain_id;
-        memory_domain_id_t const to = memory_domains_[memory_domain_index].memory_domain_id;
-        int const numa_dist = ::numa_distance(from, to);
-        return numa_dist > 0 ? static_cast<std::size_t>(numa_dist) : (from == to ? 10u : 20u);
-#else
+        // TODO: replace this local-versus-remote heuristic with our own latency probe. The OS-reported
+        // SLIT distance (`numa_distance`) was dropped with the `topology_metrics` capability, because
+        // firmware often reports a uniform or fabricated matrix.
         return compute_domains_[compute_domain_index].memory_domain_index == memory_domain_index ? 10u : 20u;
-#endif
     }
 
     /** @brief HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown. */

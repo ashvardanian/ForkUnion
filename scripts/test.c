@@ -6,55 +6,51 @@
 
 #include <forkunion.h>
 
-/* Constants */
 static const size_t default_parallel_tasks_k = 10000; // 10K
 
-/* Test helpers */
-static bool test_try_spawn_zero(void) {
-    fu_pool_t *pool = fu_pool_new("test_zero");
+/** Creates a pool from @p mask and spawns a default-sized crew, or returns NULL on failure. */
+static fu_pool_t *spawn_default_pool(char const *name, fu_capabilities_t mask, fu_caller_exclusivity_t mode) {
+    fu_pool_t *pool = fu_pool_new(name, mask);
+    if (!pool) return NULL;
+    size_t threads = fu_logical_cores_count();
+    if (threads == 0) threads = 4;
+    if (fu_pool_spawn(pool, threads, mode)) return pool;
+    fu_pool_delete(pool);
+    return NULL;
+}
+
+static bool test_try_spawn_zero(fu_capabilities_t mask) {
+    fu_pool_t *pool = fu_pool_new("test_zero", mask);
     bool result = !fu_pool_spawn(pool, 0u, fu_caller_inclusive_k);
     fu_pool_delete(pool);
     return result;
 }
 
-static bool test_try_spawn_success(void) {
-    fu_pool_t *pool = fu_pool_new("test_spawn");
+static bool test_try_spawn_success(fu_capabilities_t mask) {
+    fu_pool_t *pool = spawn_default_pool("test_spawn", mask, fu_caller_inclusive_k);
     if (!pool) return false;
-
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
-    bool result = fu_pool_spawn(pool, threads, fu_caller_inclusive_k);
     fu_pool_delete(pool);
-    return result;
+    return true;
 }
 
-/* Context for for_threads test */
-struct for_threads_context {
+/** Context for the `for_threads` test. */
+struct for_threads_context_t {
     atomic_bool *visited;
 };
 
 static void for_threads_callback(void *context_punned, size_t thread, size_t compute_domain) {
     (void)compute_domain;
-    struct for_threads_context *context = (struct for_threads_context *)context_punned;
+    struct for_threads_context_t *context = (struct for_threads_context_t *)context_punned;
     atomic_store(&context->visited[thread], true);
 }
 
-static bool test_for_threads(void) {
-    fu_pool_t *pool = fu_pool_new("test_for_threads");
+static bool test_for_threads(fu_capabilities_t mask) {
+    fu_pool_t *pool = spawn_default_pool("test_for_threads", mask, fu_caller_inclusive_k);
     if (!pool) return false;
-
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
-    if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
-        fu_pool_delete(pool);
-        return false;
-    }
 
     size_t threads_count = fu_pool_threads_count(pool);
     atomic_bool *visited = calloc(threads_count, sizeof(atomic_bool));
-    struct for_threads_context context = {.visited = visited};
+    struct for_threads_context_t context = {.visited = visited};
 
     fu_pool_for_threads(pool, for_threads_callback, &context);
 
@@ -71,8 +67,8 @@ static bool test_for_threads(void) {
     return result;
 }
 
-static bool test_caller_exclusivity_query(void) {
-    fu_pool_t *pool = fu_pool_new("test_exclusivity");
+static bool test_caller_exclusivity_query(fu_capabilities_t mask) {
+    fu_pool_t *pool = fu_pool_new("test_exclusivity", mask);
     if (!pool) return false;
 
     size_t threads = fu_logical_cores_count();
@@ -94,7 +90,7 @@ static bool test_caller_exclusivity_query(void) {
     return result;
 }
 
-static bool test_per_compute_domain_pool(void) {
+static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
     size_t compute_domains = fu_compute_domains_count();
     if (compute_domains == 0) return false;
 
@@ -104,7 +100,7 @@ static bool test_per_compute_domain_pool(void) {
         size_t cores = fu_logical_cores_count_in(compute_domain);
         if (cores == 0) cores = 2; /* Non-NUMA build reports via hardware_concurrency */
 
-        fu_pool_t *pool = fu_pool_new("compute_domain");
+        fu_pool_t *pool = fu_pool_new("compute_domain", mask);
         if (!pool) {
             result = false;
             break;
@@ -116,28 +112,20 @@ static bool test_per_compute_domain_pool(void) {
     }
 
     /* Out-of-range compute domain must fail cleanly, not crash. */
-    fu_pool_t *out_of_range = fu_pool_new("bad");
+    fu_pool_t *out_of_range = fu_pool_new("bad", mask);
     if (out_of_range && fu_pool_spawn_on(out_of_range, compute_domains + 100, 2, fu_caller_exclusive_k)) result = false;
     fu_pool_delete(out_of_range);
     return result;
 }
 
-static bool test_generation_polling(void) {
-    fu_pool_t *pool = fu_pool_new("test_generation");
-    if (!pool) return false;
-
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
+static bool test_generation_polling(fu_capabilities_t mask) {
     /* Polling before join is the caller-exclusive pattern: no caller slice is owed. */
-    if (!fu_pool_spawn(pool, threads, fu_caller_exclusive_k)) {
-        fu_pool_delete(pool);
-        return false;
-    }
+    fu_pool_t *pool = spawn_default_pool("test_generation", mask, fu_caller_exclusive_k);
+    if (!pool) return false;
 
     size_t threads_count = fu_pool_threads_count(pool);
     atomic_bool *visited = calloc(threads_count, sizeof(atomic_bool));
-    struct for_threads_context context = {.visited = visited};
+    struct for_threads_context_t context = {.visited = visited};
 
     fu_generation_t generation = fu_pool_unsafe_for_threads(pool, for_threads_callback, &context);
 
@@ -159,8 +147,8 @@ static bool test_generation_polling(void) {
     return result;
 }
 
-/* Context for uncomfortable input size test */
-struct uncomfortable_context {
+/** Context for uncomfortable input size test */
+struct uncomfortable_context_t {
     size_t input_size;
     atomic_bool out_of_bounds;
 };
@@ -168,27 +156,19 @@ struct uncomfortable_context {
 static void uncomfortable_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
-    struct uncomfortable_context *context = (struct uncomfortable_context *)context_punned;
+    struct uncomfortable_context_t *context = (struct uncomfortable_context_t *)context_punned;
     if (task >= context->input_size) atomic_store(&context->out_of_bounds, true);
 }
 
-static bool test_uncomfortable_input_size(void) {
-    fu_pool_t *pool = fu_pool_new("test_uncomfortable");
+static bool test_uncomfortable_input_size(fu_capabilities_t mask) {
+    fu_pool_t *pool = spawn_default_pool("test_uncomfortable", mask, fu_caller_inclusive_k);
     if (!pool) return false;
-
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
-    if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
-        fu_pool_delete(pool);
-        return false;
-    }
 
     size_t threads_count = fu_pool_threads_count(pool);
     size_t max_input_size = threads_count * 3;
 
     for (size_t input_size = 0; input_size <= max_input_size; ++input_size) {
-        struct uncomfortable_context context = {.input_size = input_size, .out_of_bounds = false};
+        struct uncomfortable_context_t context = {.input_size = input_size, .out_of_bounds = false};
 
         fu_pool_for_n(pool, input_size, uncomfortable_callback, &context);
 
@@ -202,57 +182,49 @@ static bool test_uncomfortable_input_size(void) {
     return true;
 }
 
-/* Aligned visit structure for cache-line alignment */
-struct aligned_visit {
+/** Aligned visit structure for cache-line alignment */
+struct aligned_visit_t {
     _Alignas(64) size_t task;
 };
 
 /* Comparator for qsort */
 static int compare_visits(const void *a, const void *b) {
-    const struct aligned_visit *va = (const struct aligned_visit *)a;
-    const struct aligned_visit *vb = (const struct aligned_visit *)b;
+    const struct aligned_visit_t *va = (const struct aligned_visit_t *)a;
+    const struct aligned_visit_t *vb = (const struct aligned_visit_t *)b;
     if (va->task < vb->task) return -1;
     if (va->task > vb->task) return 1;
     return 0;
 }
 
-static bool contains_iota(struct aligned_visit *visited, size_t size) {
-    qsort(visited, size, sizeof(struct aligned_visit), compare_visits);
+static bool contains_iota(struct aligned_visit_t *visited, size_t size) {
+    qsort(visited, size, sizeof(struct aligned_visit_t), compare_visits);
 
     for (size_t i = 0; i < size; ++i)
         if (visited[i].task != i) return false;
     return true;
 }
 
-/* Context for for_n test */
-struct for_n_context {
+/** Context for for_n test */
+struct for_n_context_t {
     atomic_size_t counter;
-    struct aligned_visit *visited;
+    struct aligned_visit_t *visited;
 };
 
 static void for_n_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
-    struct for_n_context *context = (struct for_n_context *)context_punned;
+    struct for_n_context_t *context = (struct for_n_context_t *)context_punned;
 
     size_t count_populated = atomic_fetch_add(&context->counter, 1);
     context->visited[count_populated].task = task;
 }
 
-static bool test_for_n(void) {
-    fu_pool_t *pool = fu_pool_new("test_for_n");
+static bool test_for_n(fu_capabilities_t mask) {
+    fu_pool_t *pool = spawn_default_pool("test_for_n", mask, fu_caller_inclusive_k);
     if (!pool) return false;
 
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
-    if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
-        fu_pool_delete(pool);
-        return false;
-    }
-
-    struct aligned_visit *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit));
-    struct for_n_context context = {.counter = 0, .visited = visited};
+    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    struct for_n_context_t context = {.counter = 0, .visited = visited};
 
     fu_pool_for_n(pool, default_parallel_tasks_k, for_n_callback, &context);
 
@@ -273,20 +245,12 @@ static bool test_for_n(void) {
     return result;
 }
 
-static bool test_for_n_dynamic(void) {
-    fu_pool_t *pool = fu_pool_new("test_for_n_dynamic");
+static bool test_for_n_dynamic(fu_capabilities_t mask) {
+    fu_pool_t *pool = spawn_default_pool("test_for_n_dynamic", mask, fu_caller_inclusive_k);
     if (!pool) return false;
 
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
-    if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
-        fu_pool_delete(pool);
-        return false;
-    }
-
-    struct aligned_visit *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit));
-    struct for_n_context context = {.counter = 0, .visited = visited};
+    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    struct for_n_context_t context = {.counter = 0, .visited = visited};
 
     fu_pool_for_n_dynamic(pool, default_parallel_tasks_k, for_n_callback, &context);
 
@@ -310,7 +274,7 @@ static bool test_for_n_dynamic(void) {
 static void oversubscribed_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
-    struct for_n_context *context = (struct for_n_context *)context_punned;
+    struct for_n_context_t *context = (struct for_n_context_t *)context_punned;
 
     // Perform some weird amount of work, that is not very different between consecutive tasks
     static _Thread_local volatile size_t some_local_work = 0;
@@ -320,10 +284,10 @@ static void oversubscribed_callback(void *context_punned, size_t task, size_t th
     context->visited[count_populated].task = task;
 }
 
-static bool test_oversubscribed_threads(void) {
+static bool test_oversubscribed_threads(fu_capabilities_t mask) {
     const size_t oversubscription = 3;
 
-    fu_pool_t *pool = fu_pool_new("test_oversubscribed");
+    fu_pool_t *pool = fu_pool_new("test_oversubscribed", mask);
     if (!pool) return false;
 
     size_t threads = fu_logical_cores_count();
@@ -334,8 +298,8 @@ static bool test_oversubscribed_threads(void) {
         return false;
     }
 
-    struct aligned_visit *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit));
-    struct for_n_context context = {.counter = 0, .visited = visited};
+    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    struct for_n_context_t context = {.counter = 0, .visited = visited};
 
     fu_pool_for_n_dynamic(pool, default_parallel_tasks_k, oversubscribed_callback, &context);
 
@@ -350,17 +314,9 @@ static bool test_oversubscribed_threads(void) {
 /* GCC nested functions extension test */
 #if defined(__GNUC__) && !defined(__clang__)
 
-static bool test_gcc_nested_functions(void) {
-    fu_pool_t *pool = fu_pool_new("test_gcc_nested");
+static bool test_gcc_nested_functions(fu_capabilities_t mask) {
+    fu_pool_t *pool = spawn_default_pool("test_gcc_nested", mask, fu_caller_inclusive_k);
     if (!pool) return false;
-
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
-    if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
-        fu_pool_delete(pool);
-        return false;
-    }
 
     atomic_size_t counter = 0;
     size_t num_tasks = 100;
@@ -399,17 +355,9 @@ static void block_callback_wrapper(void *context_punned, size_t task, size_t thr
     wrapper->block(NULL, task, thread, compute_domain);
 }
 
-static bool test_clang_blocks(void) {
-    fu_pool_t *pool = fu_pool_new("test_clang_blocks");
+static bool test_clang_blocks(fu_capabilities_t mask) {
+    fu_pool_t *pool = spawn_default_pool("test_clang_blocks", mask, fu_caller_inclusive_k);
     if (!pool) return false;
-
-    size_t threads = fu_logical_cores_count();
-    if (threads == 0) threads = 4;
-
-    if (!fu_pool_spawn(pool, threads, fu_caller_inclusive_k)) {
-        fu_pool_delete(pool);
-        return false;
-    }
 
     __block atomic_size_t counter = 0;
     size_t num_tasks = 100;
@@ -437,27 +385,14 @@ static bool test_clang_blocks(void) {
 
 #endif // defined(__clang__) && defined(__BLOCKS__)
 
-int main(void) {
-    printf("Welcome to the ForkUnion library test suite (C API)!\n");
-
-    char const *caps = fu_runtime_capabilities_string();
-    if (!caps) {
-        fprintf(stderr, "Thread pool not supported on this platform\n");
-        return EXIT_FAILURE;
-    }
-
-    printf("Compiled with: %s\n", fu_comptime_capabilities_string());
-    printf("Running on:    %s\n", caps);
-    printf("Logical cores: %zu\n", fu_logical_cores_count());
-    printf("NUMA nodes: %zu\n", fu_memory_domains_count());
-    printf("ComputeDomains: %zu\n", fu_compute_domains_count());
-
-    printf("\nStarting unit tests...\n");
-
-    typedef bool (*test_func_t)(void);
-    struct {
+/**
+ *  @brief Runs the whole unit-test battery once, building every pool from @p mask.
+ *  @return Tests that failed; adds the number run to `*ran`.
+ */
+static size_t run_battery(fu_capabilities_t mask, char const *combo, size_t *ran) {
+    static struct {
         char const *name;
-        test_func_t function;
+        bool (*function)(fu_capabilities_t);
     } const unit_tests[] = {
         {"`try_spawn` zero threads", test_try_spawn_zero},
         {"`try_spawn` normal", test_try_spawn_success},
@@ -477,24 +412,56 @@ int main(void) {
 #endif
     };
 
-    size_t const total_unit_tests = sizeof(unit_tests) / sizeof(unit_tests[0]);
-    size_t failed_unit_tests = 0;
-
-    for (size_t i = 0; i < total_unit_tests; ++i) {
+    printf("== capability combo: %s ==\n", combo);
+    size_t failed = 0;
+    for (size_t i = 0; i < sizeof(unit_tests) / sizeof(unit_tests[0]); ++i, ++*ran) {
         printf("Running %s... ", unit_tests[i].name);
-        bool const ok = unit_tests[i].function();
-        if (ok) printf("PASS\n");
-        else
-            printf("FAIL\n");
-        failed_unit_tests += !ok;
+        bool const ok = unit_tests[i].function(mask);
+        printf(ok ? "PASS\n" : "FAIL\n");
+        failed += !ok;
     }
+    return failed;
+}
 
-    if (failed_unit_tests > 0) {
-        fprintf(stderr, "%zu/%zu unit tests failed\n", failed_unit_tests, total_unit_tests);
+int main(void) {
+    printf("Welcome to the ForkUnion library test suite (C API)!\n");
+
+    char const *caps = fu_runtime_capabilities_string();
+    if (!caps) {
+        fprintf(stderr, "Thread pool not supported on this platform\n");
         return EXIT_FAILURE;
     }
 
-    printf("All %zu unit tests passed\n", total_unit_tests);
+    printf("Compiled with: %s\n", fu_comptime_capabilities_string());
+    printf("Running on:    %s\n", caps);
+    printf("Logical cores: %zu\n", fu_logical_cores_count());
+    printf("NUMA nodes: %zu\n", fu_memory_domains_count());
+    printf("ComputeDomains: %zu\n", fu_compute_domains_count());
 
+    // Run the battery under the default pool, then under each waiter the machine offers - flat, and
+    // (where colocated pools exist) NUMA-gated too. Combo names come straight from the enum.
+    fu_capabilities_t const waiters = fu_runtime_capabilities() & fu_capability_any_yield_k;
+    bool const has_numa = (fu_comptime_capabilities() & fu_capability_colocate_pools_on_domain_k) != 0;
+
+    size_t ran = 0, failed = 0;
+    failed += run_battery(fu_capabilities_all_k, "default", &ran);
+    for (unsigned bit = 1; bit != 0; bit <<= 1) {
+        fu_capabilities_t const waiter = (fu_capabilities_t)bit;
+        if (!(waiters & waiter)) continue;
+        failed += run_battery(waiter, fu_capability_name(waiter), &ran);
+        if (has_numa) {
+            char distributed[64];
+            snprintf(distributed, sizeof(distributed), "%s (distributed)", fu_capability_name(waiter));
+            failed +=
+                run_battery((fu_capabilities_t)(waiter | fu_capability_place_memory_on_domain_k), distributed, &ran);
+        }
+    }
+
+    if (failed > 0) {
+        fprintf(stderr, "%zu/%zu test runs failed\n", failed, ran);
+        return EXIT_FAILURE;
+    }
+
+    printf("All %zu test runs passed\n", ran);
     return EXIT_SUCCESS;
 }

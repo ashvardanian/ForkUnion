@@ -37,9 +37,9 @@ std = []
 # Kernel facilities. Left alone, each is decided by `include/forkunion/types.hpp` from the platform
 # and from whether `<numa.h>` is present; these only override that. See `build.rs`.
 topology = []                   # ? Force compute/memory-domain enumeration on
-numa-memory = []                # ? Force page placement on a memory domain (implies topology)
-huge-pages = []                 # ? Force pages larger than the base page (implies numa-memory)
-thread-pinning = []             # ? Force binding worker threads to cores
+place-memory-on-domain = []                # ? Force page placement on a memory domain (implies topology)
+place-huge-pages-on-domain = []                 # ? Force pages larger than the base page (implies numa-memory)
+place-threads-by-affinity = []             # ? Force binding worker threads to cores
 portable = []                   # ? Force every optional capability off, leaving the STL pool
 
 [profile.release]

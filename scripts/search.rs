@@ -288,7 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Thread compute_domains: {}", fu::compute_domains_count());
     println!(
         "  NUMA enabled: {}",
-        fu::comptime_capabilities().contains(fu::Capabilities::COMPTIME_NUMA_MEMORY)
+        fu::comptime_capabilities().contains(fu::Capabilities::PLACE_MEMORY_ON_DOMAIN)
     );
     println!("Configuration:");
     println!("  Embedding dimensions: {EMBEDDING_DIMENSIONS}");

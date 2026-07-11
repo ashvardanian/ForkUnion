@@ -99,7 +99,7 @@
 
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
  *  facility rather than for the library that happens to provide it - so Windows' `VirtualAllocExNuma`
- *  satisfies `FU_WITH_NUMA_MEMORY` without inventing a second macro.
+ *  satisfies `FU_WITH_PLACE_MEMORY_ON_DOMAIN` without inventing a second macro.
  *
  *  Every one auto-derives from Layer 1, and from the capabilities it leans on - so switching one off
  *  cascades to everything downstream, and `-DFU_WITH_TOPOLOGY=0` alone yields a coherent build rather
@@ -110,8 +110,8 @@
  *  instead of duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift.  */
 
 /** @brief Can we create operating-system threads directly, rather than through `std::thread`? */
-#if !defined(FU_WITH_THREADS)
-#define FU_WITH_THREADS (FU_ON_POSIX || FU_ON_WINDOWS)
+#if !defined(FU_WITH_OS_THREADS)
+#define FU_WITH_OS_THREADS (FU_ON_POSIX || FU_ON_WINDOWS)
 #endif
 
 /** @brief Can we enumerate this machine's cores, compute domains, and memory domains? */
@@ -121,50 +121,40 @@
 #define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || (FU_ON_LINUX && FU_DETECT_LIBNUMA_))
 #endif
 
-/** @brief Can we see which cores share a cache, so a compute domain can be cut at a cluster? */
-#if !defined(FU_WITH_TOPOLOGY_CACHES)
-#define FU_WITH_TOPOLOGY_CACHES FU_WITH_TOPOLOGY
-#endif
-
-/** @brief Can we read inter-domain distance, bandwidth, and latency? (ACPI SLIT and HMAT) */
-#if !defined(FU_WITH_TOPOLOGY_METRICS)
-#define FU_WITH_TOPOLOGY_METRICS (FU_ON_LINUX && FU_WITH_TOPOLOGY)
-#endif
-
 /**
  *  @brief Can we bind a thread to a set of cores, and have the kernel honour it?
- *  @note Deliberately independent of `FU_WITH_NUMA_MEMORY`. `pthread_setaffinity_np` needs no
+ *  @note Deliberately independent of `FU_WITH_PLACE_MEMORY_ON_DOMAIN`. `pthread_setaffinity_np` needs no
  *        `libnuma`, and a Linux box without it could pin perfectly well - it simply never did,
  *        because a single NUMA macro guarded both.
  *  @note False on Apple Silicon, where `thread_policy_set(THREAD_AFFINITY_POLICY)` answers
- *        `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_THREAD_QOS`.
+ *        `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
  */
-#if !defined(FU_WITH_THREAD_PINNING)
-#define FU_WITH_THREAD_PINNING (FU_ON_LINUX || FU_ON_FREEBSD || FU_ON_WINDOWS)
+#if !defined(FU_WITH_PLACE_THREADS_BY_AFFINITY)
+#define FU_WITH_PLACE_THREADS_BY_AFFINITY (FU_ON_LINUX || FU_ON_FREEBSD || FU_ON_WINDOWS)
 #endif
 
 /** @brief Can we hint which class of core a thread should run on, at creation time? */
-#if !defined(FU_WITH_THREAD_QOS)
-#define FU_WITH_THREAD_QOS FU_ON_APPLE
+#if !defined(FU_WITH_PLACE_THREADS_BY_CORE_CLASS)
+#define FU_WITH_PLACE_THREADS_BY_CORE_CLASS FU_ON_APPLE
 #endif
 
 /** @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply? */
-#if !defined(FU_WITH_THREAD_SCHED_CLASS)
-#define FU_WITH_THREAD_SCHED_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
+#if !defined(FU_WITH_RESCHEDULE_THREADS_BY_CLASS)
+#define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
 #endif
 
 /** @brief Can we place pages on a chosen memory domain? */
-#if !defined(FU_WITH_NUMA_MEMORY)
+#if !defined(FU_WITH_PLACE_MEMORY_ON_DOMAIN)
 /*  Linux places with `mbind`; Windows with `VirtualAllocExNuma`. Same capability, named for the
  *  facility, not the library - so both kernels answer it without a second macro. */
-#define FU_WITH_NUMA_MEMORY ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_TOPOLOGY)
+#define FU_WITH_PLACE_MEMORY_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_TOPOLOGY)
 #endif
 
 /** @brief Can we request pages larger than the base page? */
-#if !defined(FU_WITH_HUGE_PAGES)
+#if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
 /*  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
  *  gated behind the `SeLockMemoryPrivilege` the caller must already hold. */
-#define FU_WITH_HUGE_PAGES ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_NUMA_MEMORY)
+#define FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
 #endif
 
 /*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
@@ -177,23 +167,21 @@
  *  Mac is one, and conflating these erased both pools from every platform but Linux - including the
  *  ones whose topology we already harvest.
  */
-#define FU_WITH_COLOCATED_POOLS (FU_WITH_THREADS && FU_WITH_TOPOLOGY)
+#define FU_WITH_COLOCATE_POOLS_ON_DOMAIN (FU_WITH_OS_THREADS && FU_WITH_TOPOLOGY)
 
 /*  A bad override should fail at the `#include`, not at link time.  */
-#if FU_WITH_THREAD_PINNING && FU_ON_APPLE
-#error "FU_WITH_THREAD_PINNING: Apple answers KERN_NOT_SUPPORTED to thread_policy_set; pinning cannot be forced on"
+#if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_APPLE
+#error \
+    "FU_WITH_PLACE_THREADS_BY_AFFINITY: Apple answers KERN_NOT_SUPPORTED to thread_policy_set; pinning cannot be forced on"
 #endif
-#if FU_WITH_NUMA_MEMORY && !(FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD)
-#error "FU_WITH_NUMA_MEMORY needs a kernel that can place pages on a node"
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && !(FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD)
+#error "FU_WITH_PLACE_MEMORY_ON_DOMAIN needs a kernel that can place pages on a node"
 #endif
-#if FU_WITH_TOPOLOGY_METRICS && !FU_WITH_TOPOLOGY
-#error "FU_WITH_TOPOLOGY_METRICS describes distances between domains we would not have discovered"
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && !FU_WITH_TOPOLOGY
+#error "FU_WITH_PLACE_MEMORY_ON_DOMAIN places pages on domains we would not have discovered"
 #endif
-#if FU_WITH_NUMA_MEMORY && !FU_WITH_TOPOLOGY
-#error "FU_WITH_NUMA_MEMORY places pages on domains we would not have discovered"
-#endif
-#if FU_WITH_HUGE_PAGES && FU_ON_LINUX && !FU_WITH_NUMA_MEMORY
-#error "On Linux the hugetlb path maps with `mmap` and places with `mbind`; it needs FU_WITH_NUMA_MEMORY"
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX && !FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#error "On Linux the hugetlb path maps with `mmap` and places with `mbind`; it needs FU_WITH_PLACE_MEMORY_ON_DOMAIN"
 #endif
 
 #if FU_ALLOW_UNSAFE
@@ -204,39 +192,39 @@
 #include <numa.h> // `numa_available`, `numa_node_to_cpus`, `numa_distance`
 #endif
 
-#if FU_WITH_NUMA_MEMORY && FU_ON_LINUX
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 #include <numa.h>     // `numa_alloc_onnode`, `numa_free`
 #include <numaif.h>   // `mbind` manual assignment of `mmap` pages
 #include <sys/mman.h> // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`
 #endif
 
-#if FU_WITH_HUGE_PAGES && FU_ON_LINUX
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
 #include <linux/mman.h> // `MAP_HUGE_2MB`, `MAP_HUGE_1GB`
 #endif
 
 /*  Both the huge-page inventory and the memory-tier probe walk sysfs directories - a Linux-only
  *  concern. Windows has no `<dirent.h>` under MSVC, and its large pages are probed by size, not path. */
-#if (FU_WITH_HUGE_PAGES || FU_WITH_TOPOLOGY) && FU_ON_LINUX
+#if (FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN || FU_WITH_TOPOLOGY) && FU_ON_LINUX
 #include <dirent.h> // `opendir`, `readdir`, `closedir`
 #endif
 
-#if FU_WITH_THREADS && FU_ON_POSIX
+#if FU_WITH_OS_THREADS && FU_ON_POSIX
 #include <pthread.h> // `pthread_create`, `pthread_setname_np`
 #include <ctime>     // `nanosleep`, `clock_nanosleep`
 #endif
 
-#if FU_WITH_THREAD_PINNING && FU_ON_POSIX
+#if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_POSIX
 #include <cerrno>  // `errno`, `EINVAL` - the kernel's way of saying "your mask is too narrow"
 #include <sched.h> // `cpu_set_t`, `sched_getaffinity`, `pthread_setaffinity_np`
 #endif
 
-#if FU_WITH_THREAD_PINNING && FU_ON_FREEBSD
+#if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_FREEBSD
 #include <pthread_np.h> // `pthread_setaffinity_np` taking a `cpuset_t`
 #include <sys/cpuset.h> // `cpuset_t`, `cpuset_getaffinity`, `CPU_LEVEL_WHICH`, `CPU_WHICH_TID`
 #include <sys/param.h>  // ! Must precede `<sys/cpuset.h>`
 #endif
 
-#if FU_WITH_THREAD_QOS
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
 #include <sys/qos.h> // `qos_class_t`, `pthread_attr_set_qos_class_np`
 #endif
 
@@ -330,13 +318,14 @@
 namespace ashvardanian {
 namespace forkunion {
 
-/*  Identifiers the operating system hands us, as opposed to the dense indices we hand ourselves.
- *  A `*_index_t` counts from zero into one of our own arrays; a `*_id_t` is opaque, and only the
- *  platform layer may decode it. Neither is interchangeable with the other. */
-using memory_domain_id_t = int; // ? The OS's NUMA node number, in [0, numa_max_node()]
-using core_id_t = int;          // ? Opaque logical-processor id; on Windows it packs (group, bit)
-using socket_id_t = int;        // ? Physical CPU socket, or -1 where the OS will not say
-using qos_level_t = int;        // ? Quality of Service, like: "performance", "efficiency", "low-power"
+/** @brief The OS's NUMA node number, in [0, numa_max_node()]. */
+using memory_domain_id_t = int;
+/** @brief Opaque logical-processor id; on Windows it packs a group and a bit. */
+using core_id_t = int;
+/** @brief Physical CPU socket, or -1 where the OS will not say. */
+using socket_id_t = int;
+/** @brief A core's performance tier, ranked from fastest to lowest-power, like "performance" or "efficiency". */
+using core_quality_t = int;
 
 /**
  *  @brief A position in `machine_topology`'s array of @b compute domains, in [0, compute_domains_count).
@@ -391,70 +380,147 @@ enum class mood_t : unsigned int {
  *  @brief Describes all the special library features, both those compiled in and those found here.
  *  @sa `comptime_capabilities` and `runtime_capabilities`
  *
- *  Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
- *  about @b this @b machine: `capability_huge_pages_k` means the kernel is offering them. A bit
- *  marked `comptime_` is a fact about @b this @b build: `capability_comptime_huge_pages_k` means we
- *  compiled the code that would ask for them.
+ *  One bit per facility, and two accessors ask two questions of the same bit. `comptime_capabilities()`
+ *  reports whether the code for a facility was @b built: `capability_place_huge_pages_on_domain_k` there
+ *  means we compiled the path that asks the kernel for them. `runtime_capabilities()` reports whether the
+ *  facility is @b present on this machine: the same bit means the kernel is offering them now.
  *
- *  Neither implies the other. A binary carrying `capability_comptime_numa_memory_k` runs perfectly
- *  well on a single-node box, where `capability_numa_aware_k` never appears; and a machine with four
- *  NUMA nodes reports none of them to a build that left the topology out.
+ *  Neither implies the other. A binary that built `capability_place_memory_on_domain_k` runs well on a
+ *  single-node box, where the runtime accessor never sets that bit; and a machine with four NUMA nodes
+ *  reports none of them to a build that left the topology out. A facility is usable here only when
+ *  both accessors agree, so `comptime_capabilities() & runtime_capabilities()` is the honest set.
  */
 enum capabilities_t : unsigned int {
     capabilities_unknown_k = 0,
 
     /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
-    capability_x86_pause_k = 1 << 1,
+    capability_x86_pause_k = 1 << 0,
     /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
-    capability_x86_tpause_k = 1 << 2,
+    capability_x86_tpause_k = 1 << 1,
     /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
-    capability_arm64_yield_k = 1 << 3,
+    capability_arm64_yield_k = 1 << 2,
     /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
-    capability_arm64_wfet_k = 1 << 4,
+    capability_arm64_wfet_k = 1 << 3,
     /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
-    capability_risc5_pause_k = 1 << 5,
+    capability_risc5_pause_k = 1 << 4,
     /** `WRS.STO` sleeps the hart until a reservation breaks or a timeout. Needs the `Zawrs` extension. */
-    capability_risc5_wrs_k = 1 << 7,
+    capability_risc5_wrs_k = 1 << 5,
+
+    /** Own the raw OS thread handle instead of a `std::thread` - the substrate the thread levers stand on. Built:
+       `FU_WITH_OS_THREADS`. */
+    capability_os_threads_k = 1 << 6,
+    /** Enumerate this machine's cores, compute domains, and memory domains. The root the placements need. Built:
+       `FU_WITH_TOPOLOGY`. */
+    capability_topology_k = 1 << 7,
+    /**
+     *  Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
+     *  @sa `capability_os_threads_k` - the owned handle this needs.
+     */
+    capability_place_threads_by_affinity_k = 1 << 8,
+    /**
+     *  Steer a thread onto a class of core at creation, choosing where it runs. Built:
+     * `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
+     *  @sa `capability_os_threads_k` - the owned handle this needs.
+     */
+    capability_place_threads_by_core_class_k = 1 << 9,
+    /**
+     *  Reclass a thread's scheduler to sleep or wake it, choosing when it runs. Built:
+     * `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`.
+     *  @sa `capability_os_threads_k` - the owned handle this needs.
+     */
+    capability_reschedule_threads_by_class_k = 1 << 10,
 
     /**
-     *  @brief A @b pool is pinned to a single compute domain (a same-QoS core cluster).
-     *  @note Unlike its neighbours, this describes a pool rather than the machine, so it never appears
-     *        in `cpu_capabilities()`, `ram_capabilities()`, or their union `fu_runtime_capabilities()`.
-     *        The C wrapper uses it to discriminate its pool variants.
+     *  Place a buffer's pages on a chosen memory domain. Built: `FU_WITH_PLACE_MEMORY_ON_DOMAIN`.
+     *  @sa `capability_topology_k` - the enumerated domains this places onto.
      */
-    capability_compute_domain_k = 1 << 6,
+    capability_place_memory_on_domain_k = 1 << 11,
+    /**
+     *  Place larger-than-base pages on a chosen memory domain. A narrower case of memory placement. Built:
+     * `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`.
+     *  @sa `capability_place_memory_on_domain_k` - the placement this specializes.
+     */
+    capability_place_huge_pages_on_domain_k = 1 << 12,
+    /**
+     *  The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation.
+     *  @sa `capability_place_huge_pages_on_domain_k` - the explicit request this is the automatic counterpart to.
+     */
+    capability_huge_transparent_pages_k = 1 << 13,
 
-    /** NUMA-aware memory allocations. */
-    capability_numa_aware_k = 1 << 10,
-    /** Reducing TLB pressure with huge pages. */
-    capability_huge_pages_k = 1 << 11,
-    /** ... doing the same "transparently". */
-    capability_huge_pages_transparent_k = 1 << 12,
+    /**
+     *  Compile the domain-aware `colocated_pool` and `distributed_pool`. Built: `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`.
+     *  @sa `capability_os_threads_k` and `capability_topology_k` - both are needed; memory placement is not.
+     */
+    capability_colocate_pools_on_domain_k = 1 << 14,
 
-    /** Can spawn OS threads directly, rather than through `std::thread`. `FU_WITH_THREADS`. */
-    capability_comptime_threads_k = 1 << 16,
-    /** Can enumerate this machine's cores, compute domains, and memory domains. `FU_WITH_TOPOLOGY`. */
-    capability_comptime_topology_k = 1 << 17,
-    /** Can see which cores share a cache, so a domain is cut at a cluster. `FU_WITH_TOPOLOGY_CACHES`. */
-    capability_comptime_topology_caches_k = 1 << 18,
-    /** Can read inter-domain distance, bandwidth, and latency. `FU_WITH_TOPOLOGY_METRICS`. */
-    capability_comptime_topology_metrics_k = 1 << 19,
-    /** Can bind a thread to a set of cores, and have the kernel honour it. `FU_WITH_THREAD_PINNING`. */
-    capability_comptime_thread_pinning_k = 1 << 20,
-    /** Can hint which class of core a thread runs on, at creation. `FU_WITH_THREAD_QOS`. */
-    capability_comptime_thread_qos_k = 1 << 21,
-    /** Can change another thread's scheduling class, to sleep or wake it. `FU_WITH_THREAD_SCHED_CLASS`. */
-    capability_comptime_thread_sched_class_k = 1 << 22,
-    /** Can place pages on a chosen memory domain. `FU_WITH_NUMA_MEMORY`. */
-    capability_comptime_numa_memory_k = 1 << 23,
-    /** Can request pages larger than the base page. `FU_WITH_HUGE_PAGES`. */
-    capability_comptime_huge_pages_k = 1 << 24,
-    /** The `colocated_pool` and `distributed_pool` are compiled in. `FU_WITH_COLOCATED_POOLS`. */
-    capability_comptime_colocated_pools_k = 1 << 25,
+    /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
+    capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
+                             capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
+
 };
 
-inline capabilities_t operator|(capabilities_t a, capabilities_t b) {
+/**
+ *  @brief Which of the three pool shapes an instance is, independent of the waiter it uses.
+ *  @sa `flat_k`, `colocated_k`, and `distributed_k`
+ *
+ *  This is the shape discriminator, not a capability: `capability_colocate_pools_on_domain_k` says the
+ *  colocated and distributed shapes were @b compiled, while this says which shape a given pool @b is. A
+ *  `flat_k` pool ignores the machine's domains; a `colocated_k` pool pins to one compute domain; a
+ *  `distributed_k` pool spans every domain and replicates per memory domain.
+ */
+enum class pool_kind_t : unsigned int {
+    /** No domain awareness - one worker set over all cores, as if the machine were uniform. */
+    flat_k,
+    /** Pinned to a single compute domain, so its workers share a cache and a memory domain. */
+    colocated_k,
+    /** Spans every compute domain, replicating hot state per memory domain. */
+    distributed_k,
+};
+
+constexpr capabilities_t operator|(capabilities_t a, capabilities_t b) {
     return static_cast<capabilities_t>(static_cast<unsigned int>(a) | static_cast<unsigned int>(b));
+}
+
+inline capabilities_t &operator|=(capabilities_t &a, capabilities_t b) noexcept { return a = a | b; }
+
+/**
+ *  @brief The lower-case name of a single capability bit, or `nullptr` for a composite or unknown one.
+ *  @note The one source of truth for capability names - the string builders and the C ABI both defer here.
+ *  @sa `capability_named`, its inverse.
+ */
+constexpr char const *capability_name(capabilities_t const capability) noexcept {
+    switch (capability) {
+    case capability_x86_pause_k: return "x86_pause";
+    case capability_x86_tpause_k: return "x86_tpause";
+    case capability_arm64_yield_k: return "arm64_yield";
+    case capability_arm64_wfet_k: return "arm64_wfet";
+    case capability_risc5_pause_k: return "risc5_pause";
+    case capability_risc5_wrs_k: return "risc5_wrs";
+    case capability_os_threads_k: return "os_threads";
+    case capability_topology_k: return "topology";
+    case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";
+    case capability_place_threads_by_core_class_k: return "place_threads_by_core_class";
+    case capability_reschedule_threads_by_class_k: return "reschedule_threads_by_class";
+    case capability_place_memory_on_domain_k: return "place_memory_on_domain";
+    case capability_place_huge_pages_on_domain_k: return "place_huge_pages_on_domain";
+    case capability_huge_transparent_pages_k: return "huge_transparent_pages";
+    case capability_colocate_pools_on_domain_k: return "colocate_pools_on_domain";
+    default: return nullptr;
+    }
+}
+
+/**
+ *  @brief The single capability bit named @p name, or `capabilities_unknown_k` if none matches.
+ *  @note The inverse of `capability_name`; it defers to that one table, so the two cannot drift.
+ */
+inline capabilities_t capability_named(char const *name) noexcept {
+    if (name == nullptr) return capabilities_unknown_k;
+    for (unsigned int bit_index = 0; bit_index < sizeof(capabilities_t) * 8; ++bit_index) {
+        capabilities_t const candidate = static_cast<capabilities_t>(1u << bit_index);
+        char const *const candidate_name = capability_name(candidate);
+        if (candidate_name != nullptr && std::strcmp(candidate_name, name) == 0) return candidate;
+    }
+    return capabilities_unknown_k;
 }
 
 /**
@@ -567,83 +633,6 @@ std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ con
         if (!seen) distinct += 1;
     }
     return distinct ? distinct : 1;
-}
-
-/**
- *  @brief The kernel's own identifier for the calling thread, or 0 where there is none.
- *  @sa `pinned_thread_t::id`, which caches it so other threads can read it.
- *
- *  Linux calls it a `pid_t` and hands it out through `gettid`. Darwin has no `gettid` at all, and
- *  spells the same idea `pthread_threadid_np`, returning 64 bits. Both are the number a scheduler
- *  or a profiler will show you; neither is a `pthread_t`.
- */
-FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
-#if FU_ON_LINUX && FU_WITH_THREADS
-    return static_cast<std::uint64_t>(::gettid());
-#elif FU_ON_APPLE
-    std::uint64_t thread_id = 0;
-    ::pthread_threadid_np(nullptr, &thread_id);
-    return thread_id;
-#elif FU_ON_WINDOWS && FU_WITH_THREADS
-    // A `DWORD` that a debugger or Task Manager will show you; distinct from the `HANDLE`.
-    return static_cast<std::uint64_t>(::GetCurrentThreadId());
-#else
-    return 0;
-#endif
-}
-
-/**
- *  @brief Names the @b calling thread, which is the only thread every platform lets us name.
- *
- *  Linux's `pthread_setname_np` takes a thread and a name, so a spawner can name its workers. Apple's
- *  takes only a name and always renames the caller. Rather than branch on that at every call, the
- *  worker names itself once it is running - the one shape both kernels agree on.
- */
-FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ char const *thread_name) noexcept {
-#if FU_ON_LINUX && FU_WITH_THREADS
-    (void)::pthread_setname_np(::pthread_self(), thread_name);
-#elif FU_ON_APPLE
-    (void)::pthread_setname_np(thread_name);
-#elif FU_ON_WINDOWS && FU_WITH_THREADS
-    // `SetThreadDescription` wants UTF-16 and only exists on Windows 10 1607+. Resolve it at runtime
-    // so a binary keeps loading on older Windows, where the name is simply not applied - the same
-    // "best effort, never fatal" contract the POSIX paths keep.
-    using set_thread_description_t = HRESULT(WINAPI *)(HANDLE, PCWSTR);
-    HMODULE const kernel32 = ::GetModuleHandleW(L"kernel32.dll");
-    if (!kernel32) return;
-    // The `FARPROC`-to-typed-pointer cast is the documented `GetProcAddress` idiom; MSVC's C4191 for it
-    // is suppressed with the other Windows pragmas up top, and it is clean under `-Wextra`/clang-tidy.
-    auto const set_thread_description =
-        reinterpret_cast<set_thread_description_t>(::GetProcAddress(kernel32, "SetThreadDescription"));
-    if (!set_thread_description) return;
-
-    // POSIX thread names cap at 16 bytes; the same buffer never needs more than 16 wide chars.
-    wchar_t wide_name[16] = {};
-    int const written =
-        ::MultiByteToWideChar(CP_UTF8, 0, thread_name, -1, wide_name, static_cast<int>(std::size(wide_name)));
-    if (written <= 0) return; // ? Nothing usable to hand over
-    wide_name[std::size(wide_name) - 1] = L'\0';
-    (void)set_thread_description(::GetCurrentThread(), wide_name);
-#endif
-}
-
-/**
- *  @brief Upper bound on core IDs this machine may ever report, for sizing masks and names.
- *
- *  Not the same as `hardware_concurrency()` on Linux, where cores can be hot-plugged and the kernel
- *  reserves IDs for cores that are offline right now. Elsewhere the distinction does not exist.
- */
-FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
-#if FU_ON_WINDOWS
-    DWORD const configured = ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    if (configured > 0) return static_cast<std::size_t>(configured);
-#elif FU_ON_POSIX
-    // ! Not `_SC_NPROCESSORS_ONLN`: a core that is offline right now still owns an ID, and a mask
-    // ! sized to the online count would refuse to name it.
-    long const configured = ::sysconf(_SC_NPROCESSORS_CONF);
-    if (configured > 0) return static_cast<std::size_t>(configured);
-#endif
-    return static_cast<std::size_t>(std::thread::hardware_concurrency());
 }
 
 /**
@@ -848,7 +837,7 @@ class limited_array {
 
 /**
  *  @brief An owning, allocator-aware array whose size is fixed once, at `try_resize`.
- *  @sa `limited_array` for bounded counts, `unique_padded_buffer` when each element wants its own line.
+ *  @sa `limited_array` for bounded counts, `dynamic_padded_array` when each element wants its own line.
  *
  *  Deliberately not a `std::vector`: there is no capacity, no growth policy, and no exception. A
  *  `try_resize` either hands back a fully-constructed array or leaves an empty one, which is what
@@ -942,15 +931,20 @@ class dynamic_array {
 };
 
 /**
- *  @brief Analogous to `std::unique_ptr<T[]>`, but designed for large padded allocations.
- *  @see https://en.cppreference.com/w/cpp/memory/unique_ptr.html
+ *  @brief A `dynamic_array` whose elements sit at a caller-chosen stride, each on its own cache line.
+ *  @sa `dynamic_array` for the packed counterpart at natural alignment.
+ *
+ *  Move-only and owning like `std::unique_ptr<T[]>`, but it spaces objects by `stride()` bytes rather
+ *  than `sizeof(T)` and honours over-alignment, so an `alignas(128)` pool cell never false-shares and
+ *  never lands in under-aligned storage. It also accepts an `allocate_at_least` allocator, the way the
+ *  NUMA backends hand back more bytes than asked.
  */
 template <typename object_type_, typename allocator_type_>
-class unique_padded_buffer {
+class dynamic_padded_array {
 
     using object_t = object_type_;
     static_assert(std::is_nothrow_default_constructible_v<object_t>,
-                  "unique_padded_buffer requires noexcept-default-constructible object type");
+                  "dynamic_padded_array requires noexcept-default-constructible object type");
 
     using allocator_t = allocator_type_;
     using allocator_traits_t = std::allocator_traits<allocator_t>;
@@ -989,17 +983,17 @@ class unique_padded_buffer {
     }
 
   public:
-    unique_padded_buffer() noexcept = default;
+    dynamic_padded_array() noexcept = default;
 
-    explicit unique_padded_buffer(allocator_t const &alloc, std::size_t bytes_per_object = sizeof(object_t)) noexcept
+    explicit dynamic_padded_array(allocator_t const &alloc, std::size_t bytes_per_object = sizeof(object_t)) noexcept
         : bytes_per_object_(bytes_per_object), allocator_(alloc) {}
 
-    unique_padded_buffer(unique_padded_buffer &&o) noexcept
+    dynamic_padded_array(dynamic_padded_array &&o) noexcept
         : raw_(std::exchange(o.raw_, nullptr)), raw_owned_(std::exchange(o.raw_owned_, nullptr)),
           objects_count_(std::exchange(o.objects_count_, 0)), bytes_per_object_(o.bytes_per_object_),
           bytes_total_(std::exchange(o.bytes_total_, 0)), allocator_(std::move(o.allocator_)) {}
 
-    unique_padded_buffer &operator=(unique_padded_buffer &&o) noexcept {
+    dynamic_padded_array &operator=(dynamic_padded_array &&o) noexcept {
         if (this != &o) {
             destroy_all();
             deallocate();
@@ -1013,10 +1007,10 @@ class unique_padded_buffer {
         return *this;
     }
 
-    unique_padded_buffer(unique_padded_buffer const &) = delete;
-    unique_padded_buffer &operator=(unique_padded_buffer const &) = delete;
+    dynamic_padded_array(dynamic_padded_array const &) = delete;
+    dynamic_padded_array &operator=(dynamic_padded_array const &) = delete;
 
-    ~unique_padded_buffer() noexcept {
+    ~dynamic_padded_array() noexcept {
         destroy_all();
         deallocate();
     }
@@ -1086,304 +1080,33 @@ class unique_padded_buffer {
     explicit operator bool() const noexcept { return raw_ != nullptr && objects_count_ > 0; }
 };
 
-#if FU_ON_WINDOWS
-/*  Windows addresses a logical processor by (processor group, bit within the group's 64-bit
- *  `KAFFINITY` mask), not by a flat global id. A `core_id_t` therefore packs both, so the free
- *  function `try_pin_thread_to_cores` can rebuild a `GROUP_AFFINITY` from an id alone - no side table
- *  threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits, so the
- *  index is 0..63); the remaining bits hold the group number. Everywhere else a `core_id_t` is
- *  still just an opaque, comparable id - only the pinning path decodes it. */
-static constexpr int win_core_group_shift_k = 6;
-static constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
-/** @brief Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap
- *         of 64 @b per @b group, never a cap on total cores (a machine with more uses several groups). */
-static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
-
-FU_MAYBE_UNUSED_ static inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
-    return (static_cast<core_id_t>(group) << win_core_group_shift_k) |
-           (static_cast<core_id_t>(bit) & win_core_index_mask_k);
-}
-FU_MAYBE_UNUSED_ static inline WORD win_core_group(core_id_t id) noexcept {
-    return static_cast<WORD>(id >> win_core_group_shift_k);
-}
-FU_MAYBE_UNUSED_ static inline unsigned win_core_index(core_id_t id) noexcept {
-    return static_cast<unsigned>(id & win_core_index_mask_k);
-}
-#endif // FU_ON_WINDOWS
-
-/*  The unit each kernel writes its affinity mask in. Deliberately not `std::uint64_t` everywhere:
- *  a glibc `cpu_set_t` is an array of `__cpu_mask`, a FreeBSD `cpuset_t` an array of `long`, and a
- *  Windows `GROUP_AFFINITY` carries one 64-bit `KAFFINITY`. Matching the word keeps the aliasing
- *  below honest on 32-bit and big-endian targets alike. */
-#if FU_ON_WINDOWS
-using core_mask_word_t = KAFFINITY;
-#elif FU_ON_FREEBSD
-using core_mask_word_t = long;
-#elif FU_ON_POSIX
-using core_mask_word_t = unsigned long;
-#else
-using core_mask_word_t = std::uint64_t;
-#endif
-
-/**
- *  @brief A dense bitset over `core_id_t` - the cores a thread may run on, or should be confined to.
- *
- *  A machine is not the same thing as the slice of it we were handed. `taskset`, a cgroup `cpuset`,
- *  and a batch scheduler all narrow this set, and `hardware_concurrency` sees none of them. Sizing a
- *  pool from the machine and pinning to cores outside the set either escapes the restriction, or -
- *  where the kernel enforces it - crowds every spinning worker onto the few cores that remain.
- *
- *  Every platform hands out a dense core id, so one bitset covers them all: Linux and FreeBSD number
- *  logical processors from zero, and Windows packs `(group << 6) | bit` into the same integer.
- *
- *  @note Not `CPU_ALLOC`. That macro is `malloc` behind a name - glibc's `__sched_cpualloc` rounds
- *        the count up and tail-calls it - which would both bypass this allocator and contradict what
- *        the library promises. A `dynamic_array` sized from `possible_cores()` costs one cold-path
- *        allocation and, unlike a fixed `cpu_set_t`, does not stop at glibc's 1024-core `CPU_SETSIZE`.
- */
-template <typename allocator_type_ = std::allocator<core_mask_word_t>>
-class core_mask {
-    static constexpr std::size_t bits_per_word_k = sizeof(core_mask_word_t) * 8;
-
-    /** @brief Backing words of the bitset, one bit per `core_id_t`. */
-    dynamic_array<core_mask_word_t, allocator_type_> words_;
-
-  public:
-    core_mask() noexcept = default;
-    explicit core_mask(allocator_type_ const &allocator) noexcept : words_(allocator) {}
-
-    /**
-     *  @brief Upper bound on the `core_id_t` values this machine can produce - the width a mask covers.
-     *  @note Not `possible_cores()`. Windows ids are `(group << 6) | bit`, so a two-group machine with
-     *        80 logical processors still emits ids up to 103. Sizing by the core count would drop them.
-     */
-    static std::size_t id_space() noexcept {
-#if FU_ON_WINDOWS
-        WORD const groups = ::GetActiveProcessorGroupCount();
-        return static_cast<std::size_t>(groups ? groups : 1) * win_processors_per_group_k;
-#else
-        return possible_cores();
-#endif
-    }
-
-    /** @retval false on allocation failure, leaving the mask unusable rather than half-sized. */
-    bool try_resize_for(std::size_t const cores) noexcept {
-        return words_.try_resize(divide_round_up(cores, bits_per_word_k));
-    }
-
-    /** @brief Sizes the mask to hold every id this machine can produce. @sa `id_space`. */
-    bool try_resize() noexcept { return try_resize_for(id_space()); }
-
-    void reset() noexcept { words_.reset(); }
-    void clear() noexcept { std::memset(words_.data(), 0, bytes()); }
-
-    bool valid() const noexcept { return !words_.empty(); }
-    std::size_t capacity() const noexcept { return words_.size() * bits_per_word_k; }
-    std::size_t bytes() const noexcept { return words_.size() * sizeof(core_mask_word_t); }
-    void *data() noexcept { return static_cast<void *>(words_.data()); }
-    void const *data() const noexcept { return static_cast<void const *>(words_.data()); }
-
-    void add(core_id_t const core) noexcept {
-        if (core < 0 || static_cast<std::size_t>(core) >= capacity()) return;
-        std::size_t const bit = static_cast<std::size_t>(core);
-        words_[bit / bits_per_word_k] |= static_cast<core_mask_word_t>(core_mask_word_t {1} << (bit % bits_per_word_k));
-    }
-
-    bool contains(core_id_t const core) const noexcept {
-        if (core < 0 || static_cast<std::size_t>(core) >= capacity()) return false;
-        std::size_t const bit = static_cast<std::size_t>(core);
-        return ((words_[bit / bits_per_word_k] >> (bit % bits_per_word_k)) & core_mask_word_t {1}) != 0;
-    }
-
-    std::size_t count() const noexcept {
-        std::size_t total = 0;
-        for (std::size_t i = 0; i < words_.size(); ++i)
-            total += static_cast<std::size_t>(popcount(static_cast<std::uint64_t>(words_[i])));
-        return total;
-    }
-};
-
-using core_mask_t = core_mask<>;
-
-/**
- *  @brief Reads the cores the calling thread may run on into @p cores.
- *  @retval false where the platform exposes no such mask, which is @b not an error.
- */
-FU_MAYBE_UNUSED_ static inline bool try_capture_thread_cores(FU_MAYBE_UNUSED_ core_mask_t &cores) noexcept {
-#if FU_ON_LINUX
-    // A `cpu_set_t` is an array of `__cpu_mask`, which is exactly `core_mask_word_t` here. The kernel
-    // rejects a buffer narrower than its own cpumask, so grow once rather than guess at `nr_cpu_ids`.
-    std::size_t cores_to_fit = core_mask_t::id_space();
-    for (int attempt = 0; attempt < 4; ++attempt, cores_to_fit *= 2) {
-        if (!cores.try_resize_for(cores_to_fit)) return false;
-        if (::sched_getaffinity(0, cores.bytes(), static_cast<cpu_set_t *>(cores.data())) == 0) return true;
-        if (errno != EINVAL) break; // ! Anything but "your buffer is too small" will not improve
-    }
-    cores.reset();
-    return false;
-
-#elif FU_ON_WINDOWS
-    // A thread lives in exactly one processor group at a time, so that group's mask is its allowed set.
-    if (!cores.try_resize()) return false;
-    GROUP_AFFINITY affinity = {};
-    if (!::GetThreadGroupAffinity(::GetCurrentThread(), &affinity)) return false;
-    for (unsigned bit = 0; bit < win_processors_per_group_k; ++bit)
-        if (affinity.Mask & (static_cast<KAFFINITY>(1) << bit)) cores.add(win_encode_core_id(affinity.Group, bit));
-    return true;
-
-#elif FU_ON_FREEBSD
-    // ! Not `sched_getaffinity`: FreeBSD spells it `cpuset_getaffinity`, and `-1` means "this thread".
-    if (!cores.try_resize()) return false;
-    if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, cores.bytes(),
-                             static_cast<cpuset_t *>(cores.data())) == 0)
-        return true;
-    cores.reset();
-    return false;
-
-#else
-    // Darwin exposes no CPU mask at all. `thread_policy_set(THREAD_AFFINITY_POLICY)` sets an affinity
-    // @b tag - a hint that threads want to share an L2 - not a set of cores, and Apple Silicon answers
-    // `KERN_NOT_SUPPORTED`. A pool there partitions the work by domain and lets the scheduler place it.
-    return false;
-#endif
-}
-
-/**
- *  @brief Number of cores the calling thread may run on, or `possible_cores()` where unknowable.
- *  @note Prefer this to `std::thread::hardware_concurrency` when sizing a pool: the latter counts
- *        the machine's cores, not the ones this process was given.
- */
-FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
-    core_mask_t allowed;
-    if (try_capture_thread_cores(allowed)) {
-        std::size_t const allowed_count = allowed.count();
-        if (allowed_count > 0) return allowed_count;
-    }
-    return possible_cores();
-}
-
-/** @brief The OS thread handle a `colocated_pool` stores, joins, and pins - one per worker. */
-#if FU_ON_WINDOWS
-using native_thread_t = HANDLE; // ? From `CreateThread`; identity is tracked by thread id, not this
-#else
-using native_thread_t = pthread_t;
-#endif
-
-/**
- *  @brief Confines @p thread to the cores held by @p cores. The one place placement actually happens.
- *  @retval false when the platform exposes no thread placement, which is @b not an error.
- *
- *  Linux hands out a `cpu_set_t` and honours it. FreeBSD spells the same idea `cpuset_t`. Windows
- *  addresses a core by (processor group, bit), packed into each `core_id_t`; a thread lives in exactly
- *  one group, so a mask spanning two is a caller error. Apple Silicon answers `KERN_NOT_SUPPORTED` to
- *  `thread_policy_set` - measured, not assumed - and offers only a Quality-of-Service class, chosen at
- *  creation. So a pool there partitions the @b work by domain and lets the scheduler place the @b threads.
- *  @sa `try_pin_thread_to_cores`, the adaptor that builds a mask from a core list.
- */
-FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
-                                                           FU_MAYBE_UNUSED_ core_mask_t const &cores) noexcept {
-#if FU_ON_WINDOWS
-    // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them,
-    // and a thread cannot span groups. Cores from another group are a caller error, not a mask.
-    GROUP_AFFINITY affinity = {};
-    bool group_chosen = false;
-    for (std::size_t core = 0; core < cores.capacity(); ++core) {
-        core_id_t const id = static_cast<core_id_t>(core);
-        if (!cores.contains(id)) continue;
-        WORD const group = win_core_group(id);
-        if (!group_chosen) affinity.Group = group, group_chosen = true;
-        else if (group != affinity.Group)
-            return false; // ! A thread lives in exactly one group
-        affinity.Mask |= static_cast<KAFFINITY>(1) << win_core_index(id);
-    }
-    return group_chosen && ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0;
-
-#elif FU_ON_FREEBSD
-    if (!cores.valid()) return false;
-    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpuset_t const *>(cores.data())) == 0;
-
-#elif FU_WITH_THREAD_PINNING
-    if (!cores.valid()) return false;
-    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpu_set_t const *>(cores.data())) == 0;
-
-#else
-    return false; // ? No placement here; the harvest still reports the domains
-#endif
-}
-
-/**
- *  @brief Confines @p thread to the @p count cores listed in @p cores.
- *  @retval false when the platform exposes no thread placement, which is @b not an error.
- *  @note A thin adaptor: it builds a `core_mask` and defers to `try_apply_thread_cores`, which is
- *        where the per-platform placement lives. It owns no platform logic of its own.
- */
-FU_MAYBE_UNUSED_ static inline bool try_pin_thread_to_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
-                                                            FU_MAYBE_UNUSED_ core_id_t const *cores,
-                                                            FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
-#if FU_WITH_THREAD_PINNING
-    if (count == 0) return false;
-    core_mask_t mask;
-    if (!mask.try_resize()) return false;
-    for (std::size_t i = 0; i < count; ++i) {
-        assert(cores[i] >= 0 && "Invalid CPU core ID");
-        mask.add(cores[i]);
-    }
-    return try_apply_thread_cores(thread, mask);
-#else
-    return false; // ? No placement here; the harvest still reports the domains
-#endif
-}
-
-/**
- *  @brief Puts the calling thread back on the cores @p saved recorded before it was pinned.
- *  @note A no-op where nothing was ever narrowed, or where @p saved was never captured.
- *
- *  A pool that narrows the caller owes it the mask it had, not the mask of the whole machine. The
- *  two differ under `taskset`, a cgroup `cpuset`, or any batch scheduler, and widening to the
- *  machine would hand the caller cores this process was never granted.
- *
- *  Note that no NUMA run-node policy is reset here: the pool never sets one. Memory placement goes
- *  through `mbind` on the allocation, not through the calling thread's policy, and `numa_run_on_node`
- *  would rewrite the very CPU mask we just restored.
- */
-FU_MAYBE_UNUSED_ static inline bool try_restore_thread_cores(FU_MAYBE_UNUSED_ core_mask_t const &saved) noexcept {
-#if FU_WITH_THREAD_PINNING
-    if (!saved.valid()) return false;
-#if FU_ON_WINDOWS
-    return try_apply_thread_cores(::GetCurrentThread(), saved);
-#else
-    return try_apply_thread_cores(::pthread_self(), saved);
-#endif
-#else
-    return false;
-#endif
-}
-
 /**
  *  @brief Placeholder type for Parallel Algorithms.
  */
 struct dummy_lambda_t {};
 
 /**
- *  @brief How long a monitored waiter may sleep before it must re-check on its own.
- *  @sa `wait_capped_k`, `wait_uncapped_k`
+ *  @brief Compile-time tag: a monitored wait bounded by a timeout, so it re-checks on its own.
+ *  @sa `wait_uncapped_t`
  *
- *  The choice is a property of the @b loop, not the machine, so it is a compile-time tag rather than a
- *  runtime argument: the value is constant at each call site, and capped-versus-uncapped selects a
- *  different @b instruction - `WFET` vs `WFE`, `WRS.STO` vs `WRS.NTO` - not merely a different number.
- *
- *  - @b Capped: the loop guards more than one word, but the monitor arms only one. A change to the
- *    @b other word lands on a line nobody is watching, so the wait must time out and re-check. The
- *    cap bounds how late that change is noticed.
- *  - @b Uncapped: the loop guards a single word, so the monitor covers @b every wake source and the
- *    store that ends the wait always lands on the armed line. A timeout would only wake the core to
- *    learn nothing and sleep again, wasting power on a long wait.
- *
- *  A spin waiter ignores the tag entirely.
+ *  For a loop guarding more than one word: the monitor arms a single line, so a store to another word
+ *  goes unseen and the cap bounds how late it is noticed. Selects the timed instruction - `WFET`,
+ *  `WRS.STO`. A spin waiter ignores the tag.
  */
 struct wait_capped_t {};
+
+/**
+ *  @brief Compile-time tag: a monitored wait with no timeout, woken only by the store it watches.
+ *  @sa `wait_capped_t`
+ *
+ *  For a loop guarding a single word: the monitor covers every wake source, so a timeout would only
+ *  wake the core to learn nothing and waste power. Selects the untimed instruction - `WFE`, `WRS.NTO`.
+ */
 struct wait_uncapped_t {};
+
+/** @brief The canonical `wait_capped_t` value to pass as a wait tag. */
 inline constexpr wait_capped_t wait_capped_k {};
+/** @brief The canonical `wait_uncapped_t` value to pass as a wait tag. */
 inline constexpr wait_uncapped_t wait_uncapped_k {};
 
 /**
@@ -1685,7 +1408,7 @@ class invoke_for_n {
  *  starts helping a neighbour, which is exactly when the extra cost is worth paying.
  *
  *  Pad these to a full cache line - two cursors sharing a line would reintroduce the very traffic
- *  the split exists to avoid. @sa `unique_padded_buffer`, which spaces them by the pool's alignment.
+ *  the split exists to avoid. @sa `dynamic_padded_array`, which spaces them by the pool's alignment.
  */
 template <typename index_type_ = std::size_t>
 struct dynamic_claim {

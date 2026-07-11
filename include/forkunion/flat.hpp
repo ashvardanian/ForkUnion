@@ -1,6 +1,6 @@
 /**
- *  @file standard.hpp
- *  @brief The portable `basic_pool`, built on `std::thread`.
+ *  @file flat.hpp
+ *  @brief The portable `flat_pool`, built on `std::thread`.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
@@ -37,11 +37,11 @@ namespace forkunion {
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.hpp> // `basic_pool_t`
+ *  #include <forkunion.hpp> // `flat_pool_t`
  *
  *  using fu = ashvardanian::forkunion;
  *  int main() {
- *      fu::basic_pool_t pool; // ? Alias to `fu::basic_pool<>` template
+ *      fu::flat_pool_t pool; // ? Alias to `fu::flat_pool<>` template
  *      if (!pool.try_spawn(allowed_cores_count())) return EXIT_FAILURE;
  *      pool.for_threads([](std::size_t i) noexcept { std::printf("Hi from thread %zu\n", i); });
  *      return EXIT_SUCCESS;
@@ -55,11 +55,11 @@ namespace forkunion {
  *  @code{.cpp}
  *  #include <cstdio> // `std::printf`
  *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.hpp> // `basic_pool_t`
+ *  #include <forkunion.hpp> // `flat_pool_t`
  *
  *  using fu = ashvardanian::forkunion;
  *  int main() {
- *      fu::basic_pool_t first_pool, second_pool;
+ *      fu::flat_pool_t first_pool, second_pool;
  *      if (!first_pool.try_spawn(2) || !second_pool.try_spawn(2, fu::caller_exclusive_k)) return EXIT_FAILURE;
  *      auto broadcast = second_pool.for_threads([](std::size_t i) noexcept { poll_ssd(i); });
  *      first_pool.for_threads([](std::size_t i) noexcept { poll_nic(i); });
@@ -111,7 +111,7 @@ template <                                                  //
     typename index_type_ = std::size_t,                     //
     std::size_t alignment_ = default_alignment_k            //
     >
-class basic_pool {
+class flat_pool {
 
   public:
     using allocator_t = allocator_type_;
@@ -156,7 +156,7 @@ class basic_pool {
     static_assert(sizeof(worker_cell_t) <= alignment_k, "A worker cell must fit within one stride");
 
     using worker_cell_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<worker_cell_t>;
-    using worker_cells_t = unique_padded_buffer<worker_cell_t, worker_cell_allocator_t>;
+    using worker_cells_t = dynamic_padded_array<worker_cell_t, worker_cell_allocator_t>;
 
     using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
     using trampoline_t = void (*)(punned_fork_context_t, thread_index_t); // ? Wraps lambda's `operator()`
@@ -190,19 +190,19 @@ class basic_pool {
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
   public:
-    basic_pool(basic_pool &&) = delete;
-    basic_pool(basic_pool const &) = delete;
-    basic_pool &operator=(basic_pool &&) = delete;
-    basic_pool &operator=(basic_pool const &) = delete;
+    flat_pool(flat_pool &&) = delete;
+    flat_pool(flat_pool const &) = delete;
+    flat_pool &operator=(flat_pool &&) = delete;
+    flat_pool &operator=(flat_pool const &) = delete;
 
-    basic_pool(allocator_t const &alloc = {}) noexcept : allocator_(alloc) {}
-    ~basic_pool() noexcept { terminate(); }
+    flat_pool(allocator_t const &alloc = {}) noexcept : allocator_(alloc) {}
+    ~flat_pool() noexcept { terminate(); }
 
     /**
      *  @brief Estimates the amount of memory managed by this pool handle and internal structures.
      *  @note This API is @b not synchronized.
      */
-    std::size_t memory_usage() const noexcept { return sizeof(basic_pool) + workers_.size() * workers_.stride(); }
+    std::size_t memory_usage() const noexcept { return sizeof(flat_pool) + workers_.size() * workers_.stride(); }
 
     /** @brief Checks if the thread-pool's core synchronization points are lock-free. */
     bool is_lock_free() const noexcept { return mood_.is_lock_free() && threads_to_sync_.is_lock_free(); }
@@ -317,7 +317,7 @@ class basic_pool {
      */
     template <typename fork_type_>
     FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
-    broadcast_join<basic_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
+    broadcast_join<flat_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
         return {*this, std::forward<fork_type_>(fork)};
     }
 
@@ -398,7 +398,7 @@ class basic_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
-    broadcast_join<basic_pool, invoke_for_slices<fork_type_, index_t>> //
+    broadcast_join<flat_pool, invoke_for_slices<fork_type_, index_t>> //
         for_slices(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
@@ -416,7 +416,7 @@ class basic_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
-    broadcast_join<basic_pool, invoke_for_n<fork_type_, index_t>> //
+    broadcast_join<flat_pool, invoke_for_n<fork_type_, index_t>> //
         for_n(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
@@ -430,7 +430,7 @@ class basic_pool {
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
-    broadcast_join<basic_pool, invoke_for_n_dynamic<basic_pool, fork_type_, index_t>> //
+    broadcast_join<flat_pool, invoke_for_n_dynamic<flat_pool, fork_type_, index_t>> //
         for_n_dynamic(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {*this, n, threads_count(), std::forward<fork_type_>(fork)}};
@@ -619,7 +619,7 @@ class basic_pool {
     }
 };
 
-using basic_pool_t = basic_pool<>;
+using flat_pool_t = flat_pool<>;
 
 #pragma region Concepts
 #if FU_DETECT_CONCEPTS_

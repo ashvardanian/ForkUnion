@@ -345,19 +345,19 @@ struct log_capabilities_t {
         pos = std::strlen(line_buffer);
 
         bool first_mem = true;
-        if (caps & capability_numa_aware_k) {
+        if (caps & capability_place_memory_on_domain_k) {
             pos +=
                 static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sNUMA%s",
                                                        first_mem ? "" : " • ", colors.bold_yellow(), colors.reset()));
             first_mem = false;
         }
-        if (caps & capability_huge_pages_k) {
+        if (caps & capability_place_huge_pages_on_domain_k) {
             pos +=
                 static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sHuge Pages%s",
                                                        first_mem ? "" : " • ", colors.bold_yellow(), colors.reset()));
             first_mem = false;
         }
-        if (caps & capability_huge_pages_transparent_k) {
+        if (caps & capability_huge_transparent_pages_k) {
             pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
                                                           "%s%sTransparent Huge Pages%s", first_mem ? "" : " • ",
                                                           colors.bold_yellow(), colors.reset()));

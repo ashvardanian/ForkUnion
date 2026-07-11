@@ -32,7 +32,7 @@
  *      if (!caps) return EXIT_FAILURE; // ! Thread pool is not supported
  *      printf("ForkUnion capabilities: %s\n", caps);
  *
- *      fu_pool_t *pool = fu_pool_new("forkunion_demo");
+ *      fu_pool_t *pool = fu_pool_new("forkunion_demo", fu_capabilities_all_k);
  *      if (!pool) return EXIT_FAILURE; // ! Failed to create a thread pool
  *
  *      size_t threads = fu_logical_cores_count();
@@ -47,7 +47,7 @@
  *
  *  Unlike the C++ version, the C header wraps the best-fit pre-compiled platform-specific instantiation
  *  of C++ templates. It also uses a singleton state to store the NUMA topology and other OS/machine specs.
- *  Under the hood, the `fu_pool_t` maps to a `basic_pool` or `distributed_pool`.
+ *  Under the hood, the `fu_pool_t` maps to a `flat_pool`, a `colocated_pool`, or a `distributed_pool`.
  *  For advanced usage, prefer the core C++ library.
  *
  *  The next layer of logic is for basic index-addressable tasks. It includes basic parallel loops:
@@ -150,68 +150,64 @@ typedef enum fu_caller_exclusivity_t {
  *  @brief Describes all the special library features, both those compiled in and those found here.
  *  @sa `fu_comptime_capabilities` and `fu_runtime_capabilities`
  *
- *  Two questions share one bit-space, and the names say which is which. An unmarked bit is a fact
- *  about @b this @b machine: `fu_capability_huge_pages_k` means the kernel is offering them. A bit
- *  marked `comptime` is a fact about @b this @b build: `fu_capability_comptime_huge_pages_k` means
- *  we compiled the code that would ask for them.
+ *  One bit per facility, and two accessors ask two questions of the same bit.
+ *  `fu_comptime_capabilities` reports whether the code was @b built: a set
+ *  `fu_capability_place_huge_pages_on_domain_k` means we compiled the path that asks for them.
+ *  `fu_runtime_capabilities` reports whether the machine @b offers it now.
  *
- *  Neither implies the other. A binary carrying `fu_capability_comptime_numa_memory_k` runs
- *  perfectly well on a single-node box, where `fu_capability_numa_aware_k` never appears; and a
+ *  Neither implies the other. A binary that built `fu_capability_place_memory_on_domain_k` runs
+ *  perfectly well on a single-node box, where the runtime accessor never sets that bit; and a
  *  machine with four NUMA nodes reports none of them to a build that left the topology out.
  */
 typedef enum fu_capabilities_t {
     fu_capabilities_unknown_k = 0,
 
     /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
-    fu_capability_x86_pause_k = 1 << 1,
+    fu_capability_x86_pause_k = 1 << 0,
     /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
-    fu_capability_x86_tpause_k = 1 << 2,
+    fu_capability_x86_tpause_k = 1 << 1,
     /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
-    fu_capability_arm64_yield_k = 1 << 3,
+    fu_capability_arm64_yield_k = 1 << 2,
     /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
-    fu_capability_arm64_wfet_k = 1 << 4,
+    fu_capability_arm64_wfet_k = 1 << 3,
     /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
-    fu_capability_risc5_pause_k = 1 << 5,
+    fu_capability_risc5_pause_k = 1 << 4,
     /** `WRS.STO` sleeps the hart until a reservation breaks or a timeout. Needs the `Zawrs` extension. */
-    fu_capability_risc5_wrs_k = 1 << 7,
+    fu_capability_risc5_wrs_k = 1 << 5,
 
-    /** Pinned to a single compute domain. */
-    fu_capability_compute_domain_k = 1 << 6,
+    /** Own the raw OS thread handle instead of a `std::thread`. Built: `FU_WITH_OS_THREADS`. */
+    fu_capability_os_threads_k = 1 << 6,
+    /** Enumerate this machine's cores, compute domains, and memory domains. Built: `FU_WITH_TOPOLOGY`. */
+    fu_capability_topology_k = 1 << 7,
+    /** Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`. */
+    fu_capability_place_threads_by_affinity_k = 1 << 8,
+    /** Steer a thread onto a class of core at creation. Built: `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`. */
+    fu_capability_place_threads_by_core_class_k = 1 << 9,
+    /** Reclass a thread's scheduler to sleep or wake it. Built: `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`. */
+    fu_capability_reschedule_threads_by_class_k = 1 << 10,
+    /** Place a buffer's pages on a chosen memory domain. Built: `FU_WITH_PLACE_MEMORY_ON_DOMAIN`. */
+    fu_capability_place_memory_on_domain_k = 1 << 11,
+    /** Place larger-than-base pages on a chosen memory domain. Built: `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`. */
+    fu_capability_place_huge_pages_on_domain_k = 1 << 12,
+    /** The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation. */
+    fu_capability_huge_transparent_pages_k = 1 << 13,
+    /** The domain-aware `colocated_pool` and `distributed_pool` are compiled. Built:
+       `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`. */
+    fu_capability_colocate_pools_on_domain_k = 1 << 14,
 
-    /** NUMA-aware memory allocations. */
-    fu_capability_numa_aware_k = 1 << 10,
-    /** Reducing TLB pressure with huge pages. */
-    fu_capability_huge_pages_k = 1 << 11,
-    /** ... doing the same "transparently". */
-    fu_capability_huge_pages_transparent_k = 1 << 12,
+    /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
+    fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
+                                fu_capability_arm64_wfet_k | fu_capability_risc5_pause_k | fu_capability_risc5_wrs_k,
 
-    /** Can spawn OS threads directly, rather than through the C++ standard library. `FU_WITH_THREADS`. */
-    fu_capability_comptime_threads_k = 1 << 16,
-    /** Can enumerate this machine's cores, compute domains, and memory domains. `FU_WITH_TOPOLOGY`. */
-    fu_capability_comptime_topology_k = 1 << 17,
-    /** Can see which cores share a cache, so a domain is cut at a cluster. `FU_WITH_TOPOLOGY_CACHES`. */
-    fu_capability_comptime_topology_caches_k = 1 << 18,
-    /** Can read inter-domain distance, bandwidth, and latency. `FU_WITH_TOPOLOGY_METRICS`. */
-    fu_capability_comptime_topology_metrics_k = 1 << 19,
-    /** Can bind a thread to a set of cores, and have the kernel honour it. `FU_WITH_THREAD_PINNING`. */
-    fu_capability_comptime_thread_pinning_k = 1 << 20,
-    /** Can hint which class of core a thread runs on, at creation. `FU_WITH_THREAD_QOS`. */
-    fu_capability_comptime_thread_qos_k = 1 << 21,
-    /** Can change another thread's scheduling class, to sleep or wake it. `FU_WITH_THREAD_SCHED_CLASS`. */
-    fu_capability_comptime_thread_sched_class_k = 1 << 22,
-    /** Can place pages on a chosen memory domain. `FU_WITH_NUMA_MEMORY`. */
-    fu_capability_comptime_numa_memory_k = 1 << 23,
-    /** Can request pages larger than the base page. `FU_WITH_HUGE_PAGES`. */
-    fu_capability_comptime_huge_pages_k = 1 << 24,
-    /** `fu_pool_spawn_in` and the distributed pool exist. `FU_WITH_COLOCATED_POOLS`. */
-    fu_capability_comptime_colocated_pools_k = 1 << 25,
+    /** All-ones allow-mask: pass to `fu_pool_new` to disable capability filtering. */
+    fu_capabilities_all_k = ~0,
 } fu_capabilities_t;
 
 /**
  *  @brief Which kernel facilities this build of ForkUnion was compiled to use.
  *
  *  Consult it before reaching for a domain-aware API. `fu_pool_spawn_in`, `fu_allocate_in`, and the
- *  rest of that surface fail on a build without `fu_capability_comptime_colocated_pools_k`, and a C,
+ *  rest of that surface fail on a build without `fu_capability_colocate_pools_on_domain_k`, and a C,
  *  Rust, or Zig caller has no other way to tell that apart from a machine with one compute domain.
  */
 fu_capabilities_t fu_comptime_capabilities(void);
@@ -226,17 +222,30 @@ char const *fu_comptime_capabilities_string(void);
  *  @brief Which features this machine turned out to offer, probing the CPU and the memory system.
  *
  *  These affect performance rather than availability:
- *  - `fu_capability_numa_aware_k` pools reduce memory access latency by ~35% on multi-socket servers.
+ *  - `fu_capability_place_memory_on_domain_k` pools cut memory access latency by ~35% on multi-socket servers.
  *  - `fu_capability_x86_tpause_k` and `fu_capability_arm64_wfet_k` cut power draw during busy-waits.
  */
 fu_capabilities_t fu_runtime_capabilities(void);
 
 /**
- *  @brief The set `fu_runtime_capabilities` bits, comma-separated, like "arm64_yield,numa_aware".
+ *  @brief The set `fu_runtime_capabilities` bits, comma-separated, like "arm64_yield,place_memory_on_domain".
  *  @retval `NULL` if the thread pool is not supported on the current platform.
  *  @retval "none" if this machine offers nothing beyond a plain, portable thread pool.
  */
 char const *fu_runtime_capabilities_string(void);
+
+/**
+ *  @brief The lower-case name of a single capability bit, like "arm64_wfet".
+ *  @param[in] capability One `fu_capabilities_t` bit, not a composite mask.
+ *  @retval `NULL` for a composite mask (such as `fu_capability_any_yield_k`) or an unknown bit.
+ */
+char const *fu_capability_name(fu_capabilities_t capability);
+
+/**
+ *  @brief The single capability bit named @p name, the inverse of `fu_capability_name`.
+ *  @retval `fu_capabilities_unknown_k` if @p name is `NULL` or matches no bit.
+ */
+fu_capabilities_t fu_capability_named(char const *name);
 
 /**
  *  @brief Returns the number of logical cores in a given compute domain.
@@ -503,17 +512,25 @@ void fu_free_in(size_t memory_domain_index, void *pointer, size_t bytes);
 #pragma region Lifetime
 
 /**
- *  @brief Creates a new thread pool instance.
+ *  @brief Creates a new thread pool instance, constrained to an allow-mask of capabilities.
  *  @param[in] name Optional name for the thread pool, may be NULL.
+ *  @param[in] allowed An allow-mask of `fu_capabilities_t` bits; pass `fu_capabilities_all_k` for none.
  *  @retval Non-NULL pointer to an opaque thread pool handle on success.
  *  @retval NULL if creation failed due to insufficient memory or platform limitations.
  *  @note This API is @b thread-safe and can be called from any thread.
  *
- *  The returned pool is initially empty (no worker threads) and must be configured
- *  with `fu_pool_spawn` before use. Multiple pools can coexist.
- *  @sa `fu_pool_delete` for cleanup, `fu_pool_spawn` for initialization.
+ *  The pool variant is chosen from `fu_runtime_capabilities() & allowed`, so @p allowed lets a
+ *  caller force a specific busy-wait waiter or pool shape rather than accept the auto-selected best:
+ *  - Clear a waiter bit to drop to the next-lower waiter - omit `fu_capability_arm64_wfet_k` to
+ *    benchmark `arm64_yield` on a core that has `WFET`.
+ *  - Clear `fu_capability_place_memory_on_domain_k` to force the flat (non-NUMA) pool even on a NUMA machine.
+ *
+ *  Only the busy-wait waiter chosen at creation is retained on the handle and honored by
+ *  `fu_pool_spawn_on`; the rest of the allow-mask applies to `fu_pool_new` alone. The returned pool is
+ *  initially empty (no worker threads) and must be configured with `fu_pool_spawn` before use.
+ *  @sa `fu_pool_delete` for cleanup, `fu_pool_spawn` for initialization, `fu_runtime_capabilities`.
  */
-fu_pool_t *fu_pool_new(char const *name);
+fu_pool_t *fu_pool_new(char const *name, fu_capabilities_t allowed);
 
 /**
  *  @brief Destroys a thread pool and releases all associated resources.
@@ -544,7 +561,7 @@ void fu_pool_delete(fu_pool_t *pool);
  *  - `fu_caller_exclusive_k`: Creates @p `threads` workers, calling thread only coordinates
  *
  *  @code{.c}
- *  fu_pool_t *pool = fu_pool_new();
+ *  fu_pool_t *pool = fu_pool_new(NULL, fu_capabilities_all_k);
  *  if (pool && fu_pool_spawn(pool, fu_logical_cores_count(), fu_caller_inclusive_k)) {
  *      ... // Dispatch some parallel tasks
  *      fu_pool_delete(pool);
