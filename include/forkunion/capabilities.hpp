@@ -31,6 +31,7 @@ namespace forkunion {
 
 /** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
 struct x86_pause_t {
+    static constexpr capabilities_t capability_k = capability_x86_pause_k;
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
                            bound_type_ = {}) const noexcept {
@@ -116,6 +117,7 @@ inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
  *           not been exercised on `WAITPKG` silicon in this tree. Gated at runtime by `capability_x86_tpause_k`.
  */
 struct x86_tpause_t {
+    static constexpr capabilities_t capability_k = capability_x86_tpause_k;
     /** @brief Waits until a deadline ~1 micro-second ahead, for a loop that also guards another line. */
     template <typename value_type_, typename thread_index_type_>
     inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
@@ -193,6 +195,7 @@ struct x86_tpause_t {
 
 /** @brief On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
 struct arm64_yield_t {
+    static constexpr capabilities_t capability_k = capability_arm64_yield_k;
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
                            bound_type_ = {}) const noexcept {
@@ -228,6 +231,7 @@ struct arm64_yield_t {
  *  `capability_arm64_wfet_k` reports `FEAT_WFxT` at runtime.
  */
 struct arm64_wfet_t {
+    static constexpr capabilities_t capability_k = capability_arm64_wfet_k;
     /** @brief Waits with a ~1 micro-second cap, for a loop that also guards another line. */
     template <typename value_type_, typename thread_index_type_>
     inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
@@ -318,6 +322,7 @@ struct arm64_wfet_t {
 
 /** @brief On RISC-V, the `Zihintpause` spin-wait hint. */
 struct risc5_pause_t {
+    static constexpr capabilities_t capability_k = capability_risc5_pause_k;
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
                            bound_type_ = {}) const noexcept {
@@ -351,6 +356,7 @@ struct risc5_pause_t {
  *           may be selected.
  */
 struct risc5_wrs_t {
+    static constexpr capabilities_t capability_k = capability_risc5_wrs_k;
     /** @brief Waits with the implementation-bounded short timeout, for a loop that also guards another line. */
     template <typename value_type_, typename thread_index_type_>
     inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,

@@ -213,8 +213,8 @@ struct log_numa_topology_t {
 
             // Format core range and memory
             char cores_str[256], memory_str[64];
-            log_core_range_t {}(node.first_core_id, node.core_count, cores_str, sizeof(cores_str), colorless);
-            log_memory_volume_t {}(node.memory_size, memory_str, sizeof(memory_str), colorless);
+            log_core_range_t {}(node.first_core_id, node.logical_cores_count, cores_str, sizeof(cores_str), colorless);
+            log_memory_volume_t {}(node.volume_ram, memory_str, sizeof(memory_str), colorless);
 
             // Tree structure prefixes
             bool is_last_socket = current_socket_id == last_socket_id;
@@ -222,15 +222,15 @@ struct log_numa_topology_t {
             char const *node_connector = is_last_node_in_socket ? "└─ " : "├─ ";
 
             // Start building node line
-            int pos = std::snprintf(                                                    //
-                line_buffer, sizeof(line_buffer),                                       //
-                "%s%s%s%sNode%s %s%d%s • %sCores:%s %s%s (%zu)%s • %sMemory:%s %s%s%s", //
-                colors.dim(), socket_prefix, node_connector,                            //
-                colors.cyan(), /* "Node" */ colors.reset(),                             //
-                colors.bold_cyan(), node.memory_domain_id, colors.reset(),              //
-                colors.green(), /* "Cores:" */ colors.reset(),                          //
-                colors.bold_green(), cores_str, node.core_count, colors.reset(),        //
-                colors.yellow(), /* "Memory:" */ colors.reset(),                        //
+            int pos = std::snprintf(                                                      //
+                line_buffer, sizeof(line_buffer),                                         //
+                "%s%s%s%sNode%s %s%d%s • %sCores:%s %s%s (%zu)%s • %sMemory:%s %s%s%s",   //
+                colors.dim(), socket_prefix, node_connector,                              //
+                colors.cyan(), /* "Node" */ colors.reset(),                               //
+                colors.bold_cyan(), node.memory_domain_id, colors.reset(),                //
+                colors.green(), /* "Cores:" */ colors.reset(),                            //
+                colors.bold_green(), cores_str, node.logical_cores_count, colors.reset(), //
+                colors.yellow(), /* "Memory:" */ colors.reset(),                          //
                 colors.bold_yellow(), memory_str, colors.reset());
 
             // Memory tier, shown only when the machine actually exposes more than one

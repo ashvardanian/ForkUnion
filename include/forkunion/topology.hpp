@@ -404,7 +404,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t ram_page_size() noexcept {
  *  @retval Total system RAM in bytes, or 0 if detection fails.
  *  @note This function provides cross-platform detection of total physical memory.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t ram_total_bytes() noexcept {
+FU_MAYBE_UNUSED_ static inline std::size_t volume_ram() noexcept {
 #if FU_ON_LINUX
     // On Linux, read from /proc/meminfo
     FILE *meminfo_file = ::fopen("/proc/meminfo", "r");
@@ -694,13 +694,13 @@ struct memory_domain {
     /** @brief Physical CPU socket ID. */
     socket_id_t socket_id {-1};
     /** @brief RAM volume in bytes. */
-    std::size_t memory_size {0};
+    std::size_t volume_ram {0};
     /** @brief Memory tier ordinal, sorted fastest-to-slowest (0 = fastest). */
     std::size_t memory_level {0};
     /** @brief Pointer to the first core ID in the `core_ids` array. */
     core_id_t const *first_core_id {nullptr};
     /** @brief Number of items in the `core_ids` array. */
-    std::size_t core_count {0};
+    std::size_t logical_cores_count {0};
     /** @brief Huge page sizes available on this memory domain. */
     ram_page_settings<max_page_sizes_k> page_sizes {};
 };
@@ -730,7 +730,7 @@ struct compute_domain_t {
      *  Unlike `compute_level`, this is a magnitude, so it may be summed and divided. Where the
      *  kernel publishes a per-core rating - such as the Linux scheduler's `cpu_capacity`, scaled so
      *  the fastest core present reads 1024 - it lands here. Platforms that rank cores without
-     *  quantifying them leave this unknown, and callers weigh domains by `core_count` instead.
+     *  quantifying them leave this unknown, and callers weigh domains by `logical_cores_count` instead.
      */
     std::size_t capacity {0};
     /**
@@ -744,7 +744,7 @@ struct compute_domain_t {
     /** @brief Pointer to the first core ID in this domain. */
     core_id_t const *first_core_id {nullptr};
     /** @brief Number of cores in this domain. */
-    std::size_t core_count {0};
+    std::size_t logical_cores_count {0};
 };
 
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
@@ -1057,7 +1057,7 @@ struct machine_topology {
     /** @brief Number of memory domains, one per NUMA node. */
     std::size_t memory_domains_count_ {0};
     /** @brief Total number of cores in all nodes. */
-    std::size_t cores_count_ {0};
+    std::size_t logical_cores_count_ {0};
     /** @brief Number of compute domains actually written, never more than `compute_domains_.size()`. */
     std::size_t compute_domains_count_ {0};
     /** @brief Number of distinct QoS classes (>= 1). */
@@ -1074,7 +1074,7 @@ struct machine_topology {
         : allocator_(std::move(o.allocator_)), memory_domains_(std::move(o.memory_domains_)),
           domain_core_ids_(std::move(o.domain_core_ids_)), compute_domains_(std::move(o.compute_domains_)),
           memory_domains_count_(std::exchange(o.memory_domains_count_, 0)),
-          cores_count_(std::exchange(o.cores_count_, 0)),
+          logical_cores_count_(std::exchange(o.logical_cores_count_, 0)),
           compute_domains_count_(std::exchange(o.compute_domains_count_, 0)),
           compute_levels_count_(std::exchange(o.compute_levels_count_, 1)),
           memory_levels_count_(std::exchange(o.memory_levels_count_, 1)) {}
@@ -1086,7 +1086,7 @@ struct machine_topology {
             domain_core_ids_ = std::move(other.domain_core_ids_);
             compute_domains_ = std::move(other.compute_domains_);
             memory_domains_count_ = std::exchange(other.memory_domains_count_, 0);
-            cores_count_ = std::exchange(other.cores_count_, 0);
+            logical_cores_count_ = std::exchange(other.logical_cores_count_, 0);
             compute_domains_count_ = std::exchange(other.compute_domains_count_, 0);
             compute_levels_count_ = std::exchange(other.compute_levels_count_, 1);
             memory_levels_count_ = std::exchange(other.memory_levels_count_, 1);
@@ -1103,7 +1103,7 @@ struct machine_topology {
         memory_domains_.reset();
         domain_core_ids_.reset();
         compute_domains_.reset();
-        memory_domains_count_ = cores_count_ = compute_domains_count_ = 0;
+        memory_domains_count_ = logical_cores_count_ = compute_domains_count_ = 0;
         compute_levels_count_ = 1;
         memory_levels_count_ = 1;
     }
@@ -1126,14 +1126,14 @@ struct machine_topology {
             memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> scratch_core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> scratch_domains {domains_allocator_t {allocator_}};
-        if (!scratch_nodes.try_resize(other.memory_domains_count_)) return false; // ! OOM
-        if (!scratch_core_ids.try_resize(other.cores_count_)) return false;       // ! OOM
-        if (!scratch_domains.try_resize(other.cores_count_)) return false;        // ! OOM
+        if (!scratch_nodes.try_resize(other.memory_domains_count_)) return false;   // ! OOM
+        if (!scratch_core_ids.try_resize(other.logical_cores_count_)) return false; // ! OOM
+        if (!scratch_domains.try_resize(other.logical_cores_count_)) return false;  // ! OOM
 
         // Deep copy, re-basing every `first_core_id` into our own core-id block
         core_id_t const *const other_cores = other.domain_core_ids_.data();
-        if (other.cores_count_ > 0)
-            std::memcpy(scratch_core_ids.data(), other_cores, other.cores_count_ * sizeof(core_id_t));
+        if (other.logical_cores_count_ > 0)
+            std::memcpy(scratch_core_ids.data(), other_cores, other.logical_cores_count_ * sizeof(core_id_t));
         for (std::size_t i = 0; i < other.memory_domains_count_; ++i) {
             scratch_nodes[i] = other.memory_domains_[i];
             std::ptrdiff_t const offset = other.memory_domains_[i].first_core_id - other_cores;
@@ -1149,7 +1149,7 @@ struct machine_topology {
         domain_core_ids_ = std::move(scratch_core_ids);
         compute_domains_ = std::move(scratch_domains);
         memory_domains_count_ = other.memory_domains_count_;
-        cores_count_ = other.cores_count_;
+        logical_cores_count_ = other.logical_cores_count_;
         compute_domains_count_ = other.compute_domains_count_;
         compute_levels_count_ = other.compute_levels_count_;
         memory_levels_count_ = other.memory_levels_count_;
@@ -1160,7 +1160,7 @@ struct machine_topology {
     std::size_t memory_domains_count() const noexcept { return memory_domains_count_; }
     /** @brief Number of distinct memory tiers across all memory domains (>= 1). */
     std::size_t memory_levels_count() const noexcept { return memory_levels_count_; }
-    std::size_t threads_count() const noexcept { return cores_count_; }
+    std::size_t logical_cores_count() const noexcept { return logical_cores_count_; }
 
     /** @brief The memory domain at @p memory_domain_index, in [0, `memory_domains_count()`). */
     memory_domain_t const &memory_domain_at(memory_domain_index_t const memory_domain_index) const noexcept {
@@ -1186,8 +1186,8 @@ struct machine_topology {
     }
 
     /** @brief Relative access distance from a compute domain to a memory domain (10 = local). */
-    std::size_t distance(compute_domain_index_t const compute_domain_index,
-                         memory_domain_index_t const memory_domain_index) const noexcept {
+    std::size_t memory_distance(compute_domain_index_t const compute_domain_index,
+                                memory_domain_index_t const memory_domain_index) const noexcept {
         if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= memory_domains_count_) return 0;
         // TODO: replace this local-versus-remote heuristic with our own latency probe. The OS-reported
         // SLIT distance (`numa_distance`) was dropped with the `topology_metrics` capability, because
@@ -1214,9 +1214,62 @@ struct machine_topology {
     }
 
     /**
+     *  @brief Fills a single memory domain and compute domain covering every allowed core.
+     *  @retval false only if the core count is zero or an allocation fails.
+     *
+     *  The uniform view used when no richer topology source exists - a build without `FU_WITH_TOPOLOGY`,
+     *  or a machine the kernel reports no NUMA for. Every query then returns a sensible whole-machine
+     *  answer and a `distributed_pool` degenerates to one domain, so `fu_topology_t` is usable anywhere.
+     */
+    bool try_harvest_portable() noexcept {
+        reset();
+        std::size_t const cores = allowed_cores_count();
+        if (cores == 0) return false;
+
+        dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
+        dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
+        dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
+        if (!nodes.try_resize(1) || !core_ids.try_resize(cores) || !domains.try_resize(1)) return false;
+
+        core_id_t *const core_ids_ptr = core_ids.data();
+        for (std::size_t i = 0; i < cores; ++i) core_ids_ptr[i] = static_cast<core_id_t>(i);
+
+        memory_domain_t &node = nodes.data()[0];
+        node.memory_domain_id = 0;
+        node.socket_id = 0;
+        node.volume_ram = volume_ram();
+        node.memory_level = 0;
+        node.first_core_id = core_ids_ptr;
+        node.logical_cores_count = cores;
+
+        compute_domain_t &domain = domains.data()[0];
+        domain.memory_domain_id = 0;
+        domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
+        domain.compute_level = 0;
+        domain.capacity = 0;
+        domain.cache_bytes = 0;
+        domain.first_core_id = core_ids_ptr;
+        domain.logical_cores_count = cores;
+
+        // Moving an array keeps its heap pointer, so every `first_core_id` above stays valid.
+        memory_domains_ = std::move(nodes);
+        domain_core_ids_ = std::move(core_ids);
+        compute_domains_ = std::move(domains);
+        memory_domains_count_ = 1;
+        logical_cores_count_ = cores;
+        compute_domains_count_ = 1;
+        compute_levels_count_ = 1;
+        memory_levels_count_ = 1;
+        return true;
+    }
+
+    /**
      *  @brief Harvests CPU-memory topology - Linux NUMA nodes, or Apple Silicon performance levels.
      *  @retval false if the platform lacks topology support or the harvest failed.
      *  @retval true if the harvest was successful and the topology is ready to use.
+     *
+     *  Falls back to `try_harvest_portable` whenever no richer source is available, so a spawned pool
+     *  always sees at least one compute and one memory domain.
      */
     bool try_harvest() noexcept {
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
@@ -1228,8 +1281,8 @@ struct machine_topology {
         core_mask_t allowed;
         bool const allowed_known = try_capture_thread_cores(allowed) && allowed.count() != 0;
 
-        if (::numa_available() < 0) return false; // ! Linux kernel lacks NUMA support
-        ::numa_node_to_cpu_update();              // ? Reset the outdated stale state
+        if (::numa_available() < 0) return try_harvest_portable(); // ? No NUMA - one uniform domain
+        ::numa_node_to_cpu_update();                               // ? Reset the outdated stale state
 
         // The only resource here the arrays below cannot own for us.
         numa_cpumask_guard_t numa_mask_guard;
@@ -1285,9 +1338,9 @@ struct machine_topology {
 
             memory_domain_t &node = domains_outb[node_index];
             node.memory_domain_id = memory_domain_id;
-            node.memory_size = static_cast<std::size_t>(total_memory_size);
+            node.volume_ram = static_cast<std::size_t>(total_memory_size);
             node.first_core_id = core_ids_ptr + core_index;
-            node.core_count = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
+            node.logical_cores_count = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
 
             // Most likely, this will fill `core_ids_ptr` with `std::iota`-like values
             for (std::size_t bit_offset = 0; bit_offset < numa_mask->size; ++bit_offset)
@@ -1296,7 +1349,7 @@ struct machine_topology {
 
             // ? Cpuless memory domains have no core to query - default the socket and skip the lookup.
             // ! Only valid once `first_core_id` points to initialized entries, hence after the loop above
-            node.socket_id = node.core_count > 0 ? socket_id_of_core(node.first_core_id[0]) : -1;
+            node.socket_id = node.logical_cores_count > 0 ? socket_id_of_core(node.first_core_id[0]) : -1;
 
             // Fetch Huge Page sizes for this NUMA node
             node.page_sizes.try_harvest(memory_domain_id); // ! We are not raising the failure - Huge Pages are optional
@@ -1308,24 +1361,24 @@ struct machine_topology {
         memory_domains_ = std::move(nodes);
         domain_core_ids_ = std::move(core_ids);
         memory_domains_count_ = fetched_memory_domains;
-        cores_count_ = fetched_cores;
+        logical_cores_count_ = fetched_cores;
 
         // Let's sort all the nodes by their socket ID, then by number of cores, then by first core ID
         bubble_sort(memory_domains_.data(), memory_domains_count_,
                     [](memory_domain_t const &a, memory_domain_t const &b) noexcept {
                         if (a.socket_id != b.socket_id) return a.socket_id < b.socket_id;
-                        if (a.core_count != b.core_count)
-                            return a.core_count > b.core_count; // ? Sort by descending core count
+                        if (a.logical_cores_count != b.logical_cores_count)
+                            return a.logical_cores_count > b.logical_cores_count; // ? Sort by descending core count
                         // ? Cpuless slices are empty, so guard the dereference and sort them first
-                        core_id_t const a_first = a.core_count ? a.first_core_id[0] : -1;
-                        core_id_t const b_first = b.core_count ? b.first_core_id[0] : -1;
+                        core_id_t const a_first = a.logical_cores_count ? a.first_core_id[0] : -1;
+                        core_id_t const b_first = b.logical_cores_count ? b.first_core_id[0] : -1;
                         return a_first < b_first; // ? Sort by first core ID
                     });
 
         // Cache each harvested core's scheduler capacity once, keyed by core id. The QoS split
         // below sorts and compares capacities repeatedly, so reading sysfs per comparison would be
         // O(cores^2) file opens on a large node - a single pass here amortizes that to O(cores).
-        for (std::size_t core_index = 0; core_index < cores_count_; ++core_index) {
+        for (std::size_t core_index = 0; core_index < logical_cores_count_; ++core_index) {
             core_id_t const core_id = domain_core_ids_[core_index];
             if (static_cast<std::size_t>(core_id) < configured_cores)
                 core_capacities[static_cast<std::size_t>(core_id)] = capacity_of_core(core_id);
@@ -1341,15 +1394,15 @@ struct machine_topology {
                 core_id_t *node_cores = const_cast<core_id_t *>(node.first_core_id);
 
                 // Ascending capacity groups efficiency cores before performance cores.
-                bubble_sort(node_cores, node.core_count,
+                bubble_sort(node_cores, node.logical_cores_count,
                             [core_capacities](core_id_t const &a, core_id_t const &b) noexcept {
                                 return core_capacities[static_cast<std::size_t>(a)] <
                                        core_capacities[static_cast<std::size_t>(b)];
                             });
 
                 std::size_t run_begin = 0;
-                for (std::size_t core = 1; core <= node.core_count; ++core) {
-                    bool const at_end = core == node.core_count;
+                for (std::size_t core = 1; core <= node.logical_cores_count; ++core) {
+                    bool const at_end = core == node.logical_cores_count;
                     bool const capacity_changed =
                         !at_end && core_capacities[static_cast<std::size_t>(node_cores[core])] !=
                                        core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
@@ -1364,7 +1417,7 @@ struct machine_topology {
                     domain.capacity = core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
                     domain.cache_bytes = 0; // ? Not yet read from `sys/devices/system/cpu/cpu*/cache`
                     domain.first_core_id = node_cores + run_begin;
-                    domain.core_count = core - run_begin;
+                    domain.logical_cores_count = core - run_begin;
                     run_begin = core;
                 }
             }
@@ -1406,7 +1459,7 @@ struct machine_topology {
 #elif FU_ON_WINDOWS
         return try_harvest_windows();
 #else
-        return false;
+        return try_harvest_portable();
 #endif
     }
 
@@ -1445,7 +1498,7 @@ struct machine_topology {
         }
         if (nonempty_levels == 0) nonempty_levels = 1; // ? One level covering every core
 
-        // `compute_domains_` is sized to `cores_count_` across the class (at most one domain per core).
+        // `compute_domains_` is sized to `logical_cores_count_` across the class (at most one domain per core).
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
@@ -1460,10 +1513,10 @@ struct machine_topology {
         memory_domain_t &node = domains_outb[0];
         node.memory_domain_id = 0;
         node.socket_id = 0;
-        node.memory_size = memory_size;
+        node.volume_ram = memory_size;
         node.memory_level = 0;
         node.first_core_id = core_ids_ptr;
-        node.core_count = total_cores;
+        node.logical_cores_count = total_cores;
 
         // One compute domain per L2 cluster. Apple lists cores fastest-level first, so `hw.perflevel0`
         // takes the highest compute level; every cluster carved out of it repeats that same level.
@@ -1494,7 +1547,7 @@ struct machine_topology {
                 domain.capacity = 0;
                 domain.cache_bytes = level_cache_bytes; // ? L2 is private to the cluster, shared within it
                 domain.first_core_id = core_ids_ptr + core_offset + cut;
-                domain.core_count = cluster_cores;
+                domain.logical_cores_count = cluster_cores;
                 domains_written += 1;
             }
             core_offset += level_cores;
@@ -1510,7 +1563,7 @@ struct machine_topology {
             domain.capacity = 0;
             domain.cache_bytes = 0;
             domain.first_core_id = core_ids_ptr;
-            domain.core_count = total_cores;
+            domain.logical_cores_count = total_cores;
             domains_written = 1;
             levels_written = 1;
         }
@@ -1520,7 +1573,7 @@ struct machine_topology {
         domain_core_ids_ = std::move(core_ids);
         compute_domains_ = std::move(domains);
         memory_domains_count_ = 1;
-        cores_count_ = total_cores;
+        logical_cores_count_ = total_cores;
         compute_domains_count_ = domains_written;
         compute_levels_count_ = levels_written; // ! Several clusters may share one level - not `domains_written`
         memory_levels_count_ = 1;
@@ -1546,7 +1599,7 @@ struct machine_topology {
      *  compute domains straight out of masks, the unit Windows itself speaks in.
      *
      *  Efficiency class is an ordinal, not a magnitude - it ranks cores without rating them - so
-     *  `capacity` stays 0 and callers weigh domains by `core_count`, mirroring the
+     *  `capacity` stays 0 and callers weigh domains by `logical_cores_count`, mirroring the
      *  Apple path. `cache_bytes` is the largest private (L1/L2) cache the kernel reports for the class.
      *
      *  @note A `core_id_t` here is not a flat index: it packs the (group, in-group bit) pair via
@@ -1725,7 +1778,7 @@ struct machine_topology {
                 domain.capacity = 0;
                 domain.cache_bytes = domain_cache_bytes;
                 domain.first_core_id = core_ids_ptr + domain_first_core;
-                domain.core_count = core_cursor - domain_first_core;
+                domain.logical_cores_count = core_cursor - domain_first_core;
             }
 
             ULONGLONG available_bytes = 0;
@@ -1735,11 +1788,11 @@ struct machine_topology {
             node.memory_domain_id = static_cast<memory_domain_id_t>(memory_domain.NodeNumber);
             node.socket_id = win_socket_for_node(package_buf, package_len, memory_domain,
                                                  static_cast<socket_id_t>(memory_domain.NodeNumber));
-            node.memory_size =
+            node.volume_ram =
                 static_cast<std::size_t>(available_bytes); // ? Available, not installed - Windows has no per-node total
             node.memory_level = 0;
             node.first_core_id = core_ids_ptr + node_first_core;
-            node.core_count = core_cursor - node_first_core;
+            node.logical_cores_count = core_cursor - node_first_core;
             node.page_sizes.try_harvest(node.memory_domain_id); // ! Optional: records the large-page size if available
             node_index += 1;
             if (record->Size == 0) break;
@@ -1767,7 +1820,7 @@ struct machine_topology {
         domain_core_ids_ = std::move(core_ids);
         compute_domains_ = std::move(domains);
         memory_domains_count_ = counted_nodes;
-        cores_count_ = core_cursor;
+        logical_cores_count_ = core_cursor;
         compute_domains_count_ = domain_cursor;
         compute_levels_count_ = levels;
         memory_levels_count_ = 1; // ? Windows exposes no memory-tiering ranking

@@ -180,8 +180,8 @@
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && !FU_WITH_TOPOLOGY
 #error "FU_WITH_PLACE_MEMORY_ON_DOMAIN places pages on domains we would not have discovered"
 #endif
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX && !FU_WITH_PLACE_MEMORY_ON_DOMAIN
-#error "On Linux the hugetlb path maps with `mmap` and places with `mbind`; it needs FU_WITH_PLACE_MEMORY_ON_DOMAIN"
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && !FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#error "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN places huge pages on a domain; it needs FU_WITH_PLACE_MEMORY_ON_DOMAIN"
 #endif
 
 #if FU_ALLOW_UNSAFE
@@ -469,6 +469,8 @@ enum capabilities_t : unsigned int {
  *  `distributed_k` pool spans every domain and replicates per memory domain.
  */
 enum class pool_kind_t : unsigned int {
+    /** No pool constructed - the shape is undecided until a spawn builds one. */
+    unknown_k = 0,
     /** No domain awareness - one worker set over all cores, as if the machine were uniform. */
     flat_k,
     /** Pinned to a single compute domain, so its workers share a cache and a memory domain. */
@@ -1117,6 +1119,7 @@ inline constexpr wait_uncapped_t wait_uncapped_k {};
  *  `x86_tpause_t`, `risc5_wrs_t`) use the word to sleep the core until that line changes.
  */
 struct standard_yield_t {
+    static constexpr capabilities_t capability_k = capabilities_unknown_k;
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
                            bound_type_ = {}) const noexcept {

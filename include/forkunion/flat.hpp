@@ -116,6 +116,7 @@ class flat_pool {
   public:
     using allocator_t = allocator_type_;
     using micro_yield_t = micro_yield_type_;
+    static constexpr pool_kind_t kind_k = pool_kind_t::flat_k;
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(is_power_of_two(alignment_k), "Alignment must be a power of 2");
 

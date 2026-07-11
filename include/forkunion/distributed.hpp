@@ -378,16 +378,71 @@ struct windows_numa_allocator {
 using windows_numa_allocator_t = windows_numa_allocator<>;
 
 /**
- *  @brief The NUMA-placing allocator for this platform, or `std::allocator` where there is none.
+ *  @brief A heap-backed stand-in for the NUMA allocators, for platforms that expose no domains.
+ *
+ *  Mirrors `linux_numa_allocator`'s interface so `memory_domain_allocator_t` stays uniform: it ignores
+ *  the memory domain and reports the base page size, letting the domain-aware code paths compile and
+ *  run everywhere while degenerating to plain heap allocation. Every block is aligned to at least
+ *  `default_alignment_k`, so the NUMA backends' page alignment and this fallback offer one alignment
+ *  contract - over-aligned element types need no caller-side padding on any platform.
+ */
+template <typename value_type_ = char>
+struct portable_numa_allocator {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+
+  private:
+    memory_domain_id_t memory_domain_id_ {-1};
+    size_type default_page_size_ {ram_page_size()};
+
+    static void *allocate_aligned(size_type bytes) noexcept {
+        return ::operator new(bytes, std::align_val_t {default_alignment_k}, std::nothrow);
+    }
+
+  public:
+    memory_domain_id_t memory_domain_id() const noexcept { return memory_domain_id_; }
+    size_type default_page_size() const noexcept { return default_page_size_; }
+
+    constexpr portable_numa_allocator() noexcept = default;
+    explicit constexpr portable_numa_allocator(memory_domain_id_t id, size_type paging = ram_page_size()) noexcept
+        : memory_domain_id_(id), default_page_size_(paging) {}
+    template <typename other_type_>
+    explicit constexpr portable_numa_allocator(portable_numa_allocator<other_type_> const &o) noexcept
+        : memory_domain_id_(o.memory_domain_id()), default_page_size_(o.default_page_size()) {}
+
+    /** @brief Allocates at least @p size elements, rounded up to the page size. */
+    allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
+        size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();
+        size_type const aligned_size_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        void *result_ptr = allocate_aligned(aligned_size_bytes);
+        if (!result_ptr) return {}; // ! Allocation failed
+        size_type const pages_count = (page_size_bytes == 0) ? 0 : (aligned_size_bytes / page_size_bytes);
+        return {static_cast<value_type *>(result_ptr), size, aligned_size_bytes, pages_count};
+    }
+
+    /** @brief Allocates exactly @p size elements. */
+    value_type *allocate(size_type size) noexcept {
+        return static_cast<value_type *>(allocate_aligned(size * sizeof(value_type)));
+    }
+
+    void deallocate(value_type *p, size_type) noexcept { ::operator delete(p, std::align_val_t {default_alignment_k}); }
+};
+
+using portable_numa_allocator_t = portable_numa_allocator<>;
+
+/**
+ *  @brief The NUMA-placing allocator for this platform, or a `malloc`-backed one where there is none.
  *  @sa Selected as `colocated_pool::allocator_t` so the pool's own state lands on its node.
  */
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 using memory_domain_allocator_t = linux_numa_allocator_t;
 #elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
 using memory_domain_allocator_t = windows_numa_allocator_t;
+#else
+using memory_domain_allocator_t = portable_numa_allocator_t;
 #endif
 
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#if FU_WITH_OS_THREADS
 
 /**
  *  @brief Sleeps the calling thread for @p micros microseconds.
@@ -437,12 +492,16 @@ enum pin_granularity_t {
  *  @see https://stackoverflow.com/a/558815
  */
 struct alignas(default_alignment_k) pinned_thread_t {
-    std::atomic<native_thread_t> handle {}; // ? `pthread_t` on POSIX, `HANDLE` on Windows
-    std::atomic<std::uint64_t>
-        id {}; // ? `gettid` on Linux, `pthread_threadid_np` on Apple, `GetCurrentThreadId` on Windows
+    /** @brief The OS thread handle: `pthread_t` on POSIX, `HANDLE` on Windows. */
+    std::atomic<native_thread_t> handle {};
+    /** @brief The OS thread id: `gettid` on Linux, `pthread_threadid_np` on Apple, `GetCurrentThreadId` on Windows. */
+    std::atomic<std::uint64_t> id {};
+    /** @brief The core this worker is pinned to, or -1 when unpinned. */
     core_id_t core_id {-1};
-    char name[16] {};           // ? Written by the spawner, applied by the worker to itself
-    core_quality_t qos_level {-1}; // TODO: Populate from VFS, if available
+    /** @brief Thread name, written by the spawner and applied by the worker to itself. */
+    char name[16] {};
+    /** @brief QoS class of this worker's core. @todo Populate from VFS, if available. */
+    core_quality_t core_quality {-1};
     /**
      *  @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`.
      *  @note Lives here, rather than in a second array, so the pool allocates once and the cursor
@@ -489,6 +548,7 @@ struct colocated_pool {
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
 #endif
     using micro_yield_t = micro_yield_type_;
+    static constexpr pool_kind_t kind_k = pool_kind_t::colocated_k;
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(alignment_k > 0 && (alignment_k & (alignment_k - 1)) == 0, "Alignment must be a power of 2");
 
@@ -654,7 +714,7 @@ struct colocated_pool {
      */
     bool try_spawn(compute_domain_t const &domain,
                    caller_exclusivity_t const exclusivity = caller_inclusive_k) noexcept {
-        return try_spawn(domain, domain.core_count, exclusivity);
+        return try_spawn(domain, domain.logical_cores_count, exclusivity);
     }
 
     /**
@@ -671,7 +731,7 @@ struct colocated_pool {
      *
      *  @section Over- and Under-subscribing Cores and Pinning
      *
-     *  We may accept @p threads different from the @p domain.core_count, which allows us to:
+     *  We may accept @p threads different from the @p domain.logical_cores_count, which allows us to:
      *  - over-subscribe the cores, i.e. use more threads than cores available on the NUMA node.
      *  - under-subscribe the cores, i.e. use fewer threads than cores available on the NUMA node.
      *
@@ -788,10 +848,11 @@ struct colocated_pool {
 
         // Compose each thread's name. Apple can only name the calling thread, so the worker applies it
         // to itself; we merely publish it here, before the workers read their cells.
-        // ! `i % core_count` because a pool may hold more threads than its domain has cores.
+        // ! `i % logical_cores_count` because a pool may hold more threads than its domain has cores.
         for (thread_index_t i = 0; i < pthreads_.size(); ++i)
             fill_thread_name(pthreads_[i].name, name_,
-                             static_cast<std::size_t>(domain.first_core_id[i % domain.core_count]), max_possible_cores);
+                             static_cast<std::size_t>(domain.first_core_id[i % domain.logical_cores_count]),
+                             max_possible_cores);
         if (use_caller_thread) set_current_thread_name(pthreads_[0].name);
 
         // Pin all of the threads. Where the kernel refuses, the domains still describe the machine
@@ -801,7 +862,7 @@ struct colocated_pool {
         unpinned_threads_ = 0;
         if (pin_granularity == pin_to_core_k) {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
-                core_id_t const cpu = domain.first_core_id[i % domain.core_count];
+                core_id_t const cpu = domain.first_core_id[i % domain.logical_cores_count];
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
                 if (try_pin_thread_to_cores(pin_handle, &cpu, 1)) pthreads_[i].core_id = cpu;
                 else
@@ -811,7 +872,8 @@ struct colocated_pool {
         else {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                if (!try_pin_thread_to_cores(pin_handle, domain.first_core_id, domain.core_count)) ++unpinned_threads_;
+                if (!try_pin_thread_to_cores(pin_handle, domain.first_core_id, domain.logical_cores_count))
+                    ++unpinned_threads_;
             }
         }
 
@@ -1443,6 +1505,7 @@ struct distributed_pool {
 
     using colocated_pool_t = colocated_pool<micro_yield_type_, alignment_>;
     using machine_topology_t = machine_topology<>;
+    static constexpr pool_kind_t kind_k = pool_kind_t::distributed_k;
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN
     using allocator_t = memory_domain_allocator_t; // ? Places the pool's own state on its node
@@ -1468,8 +1531,6 @@ struct distributed_pool {
     using unique_domain_cell_buffer_t = dynamic_padded_array<compute_domain_cell_t, allocator_t>;
     using compute_domain_cells_t = dynamic_padded_array<unique_domain_cell_buffer_t, allocator_t>;
 
-    /** @brief The machine topology this pool spans: memory domains, cores, and QoS levels. */
-    machine_topology_t topology_ {};
     /** @brief Thread name buffer, forwarded to each sub-pool for OS thread naming. */
     char name_[16] {};
     /** @brief Total threads across all compute domains, including the caller on inclusive pools. */
@@ -1491,9 +1552,9 @@ struct distributed_pool {
     distributed_pool &operator=(distributed_pool &&) = delete;
     distributed_pool &operator=(distributed_pool const &) = delete;
 
-    distributed_pool(machine_topology_t topo = {}) noexcept : distributed_pool("forkunion", std::move(topo)) {}
+    distributed_pool() noexcept : distributed_pool("forkunion") {}
 
-    explicit distributed_pool(char const *name, machine_topology_t topo = {}) noexcept : topology_(std::move(topo)) {
+    explicit distributed_pool(char const *name) noexcept {
         // Accept null or empty names by falling back to a sensible default
         char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::strncpy(name_, effective_name, sizeof(name_) - 1);
@@ -1520,12 +1581,6 @@ struct distributed_pool {
     bool is_lock_free() const noexcept {
         return compute_domain_cells_ && compute_domain_cells_[0] && compute_domain_cells_[0].only().pool.is_lock_free();
     }
-
-    /**
-     *  @brief Returns the NUMA topology used by this thread-pool.
-     *  @note This API is @b not synchronized.
-     */
-    machine_topology_t const &topology() const noexcept { return topology_; }
 
     /** @brief Exposes one compute domain's cross-domain cursor, drained by `invoke_distributed_for_n_dynamic`. */
     std::atomic<index_t> &unsafe_dynamic_progress_ref(index_t compute_domain) noexcept {
@@ -1564,22 +1619,6 @@ struct distributed_pool {
 
     /**
      *  @brief Creates a thread-pool addressing all cores across all NUMA nodes.
-     *  @param[in] threads The number of threads to be used.
-     *  @param[in] exclusivity Should we count the calling thread as one of the threads?
-     *  @param[in] pin_granularity How to pin the threads to the NUMA node?
-     *  @retval false if the number of threads is zero or if spawning has failed.
-     *  @retval true if the thread-pool was created successfully, started, and is ready to use.
-     *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
-     */
-    bool try_spawn(                   //
-        thread_index_t const threads, //
-        caller_exclusivity_t const exclusivity = caller_inclusive_k,
-        pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
-        return try_spawn(topology_, threads, exclusivity, pin_granularity);
-    }
-
-    /**
-     *  @brief Creates a thread-pool addressing all cores across all NUMA nodes.
      *  @param[in] topology The NUMA topology to use for the thread-pool.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
      *  @param[in] pin_granularity How to pin the threads to the NUMA node?
@@ -1590,7 +1629,7 @@ struct distributed_pool {
     bool try_spawn( //
         machine_topology_t const &topology, caller_exclusivity_t const exclusivity = caller_inclusive_k,
         pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
-        return try_spawn(topology, topology.threads_count(), exclusivity, pin_granularity);
+        return try_spawn(topology, topology.logical_cores_count(), exclusivity, pin_granularity);
     }
 
     /**
@@ -1612,15 +1651,14 @@ struct distributed_pool {
         if (threads == 0) return false;        // ! Can't have zero threads working on something
         if (threads_count_ != 0) return false; // ! Already initialized
 
-        machine_topology_t new_topology;
-        if (!new_topology.try_assign(topology)) return false; // ! Copy-construction failed
-
+        // The topology is borrowed for the duration of this call only - every per-domain cell below
+        // captures what it needs by value, so the pool never retains a reference to it.
         // Place the control structures on the first compute domain, pinning the caller there too.
         // We spawn one sub-pool per compute domain (a same-QoS core run), not per NUMA node, so
         // performance and efficiency cores on one node become separate, independently pinned pools.
-        compute_domain_t const &first_domain = new_topology.compute_domain_at(compute_domain_index_t {});
+        compute_domain_t const &first_domain = topology.compute_domain_at(compute_domain_index_t {});
         allocator_t allocator = allocator_for_node(first_domain.memory_domain_id);
-        index_t const compute_domain_cells_count = std::min(new_topology.compute_domains_count(), threads);
+        index_t const compute_domain_cells_count = std::min(topology.compute_domains_count(), threads);
 
         compute_domain_cells_t compute_domain_cells(allocator);
         if (!compute_domain_cells.try_resize(compute_domain_cells_count)) return false; // ! Allocation failed
@@ -1629,8 +1667,7 @@ struct distributed_pool {
         for (index_t compute_domain_index = 0; compute_domain_index < compute_domain_cells_count;
              ++compute_domain_index) {
             memory_domain_id_t const memory_domain_id =
-                new_topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index))
-                    .memory_domain_id;
+                topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index)).memory_domain_id;
             allocator_t node_allocator = allocator_for_node(memory_domain_id);
             unique_domain_cell_buffer_t domain_cell_buffer(node_allocator);
             domain_cell_buffer.try_resize(1);
@@ -1657,7 +1694,7 @@ struct distributed_pool {
         // - the first one may be "inclusive".
         // - others are always "exclusive" to the caller thread.
         indexed_split<thread_index_t> threads_per_domain(threads, compute_domain_cells_count);
-        index_t const compute_levels = static_cast<index_t>(new_topology.compute_levels_count());
+        index_t const compute_levels = static_cast<index_t>(topology.compute_levels_count());
         if (!compute_domain_cells[0].only().pool.try_spawn(first_domain, threads_per_domain[0].count, exclusivity,
                                                            pin_granularity, 0, 0, compute_levels)) {
             reset_on_failure();
@@ -1667,7 +1704,7 @@ struct distributed_pool {
         for (index_t compute_domain_index = 1; compute_domain_index < compute_domain_cells_count;
              ++compute_domain_index) {
             compute_domain_t const &domain =
-                new_topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index));
+                topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index));
             compute_domain_cell_t &cell = compute_domain_cells[compute_domain_index].only();
             if (!cell.pool.try_spawn(domain, threads_per_domain[compute_domain_index].count, caller_exclusive_k,
                                      pin_granularity, threads_per_domain[compute_domain_index].first,
@@ -1677,7 +1714,6 @@ struct distributed_pool {
             }
         }
 
-        topology_ = std::move(new_topology);
         compute_domain_cells_ = std::move(compute_domain_cells);
         threads_count_ = threads;
         exclusivity_ = exclusivity;
@@ -1927,7 +1963,7 @@ static_assert(is_pool<flat_pool_t> && is_pool<colocated_pool_t> && is_pool<distr
               "These thread pools must be fully compatible with the high-level APIs");
 #endif // FU_DETECT_CONCEPTS_
 
-#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#endif // FU_WITH_OS_THREADS
 
 #pragma endregion Distributed Pool
 

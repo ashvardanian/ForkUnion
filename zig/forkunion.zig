@@ -11,7 +11,10 @@
 //! ```zig
 //! const fu = @import("forkunion");
 //!
-//! var pool = try fu.Pool.init(4, .inclusive);
+//! const topo = try fu.Topology.init();
+//! defer topo.deinit();
+//!
+//! var pool = try fu.Pool.init(topo, 4, .inclusive);
 //! defer pool.deinit();
 //!
 //! // Execute work on each thread (like OpenMP parallel)
@@ -36,51 +39,55 @@ const c = struct {
     extern fn fu_version_minor() c_int;
     extern fn fu_version_patch() c_int;
     extern fn fu_comptime_capabilities() u32;
-    extern fn fu_comptime_capabilities_string() [*:0]const u8;
     extern fn fu_runtime_capabilities() u32;
-    extern fn fu_runtime_capabilities_string() [*:0]const u8;
+    extern fn fu_name_capabilities(caps: u32, buf: [*]u8, len: usize) usize;
+
+    // Topology lifecycle
+    extern fn fu_topology_new() ?*anyopaque;
+    extern fn fu_topology_delete(topology: *anyopaque) void;
 
     // Compute topology
-    extern fn fu_logical_cores_count() usize;
-    extern fn fu_compute_domains_count() usize;
-    extern fn fu_compute_levels_count() usize;
-    extern fn fu_logical_cores_count_in(compute_domain_index: usize) usize;
-    extern fn fu_compute_level_in(compute_domain_index: usize) usize;
-    extern fn fu_compute_capacity_in(compute_domain_index: usize) usize;
-    extern fn fu_compute_cache_bytes_in(compute_domain_index: usize) usize;
+    extern fn fu_logical_cores_count(topology: *anyopaque) usize;
+    extern fn fu_compute_domains_count(topology: *anyopaque) usize;
+    extern fn fu_compute_levels_count(topology: *anyopaque) usize;
+    extern fn fu_logical_cores_count_in(topology: *anyopaque, compute_domain_index: usize) usize;
+    extern fn fu_compute_level_in(topology: *anyopaque, compute_domain_index: usize) usize;
+    extern fn fu_compute_capacity_in(topology: *anyopaque, compute_domain_index: usize) usize;
+    extern fn fu_compute_cache_bytes_in(topology: *anyopaque, compute_domain_index: usize) usize;
 
     // Memory topology
-    extern fn fu_memory_domains_count() usize;
-    extern fn fu_memory_levels_count() usize;
-    extern fn fu_memory_level_in(memory_domain_index: usize) usize;
-    extern fn fu_volume_ram() usize;
-    extern fn fu_volume_ram_in(memory_domain_index: usize) usize;
-    extern fn fu_volume_huge_pages() usize;
-    extern fn fu_volume_huge_pages_in(memory_domain_index: usize) usize;
-    extern fn fu_huge_pages_count() usize;
-    extern fn fu_huge_pages_count_in(memory_domain_index: usize) usize;
+    extern fn fu_memory_domains_count(topology: *anyopaque) usize;
+    extern fn fu_memory_levels_count(topology: *anyopaque) usize;
+    extern fn fu_memory_level_in(topology: *anyopaque, memory_domain_index: usize) usize;
+    extern fn fu_volume_ram(topology: *anyopaque) usize;
+    extern fn fu_volume_ram_in(topology: *anyopaque, memory_domain_index: usize) usize;
+    extern fn fu_volume_huge_pages(topology: *anyopaque) usize;
+    extern fn fu_volume_huge_pages_in(topology: *anyopaque, memory_domain_index: usize) usize;
+    extern fn fu_huge_pages_count(topology: *anyopaque) usize;
+    extern fn fu_huge_pages_count_in(topology: *anyopaque, memory_domain_index: usize) usize;
 
     // Affinity
-    extern fn fu_local_memory_of(compute_domain_index: usize) usize;
-    extern fn fu_memory_distance(compute_domain_index: usize, memory_domain_index: usize) usize;
-    extern fn fu_memory_bandwidth(compute_domain_index: usize, memory_domain_index: usize) usize;
-    extern fn fu_memory_latency(compute_domain_index: usize, memory_domain_index: usize) usize;
+    extern fn fu_local_memory_of(topology: *anyopaque, compute_domain_index: usize) usize;
+    extern fn fu_memory_distance(topology: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
+    extern fn fu_memory_bandwidth(topology: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
+    extern fn fu_memory_latency(topology: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
 
     // Allocation
-    extern fn fu_allocate_in(memory_domain_index: usize, bytes: usize) ?*anyopaque;
+    extern fn fu_memory_domain_id_at_index(topology: *anyopaque, memory_domain_index: usize) i32;
+    extern fn fu_allocate_in(memory_domain_id: i32, bytes: usize) ?*anyopaque;
     extern fn fu_allocate_at_least_in(
-        memory_domain_index: usize,
+        memory_domain_id: i32,
         minimum_bytes: usize,
         allocated_bytes: *usize,
         bytes_per_page: *usize,
     ) ?*anyopaque;
-    extern fn fu_free_in(memory_domain_index: usize, pointer: *anyopaque, bytes: usize) void;
+    extern fn fu_free_in(memory_domain_id: i32, pointer: *anyopaque, bytes: usize) void;
 
     // Pool lifecycle & introspection
     extern fn fu_pool_new(name: ?[*:0]const u8, allowed: u32) ?*anyopaque;
     extern fn fu_pool_delete(pool: *anyopaque) void;
-    extern fn fu_pool_spawn(pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
-    extern fn fu_pool_spawn_on(pool: *anyopaque, compute_domain_index: usize, threads: usize, exclusivity: c_int) c_int;
+    extern fn fu_pool_spawn(topology: *anyopaque, pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
+    extern fn fu_pool_spawn_on(topology: *anyopaque, pool: *anyopaque, compute_domain_index: usize, threads: usize, exclusivity: c_int) c_int;
     extern fn fu_pool_terminate(pool: *anyopaque) void;
     extern fn fu_pool_sleep(pool: *anyopaque, micros: usize) void;
     extern fn fu_pool_caller_exclusivity(pool: *anyopaque) c_int;
@@ -217,8 +224,12 @@ pub fn comptimeCapabilities() Capabilities {
 }
 
 /// The set `comptimeCapabilities` bits, comma-separated, like `"threads,topology"`.
-pub fn comptimeCapabilitiesString() [*:0]const u8 {
-    return c.fu_comptime_capabilities_string();
+///
+/// POLISH: writes into a caller-provided buffer so the returned slice borrows `buf`; the
+/// buffer must outlive the slice. Callers pass their own stack buffer.
+pub fn comptimeCapabilitiesString(buf: []u8) []const u8 {
+    const written = c.fu_name_capabilities(c.fu_comptime_capabilities(), buf.ptr, buf.len);
+    return buf[0..written];
 }
 
 /// Which features this machine turned out to offer, probing the CPU and the memory system.
@@ -227,167 +238,195 @@ pub fn runtimeCapabilities() Capabilities {
 }
 
 /// The set `runtimeCapabilities` bits, comma-separated, like `"arm64_yield,place_memory_on_domain"`.
-pub fn runtimeCapabilitiesString() [*:0]const u8 {
-    return c.fu_runtime_capabilities_string();
-}
-
-/// Returns the number of logical CPU cores available
-pub fn countLogicalCores() usize {
-    return c.fu_logical_cores_count();
-}
-
-/// Returns the number of NUMA nodes available
-pub fn countMemoryDomains() usize {
-    return c.fu_memory_domains_count();
-}
-
-/// Returns the number of distinct thread compute_domains
-pub fn countComputeDomains() usize {
-    return c.fu_compute_domains_count();
-}
-
-/// Returns the number of logical cores backing a given compute domain (0 if out of range).
-pub fn countLogicalCoresIn(compute_domain_index: usize) usize {
-    return c.fu_logical_cores_count_in(compute_domain_index);
-}
-
-/// Returns the performance level of a compute domain (higher = more performant).
-pub fn computeLevelIn(compute_domain_index: usize) usize {
-    return c.fu_compute_level_in(compute_domain_index);
-}
-
-/// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
-pub fn memoryLevelIn(memory_domain_index: usize) usize {
-    return c.fu_memory_level_in(memory_domain_index);
-}
-
-/// Returns the memory domain nearest a given compute domain (its local allocation target).
-pub fn localMemoryOf(compute_domain_index: usize) usize {
-    return c.fu_local_memory_of(compute_domain_index);
-}
-
-/// Returns the relative access distance from a compute domain to a memory domain (10 = local).
-pub fn memoryDistance(compute_domain_index: usize, memory_domain_index: usize) usize {
-    return c.fu_memory_distance(compute_domain_index, memory_domain_index);
-}
-
-/// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
-pub fn memoryBandwidth(compute_domain_index: usize, memory_domain_index: usize) usize {
-    return c.fu_memory_bandwidth(compute_domain_index, memory_domain_index);
-}
-
-/// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
-pub fn memoryLatency(compute_domain_index: usize, memory_domain_index: usize) usize {
-    return c.fu_memory_latency(compute_domain_index, memory_domain_index);
-}
-
-/// Returns the number of distinct Quality-of-Service levels.
 ///
-/// May be smaller than `countComputeDomains`, as several domains can share one level - equally-fast
-/// cores may still be split across cache clusters, or across NUMA nodes.
-pub fn countComputeLevels() usize {
-    return c.fu_compute_levels_count();
+/// POLISH: writes into a caller-provided buffer so the returned slice borrows `buf`; the
+/// buffer must outlive the slice. Callers pass their own stack buffer.
+pub fn runtimeCapabilitiesString(buf: []u8) []const u8 {
+    const written = c.fu_name_capabilities(c.fu_runtime_capabilities(), buf.ptr, buf.len);
+    return buf[0..written];
 }
 
-/// Returns the number of distinct memory tiers, the memory-axis twin of `countComputeLevels`.
-pub fn countMemoryLevels() usize {
-    return c.fu_memory_levels_count();
-}
-
-/// Returns the relative throughput of one core in a compute domain (0 if unknown).
+/// An explicit, owned handle to this machine's discovered compute and memory topology.
 ///
-/// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present. Weight
-/// work by this - `computeLevelIn` is a dense ordinal and must never be divided by. Platforms that
-/// rank cores without rating them report 0; weigh by core count instead.
-pub fn computeCapacityIn(compute_domain_index: usize) usize {
-    return c.fu_compute_capacity_in(compute_domain_index);
-}
+/// Build one with `init`, query it through the methods below, and hand it to pool constructors
+/// and NUMA allocators so they know which machine they are placing work and pages onto.
+pub const Topology = struct {
+    handle: *anyopaque,
 
-/// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
-///
-/// Sizes a cache-resident chunk, a different question from how many chunks a domain deserves -
-/// domains of equal throughput may back onto very differently sized caches.
-pub fn computeCacheBytesIn(compute_domain_index: usize) usize {
-    return c.fu_compute_cache_bytes_in(compute_domain_index);
-}
-
-/// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
-pub fn volumeRam() usize {
-    return c.fu_volume_ram();
-}
-
-/// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
-pub fn volumeRamIn(memory_domain_index: usize) usize {
-    return c.fu_volume_ram_in(memory_domain_index);
-}
-
-/// Returns the total huge-page volume (bytes) across all memory domains.
-pub fn volumeHugePages() usize {
-    return c.fu_volume_huge_pages();
-}
-
-/// Returns the huge-page volume (bytes) available in a given memory domain (0 if out of range).
-pub fn volumeHugePagesIn(memory_domain_index: usize) usize {
-    return c.fu_volume_huge_pages_in(memory_domain_index);
-}
-
-/// Returns the total number of free huge pages across all memory domains.
-pub fn countHugePages() usize {
-    return c.fu_huge_pages_count();
-}
-
-/// Returns the number of free huge pages in a given memory domain (0 if out of range).
-pub fn countHugePagesIn(memory_domain_index: usize) usize {
-    return c.fu_huge_pages_count_in(memory_domain_index);
-}
-
-/// NUMA-aware memory allocation result
-pub const NumaAllocation = struct {
-    ptr: [*]u8,
-    allocated_bytes: usize,
-    bytes_per_page: usize,
-    memory_domain: usize,
-
-    /// Returns the allocated memory as a slice
-    pub fn asSlice(self: NumaAllocation) []u8 {
-        return self.ptr[0..self.allocated_bytes];
+    /// Discovers this machine's topology, returning an owned handle.
+    pub fn init() Error!Topology {
+        const h = c.fu_topology_new() orelse return Error.CreationFailed;
+        return .{ .handle = h };
     }
 
-    /// Frees the NUMA allocation
-    pub fn free(self: NumaAllocation) void {
-        c.fu_free_in(self.memory_domain, @ptrCast(self.ptr), self.allocated_bytes);
+    /// Releases the topology handle.
+    pub fn deinit(self: Topology) void {
+        c.fu_topology_delete(self.handle);
+    }
+
+    /// Returns the number of logical CPU cores available
+    pub fn countLogicalCores(self: Topology) usize {
+        return c.fu_logical_cores_count(self.handle);
+    }
+
+    /// Returns the number of NUMA nodes available
+    pub fn countMemoryDomains(self: Topology) usize {
+        return c.fu_memory_domains_count(self.handle);
+    }
+
+    /// Resolves a memory domain's dense index to the OS id the allocators take; -1 if out of range.
+    pub fn memoryDomainIdAtIndex(self: Topology, memory_domain_index: usize) i32 {
+        return c.fu_memory_domain_id_at_index(self.handle, memory_domain_index);
+    }
+
+    /// Returns the number of distinct thread compute_domains
+    pub fn countComputeDomains(self: Topology) usize {
+        return c.fu_compute_domains_count(self.handle);
+    }
+
+    /// Returns the number of logical cores backing a given compute domain (0 if out of range).
+    pub fn countLogicalCoresIn(self: Topology, compute_domain_index: usize) usize {
+        return c.fu_logical_cores_count_in(self.handle, compute_domain_index);
+    }
+
+    /// Returns the performance level of a compute domain (higher = more performant).
+    pub fn computeLevelIn(self: Topology, compute_domain_index: usize) usize {
+        return c.fu_compute_level_in(self.handle, compute_domain_index);
+    }
+
+    /// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
+    pub fn memoryLevelIn(self: Topology, memory_domain_index: usize) usize {
+        return c.fu_memory_level_in(self.handle, memory_domain_index);
+    }
+
+    /// Returns the memory domain nearest a given compute domain (its local allocation target).
+    pub fn localMemoryOf(self: Topology, compute_domain_index: usize) usize {
+        return c.fu_local_memory_of(self.handle, compute_domain_index);
+    }
+
+    /// Returns the relative access distance from a compute domain to a memory domain (10 = local).
+    pub fn memoryDistance(self: Topology, compute_domain_index: usize, memory_domain_index: usize) usize {
+        return c.fu_memory_distance(self.handle, compute_domain_index, memory_domain_index);
+    }
+
+    /// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
+    pub fn memoryBandwidth(self: Topology, compute_domain_index: usize, memory_domain_index: usize) usize {
+        return c.fu_memory_bandwidth(self.handle, compute_domain_index, memory_domain_index);
+    }
+
+    /// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
+    pub fn memoryLatency(self: Topology, compute_domain_index: usize, memory_domain_index: usize) usize {
+        return c.fu_memory_latency(self.handle, compute_domain_index, memory_domain_index);
+    }
+
+    /// Returns the number of distinct Quality-of-Service levels.
+    ///
+    /// May be smaller than `countComputeDomains`, as several domains can share one level - equally-fast
+    /// cores may still be split across cache clusters, or across NUMA nodes.
+    pub fn countComputeLevels(self: Topology) usize {
+        return c.fu_compute_levels_count(self.handle);
+    }
+
+    /// Returns the number of distinct memory tiers, the memory-axis twin of `countComputeLevels`.
+    pub fn countMemoryLevels(self: Topology) usize {
+        return c.fu_memory_levels_count(self.handle);
+    }
+
+    /// Returns the relative throughput of one core in a compute domain (0 if unknown).
+    ///
+    /// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present. Weight
+    /// work by this - `computeLevelIn` is a dense ordinal and must never be divided by. Platforms that
+    /// rank cores without rating them report 0; weigh by core count instead.
+    pub fn computeCapacityIn(self: Topology, compute_domain_index: usize) usize {
+        return c.fu_compute_capacity_in(self.handle, compute_domain_index);
+    }
+
+    /// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
+    ///
+    /// Sizes a cache-resident chunk, a different question from how many chunks a domain deserves -
+    /// domains of equal throughput may back onto very differently sized caches.
+    pub fn computeCacheBytesIn(self: Topology, compute_domain_index: usize) usize {
+        return c.fu_compute_cache_bytes_in(self.handle, compute_domain_index);
+    }
+
+    /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
+    pub fn volumeRam(self: Topology) usize {
+        return c.fu_volume_ram(self.handle);
+    }
+
+    /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+    pub fn volumeRamIn(self: Topology, memory_domain_index: usize) usize {
+        return c.fu_volume_ram_in(self.handle, memory_domain_index);
+    }
+
+    /// Returns the total huge-page volume (bytes) across all memory domains.
+    pub fn volumeHugePages(self: Topology) usize {
+        return c.fu_volume_huge_pages(self.handle);
+    }
+
+    /// Returns the huge-page volume (bytes) available in a given memory domain (0 if out of range).
+    pub fn volumeHugePagesIn(self: Topology, memory_domain_index: usize) usize {
+        return c.fu_volume_huge_pages_in(self.handle, memory_domain_index);
+    }
+
+    /// Returns the total number of free huge pages across all memory domains.
+    pub fn countHugePages(self: Topology) usize {
+        return c.fu_huge_pages_count(self.handle);
+    }
+
+    /// Returns the number of free huge pages in a given memory domain (0 if out of range).
+    pub fn countHugePagesIn(self: Topology, memory_domain_index: usize) usize {
+        return c.fu_huge_pages_count_in(self.handle, memory_domain_index);
     }
 };
 
-/// Allocates memory on a specific NUMA node with optimal page size
-pub fn allocateAtLeast(memory_domain: usize, minimum_bytes: usize) ?NumaAllocation {
+/// Result of a memory-domain allocation; carries only the OS id, so it can outlive the topology.
+pub const AllocationResult = struct {
+    memory_domain_id: i32,
+    ptr: [*]u8,
+    allocated_bytes: usize,
+    bytes_per_page: usize,
+
+    /// Returns the allocated memory as a slice
+    pub fn asSlice(self: AllocationResult) []u8 {
+        return self.ptr[0..self.allocated_bytes];
+    }
+
+    /// Frees the allocation
+    pub fn free(self: AllocationResult) void {
+        c.fu_free_in(self.memory_domain_id, @ptrCast(self.ptr), self.allocated_bytes);
+    }
+};
+
+/// Allocates memory on a memory domain with optimal page size; id from `Topology.memoryDomainIdAtIndex`.
+pub fn allocateAtLeast(memory_domain_id: i32, minimum_bytes: usize) ?AllocationResult {
     var allocated_bytes: usize = undefined;
     var bytes_per_page: usize = undefined;
 
     const ptr = c.fu_allocate_at_least_in(
-        memory_domain,
+        memory_domain_id,
         minimum_bytes,
         &allocated_bytes,
         &bytes_per_page,
     ) orelse return null;
 
     return .{
+        .memory_domain_id = memory_domain_id,
         .ptr = @ptrCast(@alignCast(ptr)),
         .allocated_bytes = allocated_bytes,
         .bytes_per_page = bytes_per_page,
-        .memory_domain = memory_domain,
     };
 }
 
-/// Allocates exactly the requested bytes on a specific NUMA node
-pub fn allocate(memory_domain: usize, bytes: usize) ?[*]u8 {
-    const ptr = c.fu_allocate_in(memory_domain, bytes) orelse return null;
+/// Allocates exactly the requested bytes on a memory domain; id from `Topology.memoryDomainIdAtIndex`.
+pub fn allocate(memory_domain_id: i32, bytes: usize) ?[*]u8 {
+    const ptr = c.fu_allocate_in(memory_domain_id, bytes) orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
-/// NUMA-aware allocator compatible with Zig's allocator interface.
-pub const NumaAllocator = struct {
-    node_index: usize,
+/// Memory-domain-pinned allocator compatible with Zig's allocator interface.
+pub const PinnedAllocator = struct {
+    memory_domain_id: i32,
 
     const Self = @This();
     const Allocator = std.mem.Allocator;
@@ -404,8 +443,8 @@ pub const NumaAllocator = struct {
         .free = free,
     };
 
-    pub fn init(node_index: usize) Self {
-        return .{ .node_index = node_index };
+    pub fn init(memory_domain_id: i32) Self {
+        return .{ .memory_domain_id = memory_domain_id };
     }
 
     pub fn allocator(self: *Self) Allocator {
@@ -461,7 +500,7 @@ pub const NumaAllocator = struct {
         var allocated_bytes: usize = undefined;
         var bytes_per_page: usize = undefined;
         const raw_ptr = c.fu_allocate_at_least_in(
-            self.node_index,
+            self.memory_domain_id,
             request_bytes,
             &allocated_bytes,
             &bytes_per_page,
@@ -470,7 +509,7 @@ pub const NumaAllocator = struct {
         const base_addr = @intFromPtr(raw_ptr);
         const data_addr = alignment.forward(base_addr + header_size);
         if (data_addr + len > base_addr + allocated_bytes) {
-            c.fu_free_in(self.node_index, raw_ptr, allocated_bytes);
+            c.fu_free_in(self.memory_domain_id, raw_ptr, allocated_bytes);
             return null;
         }
 
@@ -512,7 +551,7 @@ pub const NumaAllocator = struct {
         const header_ptr = @as(*Header, @ptrFromInt(@intFromPtr(buf.ptr) - @sizeOf(Header)));
         const header = header_ptr.*;
         const base_ptr = @as(*anyopaque, @ptrFromInt(header.base_addr));
-        c.fu_free_in(self.node_index, base_ptr, header.allocated_bytes);
+        c.fu_free_in(self.memory_domain_id, base_ptr, header.allocated_bytes);
     }
 };
 
@@ -521,22 +560,24 @@ pub const Pool = struct {
     handle: *anyopaque,
 
     /// Creates a new thread pool
-    pub fn init(thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
-        return initNamed(null, thread_count, exclusivity);
+    pub fn init(topology: Topology, thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
+        return initNamed(topology, null, thread_count, exclusivity);
     }
 
     /// Creates a new named thread pool
     pub fn initNamed(
+        topology: Topology,
         name: ?[]const u8,
         thread_count: usize,
         exclusivity: CallerExclusivity,
     ) Error!Pool {
-        return initNamedWithCapabilities(name, thread_count, exclusivity, Capabilities.all());
+        return initNamedWithCapabilities(topology, name, thread_count, exclusivity, Capabilities.all());
     }
 
     /// As `initNamed`, but constrains the pool to `allowed`: clear a waiter bit to force a
     /// lower-priority busy-wait, or clear `place_memory_on_domain` to force the flat (non-NUMA) pool.
     pub fn initNamedWithCapabilities(
+        topology: Topology,
         name: ?[]const u8,
         thread_count: usize,
         exclusivity: CallerExclusivity,
@@ -554,7 +595,7 @@ pub const Pool = struct {
         errdefer c.fu_pool_delete(handle);
 
         // C++ validates threads > 0 and returns false if invalid
-        const success = c.fu_pool_spawn(handle, thread_count, @intFromEnum(exclusivity));
+        const success = c.fu_pool_spawn(topology.handle, handle, thread_count, @intFromEnum(exclusivity));
         if (success == 0) return Error.SpawnFailed;
 
         return .{ .handle = handle };
@@ -566,12 +607,13 @@ pub const Pool = struct {
     /// `0..countComputeDomains()`. Spawn one per compute domain and coordinate them from a
     /// single thread with the generation-token API. On builds without NUMA, only compute
     /// domain 0 is valid.
-    pub fn spawnOn(compute_domain_index: usize, thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
-        return spawnOnWithCapabilities(compute_domain_index, thread_count, exclusivity, Capabilities.all());
+    pub fn spawnOn(topology: Topology, compute_domain_index: usize, thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
+        return spawnOnWithCapabilities(topology, compute_domain_index, thread_count, exclusivity, Capabilities.all());
     }
 
     /// As `spawnOn`, but constrains the colocated pool to `allowed`.
     pub fn spawnOnWithCapabilities(
+        topology: Topology,
         compute_domain_index: usize,
         thread_count: usize,
         exclusivity: CallerExclusivity,
@@ -580,7 +622,7 @@ pub const Pool = struct {
         const handle = c.fu_pool_new(null, @bitCast(allowed)) orelse return Error.CreationFailed;
         errdefer c.fu_pool_delete(handle);
 
-        const success = c.fu_pool_spawn_on(handle, compute_domain_index, thread_count, @intFromEnum(exclusivity));
+        const success = c.fu_pool_spawn_on(topology.handle, handle, compute_domain_index, thread_count, @intFromEnum(exclusivity));
         if (success == 0) return Error.SpawnFailed;
 
         return .{ .handle = handle };
@@ -945,9 +987,14 @@ test "system capabilities" {
     std.debug.print("Running test: system capabilities\n", .{});
     const comptime_caps = comptimeCapabilities();
     const runtime_caps = runtimeCapabilities();
-    std.debug.print("  comptime: {s}\n", .{comptimeCapabilitiesString()});
-    std.debug.print("  runtime:  {s}\n", .{runtimeCapabilitiesString()});
-    try std.testing.expect(std.mem.len(runtimeCapabilitiesString()) > 0);
+    var comptime_buf: [256]u8 = undefined;
+    var runtime_buf: [256]u8 = undefined;
+    std.debug.print("  comptime: {s}\n", .{comptimeCapabilitiesString(&comptime_buf)});
+    std.debug.print("  runtime:  {s}\n", .{runtimeCapabilitiesString(&runtime_buf)});
+    try std.testing.expect(runtimeCapabilitiesString(&runtime_buf).len > 0);
+
+    const topo = try Topology.init();
+    defer topo.deinit();
 
     // Threads are the one facility every supported platform has.
     try std.testing.expect(comptime_caps.os_threads);
@@ -962,7 +1009,7 @@ test "system capabilities" {
     if (comptime_caps.place_memory_on_domain) try std.testing.expect(comptime_caps.topology);
 
     // Without the pools, the library can still see exactly one domain, and never more.
-    if (!comptime_caps.colocate_pools_on_domain) try std.testing.expectEqual(@as(usize, 1), countComputeDomains());
+    if (!comptime_caps.colocate_pools_on_domain) try std.testing.expectEqual(@as(usize, 1), topo.countComputeDomains());
 
     // One facility, two questions of the same bit: a machine can only _offer_ page placement if this
     // build compiled the path that asks for it.
@@ -971,19 +1018,24 @@ test "system capabilities" {
 
 test "system metadata" {
     std.debug.print("Running test: system metadata\n", .{});
-    const cores = countLogicalCores();
+    const topo = try Topology.init();
+    defer topo.deinit();
+
+    const cores = topo.countLogicalCores();
     try std.testing.expect(cores > 0);
 
-    const numa = countMemoryDomains();
+    const numa = topo.countMemoryDomains();
     try std.testing.expect(numa > 0);
 
-    const colocs = countComputeDomains();
+    const colocs = topo.countComputeDomains();
     try std.testing.expect(colocs > 0);
 }
 
 test "pool creation and destruction" {
     std.debug.print("Running test: pool creation and destruction\n", .{});
-    var pool = try Pool.init(2, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 2, .inclusive);
     defer pool.deinit();
 
     try std.testing.expectEqual(2, pool.threads());
@@ -992,23 +1044,27 @@ test "pool creation and destruction" {
 test "caller exclusivity query" {
     std.debug.print("Running test: caller exclusivity query\n", .{});
     // The pool is the single source of truth, queried live (not cached).
-    var inclusive = try Pool.init(2, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var inclusive = try Pool.init(topo, 2, .inclusive);
     defer inclusive.deinit();
     try std.testing.expectEqual(CallerExclusivity.inclusive, inclusive.callerExclusivity());
 
-    var exclusive = try Pool.init(2, .exclusive);
+    var exclusive = try Pool.init(topo, 2, .exclusive);
     defer exclusive.deinit();
     try std.testing.expectEqual(CallerExclusivity.exclusive, exclusive.callerExclusivity());
 }
 
 test "per-compute_domain pool" {
     std.debug.print("Running test: per-compute_domain pool\n", .{});
-    const compute_domains = countComputeDomains();
+    const topo = try Topology.init();
+    defer topo.deinit();
+    const compute_domains = topo.countComputeDomains();
     try std.testing.expect(compute_domains >= 1);
 
     // A pool pinned to compute_domain 0, sized to that compute_domain's core count.
-    const cores = @max(countLogicalCoresIn(0), 1);
-    var pool = try Pool.spawnOn(0, cores, .exclusive);
+    const cores = @max(topo.countLogicalCoresIn(0), 1);
+    var pool = try Pool.spawnOn(topo, 0, cores, .exclusive);
     defer pool.deinit();
 
     var counter = std.atomic.Value(usize).init(0);
@@ -1026,7 +1082,9 @@ test "per-compute_domain pool" {
 
 test "named pool creation" {
     std.debug.print("Running test: named pool creation\n", .{});
-    var pool = try Pool.initNamed(null, 2, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.initNamed(topo, null, 2, .inclusive);
     defer pool.deinit();
 
     try std.testing.expectEqual(2, pool.threads());
@@ -1034,7 +1092,9 @@ test "named pool creation" {
 
 test "for_threads execution" {
     std.debug.print("Running test: for_threads execution\n", .{});
-    var pool = try Pool.init(4, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .inclusive);
     defer pool.deinit();
 
     var visited = [_]std.atomic.Value(bool){std.atomic.Value(bool).init(false)} ** 4;
@@ -1060,7 +1120,9 @@ test "for_threads execution" {
 
 test "for_n static scheduling" {
     std.debug.print("Running test: for_n static scheduling\n", .{});
-    var pool = try Pool.init(4, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .inclusive);
     defer pool.deinit();
 
     var visited = [_]std.atomic.Value(bool){std.atomic.Value(bool).init(false)} ** 100;
@@ -1083,7 +1145,9 @@ test "for_n static scheduling" {
 
 test "for_n_dynamic work stealing" {
     std.debug.print("Running test: for_n_dynamic work stealing\n", .{});
-    var pool = try Pool.init(4, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .inclusive);
     defer pool.deinit();
 
     var counter = std.atomic.Value(usize).init(0);
@@ -1104,7 +1168,9 @@ test "for_n_dynamic work stealing" {
 
 test "for_slices execution" {
     std.debug.print("Running test: for_slices execution\n", .{});
-    var pool = try Pool.init(4, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .inclusive);
     defer pool.deinit();
 
     var data = [_]i32{0} ** 1000;
@@ -1136,13 +1202,15 @@ test "for_slices execution" {
 
 test "NUMA allocation" {
     std.debug.print("Running test: NUMA allocation\n", .{});
-    if (!comptimeCapabilities().comptime_numa_memory) return error.SkipZigTest;
+    if (!comptimeCapabilities().place_memory_on_domain) return error.SkipZigTest;
 
-    const allocation = allocateAtLeast(0, 1024) orelse return error.SkipZigTest;
+    const topo = try Topology.init();
+    defer topo.deinit();
+    const allocation = allocateAtLeast(topo.memoryDomainIdAtIndex(0), 1024) orelse return error.SkipZigTest;
     defer allocation.free();
 
     try std.testing.expect(allocation.allocated_bytes >= 1024);
-    try std.testing.expectEqual(0, allocation.memory_domain);
+    try std.testing.expectEqual(topo.memoryDomainIdAtIndex(0), allocation.memory_domain_id);
 
     // Write to memory to ensure it's usable
     const slice = allocation.asSlice();
@@ -1153,10 +1221,12 @@ test "NUMA allocation" {
 
 test "NUMA allocator integrates with std collections" {
     std.debug.print("Running test: NUMA allocator integrates with std collections\n", .{});
-    if (!comptimeCapabilities().comptime_numa_memory) return error.SkipZigTest;
+    if (!comptimeCapabilities().place_memory_on_domain) return error.SkipZigTest;
 
-    var numa_alloc = NumaAllocator.init(0);
-    const allocator = numa_alloc.allocator();
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pinned_alloc = PinnedAllocator.init(topo.memoryDomainIdAtIndex(0));
+    const allocator = pinned_alloc.allocator();
 
     var list = try std.ArrayList(u64).initCapacity(allocator, 0);
     defer list.deinit(allocator);
@@ -1183,7 +1253,9 @@ test "NUMA allocator integrates with std collections" {
 
 test "for_n void context" {
     std.debug.print("Running test: for_n void context\n", .{});
-    var pool = try Pool.init(4, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .inclusive);
     defer pool.deinit();
 
     var counter = std.atomic.Value(usize).init(0);
@@ -1205,7 +1277,9 @@ test "for_n void context" {
 
 test "unsafe_for_threads and join" {
     std.debug.print("Running test: unsafe_for_threads and join\n", .{});
-    var pool = try Pool.init(4, .inclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .inclusive);
     defer pool.deinit();
 
     var counter = std.atomic.Value(usize).init(0);
@@ -1238,7 +1312,9 @@ test "unsafe_for_threads and join" {
 
 test "generation polling on exclusive pool" {
     std.debug.print("Running test: generation polling on exclusive pool\n", .{});
-    var pool = try Pool.init(4, .exclusive);
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .exclusive);
     defer pool.deinit();
 
     var counter = std.atomic.Value(usize).init(0);

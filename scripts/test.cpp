@@ -122,14 +122,14 @@ static bool test_topology_invariants() noexcept {
     std::size_t cores_across_domains = 0;
     for (std::size_t i = 0; i < compute_domains; ++i) {
         fu::compute_domain_t const &domain = topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(i));
-        if (domain.core_count == 0 || domain.first_core_id == nullptr) return false;
+        if (domain.logical_cores_count == 0 || domain.first_core_id == nullptr) return false;
         if (domain.compute_level >= compute_levels) return false;
         if (domain.memory_domain_index >= memory_domains) return false;
         compute_level_seen[domain.compute_level] = true;
-        cores_across_domains += domain.core_count;
+        cores_across_domains += domain.logical_cores_count;
     }
     // Every core must belong to exactly one compute domain.
-    if (cores_across_domains != topology.threads_count()) return false;
+    if (cores_across_domains != topology.logical_cores_count()) return false;
 
     for (std::size_t i = 0; i < memory_domains; ++i) {
         std::size_t const level = topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(i)).memory_level;
@@ -767,7 +767,7 @@ static bool test_caller_affinity_preserved() noexcept {
     bool succeeded = fu::try_restore_thread_cores(narrowed); // ? Applies `narrowed` to this thread
     if (succeeded) {
         fu::machine_topology_t topology;
-        succeeded = topology.try_harvest() && topology.threads_count() == 2;
+        succeeded = topology.try_harvest() && topology.logical_cores_count() == 2;
 
         if (succeeded) {
             fu::distributed_pool_t pool;

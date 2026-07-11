@@ -14,9 +14,6 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(feature = "std")]
-use std::ffi::CStr;
-
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
 use core::marker::PhantomData;
@@ -45,9 +42,10 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 /// # Examples
 ///
 /// ```rust
-/// use forkunion::{CacheAligned, ThreadPool};
+/// use forkunion::{CacheAligned, ThreadPool, Topology};
 ///
-/// let mut pool = ThreadPool::try_spawn(4).unwrap();
+/// let topology = Topology::new().unwrap();
+/// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
 /// let data: Vec<usize> = (0..1000).collect();
 ///
 /// // Each thread gets its own cache-aligned accumulator
@@ -367,52 +365,74 @@ extern "C" {
     fn fu_version_minor() -> c_int;
     fn fu_version_patch() -> c_int;
     fn fu_comptime_capabilities() -> u32;
-    fn fu_comptime_capabilities_string() -> *const c_char;
     fn fu_runtime_capabilities() -> u32;
-    fn fu_runtime_capabilities_string() -> *const c_char;
+    fn fu_name_capabilities(caps: u32, buf: *mut c_char, len: usize) -> usize;
+
+    // Topology handle lifecycle
+    fn fu_topology_new() -> *mut c_void;
+    fn fu_topology_delete(topology: *mut c_void);
 
     // Compute topology
-    fn fu_logical_cores_count_in(compute_domain_index: usize) -> usize;
-    fn fu_logical_cores_count() -> usize;
-    fn fu_compute_domains_count() -> usize;
-    fn fu_compute_level_in(compute_domain_index: usize) -> usize;
-    fn fu_compute_levels_count() -> usize;
-    fn fu_compute_capacity_in(compute_domain_index: usize) -> usize;
-    fn fu_compute_cache_bytes_in(compute_domain_index: usize) -> usize;
+    fn fu_logical_cores_count_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
+    fn fu_logical_cores_count(topology: *mut c_void) -> usize;
+    fn fu_compute_domains_count(topology: *mut c_void) -> usize;
+    fn fu_compute_level_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
+    fn fu_compute_levels_count(topology: *mut c_void) -> usize;
+    fn fu_compute_capacity_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
+    fn fu_compute_cache_bytes_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
 
     // Memory topology
-    fn fu_memory_domains_count() -> usize;
-    fn fu_memory_level_in(memory_domain_index: usize) -> usize;
-    fn fu_memory_levels_count() -> usize;
+    fn fu_memory_domains_count(topology: *mut c_void) -> usize;
+    fn fu_memory_level_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
+    fn fu_memory_levels_count(topology: *mut c_void) -> usize;
 
     // Affinity
-    fn fu_local_memory_of(compute_domain_index: usize) -> usize;
-    fn fu_memory_distance(compute_domain_index: usize, memory_domain_index: usize) -> usize;
-    fn fu_memory_bandwidth(compute_domain_index: usize, memory_domain_index: usize) -> usize;
-    fn fu_memory_latency(compute_domain_index: usize, memory_domain_index: usize) -> usize;
+    fn fu_local_memory_of(topology: *mut c_void, compute_domain_index: usize) -> usize;
+    fn fu_memory_distance(
+        topology: *mut c_void,
+        compute_domain_index: usize,
+        memory_domain_index: usize,
+    ) -> usize;
+    fn fu_memory_bandwidth(
+        topology: *mut c_void,
+        compute_domain_index: usize,
+        memory_domain_index: usize,
+    ) -> usize;
+    fn fu_memory_latency(
+        topology: *mut c_void,
+        compute_domain_index: usize,
+        memory_domain_index: usize,
+    ) -> usize;
 
-    fn fu_volume_ram_in(memory_domain_index: usize) -> usize;
-    fn fu_volume_ram() -> usize;
-    fn fu_volume_huge_pages_in(memory_domain_index: usize) -> usize;
-    fn fu_volume_huge_pages() -> usize;
-    fn fu_huge_pages_count_in(memory_domain_index: usize) -> usize;
-    fn fu_huge_pages_count() -> usize;
+    fn fu_volume_ram_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
+    fn fu_volume_ram(topology: *mut c_void) -> usize;
+    fn fu_volume_huge_pages_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
+    fn fu_volume_huge_pages(topology: *mut c_void) -> usize;
+    fn fu_huge_pages_count_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
+    fn fu_huge_pages_count(topology: *mut c_void) -> usize;
 
     // Allocation
+    fn fu_memory_domain_id_at_index(topology: *mut c_void, memory_domain_index: usize) -> i32;
     fn fu_allocate_at_least_in(
-        memory_domain_index: usize,
+        memory_domain_id: i32,
         minimum_bytes: usize,
         allocated_bytes: *mut usize,
         bytes_per_page: *mut usize,
     ) -> *mut c_void;
-    fn fu_allocate_in(memory_domain_index: usize, bytes: usize) -> *mut c_void;
-    fn fu_free_in(memory_domain_index: usize, pointer: *mut c_void, bytes: usize);
+    fn fu_allocate_in(memory_domain_id: i32, bytes: usize) -> *mut c_void;
+    fn fu_free_in(memory_domain_id: i32, pointer: *mut c_void, bytes: usize);
 
     // Pool lifecycle & introspection
     fn fu_pool_new(name: *const c_char, allowed: u32) -> *mut c_void;
     fn fu_pool_delete(pool: *mut c_void);
-    fn fu_pool_spawn(pool: *mut c_void, threads: usize, exclusivity: c_int) -> c_int;
+    fn fu_pool_spawn(
+        topology: *mut c_void,
+        pool: *mut c_void,
+        threads: usize,
+        exclusivity: c_int,
+    ) -> c_int;
     fn fu_pool_spawn_on(
+        topology: *mut c_void,
         pool: *mut c_void,
         compute_domain_index: usize,
         threads: usize,
@@ -556,14 +576,35 @@ pub fn comptime_capabilities() -> Capabilities {
     Capabilities(unsafe { fu_comptime_capabilities() })
 }
 
+/// Formats a capability bitset into a comma-separated name list, like `"threads,topology"`.
+///
+/// POLISH: returns an owned `String` because `fu_name_capabilities` writes into a caller
+/// buffer rather than handing back a static pointer; a fixed-capacity stack type would avoid
+/// the allocation. Returns `None` if the C side reports it could not format the names.
+#[cfg(feature = "std")]
+pub fn name_capabilities(caps: Capabilities) -> Option<std::string::String> {
+    let mut buf = [0u8; 256];
+    let written =
+        unsafe { fu_name_capabilities(caps.0, buf.as_mut_ptr() as *mut c_char, buf.len()) };
+    if written == 0 {
+        return None;
+    }
+    let len = core::cmp::min(written, buf.len());
+    // Trim any trailing NUL the C side may have written.
+    let bytes = &buf[..len];
+    let bytes = match bytes.iter().position(|&b| b == 0) {
+        Some(nul) => &bytes[..nul],
+        None => bytes,
+    };
+    core::str::from_utf8(bytes)
+        .ok()
+        .map(std::string::String::from)
+}
+
 /// The set [`comptime_capabilities`] bits, comma-separated, like `"threads,topology"`.
 #[cfg(feature = "std")]
-pub fn comptime_capabilities_string() -> Option<&'static str> {
-    unsafe {
-        CStr::from_ptr(fu_comptime_capabilities_string())
-            .to_str()
-            .ok()
-    }
+pub fn comptime_capabilities_string() -> Option<std::string::String> {
+    name_capabilities(comptime_capabilities())
 }
 
 /// Which features this machine turned out to offer, probing the CPU and the memory system.
@@ -573,20 +614,8 @@ pub fn runtime_capabilities() -> Capabilities {
 
 /// The set [`runtime_capabilities`] bits, comma-separated, like `"arm64_yield,numa_aware"`.
 #[cfg(feature = "std")]
-pub fn runtime_capabilities_string() -> Option<&'static str> {
-    unsafe {
-        let ptr = fu_runtime_capabilities_string();
-        if ptr.is_null() {
-            None
-        } else {
-            CStr::from_ptr(ptr).to_str().ok()
-        }
-    }
-}
-
-/// Returns a raw pointer to the runtime capabilities string, for `no_std` environments.
-pub fn runtime_capabilities_string_ptr() -> *const c_char {
-    unsafe { fu_runtime_capabilities_string() }
+pub fn runtime_capabilities_string() -> Option<std::string::String> {
+    name_capabilities(runtime_capabilities())
 }
 
 /// A position in the topology's array of **compute** domains, in `[0, compute_domains_count())`.
@@ -607,6 +636,15 @@ pub struct ComputeDomain(pub usize);
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomain(pub usize);
 
+/// An OS memory-domain id - a NUMA node - the allocators key off, obtained from
+/// [`Topology::memory_domain_id_at_index`]; `-1` when there is none.
+///
+/// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS id the
+/// kernel labels a node with. A [`PinnedAllocator`] holds only this id, so it - and every
+/// [`AllocationResult`] it hands out - is free of the topology handle and can outlive it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemoryDomainId(pub i32);
+
 impl ComputeDomain {
     /// The raw index, for the FFI boundary and for arithmetic.
     #[inline]
@@ -623,131 +661,214 @@ impl MemoryDomain {
     }
 }
 
-/// Returns the number of logical cores backing a given compute domain.
+impl MemoryDomainId {
+    /// The raw OS id, for the FFI boundary; `-1` names no domain.
+    #[inline]
+    pub fn get(self) -> i32 {
+        self.0
+    }
+
+    /// Whether this id names a real domain rather than the `-1` sentinel.
+    #[inline]
+    pub fn is_valid(self) -> bool {
+        self.0 >= 0
+    }
+}
+
+/// An explicit, owned handle to the machine's compute and memory topology.
 ///
-/// Zero if `compute_domain_index` is out of range. Use it to size a per-compute-domain pool
-/// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
-pub fn logical_cores_count_in(compute_domain: ComputeDomain) -> usize {
-    unsafe { fu_logical_cores_count_in(compute_domain.get()) }
-}
-
-/// Returns the number of logical CPU cores available on the system.
-pub fn logical_cores_count() -> usize {
-    unsafe { fu_logical_cores_count() }
-}
-
-/// Returns the number of distinct thread compute_domains available.
+/// The topology is discovered once, when [`Topology::new`] is called, and every affinity query,
+/// NUMA allocation, and pool spawn is answered against this handle rather than a process-wide
+/// singleton. Create one near the start of a program and share it (`&Topology`) with the pools
+/// and allocators that need it; it is [`Send`] + [`Sync`], so a single handle serves every thread.
 ///
-/// A "compute_domain" represents a group of threads that share the same:
-/// - **NUMA memory domain** - threads with fast local memory access
-/// - **Quality-of-Service level** - P-cores vs E-cores on heterogeneous CPUs  
-/// - **Cache hierarchy** - threads sharing L3 cache
+/// # Examples
 ///
-/// # Typical Values
+/// ```rust
+/// use forkunion::*;
 ///
-/// - `1` on most desktop, laptop, or IoT platforms with unified memory
-/// - `2-8` on typical dual-socket servers or heterogeneous mobile chips
-/// - `4-32` on high-end cloud servers with multiple sockets
-pub fn compute_domains_count() -> usize {
-    unsafe { fu_compute_domains_count() }
+/// let topology = Topology::new().expect("Failed to probe topology");
+/// let cores = topology.logical_cores_count();
+/// let pool = ThreadPool::try_spawn(&topology, cores.max(1)).expect("Failed to spawn pool");
+/// assert_eq!(pool.threads_count(), cores.max(1));
+/// ```
+pub struct Topology {
+    inner: *mut c_void,
 }
 
-/// Returns the performance level of a compute domain (higher = more performant).
-pub fn compute_level_in(compute_domain: ComputeDomain) -> usize {
-    unsafe { fu_compute_level_in(compute_domain.get()) }
+unsafe impl Send for Topology {}
+unsafe impl Sync for Topology {}
+
+impl Topology {
+    /// Probes the machine and builds a fresh topology handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CreationFailed`] if the C side could not allocate or populate the handle.
+    pub fn new() -> Result<Self, Error> {
+        let inner = unsafe { fu_topology_new() };
+        if inner.is_null() {
+            return Err(Error::CreationFailed);
+        }
+        Ok(Self { inner })
+    }
+
+    /// Returns the number of logical cores backing a given compute domain.
+    ///
+    /// Zero if `compute_domain` is out of range. Use it to size a per-compute-domain pool
+    /// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
+    pub fn logical_cores_count_in(&self, compute_domain: ComputeDomain) -> usize {
+        unsafe { fu_logical_cores_count_in(self.inner, compute_domain.get()) }
+    }
+
+    /// Returns the number of logical CPU cores available on the system.
+    pub fn logical_cores_count(&self) -> usize {
+        unsafe { fu_logical_cores_count(self.inner) }
+    }
+
+    /// Returns the number of distinct thread compute_domains available.
+    ///
+    /// A "compute_domain" represents a group of threads that share the same:
+    /// - **NUMA memory domain** - threads with fast local memory access
+    /// - **Quality-of-Service level** - P-cores vs E-cores on heterogeneous CPUs
+    /// - **Cache hierarchy** - threads sharing L3 cache
+    ///
+    /// # Typical Values
+    ///
+    /// - `1` on most desktop, laptop, or IoT platforms with unified memory
+    /// - `2-8` on typical dual-socket servers or heterogeneous mobile chips
+    /// - `4-32` on high-end cloud servers with multiple sockets
+    pub fn compute_domains_count(&self) -> usize {
+        unsafe { fu_compute_domains_count(self.inner) }
+    }
+
+    /// Returns the performance level of a compute domain (higher = more performant).
+    pub fn compute_level_in(&self, compute_domain: ComputeDomain) -> usize {
+        unsafe { fu_compute_level_in(self.inner, compute_domain.get()) }
+    }
+
+    /// Returns the number of distinct Quality-of-Service levels.
+    ///
+    /// May be smaller than [`compute_domains_count`](Self::compute_domains_count), as several
+    /// domains can share one level - equally-fast cores may still be split across cache clusters,
+    /// or across NUMA nodes.
+    pub fn compute_levels_count(&self) -> usize {
+        unsafe { fu_compute_levels_count(self.inner) }
+    }
+
+    /// Returns the relative throughput of one core in a compute domain (0 if unknown).
+    ///
+    /// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present.
+    /// This is the number to weight work by - [`compute_level_in`](Self::compute_level_in) is a
+    /// dense ordinal and must never be divided by. Platforms that rank cores without rating them
+    /// report 0 here; fall back to [`threads_count_in`](ThreadPool::threads_count_in) when they do.
+    pub fn compute_capacity_in(&self, compute_domain: ComputeDomain) -> usize {
+        unsafe { fu_compute_capacity_in(self.inner, compute_domain.get()) }
+    }
+
+    /// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
+    ///
+    /// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
+    /// deserves - domains of equal throughput may back onto very differently sized caches.
+    pub fn compute_cache_bytes_in(&self, compute_domain: ComputeDomain) -> usize {
+        unsafe { fu_compute_cache_bytes_in(self.inner, compute_domain.get()) }
+    }
+
+    /// Returns the number of NUMA nodes available on the system.
+    pub fn memory_domains_count(&self) -> usize {
+        unsafe { fu_memory_domains_count(self.inner) }
+    }
+
+    /// Resolves a memory domain's dense index to the OS id a [`PinnedAllocator`] takes.
+    ///
+    /// Returns [`MemoryDomainId(-1)`](MemoryDomainId) if the index is out of range. The id is the one
+    /// place the topology is consulted for allocation; once resolved, the allocator needs it alone.
+    pub fn memory_domain_id_at_index(&self, memory_domain: MemoryDomain) -> MemoryDomainId {
+        MemoryDomainId(unsafe { fu_memory_domain_id_at_index(self.inner, memory_domain.get()) })
+    }
+
+    /// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
+    pub fn memory_level_in(&self, memory_domain: MemoryDomain) -> usize {
+        unsafe { fu_memory_level_in(self.inner, memory_domain.get()) }
+    }
+
+    /// Returns the number of distinct memory tiers, the memory-axis twin of
+    /// [`compute_levels_count`](Self::compute_levels_count).
+    ///
+    /// Reports 1 on single-tier systems, and 2+ where HBM, DDR, and CXL are mixed.
+    pub fn memory_levels_count(&self) -> usize {
+        unsafe { fu_memory_levels_count(self.inner) }
+    }
+
+    /// Returns the memory domain nearest a given compute domain (its local allocation target).
+    pub fn local_memory_of(&self, compute_domain: ComputeDomain) -> MemoryDomain {
+        MemoryDomain(unsafe { fu_local_memory_of(self.inner, compute_domain.get()) })
+    }
+
+    /// Returns the relative access distance from a compute domain to a memory domain (10 = local).
+    pub fn memory_distance(
+        &self,
+        compute_domain: ComputeDomain,
+        memory_domain: MemoryDomain,
+    ) -> usize {
+        unsafe { fu_memory_distance(self.inner, compute_domain.get(), memory_domain.get()) }
+    }
+
+    /// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
+    pub fn memory_bandwidth(
+        &self,
+        compute_domain: ComputeDomain,
+        memory_domain: MemoryDomain,
+    ) -> usize {
+        unsafe { fu_memory_bandwidth(self.inner, compute_domain.get(), memory_domain.get()) }
+    }
+
+    /// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
+    pub fn memory_latency(
+        &self,
+        compute_domain: ComputeDomain,
+        memory_domain: MemoryDomain,
+    ) -> usize {
+        unsafe { fu_memory_latency(self.inner, compute_domain.get(), memory_domain.get()) }
+    }
+
+    /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+    pub fn volume_ram_in(&self, memory_domain: MemoryDomain) -> usize {
+        unsafe { fu_volume_ram_in(self.inner, memory_domain.get()) }
+    }
+
+    /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
+    pub fn volume_ram(&self) -> usize {
+        unsafe { fu_volume_ram(self.inner) }
+    }
+
+    /// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
+    pub fn volume_huge_pages_in(&self, memory_domain: MemoryDomain) -> usize {
+        unsafe { fu_volume_huge_pages_in(self.inner, memory_domain.get()) }
+    }
+
+    /// Returns the total huge-page volume (bytes) across all memory domains.
+    pub fn volume_huge_pages(&self) -> usize {
+        unsafe { fu_volume_huge_pages(self.inner) }
+    }
+
+    /// Returns the number of free huge pages in a given memory domain (0 if out of range).
+    pub fn huge_pages_count_in(&self, memory_domain: MemoryDomain) -> usize {
+        unsafe { fu_huge_pages_count_in(self.inner, memory_domain.get()) }
+    }
+
+    /// Returns the total number of free huge pages across all memory domains.
+    pub fn huge_pages_count(&self) -> usize {
+        unsafe { fu_huge_pages_count(self.inner) }
+    }
 }
 
-/// Returns the number of distinct Quality-of-Service levels.
-///
-/// May be smaller than [`compute_domains_count`], as several domains can share one level -
-/// equally-fast cores may still be split across cache clusters, or across NUMA nodes.
-pub fn compute_levels_count() -> usize {
-    unsafe { fu_compute_levels_count() }
-}
-
-/// Returns the relative throughput of one core in a compute domain (0 if unknown).
-///
-/// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present.
-/// This is the number to weight work by - [`compute_level_in`] is a dense ordinal and must
-/// never be divided by. Platforms that rank cores without rating them report 0 here; fall back
-/// to [`threads_count_in`](ThreadPool::threads_count_in) when they do.
-pub fn compute_capacity_in(compute_domain: ComputeDomain) -> usize {
-    unsafe { fu_compute_capacity_in(compute_domain.get()) }
-}
-
-/// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
-///
-/// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
-/// deserves - domains of equal throughput may back onto very differently sized caches.
-pub fn compute_cache_bytes_in(compute_domain: ComputeDomain) -> usize {
-    unsafe { fu_compute_cache_bytes_in(compute_domain.get()) }
-}
-
-/// Returns the number of NUMA nodes available on the system.
-pub fn memory_domains_count() -> usize {
-    unsafe { fu_memory_domains_count() }
-}
-
-/// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
-pub fn memory_level_in(memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_memory_level_in(memory_domain.get()) }
-}
-
-/// Returns the number of distinct memory tiers, the memory-axis twin of [`compute_levels_count`].
-///
-/// Reports 1 on single-tier systems, and 2+ where HBM, DDR, and CXL are mixed.
-pub fn memory_levels_count() -> usize {
-    unsafe { fu_memory_levels_count() }
-}
-
-/// Returns the memory domain nearest a given compute domain (its local allocation target).
-pub fn local_memory_of(compute_domain: ComputeDomain) -> MemoryDomain {
-    MemoryDomain(unsafe { fu_local_memory_of(compute_domain.get()) })
-}
-
-/// Returns the relative access distance from a compute domain to a memory domain (10 = local).
-pub fn memory_distance(compute_domain: ComputeDomain, memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_memory_distance(compute_domain.get(), memory_domain.get()) }
-}
-
-/// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
-pub fn memory_bandwidth(compute_domain: ComputeDomain, memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_memory_bandwidth(compute_domain.get(), memory_domain.get()) }
-}
-
-/// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
-pub fn memory_latency(compute_domain: ComputeDomain, memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_memory_latency(compute_domain.get(), memory_domain.get()) }
-}
-
-/// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
-pub fn volume_ram_in(memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_volume_ram_in(memory_domain.get()) }
-}
-
-/// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
-pub fn volume_ram() -> usize {
-    unsafe { fu_volume_ram() }
-}
-
-/// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
-pub fn volume_huge_pages_in(memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_volume_huge_pages_in(memory_domain.get()) }
-}
-
-/// Returns the total huge-page volume (bytes) across all memory domains.
-pub fn volume_huge_pages() -> usize {
-    unsafe { fu_volume_huge_pages() }
-}
-
-/// Returns the number of free huge pages in a given memory domain (0 if out of range).
-pub fn huge_pages_count_in(memory_domain: MemoryDomain) -> usize {
-    unsafe { fu_huge_pages_count_in(memory_domain.get()) }
-}
-
-/// Returns the total number of free huge pages across all memory domains.
-pub fn huge_pages_count() -> usize {
-    unsafe { fu_huge_pages_count() }
+impl Drop for Topology {
+    fn drop(&mut self) {
+        unsafe {
+            fu_topology_delete(self.inner);
+        }
+    }
 }
 
 /// Defines whether the calling thread participates in task execution.
@@ -786,7 +907,8 @@ pub enum CallerExclusivity {
 /// use forkunion::*;
 ///
 /// // Create a thread pool with 4 threads
-/// let mut pool = spawn(4);
+/// let topology = Topology::new().unwrap();
+/// let mut pool = spawn(&topology, 4);
 ///
 /// // Execute work on each thread
 /// pool.for_threads(&|thread_index, compute_domain_index| {
@@ -819,24 +941,33 @@ unsafe impl Sync for ThreadPool {}
 
 impl ThreadPool {
     pub fn try_spawn_with_exclusivity(
+        topology: &Topology,
         threads: usize,
         exclusivity: CallerExclusivity,
     ) -> Result<Self, Error> {
-        Self::try_named_spawn_with_exclusivity(None, threads, exclusivity)
+        Self::try_named_spawn_with_exclusivity(topology, None, threads, exclusivity)
     }
 
     pub fn try_named_spawn_with_exclusivity(
+        topology: &Topology,
         name: Option<&str>,
         threads: usize,
         exclusivity: CallerExclusivity,
     ) -> Result<Self, Error> {
-        Self::try_named_spawn_with_capabilities(name, threads, exclusivity, Capabilities::ALL)
+        Self::try_named_spawn_with_capabilities(
+            topology,
+            name,
+            threads,
+            exclusivity,
+            Capabilities::ALL,
+        )
     }
 
     /// As [`try_named_spawn_with_exclusivity`](Self::try_named_spawn_with_exclusivity), but constrains
     /// the pool to `allowed`: clear a waiter bit to force a lower-priority busy-wait, or clear
     /// [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] to force the flat (non-NUMA) pool.
     pub fn try_named_spawn_with_capabilities(
+        topology: &Topology,
         name: Option<&str>,
         threads: usize,
         exclusivity: CallerExclusivity,
@@ -863,7 +994,7 @@ impl ThreadPool {
                 return Err(Error::CreationFailed);
             }
 
-            let success = fu_pool_spawn(inner, threads, exclusivity as c_int);
+            let success = fu_pool_spawn(topology.inner, inner, threads, exclusivity as c_int);
             if success == 0 {
                 fu_pool_delete(inner);
                 return Err(Error::SpawnFailed);
@@ -886,17 +1017,20 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     /// // One pool per compute domain, sized to that domain's core count.
-    /// let pools: Vec<ThreadPool> = (0..compute_domains_count())
-    ///     .map(|c| ThreadPool::try_spawn_on(c, logical_cores_count_in(ComputeDomain(c)).max(1), CallerExclusivity::Exclusive).unwrap())
+    /// let topology = Topology::new().unwrap();
+    /// let pools: Vec<ThreadPool> = (0..topology.compute_domains_count())
+    ///     .map(|c| ThreadPool::try_spawn_on(&topology, c, topology.logical_cores_count_in(ComputeDomain(c)).max(1), CallerExclusivity::Exclusive).unwrap())
     ///     .collect();
-    /// assert_eq!(pools.len(), compute_domains_count());
+    /// assert_eq!(pools.len(), topology.compute_domains_count());
     /// ```
     pub fn try_spawn_on(
+        topology: &Topology,
         compute_domain_index: usize,
         threads: usize,
         exclusivity: CallerExclusivity,
     ) -> Result<Self, Error> {
         Self::try_spawn_on_with_capabilities(
+            topology,
             compute_domain_index,
             threads,
             exclusivity,
@@ -906,6 +1040,7 @@ impl ThreadPool {
 
     /// As [`try_spawn_on`](Self::try_spawn_on), but constrains the colocated pool to `allowed`.
     pub fn try_spawn_on_with_capabilities(
+        topology: &Topology,
         compute_domain_index: usize,
         threads: usize,
         exclusivity: CallerExclusivity,
@@ -919,8 +1054,13 @@ impl ThreadPool {
             if inner.is_null() {
                 return Err(Error::CreationFailed);
             }
-            let success =
-                fu_pool_spawn_on(inner, compute_domain_index, threads, exclusivity as c_int);
+            let success = fu_pool_spawn_on(
+                topology.inner,
+                inner,
+                compute_domain_index,
+                threads,
+                exclusivity as c_int,
+            );
             if success == 0 {
                 fu_pool_delete(inner);
                 return Err(Error::SpawnFailed);
@@ -945,11 +1085,12 @@ impl ThreadPool {
     /// use forkunion::*;
     ///
     /// // Create a pool that uses 4 threads total (3 spawned + caller)
-    /// let pool = ThreadPool::try_spawn(4).expect("Failed to create thread pool");
+    /// let topology = Topology::new().unwrap();
+    /// let pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create thread pool");
     /// assert_eq!(pool.threads_count(), 4);
     /// ```
-    pub fn try_spawn(threads: usize) -> Result<Self, Error> {
-        Self::try_spawn_with_exclusivity(threads, CallerExclusivity::Inclusive)
+    pub fn try_spawn(topology: &Topology, threads: usize) -> Result<Self, Error> {
+        Self::try_spawn_with_exclusivity(topology, threads, CallerExclusivity::Inclusive)
     }
 
     /// Creates a new named thread pool with the specified number of threads.
@@ -968,11 +1109,17 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let pool = ThreadPool::try_named_spawn("worker_pool", 4).expect("Failed to create thread pool");
+    /// let topology = Topology::new().unwrap();
+    /// let pool = ThreadPool::try_named_spawn(&topology, "worker_pool", 4).expect("Failed to create thread pool");
     /// assert_eq!(pool.threads_count(), 4);
     /// ```
-    pub fn try_named_spawn(name: &str, threads: usize) -> Result<Self, Error> {
-        Self::try_named_spawn_with_exclusivity(Some(name), threads, CallerExclusivity::Inclusive)
+    pub fn try_named_spawn(topology: &Topology, name: &str, threads: usize) -> Result<Self, Error> {
+        Self::try_named_spawn_with_exclusivity(
+            topology,
+            Some(name),
+            threads,
+            CallerExclusivity::Inclusive,
+        )
     }
 
     /// Returns whether the calling thread participates in the workload.
@@ -1008,7 +1155,8 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let pool = spawn(8);
+    /// let topology = Topology::new().unwrap();
+    /// let pool = spawn(&topology, 8);
     /// let total_compute_domains = pool.compute_domains_count();
     ///
     /// for compute_domain_index in 0..total_compute_domains {
@@ -1067,7 +1215,8 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     ///
     /// // Process a batch of work
     /// pool.for_n(1000, |prong| {
@@ -1108,7 +1257,8 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     /// pool.for_threads(&|thread_index, compute_domain_index| {
     ///     println!("Thread {} on compute_domain {}", thread_index, compute_domain_index);
     /// })
@@ -1132,7 +1282,8 @@ impl ThreadPool {
     ///
     /// ```rust
     /// use forkunion::*;
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     /// let counter = std::sync::atomic::AtomicUsize::new(0);
     /// pool.broadcast(|_thread_index, _compute_domain_index| {
     ///     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1160,7 +1311,8 @@ impl ThreadPool {
     ///
     /// ```rust
     /// use forkunion::*;
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     /// let counter = SpinMutex::new(0usize);
     /// pool.scope(|scope| {
     ///     scope.broadcast(|thread_index, compute_domain_index| {
@@ -1194,7 +1346,8 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     ///
     /// pool.for_slices(1000, |prong, count| {
     ///     let start_index = prong.task_index;
@@ -1233,7 +1386,8 @@ impl ThreadPool {
     ///
     /// ```rust
     /// use forkunion::*;
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     /// let mut data = vec![0u64; 1000];
     /// pool.for_slices_mut(&mut data, |_thread_index, chunk| {
     ///     for value in chunk {
@@ -1282,7 +1436,8 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     ///
     /// pool.for_n(1000, |prong| {
     ///     // Simulate computation based on task index
@@ -1317,7 +1472,8 @@ impl ThreadPool {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = spawn(4);
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 4);
     ///
     /// pool.for_n_dynamic(100, |prong| {
     ///     // Simulate variable work duration - some tasks take longer
@@ -1680,10 +1836,9 @@ pub struct AllocationResult {
     ptr: NonNull<u8>,
     allocated_bytes: usize,
     bytes_per_page: usize,
-    memory_domain: usize,
-    // For over-aligned allocations, tracks the unaligned pointer/size for freeing
-    overaligned_ptr: Option<NonNull<u8>>,
-    overaligned_bytes: Option<usize>,
+    // The OS memory-domain id is all `fu_free_in` needs, so the allocation carries no topology handle
+    // and can outlive the `Topology` it came from.
+    memory_domain_id: MemoryDomainId,
 }
 
 impl AllocationResult {
@@ -1712,9 +1867,9 @@ impl AllocationResult {
         self.bytes_per_page
     }
 
-    /// Returns the NUMA node this memory was allocated on.
-    pub fn memory_domain(&self) -> usize {
-        self.memory_domain
+    /// Returns the OS id of the memory domain this memory was allocated on.
+    pub fn memory_domain_id(&self) -> MemoryDomainId {
+        self.memory_domain_id
     }
 
     /// Converts a typed slice into the allocation's memory space.
@@ -1748,10 +1903,11 @@ impl AllocationResult {
 impl Drop for AllocationResult {
     fn drop(&mut self) {
         unsafe {
-            // Use unaligned pointer/size if this was an over-aligned allocation
-            let ptr = self.overaligned_ptr.unwrap_or(self.ptr);
-            let bytes = self.overaligned_bytes.unwrap_or(self.allocated_bytes);
-            fu_free_in(self.memory_domain, ptr.as_ptr() as *mut c_void, bytes);
+            fu_free_in(
+                self.memory_domain_id.get(),
+                self.ptr.as_ptr() as *mut c_void,
+                self.allocated_bytes,
+            );
         }
     }
 }
@@ -1771,69 +1927,62 @@ unsafe impl Sync for AllocationResult {}
 ///
 /// ```rust
 /// use forkunion::*;
-/// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc for NUMA node 0");
+/// let topology = Topology::new().unwrap();
+/// let id = topology.memory_domain_id_at_index(MemoryDomain(0));
+/// let allocator = PinnedAllocator::new(id).expect("Failed to create alloc for NUMA node 0");
 /// let allocation = allocator.allocate(1024).expect("Failed to allocate 1024 bytes");
 ///
 /// // Access the allocated memory
 /// let memory_slice = allocation.as_slice();
 /// assert_eq!(memory_slice.len(), 1024);
 /// println!("Allocated {} bytes on NUMA node {}",
-///          allocation.allocated_bytes(), allocation.memory_domain());
+///          allocation.allocated_bytes(), allocation.memory_domain_id().get());
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct PinnedAllocator {
-    memory_domain: usize,
+    memory_domain_id: MemoryDomainId,
 }
 
 impl PinnedAllocator {
-    /// Creates a new allocator pinned to the specified NUMA node.
+    /// Creates a new allocator pinned to the memory domain named by @p memory_domain_id.
     ///
     /// # Arguments
     ///
-    /// * `memory_domain` - The memory domain index (0-based) to pin allocations to
+    /// * `memory_domain_id` - The OS memory-domain id from [`Topology::memory_domain_id_at_index`]
     ///
     /// # Errors
     ///
-    /// Returns `None` if the memory domain index is invalid (>= available memory domains).
+    /// Returns `None` if the id is the `-1` sentinel, i.e. it names no domain.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use forkunion::*;
     ///
+    /// let topology = Topology::new().unwrap();
     /// // Create allocator for the first NUMA node
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("NUMA node 0 should be available");
+    /// let id = topology.memory_domain_id_at_index(MemoryDomain(0));
+    /// let allocator = PinnedAllocator::new(id).expect("NUMA node 0 should be available");
     ///
     /// // Check if a specific NUMA node exists
-    /// let numa_count = memory_domains_count();
+    /// let numa_count = topology.memory_domains_count();
     /// if numa_count > 1 {
-    ///     let allocator2 = PinnedAllocator::new(MemoryDomain(1)).expect("NUMA node 1 should be available");
-    ///     println!("Created allocator for NUMA node: {}", allocator2.memory_domain());
+    ///     let id2 = topology.memory_domain_id_at_index(MemoryDomain(1));
+    ///     let allocator2 = PinnedAllocator::new(id2).expect("NUMA node 1 should be available");
+    ///     println!("Created allocator for NUMA node: {}", allocator2.memory_domain_id().get());
     /// }
     /// ```
-    pub fn new(memory_domain: MemoryDomain) -> Option<Self> {
-        if memory_domain.get() >= memory_domains_count() {
+    pub fn new(memory_domain_id: MemoryDomainId) -> Option<Self> {
+        if !memory_domain_id.is_valid() {
             return None;
         }
 
-        Some(Self {
-            memory_domain: memory_domain.get(),
-        })
+        Some(Self { memory_domain_id })
     }
 
-    /// Returns the NUMA node this allocator is pinned to.
-    pub fn memory_domain(&self) -> usize {
-        self.memory_domain
-    }
-
-    /// Returns the volume of huge pages available on this allocator's NUMA node.
-    pub fn volume_huge_pages(&self) -> usize {
-        unsafe { fu_volume_huge_pages_in(self.memory_domain) }
-    }
-
-    /// Returns the volume of any pages (huge or regular) available on this allocator's NUMA node.
-    pub fn volume_ram(&self) -> usize {
-        unsafe { fu_volume_ram_in(self.memory_domain) }
+    /// Returns the OS id of the memory domain this allocator is pinned to.
+    pub fn memory_domain_id(&self) -> MemoryDomainId {
+        self.memory_domain_id
     }
 
     /// Allocates memory with at least the requested size on this allocator's NUMA node.
@@ -1854,7 +2003,8 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
     /// let allocation = allocator.allocate_at_least(1024).expect("Failed to allocate memory");
     ///
     /// println!("Requested 1024 bytes, got {} bytes on {} byte pages",
@@ -1877,7 +2027,7 @@ impl PinnedAllocator {
 
         unsafe {
             let ptr = fu_allocate_at_least_in(
-                self.memory_domain,
+                self.memory_domain_id.get(),
                 minimum_bytes,
                 &mut allocated_bytes as *mut usize,
                 &mut bytes_per_page as *mut usize,
@@ -1891,9 +2041,7 @@ impl PinnedAllocator {
                 ptr: NonNull::new_unchecked(ptr as *mut u8),
                 allocated_bytes,
                 bytes_per_page,
-                memory_domain: self.memory_domain,
-                overaligned_ptr: None,
-                overaligned_bytes: None,
+                memory_domain_id: self.memory_domain_id,
             })
         }
     }
@@ -1913,7 +2061,9 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let id = topology.memory_domain_id_at_index(MemoryDomain(0));
+    /// let allocator = PinnedAllocator::new(id).unwrap();
     /// let allocation = allocator.allocate(1024).expect("Failed to allocate memory");
     /// assert_eq!(allocation.allocated_bytes(), 1024);
     ///
@@ -1933,7 +2083,7 @@ impl PinnedAllocator {
         }
 
         unsafe {
-            let ptr = fu_allocate_in(self.memory_domain, bytes);
+            let ptr = fu_allocate_in(self.memory_domain_id.get(), bytes);
 
             if ptr.is_null() {
                 return None;
@@ -1943,9 +2093,7 @@ impl PinnedAllocator {
                 ptr: NonNull::new_unchecked(ptr as *mut u8),
                 allocated_bytes: bytes,
                 bytes_per_page: 0, // Not provided by fu_allocate
-                memory_domain: self.memory_domain,
-                overaligned_ptr: None,
-                overaligned_bytes: None,
+                memory_domain_id: self.memory_domain_id,
             })
         }
     }
@@ -1961,7 +2109,8 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
     /// let mut allocation = allocator.allocate_for::<u64>(100).expect("Failed to allocate");
     ///
     /// // Verify the allocation size first
@@ -1977,37 +2126,13 @@ impl PinnedAllocator {
     /// assert_eq!(slice[99], 12345);
     /// ```
     pub fn allocate_for<T>(&self, count: usize) -> Option<AllocationResult> {
-        let size = core::mem::size_of::<T>();
-        let align = core::mem::align_of::<T>();
-        let bytes = count.checked_mul(size)?;
-
-        // If alignment is <= default malloc alignment (16 bytes), use simple path
-        if align <= 16 {
-            return self.allocate(bytes);
+        // The allocator guarantees `DEFAULT_ALIGNMENT`, so any element type up to that alignment is
+        // satisfied directly; a stricter type cannot be honored and is refused.
+        if core::mem::align_of::<T>() > DEFAULT_ALIGNMENT {
+            return None;
         }
-
-        // For over-aligned types (like CacheAligned<T> with 128-byte alignment),
-        // we need to over-allocate and manually align the pointer
-        let padding = align - 1;
-        let total_bytes = bytes.checked_add(padding)?;
-
-        let mut allocation = self.allocate(total_bytes)?;
-
-        // Save unaligned pointer and size for freeing
-        let unaligned_ptr = allocation.ptr;
-        let unaligned_bytes = allocation.allocated_bytes;
-
-        // Calculate aligned pointer
-        let ptr = allocation.as_ptr() as usize;
-        let aligned_ptr = (ptr + padding) & !(align - 1);
-
-        // Adjust the allocation to point to the aligned address
-        allocation.ptr = unsafe { core::ptr::NonNull::new_unchecked(aligned_ptr as *mut u8) };
-        allocation.allocated_bytes = bytes;
-        allocation.overaligned_ptr = Some(unaligned_ptr);
-        allocation.overaligned_bytes = Some(unaligned_bytes);
-
-        Some(allocation)
+        let bytes = count.checked_mul(core::mem::size_of::<T>())?;
+        self.allocate(bytes)
     }
 
     /// Allocates memory for at least the specified number of elements of type T.
@@ -2023,7 +2148,8 @@ impl PinnedAllocator {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
     /// let mut allocation = allocator.allocate_for_at_least::<u32>(1000).expect("Failed to allocate");
     /// let actual_count = allocation.allocated_bytes() / std::mem::size_of::<u32>();
     /// println!("Requested {} u32s, got space for {} u32s", 1000, actual_count);
@@ -2047,34 +2173,32 @@ impl PinnedAllocator {
     }
 }
 
-/// Creates an allocator for the first available NUMA node (typically node 0).
-///
-/// This is a convenience function for systems where NUMA awareness is desired
-/// but the specific node doesn't matter.
+/// Creates an allocator for the first memory domain, index 0, when the specific domain does not matter.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use forkunion::*;
 ///
-/// let allocator = default_numa_allocator().expect("No NUMA nodes available");
+/// let topology = Topology::new().unwrap();
+/// let allocator = default_pinned_allocator(&topology).expect("No memory domains available");
 /// let allocation = allocator.allocate(1024).expect("Failed to allocate");
 ///
-/// // The default allocator uses NUMA node 0
-/// assert_eq!(allocation.memory_domain(), 0);
+/// // The default allocator uses the first memory domain
+/// assert_eq!(allocation.memory_domain_id(), topology.memory_domain_id_at_index(MemoryDomain(0)));
 ///
-/// // For more control, create specific NUMA allocators
-/// let numa_count = memory_domains_count();
-/// println!("System has {} NUMA nodes available", numa_count);
+/// // For more control, pin to a specific domain
+/// let domains = topology.memory_domains_count();
+/// println!("System has {} memory domains available", domains);
 ///
-/// if numa_count > 1 {
-///     let allocator_node1 = PinnedAllocator::new(MemoryDomain(1)).expect("NUMA node 1 available");
-///     let allocation2 = allocator_node1.allocate(2048).expect("Failed to allocate on node 1");
-///     assert_eq!(allocation2.memory_domain(), 1);
+/// if domains > 1 {
+///     let allocator_domain1 = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(1))).expect("domain 1 available");
+///     let allocation2 = allocator_domain1.allocate(2048).expect("Failed to allocate on domain 1");
+///     assert_eq!(allocation2.memory_domain_id(), topology.memory_domain_id_at_index(MemoryDomain(1)));
 /// }
 /// ```
-pub fn default_numa_allocator() -> Option<PinnedAllocator> {
-    PinnedAllocator::new(MemoryDomain(0))
+pub fn default_pinned_allocator(topology: &Topology) -> Option<PinnedAllocator> {
+    PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
 }
 
 /// A Vec-like container that uses NUMA-aware pinned memory allocation.
@@ -2089,7 +2213,8 @@ pub fn default_numa_allocator() -> Option<PinnedAllocator> {
 /// use forkunion::*;
 ///
 /// // Create a vector on NUMA node 0
-/// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+/// let topology = Topology::new().unwrap();
+/// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
 /// let mut vec = PinnedVec::<u64>::new_in(allocator);
 ///
 /// // Add elements
@@ -2127,7 +2252,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::new_in(allocator);
     /// assert_eq!(vec.len(), 0);
     /// assert_eq!(vec.capacity(), 0);
@@ -2158,7 +2284,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::with_capacity_in(allocator, 100).expect("Failed to create vec");
     /// assert_eq!(vec.len(), 0);
     /// assert_eq!(vec.capacity(), 100);
@@ -2194,9 +2321,9 @@ impl<T> PinnedVec<T> {
         self.capacity
     }
 
-    /// Returns the NUMA node this vector's memory is allocated on.
-    pub fn memory_domain(&self) -> usize {
-        self.allocator.memory_domain()
+    /// Returns the OS id of the memory domain this vector's memory is allocated on.
+    pub fn memory_domain_id(&self) -> MemoryDomainId {
+        self.allocator.memory_domain_id()
     }
 
     /// Reserves capacity for at least `additional` more elements.
@@ -2214,7 +2341,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.reserve(10).expect("Failed to reserve");
     /// assert!(vec.capacity() >= 10);
@@ -2272,7 +2400,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// assert_eq!(vec.len(), 1);
@@ -2302,7 +2431,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// assert_eq!(vec.pop(), Some(42));
@@ -2327,7 +2457,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// vec.clear();
@@ -2599,7 +2730,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
     /// vec.resize(5, 0).expect("Failed to resize");
     /// vec.fill(42);
@@ -2623,7 +2755,8 @@ impl<T> PinnedVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+    /// let topology = Topology::new().unwrap();
+    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
     /// vec.resize(5, 0).expect("Failed to resize");
     /// vec.fill_with(|| 42);
@@ -2670,8 +2803,9 @@ unsafe impl<T: Sync> Sync for PinnedVec<T> {}
 /// ```rust
 /// use forkunion::*;
 ///
-/// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
-/// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
+/// let topology = Topology::new().unwrap();
+/// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
+/// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
 ///
 /// // Fill all vectors across all NUMA nodes with the same value
 /// rr_vec.fill(&mut pool, 42);
@@ -2694,17 +2828,19 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
-    /// assert_eq!(rr_vec.compute_domains_count(), compute_domains_count());
+    /// let topology = Topology::new().unwrap();
+    /// let rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
+    /// assert_eq!(rr_vec.compute_domains_count(), topology.compute_domains_count());
     /// ```
-    pub fn new() -> Option<Self> {
-        let compute_domains_count = compute_domains_count();
+    pub fn new(topology: &Topology) -> Option<Self> {
+        let compute_domains_count = topology.compute_domains_count();
         if compute_domains_count == 0 {
             return None;
         }
 
         // Use the first NUMA node to allocate the container
-        let container_allocator = PinnedAllocator::new(MemoryDomain(0))?;
+        let container_allocator =
+            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))?;
         let mut compute_domains =
             PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
 
@@ -2712,9 +2848,10 @@ impl<T> RoundRobinVec<T> {
         for compute_domain_index in 0..compute_domains_count {
             // A compute-domain index is not a memory-domain index. They coincide only when the
             // machine has one memory domain per compute domain; an Apple M5 Pro has three compute
-            // domains over one memory domain, and `PinnedAllocator::new(MemoryDomain(1))` would simply fail.
-            let allocator =
-                PinnedAllocator::new(local_memory_of(ComputeDomain(compute_domain_index)))?;
+            // domains over one memory domain, so its id at index 1 comes back as -1 and the allocator fails.
+            let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(
+                topology.local_memory_of(ComputeDomain(compute_domain_index)),
+            ))?;
             let vec = PinnedVec::new_in(allocator);
             compute_domains.push(vec).ok()?;
         }
@@ -2746,21 +2883,26 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(1000)
+    /// let topology = Topology::new().unwrap();
+    /// let rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(&topology, 1000)
     ///     .expect("Failed to create RoundRobinVec");
     ///
     /// for i in 0..rr_vec.compute_domains_count() {
     ///     assert_eq!(rr_vec.capacity_at(i), 1000);
     /// }
     /// ```
-    pub fn with_capacity_per_compute_domain(capacity_per_compute_domain: usize) -> Option<Self> {
-        let compute_domains_count = compute_domains_count();
+    pub fn with_capacity_per_compute_domain(
+        topology: &Topology,
+        capacity_per_compute_domain: usize,
+    ) -> Option<Self> {
+        let compute_domains_count = topology.compute_domains_count();
         if compute_domains_count == 0 {
             return None;
         }
 
         // Use the first NUMA node to allocate the container
-        let container_allocator = PinnedAllocator::new(MemoryDomain(0))?;
+        let container_allocator =
+            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))?;
         let mut compute_domains =
             PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
 
@@ -2768,9 +2910,10 @@ impl<T> RoundRobinVec<T> {
         for compute_domain_index in 0..compute_domains_count {
             // A compute-domain index is not a memory-domain index. They coincide only when the
             // machine has one memory domain per compute domain; an Apple M5 Pro has three compute
-            // domains over one memory domain, and `PinnedAllocator::new(MemoryDomain(1))` would simply fail.
-            let allocator =
-                PinnedAllocator::new(local_memory_of(ComputeDomain(compute_domain_index)))?;
+            // domains over one memory domain, so its id at index 1 comes back as -1 and the allocator fails.
+            let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(
+                topology.local_memory_of(ComputeDomain(compute_domain_index)),
+            ))?;
             let vec = PinnedVec::with_capacity_in(allocator, capacity_per_compute_domain)?;
             compute_domains.push(vec).ok()?;
         }
@@ -2879,7 +3022,8 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
+    /// let topology = Topology::new().unwrap();
+    /// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
     /// // Add some elements...
     /// if let Some(element) = rr_vec.get(5) {
     ///     println!("Element at index 5: {}", element);
@@ -2940,7 +3084,8 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
+    /// let topology = Topology::new().unwrap();
+    /// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
     /// rr_vec.push(42).expect("Failed to push");
     /// assert_eq!(rr_vec.len(), 1);
     /// ```
@@ -3009,7 +3154,8 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut rr_vec = RoundRobinVec::<i32>::new().expect("Failed to create RoundRobinVec");
+    /// let topology = Topology::new().unwrap();
+    /// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
     /// rr_vec.push(42).expect("Failed to push");
     /// assert_eq!(rr_vec.pop(), Some(42));
     /// assert_eq!(rr_vec.pop(), None);
@@ -3149,8 +3295,9 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(1000)
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
+    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(&topology, 1000)
     ///     .expect("Failed to create RoundRobinVec");
     ///
     /// // Resize all vectors to have some elements
@@ -3196,8 +3343,9 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(1000)
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
+    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(&topology, 1000)
     ///     .expect("Failed to create RoundRobinVec");
     ///
     /// // Resize all vectors to have some elements
@@ -3243,8 +3391,9 @@ impl<T> RoundRobinVec<T> {
     /// ```rust
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<usize>::new().expect("Failed to create RoundRobinVec");
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
+    /// let mut rr_vec = RoundRobinVec::<usize>::new(&topology).expect("Failed to create RoundRobinVec");
     /// rr_vec.resize(&mut pool, 100, 0).expect("Failed to resize");
     ///
     /// rr_vec.fill_with_index(&mut pool, |index| index * 2);
@@ -3817,7 +3966,8 @@ where
     /// # Example
     /// ```
     /// use forkunion::*;
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = (0..1000).collect();
     /// let mut scratch: Vec<CacheAligned<u64>> =
     ///     (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
@@ -3880,7 +4030,8 @@ where
     ///     Ok(())
     /// }
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = (1..100).collect();
     /// let mut scratch: Vec<CacheAligned<u64>> =
     ///     (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
@@ -3963,7 +4114,8 @@ where
     ///     if *x < 100 { Ok(()) } else { Err("value too large") }
     /// }
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = (0..50).collect();
     ///
     /// let result = (&data[..])
@@ -4029,7 +4181,8 @@ where
     /// ```
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = vec![10, 20, 30, 20, 10];
     ///
     /// let found = (&data[..])
@@ -4058,9 +4211,14 @@ where
             return None;
         }
         let threads = self.pool.threads_count();
+        // POLISH: a fresh Topology is probed here only because `ThreadPool` does not carry one;
+        // it must be declared before `scratch` so the scratch allocation frees while it is alive.
+        // A `&Topology` threaded through the parallel-iterator adapters would remove this.
+        let topology = Topology::new().expect("failed to probe topology");
         let mut scratch: PinnedVec<CacheAligned<Option<(usize, I::Item)>>> =
             PinnedVec::with_capacity_in(
-                PinnedAllocator::new(MemoryDomain(0)).expect("failed to get allocator"),
+                PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+                    .expect("failed to get allocator"),
                 threads,
             )
             .expect("failed to allocate scratch");
@@ -4111,7 +4269,8 @@ where
     /// ```
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = vec![10, 20, 30, 20, 10];
     ///
     /// let found = (&data[..])
@@ -4132,9 +4291,14 @@ where
             return None;
         }
         let threads = self.pool.threads_count();
+        // POLISH: a fresh Topology is probed here only because `ThreadPool` does not carry one;
+        // it must be declared before `scratch` so the scratch allocation frees while it is alive.
+        // A `&Topology` threaded through the parallel-iterator adapters would remove this.
+        let topology = Topology::new().expect("failed to probe topology");
         let mut scratch: PinnedVec<CacheAligned<Option<(usize, I::Item)>>> =
             PinnedVec::with_capacity_in(
-                PinnedAllocator::new(MemoryDomain(0)).expect("failed to get allocator"),
+                PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+                    .expect("failed to get allocator"),
                 threads,
             )
             .expect("failed to allocate scratch");
@@ -4184,7 +4348,8 @@ where
     /// ```
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = (0..1000).collect();
     ///
     /// let found = (&data[..])
@@ -4241,7 +4406,8 @@ where
     /// ```
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = (0..1000).collect();
     ///
     /// let has_large = (&data[..])
@@ -4268,7 +4434,8 @@ where
     /// ```
     /// use forkunion::*;
     ///
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = (0..100).collect();
     ///
     /// let all_small = (&data[..])
@@ -4304,7 +4471,8 @@ where
     /// # Example
     /// ```
     /// use forkunion::*;
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<u64> = (0..1000).collect();
     ///
     /// let total = (&data[..]).into_par_iter().with_pool(&mut pool)
@@ -4328,8 +4496,12 @@ where
         // Note: Using PinnedVec per compute_domain for true NUMA-awareness would be ideal,
         // but for simplicity we use a contiguous allocation here. The OS will still
         // tend to place this on the NUMA node of the allocating thread.
+        // POLISH: a fresh Topology is probed here only because `ThreadPool` does not carry one;
+        // it must outlive `scratch`. A `&Topology` threaded through the reduce adapters removes this.
+        let topology = Topology::new().expect("failed to probe topology");
         let mut scratch = PinnedVec::with_capacity_in(
-            PinnedAllocator::new(MemoryDomain(0)).expect("failed to get allocator"),
+            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+                .expect("failed to get allocator"),
             threads,
         )
         .expect("failed to allocate scratch");
@@ -4357,7 +4529,8 @@ where
     /// # Example
     /// ```
     /// use forkunion::*;
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data = vec![1u64, 2, 3, 4, 5];
     /// let sum: u64 = (&data[..]).into_par_iter().with_pool(&mut pool).sum();
     /// assert_eq!(sum, 15);
@@ -4379,7 +4552,8 @@ where
     /// # Example
     /// ```
     /// use forkunion::*;
-    /// let mut pool = ThreadPool::try_spawn(4).unwrap();
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
     /// let data: Vec<usize> = (0..1000).collect();
     /// let count = (&data[..]).into_par_iter().with_pool(&mut pool).count();
     /// ```
@@ -4928,13 +5102,13 @@ pub mod prelude {
 }
 
 /// Spawns a pool with the specified number of threads.
-pub fn spawn(threads: usize) -> ThreadPool {
-    ThreadPool::try_spawn(threads).expect("Failed to spawn ThreadPool")
+pub fn spawn(topology: &Topology, threads: usize) -> ThreadPool {
+    ThreadPool::try_spawn(topology, threads).expect("Failed to spawn ThreadPool")
 }
 
 /// Spawns a named pool with the specified number of threads.
-pub fn named_spawn(name: &str, threads: usize) -> ThreadPool {
-    ThreadPool::try_named_spawn(name, threads).expect("Failed to spawn named ThreadPool")
+pub fn named_spawn(topology: &Topology, name: &str, threads: usize) -> ThreadPool {
+    ThreadPool::try_named_spawn(topology, name, threads).expect("Failed to spawn named ThreadPool")
 }
 
 /// Standalone function to distribute `n` similar duration calls between threads.
@@ -5006,12 +5180,14 @@ mod tests {
 
     #[inline]
     fn hw_threads() -> usize {
-        logical_cores_count().max(1)
+        let topology = Topology::new().unwrap();
+        topology.logical_cores_count().max(1)
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn capabilities() {
+        let topology = Topology::new().unwrap();
         let comptime = comptime_capabilities();
         let runtime = runtime_capabilities();
         std::println!("Comptime: {:?}", comptime_capabilities_string());
@@ -5035,7 +5211,7 @@ mod tests {
 
         // Whatever we can construct, we can only construct because a capability was compiled in.
         if !comptime.contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN) {
-            assert_eq!(compute_domains_count(), 1);
+            assert_eq!(topology.compute_domains_count(), 1);
         }
 
         // One facility, two questions of the same bit: a machine can only _offer_ page placement if
@@ -5048,10 +5224,11 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn system_info() {
-        let cores = logical_cores_count();
-        let numa = memory_domains_count();
-        let compute_domains = compute_domains_count();
-        let qos = compute_levels_count();
+        let topology = Topology::new().unwrap();
+        let cores = topology.logical_cores_count();
+        let numa = topology.memory_domains_count();
+        let compute_domains = topology.compute_domains_count();
+        let qos = topology.compute_levels_count();
 
         std::println!(
             "Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}"
@@ -5062,10 +5239,11 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn topology_axes() {
-        let compute_domains = compute_domains_count();
-        let compute_levels = compute_levels_count();
-        let memory_domains = memory_domains_count();
-        let memory_levels = memory_levels_count();
+        let topology = Topology::new().unwrap();
+        let compute_domains = topology.compute_domains_count();
+        let compute_levels = topology.compute_levels_count();
+        let memory_domains = topology.memory_domains_count();
+        let memory_levels = topology.memory_levels_count();
         assert!(compute_domains > 0 && memory_domains > 0);
 
         // Levels are dense ranks over domains, so they can never outnumber them.
@@ -5073,20 +5251,23 @@ mod tests {
         assert!(memory_levels <= memory_domains);
 
         for domain in (0..compute_domains).map(ComputeDomain) {
-            assert!(compute_level_in(domain) < compute_levels.max(1));
-            assert!(local_memory_of(domain).get() < memory_domains);
+            assert!(topology.compute_level_in(domain) < compute_levels.max(1));
+            assert!(topology.local_memory_of(domain).get() < memory_domains);
             // Capacity and cache are magnitudes, unknown as 0 - never negative, never asserted nonzero.
-            let _capacity = compute_capacity_in(domain);
-            let _cache_bytes = compute_cache_bytes_in(domain);
+            let _capacity = topology.compute_capacity_in(domain);
+            let _cache_bytes = topology.compute_cache_bytes_in(domain);
         }
         for domain in (0..memory_domains).map(MemoryDomain) {
-            assert!(memory_level_in(domain) < memory_levels.max(1));
+            assert!(topology.memory_level_in(domain) < memory_levels.max(1));
         }
 
         // Out-of-range indices must saturate to 0 rather than trap or read past the topology.
-        assert_eq!(compute_capacity_in(ComputeDomain(compute_domains + 64)), 0);
         assert_eq!(
-            compute_cache_bytes_in(ComputeDomain(compute_domains + 64)),
+            topology.compute_capacity_in(ComputeDomain(compute_domains + 64)),
+            0
+        );
+        assert_eq!(
+            topology.compute_cache_bytes_in(ComputeDomain(compute_domains + 64)),
             0
         );
     }
@@ -5094,7 +5275,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn spawn_and_basic_info() {
-        let pool = spawn(2);
+        let topology = Topology::new().unwrap();
+        let pool = spawn(&topology, 2);
         assert_eq!(pool.threads_count(), 2);
         assert!(pool.compute_domains_count() > 0);
     }
@@ -5102,30 +5284,37 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn caller_exclusivity_query() {
+        let topology = Topology::new().unwrap();
         // The pool is the single source of truth, queried live (not cached).
         let inclusive =
-            ThreadPool::try_spawn_with_exclusivity(2, CallerExclusivity::Inclusive).unwrap();
+            ThreadPool::try_spawn_with_exclusivity(&topology, 2, CallerExclusivity::Inclusive)
+                .unwrap();
         assert_eq!(inclusive.caller_exclusivity(), CallerExclusivity::Inclusive);
 
         let exclusive =
-            ThreadPool::try_spawn_with_exclusivity(2, CallerExclusivity::Exclusive).unwrap();
+            ThreadPool::try_spawn_with_exclusivity(&topology, 2, CallerExclusivity::Exclusive)
+                .unwrap();
         assert_eq!(exclusive.caller_exclusivity(), CallerExclusivity::Exclusive);
 
         // The default `spawn` is inclusive
-        assert_eq!(spawn(2).caller_exclusivity(), CallerExclusivity::Inclusive);
+        assert_eq!(
+            spawn(&topology, 2).caller_exclusivity(),
+            CallerExclusivity::Inclusive
+        );
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn per_compute_domain_pools() {
+        let topology = Topology::new().unwrap();
         // One pool per compute_domain, each pinned to its node; drive them from this thread.
-        let compute_domains = compute_domains_count();
+        let compute_domains = topology.compute_domains_count();
         assert!(compute_domains >= 1);
 
         let mut pools: Vec<ThreadPool> = (0..compute_domains)
             .map(|c| {
-                let cores = logical_cores_count_in(ComputeDomain(c)).max(1);
-                ThreadPool::try_spawn_on(c, cores, CallerExclusivity::Exclusive)
+                let cores = topology.logical_cores_count_in(ComputeDomain(c)).max(1);
+                ThreadPool::try_spawn_on(&topology, c, cores, CallerExclusivity::Exclusive)
                     .expect("failed to spawn per-compute_domain pool")
             })
             .collect();
@@ -5140,17 +5329,21 @@ mod tests {
         }
 
         // Out-of-range compute_domain must fail cleanly, not panic.
-        assert!(
-            ThreadPool::try_spawn_on(compute_domains + 100, 2, CallerExclusivity::Exclusive)
-                .is_err()
-        );
+        assert!(ThreadPool::try_spawn_on(
+            &topology,
+            compute_domains + 100,
+            2,
+            CallerExclusivity::Exclusive
+        )
+        .is_err());
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn for_threads_dispatch() {
+        let topology = Topology::new().unwrap();
         let count_threads = hw_threads();
-        let mut pool = spawn(count_threads);
+        let mut pool = spawn(&topology, count_threads);
 
         let visited: Arc<Vec<AtomicBool>> =
             Arc::new((0..count_threads).map(|_| AtomicBool::new(false)).collect());
@@ -5176,7 +5369,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn broadcast_owns_and_blocks() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let counter = AtomicUsize::new(0);
         // Owned closure, no `&` and no guard - borrows `counter` from this frame safely.
         pool.broadcast(|_thread_index, _compute_domain_index| {
@@ -5188,7 +5382,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn for_slices_mut_partitions_disjointly() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let total = 10_000usize;
         let mut data: Vec<usize> = (0..total).collect();
 
@@ -5211,8 +5406,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn for_n_static_scheduling() {
+        let topology = Topology::new().unwrap();
         const EXPECTED_PARTS: usize = 1_000;
-        let mut pool = spawn(hw_threads());
+        let mut pool = spawn(&topology, hw_threads());
 
         let visited: Arc<Vec<AtomicBool>> = Arc::new(
             (0..EXPECTED_PARTS)
@@ -5242,8 +5438,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn for_n_dynamic_scheduling() {
+        let topology = Topology::new().unwrap();
         const EXPECTED_PARTS: usize = 1_000;
-        let mut pool = spawn(hw_threads());
+        let mut pool = spawn(&topology, hw_threads());
 
         let visited: Arc<Vec<AtomicBool>> = Arc::new(
             (0..EXPECTED_PARTS)
@@ -5273,8 +5470,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn for_each_mut() {
+        let topology = Topology::new().unwrap();
         const ELEMENTS: usize = 1000;
-        let mut pool = spawn(hw_threads());
+        let mut pool = spawn(&topology, hw_threads());
         let mut data = std::vec![0u64; ELEMENTS];
 
         for_each_prong_mut(&mut pool, &mut data, |x, prong| {
@@ -5289,7 +5487,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn closure_objects() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
@@ -5307,10 +5506,12 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn guard_lifecycle_exclusive() {
+        let topology = Topology::new().unwrap();
         // On exclusive pools the work is dispatched at guard construction:
         // the caller can overlap its own work and poll `is_complete`.
-        let mut pool = ThreadPool::try_spawn_with_exclusivity(4, CallerExclusivity::Exclusive)
-            .expect("Failed to create exclusive thread pool");
+        let mut pool =
+            ThreadPool::try_spawn_with_exclusivity(&topology, 4, CallerExclusivity::Exclusive)
+                .expect("Failed to create exclusive thread pool");
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
@@ -5339,9 +5540,10 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn guard_lifecycle_inclusive() {
+        let topology = Topology::new().unwrap();
         // On inclusive pools the dispatch is deferred to `join`, where the
         // calling thread contributes its own slice.
-        let mut pool = spawn(4);
+        let mut pool = spawn(&topology, 4);
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
@@ -5368,16 +5570,18 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_allocator_creation() {
-        let numa_count = memory_domains_count();
+        let topology = Topology::new().unwrap();
+        let numa_count = topology.memory_domains_count();
         assert!(numa_count > 0, "System should have at least one NUMA node");
 
         // Test valid NUMA node
-        let allocator =
-            PinnedAllocator::new(MemoryDomain(0)).expect("NUMA node 0 should be available");
-        assert_eq!(allocator.memory_domain(), 0);
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("NUMA node 0 should be available");
+        assert_eq!(allocator.memory_domain_id().get(), 0);
 
         // Test invalid NUMA node
-        let invalid_allocator = PinnedAllocator::new(MemoryDomain(numa_count + 10));
+        let invalid_allocator =
+            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(numa_count + 10)));
         assert!(
             invalid_allocator.is_none(),
             "Invalid NUMA node should return None"
@@ -5387,13 +5591,15 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn basic_allocation() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let allocation = allocator
             .allocate(1024)
             .expect("Failed to allocate 1024 bytes");
 
         assert_eq!(allocation.allocated_bytes(), 1024);
-        assert_eq!(allocation.memory_domain(), 0);
+        assert_eq!(allocation.memory_domain_id().get(), 0);
 
         // Test that we can write to the memory
         let slice = allocation.as_slice();
@@ -5403,7 +5609,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn allocate_zero_bytes() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let allocation = allocator.allocate(0);
         assert!(
             allocation.is_none(),
@@ -5414,13 +5622,15 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn allocate_at_least() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let allocation = allocator
             .allocate_at_least(1000)
             .expect("Failed to allocate at least 1000 bytes");
 
         assert!(allocation.allocated_bytes() >= 1000);
-        assert_eq!(allocation.memory_domain(), 0);
+        assert_eq!(allocation.memory_domain_id().get(), 0);
 
         // bytes_per_page should be set to something reasonable
         if allocation.bytes_per_page() > 0 {
@@ -5431,29 +5641,35 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_creation() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 0);
-        assert_eq!(vec.memory_domain(), 0);
+        assert_eq!(vec.memory_domain_id().get(), 0);
         assert!(vec.is_empty());
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_with_capacity() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::with_capacity_in(allocator, 10).expect("Failed to create vec");
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 10);
-        assert_eq!(vec.memory_domain(), 0);
+        assert_eq!(vec.memory_domain_id().get(), 0);
         assert!(vec.is_empty());
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_push_pop() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
         // Test push
@@ -5477,7 +5693,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_indexing() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(10).expect("Failed to push");
         vec.push(20).expect("Failed to push");
@@ -5496,7 +5714,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_clear() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
         vec.push(2).expect("Failed to push");
@@ -5511,7 +5731,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_insert_remove() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
         vec.push(3).expect("Failed to push");
@@ -5534,7 +5756,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_reserve() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.capacity(), 0);
 
@@ -5552,7 +5776,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_extend_from_slice() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         let data = [1, 2, 3, 4, 5];
 
@@ -5566,7 +5792,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_iterators() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
             vec.push(i).expect("Failed to push");
@@ -5591,7 +5819,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_slices() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
             vec.push(i).expect("Failed to push");
@@ -5611,7 +5841,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_growth() {
-        let allocator = PinnedAllocator::new(MemoryDomain(0)).expect("Failed to create alloc");
+        let topology = Topology::new().unwrap();
+        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
         // Push many elements to test growth
@@ -5628,8 +5860,10 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn pinned_vec_invalid_memory_domain() {
-        let numa_count = memory_domains_count();
-        let allocator = PinnedAllocator::new(MemoryDomain(numa_count + 1));
+        let topology = Topology::new().unwrap();
+        let numa_count = topology.memory_domains_count();
+        let allocator =
+            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(numa_count + 1)));
         assert!(allocator.is_none());
     }
 
@@ -5644,7 +5878,8 @@ mod tests {
 
     #[test]
     fn parallel_slice_static_for_each() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..512).collect();
         let total = AtomicUsize::new(0);
 
@@ -5661,7 +5896,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn parallel_slice_mut_dynamic_for_each() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let mut data: Vec<usize> = (0..256).collect();
 
         (&mut data[..])
@@ -5679,7 +5915,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn parallel_slice_zip_sum() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let a: Vec<usize> = (0..128).collect();
         let b: Vec<usize> = (0..128).rev().collect();
         let sums: Arc<Vec<AtomicUsize>> =
@@ -5702,7 +5939,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn parallel_exact_iter_dispatch() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let mut values = vec![0usize; 256];
         let ptr = SyncMutPtr::new(values.as_mut_ptr());
         (0..values.len())
@@ -5721,9 +5959,10 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn round_robin_parallel_mut() {
-        let mut pool = spawn(hw_threads());
-        let mut rr_vec =
-            RoundRobinVec::<usize>::with_capacity_per_compute_domain(8).expect("round robin vec");
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
+        let mut rr_vec = RoundRobinVec::<usize>::with_capacity_per_compute_domain(&topology, 8)
+            .expect("round robin vec");
 
         // Populate evenly
         for value in 0..32 {
@@ -5748,9 +5987,10 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn round_robin_fill_with_index_is_deterministic() {
+        let topology = Topology::new().unwrap();
         for threads in [1usize, 3, 17] {
-            let mut pool = spawn(threads);
-            let mut rr_vec = RoundRobinVec::<usize>::new().expect("round robin vec");
+            let mut pool = spawn(&topology, threads);
+            let mut rr_vec = RoundRobinVec::<usize>::new(&topology).expect("round robin vec");
             rr_vec.resize(&mut pool, 1000, 0).expect("resize");
 
             rr_vec.fill_with_index(&mut pool, |index| index * 3 + 1);
@@ -5770,8 +6010,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn round_robin_fill_with_covers_every_slot() {
-        let mut pool = spawn(hw_threads());
-        let mut rr_vec = RoundRobinVec::<usize>::new().expect("round robin vec");
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
+        let mut rr_vec = RoundRobinVec::<usize>::new(&topology).expect("round robin vec");
         rr_vec.resize(&mut pool, 500, 0).expect("resize");
 
         rr_vec.fill_with(&mut pool, || 7);
@@ -5838,7 +6079,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn scratch_reduction_collects_sum() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1024).collect();
         let mut scratch = vec![0usize; pool.threads_count()];
 
@@ -5857,7 +6099,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_with_scratch_sum() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1024).collect();
         let mut scratch: Vec<CacheAligned<u64>> =
             (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
@@ -5877,7 +6120,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_with_scratch_dynamic() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1000).collect();
         let mut scratch: Vec<CacheAligned<usize>> =
             (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
@@ -5897,7 +6141,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_sum() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (1..=1000).collect();
         let total: u64 = (&data[..]).into_par_iter().with_pool(&mut pool).sum();
         assert_eq!(total, data.iter().sum());
@@ -5906,7 +6151,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_count() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1000).collect();
         let count = (&data[..]).into_par_iter().with_pool(&mut pool).count();
         assert_eq!(count, 1000);
@@ -5915,7 +6161,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_product() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data = vec![2u64, 3, 5, 7];
         let product = (&data[..]).into_par_iter().with_pool(&mut pool).reduce(
             || 1u64,
@@ -5928,7 +6175,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_empty() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
         assert_eq!(
             (&data[..])
@@ -5942,7 +6190,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn reduce_range() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let total: usize = (0..10_000).into_par_iter().with_pool(&mut pool).sum();
         assert_eq!(total, (0..10_000).sum());
     }
@@ -5952,7 +6201,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn try_for_each_success() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let result = (&data[..])
             .into_par_iter()
@@ -5964,7 +6214,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn try_for_each_early_exit() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let result = (&data[..])
             .into_par_iter()
@@ -5978,7 +6229,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn try_for_each_empty() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
         let result = (&data[..])
             .into_par_iter()
@@ -5990,7 +6242,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn try_fold_with_scratch_success() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let mut scratch: Vec<CacheAligned<u64>> =
             (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
@@ -6011,7 +6264,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn try_fold_with_scratch_early_exit() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let mut scratch: Vec<CacheAligned<u64>> =
             (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
@@ -6036,7 +6290,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_first_deterministic() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         // Find first even number >= 100
         let found = (&data[..])
@@ -6052,7 +6307,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_first_not_found() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..100).collect();
         let found = (&data[..])
             .into_par_iter()
@@ -6064,7 +6320,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_first_last_deterministic_under_contention() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..10_000).collect();
         for _ in 0..64 {
             let first = (&data[..])
@@ -6093,7 +6350,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_last_accepts_index_zero() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1_000).collect();
         let last = (&data[..])
             .into_par_iter()
@@ -6105,7 +6363,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_last_deterministic() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         // Find last even number < 900
         let found = (&data[..])
@@ -6118,7 +6377,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_last_not_found() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..100).collect();
         let found = (&data[..])
             .into_par_iter()
@@ -6130,7 +6390,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_any_found() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let found = (&data[..])
             .into_par_iter()
@@ -6142,7 +6403,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_any_not_found() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let found = (&data[..])
             .into_par_iter()
@@ -6154,7 +6416,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_any_empty() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
         let found = (&data[..])
             .into_par_iter()
@@ -6166,7 +6429,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn any_true() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let result = (&data[..])
             .into_par_iter()
@@ -6178,7 +6442,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn any_false() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let result = (&data[..])
             .into_par_iter()
@@ -6190,7 +6455,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn any_empty() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
         let result = (&data[..])
             .into_par_iter()
@@ -6202,7 +6468,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn all_true() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let result = (&data[..])
             .into_par_iter()
@@ -6214,7 +6481,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn all_false() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
         let result = (&data[..])
             .into_par_iter()
@@ -6226,7 +6494,8 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn all_empty() {
-        let mut pool = spawn(hw_threads());
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
         let result = (&data[..])
             .into_par_iter()
@@ -6238,15 +6507,22 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn generation_multi_pool_polling() {
+        let topology = Topology::new().unwrap();
         // Polling before join is the caller-exclusive pattern: on inclusive pools the
         // caller owes a slice that only runs inside `join`, so `is_complete` stays false.
         let count_threads = hw_threads();
-        let mut pool_a =
-            ThreadPool::try_spawn_with_exclusivity(count_threads, CallerExclusivity::Exclusive)
-                .expect("Failed to create pool_a");
-        let mut pool_b =
-            ThreadPool::try_spawn_with_exclusivity(count_threads, CallerExclusivity::Exclusive)
-                .expect("Failed to create pool_b");
+        let mut pool_a = ThreadPool::try_spawn_with_exclusivity(
+            &topology,
+            count_threads,
+            CallerExclusivity::Exclusive,
+        )
+        .expect("Failed to create pool_a");
+        let mut pool_b = ThreadPool::try_spawn_with_exclusivity(
+            &topology,
+            count_threads,
+            CallerExclusivity::Exclusive,
+        )
+        .expect("Failed to create pool_b");
 
         let visited_a: Vec<AtomicBool> =
             (0..count_threads).map(|_| AtomicBool::new(false)).collect();
@@ -6294,12 +6570,16 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[test]
     fn generation_raw_unsafe_api() {
+        let topology = Topology::new().unwrap();
         // The raw C-ABI mirror: an `unsafe_for_threads` dispatch returning an odd token,
         // polled with the safe `is_complete`, and joined with `unsafe_join`.
         let count_threads = hw_threads();
-        let pool =
-            ThreadPool::try_spawn_with_exclusivity(count_threads, CallerExclusivity::Exclusive)
-                .expect("Failed to create exclusive thread pool");
+        let pool = ThreadPool::try_spawn_with_exclusivity(
+            &topology,
+            count_threads,
+            CallerExclusivity::Exclusive,
+        )
+        .expect("Failed to create exclusive thread pool");
 
         let counter = AtomicUsize::new(0);
 
