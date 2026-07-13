@@ -49,9 +49,12 @@
 #endif
 
 /*  Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to derive
- *  the capabilities below. Nothing else in the library may ask `__linux__` again.  */
-/*  Android is Linux, but Bionic has neither `libnuma` nor GLibC; it must not take the Linux path. */
-#if defined(__linux__) && !defined(__ANDROID__)
+ *  the capabilities below. Nothing else in the library may ask `__linux__` again. Identity is the kernel
+ *  ABI - pthreads, `sched_setaffinity`, `gettid`, `/proc`, `/sys` - which Android shares in full; what
+ *  Bionic lacks is GLibC and `libnuma`, and that is the separate `FU_DETECT_LIBNUMA_` axis below, which
+ *  keys on `__GLIBC__` and stays 0 on Bionic - so threads and affinity stay on there while topology and
+ *  NUMA memory stay off.  */
+#if defined(__linux__)
 #define FU_ON_LINUX 1
 #else
 #define FU_ON_LINUX 0
@@ -169,7 +172,9 @@
  */
 #define FU_WITH_COLOCATE_POOLS_ON_DOMAIN (FU_WITH_OS_THREADS && FU_WITH_TOPOLOGY)
 
-/*  A bad override should fail at the `#include`, not at link time.  */
+/*  A bad override should fail at the `#include`, not at link time - whether it is a contradiction the
+ *  caller wrote by hand, or a retired spelling that would otherwise be silently ignored, handing a
+ *  build system or a downstream a default build unlike the one it asked for.  */
 #if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_APPLE
 #error \
     "FU_WITH_PLACE_THREADS_BY_AFFINITY: Apple answers KERN_NOT_SUPPORTED to thread_policy_set; pinning cannot be forced on"
@@ -182,6 +187,11 @@
 #endif
 #if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && !FU_WITH_PLACE_MEMORY_ON_DOMAIN
 #error "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN places huge pages on a domain; it needs FU_WITH_PLACE_MEMORY_ON_DOMAIN"
+#endif
+#if defined(FU_ENABLE_NUMA) || defined(FU_WITH_NUMA_MEMORY) || defined(FU_WITH_HUGE_PAGES) || \
+    defined(FU_WITH_THREAD_PINNING) || defined(FU_WITH_TOPOLOGY_METRICS)
+#error \
+    "Retired capability macro. Use FU_WITH_PLACE_MEMORY_ON_DOMAIN, FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN, or FU_WITH_PLACE_THREADS_BY_AFFINITY"
 #endif
 
 #if FU_ALLOW_UNSAFE

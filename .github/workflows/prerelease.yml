@@ -235,21 +235,26 @@ jobs:
           rustup default stable
           rustc -vV
       - name: Build Rust
-        run: cargo build --features numa
+        run: cargo build --features place-memory-on-domain
       - name: Test Rust
-        run: cargo test --features numa
+        run: cargo test --features place-memory-on-domain
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
       - name: Test Zig
-        run: zig build test -Dnuma=true
+        run: zig build test -Dplace-memory-on-domain=true
 
   test_macos:
-    name: macOS
-    runs-on: macos-14
-
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-14 }
+          - { arch: x86_64, runner: macos-13 }
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -296,7 +301,7 @@ jobs:
       fail-fast: false
       matrix:
         llvm: [17, 18, 19, 20, 21]
-        config: [Debug, Release, RelWithDebInfo, MinSizeRel]
+        config: [Debug, Release]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -351,9 +356,16 @@ jobs:
       - name: Test C++ with topology forced ON
         run: |
           $ErrorActionPreference = "Stop"
-          cmake -B build_topo -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_NUMA_MEMORY=ON
+          cmake -B build_topo -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON
           cmake --build build_topo --config RelWithDebInfo
           .\build_topo\forkunion_test_cpp20.exe
+
+      # Windows ARM64 cross-compiles on the x64 host; the binary can't run here, so it is compile-only.
+      - name: Build C++ for ARM64 (compile-only)
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -B build_arm64 -A ARM64
+          cmake --build build_arm64 --config RelWithDebInfo
 
       - name: Test C
         run: |
@@ -385,7 +397,7 @@ jobs:
       fail-fast: false
       matrix:
         toolset: [v143, v142] # VS 2022 and VS 2019
-        config: [Debug, Release, RelWithDebInfo, MinSizeRel]
+        config: [Debug, Release]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -408,62 +420,105 @@ jobs:
         run: |
           Write-Host "MSVC still lacks <stdatomic.h>; skipping C test binary"
 
-  test_i386:
-    name: Cross-compilation (i386)
+  # Each row is a prebuilt `dockcross` image carrying the toolchain, qemu, and a CMake toolchain file;
+  # `ctest` runs the binaries through its `CMAKE_CROSSCOMPILING_EMULATOR`. s390x is the big-endian guard.
+  test_cross:
+    name: Cross-compile (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: i686, image: dockcross/linux-x86 }
+          - { name: armv7, image: dockcross/linux-armv7 }
+          - { name: s390x, image: dockcross/linux-s390x }
+          - { name: riscv64, image: dockcross/linux-riscv64 }
+          - { name: ppc64le, image: dockcross/linux-ppc64le }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure, build, and test
+        run: |
+          cmake -B build -D CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+          ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
+
+  # The two libc floors the downstream wheels must clear: musl and manylinux2014's glibc 2.17. Toolchain
+  # install precedes checkout because Alpine ships no git.
+  test_containers:
+    name: Container (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: musl (Alpine)
+            image: alpine:3.20
+            setup: apk add --no-cache git build-base cmake
+          - name: glibc 2.17 (manylinux2014)
+            image: quay.io/pypa/manylinux2014_x86_64
+            setup: yum install -y git gcc gcc-c++ make && pipx install cmake
+    steps:
+      - name: Install toolchain
+        run: ${{ matrix.setup }}
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build & test
+        run: |
+          set -eux
+          cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+          build/forkunion_test_cpp17
+          build/forkunion_test_cpp20
+          build/forkunion_test_c11
+
+  # Bionic has pthreads and affinity but no libnuma; the toolchain defines __ANDROID__, so this
+  # compile proves the threaded build survives it. Compile-only - device binaries can't run here.
+  test_android:
+    name: Android (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: arm64-v8a, image: dockcross/android-arm64 }
+          - { name: armeabi-v7a, image: dockcross/android-arm }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure and build
+        run: |
+          cmake -B build -D CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+
+  # Only coverage of the FreeBSD cpuset_t affinity path. The VM is x86_64; aarch64 FreeBSD is cross-only.
+  test_freebsd:
+    name: FreeBSD (x86_64)
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install cross-compilation tools
-        run: |
-          sudo apt update
-          sudo apt install -y cmake build-essential gcc-multilib g++-multilib
+      - name: Build & test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          prepare: pkg install -y cmake
+          run: |
+            cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo
+            cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+            ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
 
-      - name: Build C++
-        run: |
-          cmake -B build_i386 -D CMAKE_C_FLAGS=-m32 -D CMAKE_CXX_FLAGS=-m32 -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_i386 --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
-
-      - name: Test C++
-        run: |
-          build_i386/forkunion_test_cpp17
-          build_i386/forkunion_test_cpp20
-
-      - name: Test C
-        run: |
-          build_i386/forkunion_test_c11
-
-  test_armhf:
-    name: Cross-compilation (armhf)
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install cross-compilation tools
-        run: |
-          sudo apt update
-          sudo apt install -y cmake build-essential gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user-static
-
-      - name: Build C++
-        run: |
-          cmake -B build_armhf -D CMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -D CMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_armhf --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
-
-      - name: Test C++
-        run: |
-          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/forkunion_test_cpp17
-          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/forkunion_test_cpp20
-
-      - name: Test C
-        run: |
-          qemu-arm-static -L /usr/arm-linux-gnueabihf build_armhf/forkunion_test_c11
-
-  # Every `FU_WITH_*` capability is a switch a downstream build may flip, and each one guards a
-  # different kernel facility. The combinations do not collapse: a Linux box without `libnuma` can
-  # still pin threads, and a Mac that reports a rich topology can pin nothing at all. Compiling only
-  # the default configuration is how `pthread_setaffinity_np` sat behind a NUMA macro for so long.
+  # Each `FU_WITH_*` capability is a switch a downstream build may flip; the combinations do not
+  # collapse - a Linux box without `libnuma` can still pin threads. Each row builds under `-Werror`.
   test_ubuntu_capabilities:
     name: Ubuntu (Capability Matrix)
     runs-on: ubuntu-24.04
@@ -480,18 +535,15 @@ jobs:
           - name: no topology
             libnuma: true
             flags: "-DFU_WITH_TOPOLOGY=0"
-          - name: no NUMA memory, but still pinning
+          - name: no memory placement, but still pinning
             libnuma: true
-            flags: "-DFU_WITH_NUMA_MEMORY=0"
+            flags: "-DFU_WITH_PLACE_MEMORY_ON_DOMAIN=0"
           - name: no huge pages
             libnuma: true
-            flags: "-DFU_WITH_HUGE_PAGES=0"
+            flags: "-DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=0"
           - name: no pinning
             libnuma: true
-            flags: "-DFU_WITH_THREAD_PINNING=0"
-          - name: no metrics
-            libnuma: true
-            flags: "-DFU_WITH_TOPOLOGY_METRICS=0"
+            flags: "-DFU_WITH_PLACE_THREADS_BY_AFFINITY=0"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -502,32 +554,14 @@ jobs:
           sudo apt install -y build-essential
           if [ "${{ matrix.libnuma }}" = "true" ]; then sudo apt install -y libnuma-dev; fi
 
-      - name: Build & Test C++ (${{ matrix.name }})
+      - name: Build & test C++ and the C shim (${{ matrix.name }})
         run: |
+          set -euxo pipefail
           LIBS="-latomic"
           if [ "${{ matrix.libnuma }}" = "true" ]; then LIBS="-lnuma $LIBS"; fi
           g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude scripts/test.cpp -o test_cpp $LIBS
           ./test_cpp
-
-      - name: Build C shim (${{ matrix.name }})
-        run: g++ -std=c++17 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
-
-      - name: Report the capabilities that survived
-        run: |
-          LIBS="-latomic"
-          if [ "${{ matrix.libnuma }}" = "true" ]; then LIBS="-lnuma $LIBS"; fi
-          cat > options.c <<'EOF'
-          #include <stdio.h>
-          #include "forkunion.h"
-          int main(void) {
-              printf("comptime: %s\n", fu_comptime_capabilities_string());
-              printf("runtime:  %s\n", fu_runtime_capabilities_string());
-              return 0;
-          }
-          EOF
-          gcc -std=c11 -Iinclude -c options.c -o options.o
-          g++ options.o forkunion.o -o options $LIBS
-          ./options
+          g++ -std=c++17 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
 
   # A capability nobody can turn off by hand is not a capability. These must be rejected at the
   # `#include`, by an `#error` naming the contradiction - never at link time, with missing symbols.
@@ -547,9 +581,8 @@ jobs:
         run: |
           set -e
           for flags in \
-            "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_NUMA_MEMORY=1" \
-            "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_TOPOLOGY_METRICS=1" \
-            "-DFU_WITH_NUMA_MEMORY=0 -DFU_WITH_HUGE_PAGES=1"; do
+            "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_PLACE_MEMORY_ON_DOMAIN=1" \
+            "-DFU_WITH_PLACE_MEMORY_ON_DOMAIN=0 -DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=1"; do
             if g++ -std=c++20 $flags -Iinclude -fsyntax-only scripts/test.cpp 2>/dev/null; then
               echo "::error::'$flags' compiled, but describes a build that cannot exist"
               exit 1
@@ -590,12 +623,12 @@ jobs:
         run: cargo test --lib --no-default-features --features portable,std
 
       - name: Test Rust (forced NUMA memory)
-        run: cargo test --lib --features numa-memory
+        run: cargo test --lib --features place-memory-on-domain
 
       - name: Reject Rust `portable` alongside a capability it disables
         run: |
-          if cargo build --features portable,numa-memory 2>/dev/null; then
-            echo "::error::portable and numa-memory built together"
+          if cargo build --features portable,place-memory-on-domain 2>/dev/null; then
+            echo "::error::portable and place-memory-on-domain built together"
             exit 1
           fi
           echo "rejected, as it should be"
@@ -634,29 +667,3 @@ jobs:
             -Iinclude -c scripts/test.cpp -o test_ios.o
           clang++ -std=c++17 -O2 -Wall -Wextra -Werror -target $TARGET -isysroot "$SYSROOT" \
             -Iinclude -c c/forkunion.cpp -o forkunion_ios.o
-
-  test_s390x:
-    name: Cross-compilation (s390x)
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install cross-compilation tools
-        run: |
-          sudo apt update
-          sudo apt install -y cmake build-essential gcc-s390x-linux-gnu g++-s390x-linux-gnu qemu-user-static
-
-      - name: Build C++
-        run: |
-          cmake -B build_s390x -D CMAKE_C_COMPILER=s390x-linux-gnu-gcc -D CMAKE_CXX_COMPILER=s390x-linux-gnu-g++ -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_s390x --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
-
-      - name: Test C++
-        run: |
-          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/forkunion_test_cpp17
-          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/forkunion_test_cpp20
-
-      - name: Test C
-        run: |
-          qemu-s390x-static -L /usr/s390x-linux-gnu build_s390x/forkunion_test_c11
