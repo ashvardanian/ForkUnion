@@ -530,9 +530,7 @@ mod tests {
             "Generation tokens are always odd"
         );
 
-        // Exclusive pools complete without the caller contributing a slice, so `join`
-        // blocks purely on the workers; afterwards the completion query must observe them
-        // done - a deterministic check with no busy-wait and no timing assumptions.
+        // Join blocks on the workers; the completion query is only meaningful after it.
         operation.join();
         assert!(
             operation.is_complete(),

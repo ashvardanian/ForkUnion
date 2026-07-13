@@ -1369,8 +1369,7 @@ mod tests {
     #[test]
     fn generation_multi_pool_completion() {
         let topology = Topology::new().unwrap();
-        // Two independent exclusive pools each dispatch at construction and complete on
-        // their own; joining both and querying each generation proves they run side by side.
+        // Two independent exclusive pools run side by side; join both, then query each.
         let count_threads = hw_threads();
         let mut pool_a = ThreadPool::try_spawn_with_exclusivity(
             &topology,
@@ -1397,12 +1396,9 @@ mod tests {
             visited_b[thread_index].store(true, Ordering::Relaxed);
         };
 
-        // Both guards dispatch at construction on exclusive pools - no explicit broadcast
         let mut operation_a = pool_a.for_threads(&work_a);
         let mut operation_b = pool_b.for_threads(&work_b);
 
-        // Join both - a blocking wait, never a busy-poll - then each independent
-        // generation's completion query must observe it done.
         operation_a.join();
         operation_b.join();
         assert!(
@@ -1456,8 +1452,7 @@ mod tests {
         };
         assert_eq!(generation & 1, 1, "Generation tokens are always odd");
 
-        // Joining blocks purely on the workers - exclusive pools owe the caller no slice -
-        // and afterwards the completion query must observe them done, with no busy-wait.
+        // Join blocks on the workers; query completion only after.
         unsafe { pool.unsafe_join(generation) };
         assert!(
             pool.is_complete(generation),

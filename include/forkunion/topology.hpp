@@ -5,6 +5,10 @@
  */
 #pragma once
 #include "capabilities.hpp"
+#if FU_ON_LINUX && FU_WITH_OS_THREADS
+#include <sys/syscall.h> // `SYS_gettid`
+#include <unistd.h>      // `syscall`
+#endif
 
 namespace ashvardanian {
 namespace forkunion {
@@ -19,7 +23,8 @@ namespace forkunion {
  */
 FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
 #if FU_ON_LINUX && FU_WITH_OS_THREADS
-    return static_cast<std::uint64_t>(::gettid());
+    // The `gettid()` wrapper only appeared in glibc 2.30; the syscall reaches every libc.
+    return static_cast<std::uint64_t>(::syscall(SYS_gettid));
 #elif FU_ON_APPLE
     std::uint64_t thread_id = 0;
     ::pthread_threadid_np(nullptr, &thread_id);

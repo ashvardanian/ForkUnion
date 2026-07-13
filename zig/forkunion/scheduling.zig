@@ -746,9 +746,7 @@ test "generation polling on exclusive pool" {
         }
     }.worker, &context);
 
-    // Exclusive pools complete without the caller contributing a slice, so `unsafeJoin`
-    // blocks purely on the workers; afterwards the completion query must observe them done -
-    // a deterministic check with no busy-wait and no timing assumptions.
+    // Join blocks on the workers; the completion query is only meaningful after it.
     try std.testing.expect(generation & 1 == 1);
     pool.unsafeJoin(generation);
     try std.testing.expect(pool.isComplete(generation));

@@ -414,8 +414,10 @@ struct colocated_pool {
                     ::WaitForSingleObject(started, INFINITE);
                     ::CloseHandle(started);
 #else
-                    FU_MAYBE_UNUSED_ int cancel_result = ::pthread_cancel(started);
-                    assert(cancel_result == 0 && "Failed to cancel a thread");
+                    // Spin-loop workers see `die_k` and exit; join reaps each, mirroring the
+                    // Windows path. Cancellation is inert without a cancel point, and unwanted.
+                    FU_MAYBE_UNUSED_ int join_result = ::pthread_join(started, nullptr);
+                    assert(join_result == 0 && "Failed to join a thread");
 #endif
                 }
                 reset_on_failure();
