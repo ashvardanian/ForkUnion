@@ -302,6 +302,14 @@ FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ nati
     if (!cores.valid()) return false;
     return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpuset_t const *>(cores.data())) == 0;
 
+#elif FU_ON_ANDROID
+    // Bionic gained `pthread_setaffinity_np` only at NDK API 36, so pin through `sched_setaffinity` on
+    // the thread's tid instead - it works at every level, with `pthread_gettid_np` from API 21 mapping
+    // the handle to that tid.
+    if (!cores.valid()) return false;
+    return ::sched_setaffinity(::pthread_gettid_np(thread), cores.bytes(),
+                               static_cast<cpu_set_t const *>(cores.data())) == 0;
+
 #elif FU_WITH_PLACE_THREADS_BY_AFFINITY
     if (!cores.valid()) return false;
     return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpu_set_t const *>(cores.data())) == 0;

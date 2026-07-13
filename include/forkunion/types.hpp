@@ -60,6 +60,15 @@
 #define FU_ON_LINUX 0
 #endif
 
+/*  A Bionic sub-identity of Linux: Android shares the kernel ABI but not every GLibC extension, so the
+ *  handful of capabilities that differ - affinity, whose `pthread_setaffinity_np` Bionic lacks before
+ *  NDK 36 - key on this rather than re-asking `__ANDROID__` at the use site.  */
+#if defined(__ANDROID__)
+#define FU_ON_ANDROID 1
+#else
+#define FU_ON_ANDROID 0
+#endif
+
 #if defined(__APPLE__)
 #define FU_ON_APPLE 1
 #else
@@ -146,9 +155,11 @@
 #define FU_WITH_PLACE_THREADS_BY_CORE_CLASS FU_ON_APPLE
 #endif
 
-/** @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply? */
+/** @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply?
+ *  @note Keyed on `SCHED_IDLE`, which FreeBSD does not provide - its idle priority is `idprio`, a
+ *        different call this path does not make. */
 #if !defined(FU_WITH_RESCHEDULE_THREADS_BY_CLASS)
-#define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
+#define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX)
 #endif
 
 /** @brief Can we place pages on a chosen memory domain? */
