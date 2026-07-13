@@ -287,20 +287,15 @@ pub const Topology = struct {
 };
 
 test "version info" {
-    std.debug.print("Running test: version info\n", .{});
     const v = version();
     try std.testing.expect(v.major >= 0);
     try std.testing.expect(v.minor >= 0);
 }
 
 test "system capabilities" {
-    std.debug.print("Running test: system capabilities\n", .{});
     const comptime_caps = comptimeCapabilities();
     const runtime_caps = runtimeCapabilities();
-    var comptime_buf: [256]u8 = undefined;
     var runtime_buf: [256]u8 = undefined;
-    std.debug.print("  comptime: {s}\n", .{comptimeCapabilitiesString(&comptime_buf)});
-    std.debug.print("  runtime:  {s}\n", .{runtimeCapabilitiesString(&runtime_buf)});
     try std.testing.expect(runtimeCapabilitiesString(&runtime_buf).len > 0);
 
     const topo = try Topology.init();
@@ -327,7 +322,6 @@ test "system capabilities" {
 }
 
 test "system metadata" {
-    std.debug.print("Running test: system metadata\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
 

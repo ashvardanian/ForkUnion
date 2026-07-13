@@ -1367,10 +1367,10 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn generation_multi_pool_polling() {
+    fn generation_multi_pool_completion() {
         let topology = Topology::new().unwrap();
-        // Polling before join is the caller-exclusive pattern: on inclusive pools the
-        // caller owes a slice that only runs inside `join`, so `is_complete` stays false.
+        // Two independent exclusive pools each dispatch at construction and complete on
+        // their own; joining both and querying each generation proves they run side by side.
         let count_threads = hw_threads();
         let mut pool_a = ThreadPool::try_spawn_with_exclusivity(
             &topology,
@@ -1398,23 +1398,21 @@ mod tests {
         };
 
         // Both guards dispatch at construction on exclusive pools - no explicit broadcast
-        let operation_a = pool_a.for_threads(&work_a);
-        let operation_b = pool_b.for_threads(&work_b);
+        let mut operation_a = pool_a.for_threads(&work_a);
+        let mut operation_b = pool_b.for_threads(&work_b);
 
-        // Poll both pools until complete
-        let mut a_done = false;
-        let mut b_done = false;
-        while !a_done || !b_done {
-            if !a_done {
-                a_done = operation_a.is_complete();
-            }
-            if !b_done {
-                b_done = operation_b.is_complete();
-            }
-        }
-
-        drop(operation_a); // Drop joins
-        drop(operation_b);
+        // Join both - a blocking wait, never a busy-poll - then each independent
+        // generation's completion query must observe it done.
+        operation_a.join();
+        operation_b.join();
+        assert!(
+            operation_a.is_complete(),
+            "pool_a generation must be complete after join"
+        );
+        assert!(
+            operation_b.is_complete(),
+            "pool_b generation must be complete after join"
+        );
 
         for i in 0..count_threads {
             assert!(
@@ -1458,10 +1456,13 @@ mod tests {
         };
         assert_eq!(generation & 1, 1, "Generation tokens are always odd");
 
-        while !pool.is_complete(generation) {
-            core::hint::spin_loop();
-        }
+        // Joining blocks purely on the workers - exclusive pools owe the caller no slice -
+        // and afterwards the completion query must observe them done, with no busy-wait.
         unsafe { pool.unsafe_join(generation) };
+        assert!(
+            pool.is_complete(generation),
+            "join must leave the generation complete"
+        );
         assert_eq!(counter.load(Ordering::Relaxed), count_threads);
     }
 }

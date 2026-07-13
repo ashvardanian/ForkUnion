@@ -530,11 +530,14 @@ mod tests {
             "Generation tokens are always odd"
         );
 
-        // Poll until the workers are done, then join
-        while !operation.is_complete() {
-            core::hint::spin_loop();
-        }
+        // Exclusive pools complete without the caller contributing a slice, so `join`
+        // blocks purely on the workers; afterwards the completion query must observe them
+        // done - a deterministic check with no busy-wait and no timing assumptions.
         operation.join();
+        assert!(
+            operation.is_complete(),
+            "join must leave the operation complete"
+        );
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 

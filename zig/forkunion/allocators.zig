@@ -416,7 +416,6 @@ pub fn ShardedArray(comptime T: type) type {
 }
 
 test "NUMA allocation" {
-    std.debug.print("Running test: NUMA allocation\n", .{});
     if (!@import("topology.zig").comptimeCapabilities().place_memory_on_domain) return error.SkipZigTest;
 
     const topo = try Topology.init();
@@ -435,7 +434,6 @@ test "NUMA allocation" {
 }
 
 test "NUMA allocator integrates with std collections" {
-    std.debug.print("Running test: NUMA allocator integrates with std collections\n", .{});
     if (!@import("topology.zig").comptimeCapabilities().place_memory_on_domain) return error.SkipZigTest;
 
     const topo = try Topology.init();

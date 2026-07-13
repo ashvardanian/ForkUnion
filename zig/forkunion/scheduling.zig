@@ -487,7 +487,6 @@ pub const Pool = struct {
 };
 
 test "pool creation and destruction" {
-    std.debug.print("Running test: pool creation and destruction\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 2, .inclusive);
@@ -497,7 +496,6 @@ test "pool creation and destruction" {
 }
 
 test "caller exclusivity query" {
-    std.debug.print("Running test: caller exclusivity query\n", .{});
     // The pool is the single source of truth, queried live (not cached).
     const topo = try Topology.init();
     defer topo.deinit();
@@ -511,7 +509,6 @@ test "caller exclusivity query" {
 }
 
 test "pool capabilities reflect the build" {
-    std.debug.print("Running test: pool capabilities reflect the build\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     // A pool reports the effective capabilities it spawned with; the allow-mask is a hard ceiling.
@@ -533,7 +530,6 @@ test "pool capabilities reflect the build" {
 }
 
 test "per-compute_domain pool" {
-    std.debug.print("Running test: per-compute_domain pool\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     const compute_domains = topo.countComputeDomains();
@@ -558,7 +554,6 @@ test "per-compute_domain pool" {
 }
 
 test "named pool creation" {
-    std.debug.print("Running test: named pool creation\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.initNamed(topo, null, 2, .inclusive);
@@ -568,7 +563,6 @@ test "named pool creation" {
 }
 
 test "for_threads execution" {
-    std.debug.print("Running test: for_threads execution\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 4, .inclusive);
@@ -596,7 +590,6 @@ test "for_threads execution" {
 }
 
 test "for_n static scheduling" {
-    std.debug.print("Running test: for_n static scheduling\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 4, .inclusive);
@@ -621,7 +614,6 @@ test "for_n static scheduling" {
 }
 
 test "for_n_dynamic work stealing" {
-    std.debug.print("Running test: for_n_dynamic work stealing\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 4, .inclusive);
@@ -644,7 +636,6 @@ test "for_n_dynamic work stealing" {
 }
 
 test "for_slices execution" {
-    std.debug.print("Running test: for_slices execution\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 4, .inclusive);
@@ -678,7 +669,6 @@ test "for_slices execution" {
 }
 
 test "for_n void context" {
-    std.debug.print("Running test: for_n void context\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 4, .inclusive);
@@ -702,7 +692,6 @@ test "for_n void context" {
 }
 
 test "unsafe_for_threads and join" {
-    std.debug.print("Running test: unsafe_for_threads and join\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 4, .inclusive);
@@ -737,7 +726,6 @@ test "unsafe_for_threads and join" {
 }
 
 test "generation polling on exclusive pool" {
-    std.debug.print("Running test: generation polling on exclusive pool\n", .{});
     const topo = try Topology.init();
     defer topo.deinit();
     var pool = try Pool.init(topo, 4, .exclusive);
@@ -758,12 +746,12 @@ test "generation polling on exclusive pool" {
         }
     }.worker, &context);
 
-    // On exclusive pools the caller owes no slice, so polling alone reaches completion
+    // Exclusive pools complete without the caller contributing a slice, so `unsafeJoin`
+    // blocks purely on the workers; afterwards the completion query must observe them done -
+    // a deterministic check with no busy-wait and no timing assumptions.
     try std.testing.expect(generation & 1 == 1);
-    while (!pool.isComplete(generation)) {
-        std.atomic.spinLoopHint();
-    }
     pool.unsafeJoin(generation);
+    try std.testing.expect(pool.isComplete(generation));
 
     // All 4 worker threads should have executed
     try std.testing.expectEqual(4, counter.load(.acquire));
