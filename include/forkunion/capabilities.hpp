@@ -21,13 +21,12 @@
 /*  Runtime `Zawrs` detection on Linux RISC-V goes through the `riscv_hwprobe` syscall, but only when
  *  this kernel's headers actually define it. Without them we fall back to the compile-time
  *  `__riscv_zawrs` macro, and claim nothing if neither is available. */
-#if FU_DETECT_ARCH_RISC5_ && FU_ON_LINUX && defined(__has_include)
-#if __has_include(<asm/hwprobe.h>) && __has_include(<sys/syscall.h>) && __has_include(<unistd.h>)
+#if FU_DETECT_ARCH_RISC5_ && FU_ON_LINUX && __has_include(<asm/hwprobe.h>) && \
+    __has_include(<sys/syscall.h>) && __has_include(<unistd.h>)
 #include <asm/hwprobe.h> // `riscv_hwprobe`, `RISCV_HWPROBE_KEY_IMA_EXT_0`, `RISCV_HWPROBE_EXT_ZAWRS`
 #include <sys/syscall.h> // `SYS_riscv_hwprobe`
 #include <unistd.h>      // `syscall`
 #define FU_DETECT_RISCV_HWPROBE_ 1
-#endif
 #endif
 
 namespace ashvardanian {

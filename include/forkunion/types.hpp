@@ -87,15 +87,20 @@
  *  separate package on every distribution, and a build that assumed it from the GLibC version alone
  *  would enable `FU_WITH_TOPOLOGY` and then fail at `#include <numa.h>`.
  *  @see https://man7.org/linux/man-pages/man2/gettid.2.html  */
-#if FU_ON_LINUX
-#if __has_include(<features.h>)
+#if FU_ON_LINUX && __has_include(<features.h>)
 #include <features.h> // `__GLIBC__`, `__GLIBC_PREREQ`
 #endif
-#if defined(__GLIBC__) && defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 30) && __has_include(<numa.h>)
-#define FU_DETECT_LIBNUMA_ 1
+
+/*  A shim so `__GLIBC_PREREQ` can be used in a flat `#if`: musl and Bionic leave it undefined, yet the
+ *  preprocessor still tokenizes `__GLIBC_PREREQ(2, 30)` on a live `&&` line. Here it yields 0 instead.  */
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#define FU_GLIBC_PREREQ_(major, minor) __GLIBC_PREREQ(major, minor)
 #else
-#define FU_DETECT_LIBNUMA_ 0
+#define FU_GLIBC_PREREQ_(major, minor) 0
 #endif
+
+#if FU_ON_LINUX && FU_GLIBC_PREREQ_(2, 30) && __has_include(<numa.h>)
+#define FU_DETECT_LIBNUMA_ 1
 #else
 #define FU_DETECT_LIBNUMA_ 0
 #endif
