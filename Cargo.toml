@@ -55,8 +55,8 @@ test = false
 bench = false
 
 [[example]]
-name = "search"
-path = "scripts/search.rs"
+name = "triangles"
+path = "scripts/triangles.rs"
 test = false
 bench = false
 
@@ -64,4 +64,3 @@ bench = false
 rayon = "1.11"
 rand = "0.9"
 tokio = { version = "1.46.1", features = ["rt-multi-thread", "sync"] }
-simsimd = "6.5.3"

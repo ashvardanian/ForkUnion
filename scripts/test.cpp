@@ -719,6 +719,57 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
     return true;
 }
 
+/** @brief `replicated_array` is one uninitialized per-domain buffer; the caller fills and reads its slices. */
+static bool test_replicated_array() noexcept {
+    fu::machine_topology_t topology;
+    if (!topology.try_harvest()) return true; // ? No topology here; nothing to check
+
+    std::size_t const n = 4096;
+    fu::replicated_array<std::uint32_t> replicas;
+    if (!replicas.try_resize_uninitialized(topology, n)) return false;
+    if (replicas.size() != n || replicas.memory_domains_count() != topology.memory_domains_count()) return false;
+
+    // Fill every replica with a domain-dependent pattern, so replicas that aliased would be caught.
+    for (std::size_t domain = 0; domain < replicas.memory_domains_count(); ++domain) {
+        fu::span<std::uint32_t> const replica =
+            replicas.on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
+        if (replica.size() != n) return false;
+        for (std::size_t i = 0; i < n; ++i) replica[i] = static_cast<std::uint32_t>(domain * n + i);
+    }
+    for (std::size_t domain = 0; domain < replicas.memory_domains_count(); ++domain)
+        for (std::size_t i = 0; i < n; ++i)
+            if (replicas.at(static_cast<fu::memory_domain_index_t>(domain), i) != domain * n + i) return false;
+    return true;
+}
+
+/** @brief `sharded_array` stores each element once; `location_of`/`logical_index_of` round-trip the segment map. */
+static bool test_sharded_array() noexcept {
+    fu::machine_topology_t topology;
+    if (!topology.try_harvest()) return true;
+
+    std::size_t const n = 4096;
+    fu::sharded_array<std::uint32_t> shards;
+    if (!shards.try_resize_uninitialized(topology, n)) return false;
+
+    // Each element lives exactly once: the shard lengths sum to the logical length.
+    std::size_t footprint = 0;
+    for (std::size_t domain = 0; domain < shards.memory_domains_count(); ++domain)
+        footprint += shards.length_on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
+    if (shards.size() != n || footprint != n) return false;
+
+    // Write each element to its own logical index, then read it back through `location_of`.
+    for (std::size_t domain = 0; domain < shards.memory_domains_count(); ++domain) {
+        auto const memory_domain = static_cast<fu::memory_domain_index_t>(domain);
+        for (std::size_t local = 0; local < shards.length_on_memory_domain(memory_domain); ++local)
+            shards.at(memory_domain, local) = static_cast<std::uint32_t>(shards.logical_index_of(memory_domain, local));
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        fu::sharded_array<std::uint32_t>::location_t const home = shards.location_of(i);
+        if (shards.at(home.memory_domain, home.local_index) != i) return false;
+    }
+    return true;
+}
+
 /**
  *  @brief Enhanced NUMA topology logging function using the logger class.
  */
@@ -802,6 +853,8 @@ int main(void) {
         {"`coprime_permutation` ranges", test_coprime_permutation}, //
         // Hardware topology, on every host that reports one
         {"`machine_topology` invariants", test_topology_invariants}, //
+        {"`replicated_array` per-domain buffer", test_replicated_array},
+        {"`sharded_array` segment round-trip", test_sharded_array},
         // Actual thread-pools
         {"`try_spawn` zero threads", test_try_spawn_zero},                       //
         {"`try_spawn` normal", test_try_spawn_success},                          //

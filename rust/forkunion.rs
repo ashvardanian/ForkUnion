@@ -413,14 +413,23 @@ extern "C" {
 
     // Allocation
     fn fu_memory_domain_id_at_index(topology: *mut c_void, memory_domain_index: usize) -> i32;
-    fn fu_allocate_at_least_in(
+    fn fu_allocate_at_least_on_domain_id(
         memory_domain_id: i32,
         minimum_bytes: usize,
         allocated_bytes: *mut usize,
         bytes_per_page: *mut usize,
     ) -> *mut c_void;
-    fn fu_allocate_in(memory_domain_id: i32, bytes: usize) -> *mut c_void;
-    fn fu_free_in(memory_domain_id: i32, pointer: *mut c_void, bytes: usize);
+    fn fu_allocate_on_domain_id(memory_domain_id: i32, bytes: usize) -> *mut c_void;
+    fn fu_free_on_domain_id(memory_domain_id: i32, pointer: *mut c_void, bytes: usize);
+    fn fu_allocate_symmetric(
+        topology: *mut c_void,
+        bytes_per_domain: usize,
+        stride_bytes: *mut usize,
+        memory_domains_count: *mut usize,
+        total_bytes: *mut usize,
+        bytes_per_page: *mut usize,
+    ) -> *mut c_void;
+    fn fu_free_symmetric(base: *mut c_void, total_bytes: usize);
 
     // Pool lifecycle & introspection
     fn fu_pool_new(name: *const c_char, allowed: u32) -> *mut c_void;
@@ -500,7 +509,7 @@ extern "C" {
 /// ```
 /// use forkunion::{comptime_capabilities, Capabilities};
 /// if comptime_capabilities().contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN) {
-///     // `spawn_in`, `PinnedAllocator`, and friends are real here.
+///     // `spawn_in`, `DomainAllocator`, and friends are real here.
 /// }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -624,10 +633,11 @@ pub fn runtime_capabilities_string() -> Option<std::string::String> {
 /// indexed independently: an Apple M5 Pro reports three compute domains over a single memory domain,
 /// so a compute index of `2` names no memory domain at all.
 ///
-/// This is not hypothetical. `RoundRobinVec` handed a compute-domain index to `PinnedAllocator::new`,
-/// which expects a memory-domain index. It compiled, and it worked on every machine where the two
-/// counts happened to match. Unlike a C++ `enum`, a newtype also refuses `slice[compute_domain]`,
-/// because `Index<usize>` will not accept it - which is the other half of the same bug.
+/// This is not hypothetical. Handing a compute-domain index to `DomainAllocator::new`, which expects a
+/// memory-domain index, compiles and works on every machine where the two counts happen to match, then
+/// misplaces memory where they diverge. Unlike a C++ `enum`, a newtype also refuses
+/// `slice[compute_domain]`, because `Index<usize>` will not accept it - which is the other half of the
+/// same bug.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComputeDomain(pub usize);
 
@@ -640,7 +650,7 @@ pub struct MemoryDomain(pub usize);
 /// [`Topology::memory_domain_id_at_index`]; `-1` when there is none.
 ///
 /// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS id the
-/// kernel labels a node with. A [`PinnedAllocator`] holds only this id, so it - and every
+/// kernel labels a node with. A [`DomainAllocator`] holds only this id, so it - and every
 /// [`AllocationResult`] it hands out - is free of the topology handle and can outlive it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomainId(pub i32);
@@ -713,6 +723,11 @@ impl Topology {
         Ok(Self { inner })
     }
 
+    /// Raw C handle, for FFI that takes the topology pointer directly - the symmetric allocator.
+    pub(crate) fn raw(&self) -> *mut c_void {
+        self.inner
+    }
+
     /// Returns the number of logical cores backing a given compute domain.
     ///
     /// Zero if `compute_domain` is out of range. Use it to size a per-compute-domain pool
@@ -774,12 +789,12 @@ impl Topology {
         unsafe { fu_compute_cache_bytes_in(self.inner, compute_domain.get()) }
     }
 
-    /// Returns the number of NUMA nodes available on the system.
+    /// Returns the number of memory domains available.
     pub fn memory_domains_count(&self) -> usize {
         unsafe { fu_memory_domains_count(self.inner) }
     }
 
-    /// Resolves a memory domain's dense index to the OS id a [`PinnedAllocator`] takes.
+    /// Resolves a memory domain's dense index to the OS id a [`DomainAllocator`] takes.
     ///
     /// Returns [`MemoryDomainId(-1)`](MemoryDomainId) if the index is out of range. The id is the one
     /// place the topology is consulted for allocation; once resolved, the allocator needs it alone.
@@ -1830,13 +1845,13 @@ where
     }
 }
 
-/// Result of a NUMA allocation containing both the allocated pointer and metadata.
+/// Result of a memory-domain allocation; carries only the OS id, so it can outlive the topology.
 #[derive(Debug)]
 pub struct AllocationResult {
     ptr: NonNull<u8>,
     allocated_bytes: usize,
     bytes_per_page: usize,
-    // The OS memory-domain id is all `fu_free_in` needs, so the allocation carries no topology handle
+    // The OS memory-domain id is all `fu_free_on_domain_id` needs, so the allocation carries no topology handle
     // and can outlive the `Topology` it came from.
     memory_domain_id: MemoryDomainId,
 }
@@ -1903,7 +1918,7 @@ impl AllocationResult {
 impl Drop for AllocationResult {
     fn drop(&mut self) {
         unsafe {
-            fu_free_in(
+            fu_free_on_domain_id(
                 self.memory_domain_id.get(),
                 self.ptr.as_ptr() as *mut c_void,
                 self.allocated_bytes,
@@ -1917,11 +1932,10 @@ unsafe impl Send for AllocationResult {}
 // Safety: AllocationResult can be shared between threads with proper synchronization
 unsafe impl Sync for AllocationResult {}
 
-/// NUMA-aware memory allocator pinned to a specific NUMA node.
+/// An allocator bound to a single memory domain, so every block it hands out is domain-local.
 ///
-/// This allocator provides efficient memory allocation on a specific NUMA node,
-/// which is beneficial for performance in multi-socket systems where memory access
-/// latency varies based on the physical location of memory relative to the CPU.
+/// On a machine whose memory access latency varies with the domain a block lives on, keeping an
+/// allocation on the domain of the cores that read it avoids the cross-domain penalty.
 ///
 /// # Examples
 ///
@@ -1929,22 +1943,22 @@ unsafe impl Sync for AllocationResult {}
 /// use forkunion::*;
 /// let topology = Topology::new().unwrap();
 /// let id = topology.memory_domain_id_at_index(MemoryDomain(0));
-/// let allocator = PinnedAllocator::new(id).expect("Failed to create alloc for NUMA node 0");
-/// let allocation = allocator.allocate(1024).expect("Failed to allocate 1024 bytes");
+/// let allocator = DomainAllocator::new(id).expect("failed to bind allocator to memory domain 0");
+/// let allocation = allocator.allocate(1024).expect("failed to allocate 1024 bytes");
 ///
 /// // Access the allocated memory
 /// let memory_slice = allocation.as_slice();
 /// assert_eq!(memory_slice.len(), 1024);
-/// println!("Allocated {} bytes on NUMA node {}",
+/// println!("Allocated {} bytes on memory domain {}",
 ///          allocation.allocated_bytes(), allocation.memory_domain_id().get());
 /// ```
 #[derive(Debug, Clone, Copy)]
-pub struct PinnedAllocator {
+pub struct DomainAllocator {
     memory_domain_id: MemoryDomainId,
 }
 
-impl PinnedAllocator {
-    /// Creates a new allocator pinned to the memory domain named by @p memory_domain_id.
+impl DomainAllocator {
+    /// Creates an allocator bound to the memory domain named by `memory_domain_id`.
     ///
     /// # Arguments
     ///
@@ -1960,16 +1974,16 @@ impl PinnedAllocator {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// // Create allocator for the first NUMA node
+    /// // Bind an allocator to the first memory domain
     /// let id = topology.memory_domain_id_at_index(MemoryDomain(0));
-    /// let allocator = PinnedAllocator::new(id).expect("NUMA node 0 should be available");
+    /// let allocator = DomainAllocator::new(id).expect("memory domain 0 should be available");
     ///
-    /// // Check if a specific NUMA node exists
-    /// let numa_count = topology.memory_domains_count();
-    /// if numa_count > 1 {
+    /// // Bind another to a second memory domain when the machine has one
+    /// let memory_domains = topology.memory_domains_count();
+    /// if memory_domains > 1 {
     ///     let id2 = topology.memory_domain_id_at_index(MemoryDomain(1));
-    ///     let allocator2 = PinnedAllocator::new(id2).expect("NUMA node 1 should be available");
-    ///     println!("Created allocator for NUMA node: {}", allocator2.memory_domain_id().get());
+    ///     let allocator2 = DomainAllocator::new(id2).expect("memory domain 1 should be available");
+    ///     println!("Bound allocator to memory domain: {}", allocator2.memory_domain_id().get());
     /// }
     /// ```
     pub fn new(memory_domain_id: MemoryDomainId) -> Option<Self> {
@@ -1980,12 +1994,12 @@ impl PinnedAllocator {
         Some(Self { memory_domain_id })
     }
 
-    /// Returns the OS id of the memory domain this allocator is pinned to.
+    /// Returns the OS id of the memory domain this allocator is bound to.
     pub fn memory_domain_id(&self) -> MemoryDomainId {
         self.memory_domain_id
     }
 
-    /// Allocates memory with at least the requested size on this allocator's NUMA node.
+    /// Allocates memory with at least the requested size on this allocator's memory domain.
     ///
     /// Returns both the actual allocated size and page size information, which can be
     /// useful for optimizing memory access patterns.
@@ -2004,7 +2018,7 @@ impl PinnedAllocator {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
     /// let allocation = allocator.allocate_at_least(1024).expect("Failed to allocate memory");
     ///
     /// println!("Requested 1024 bytes, got {} bytes on {} byte pages",
@@ -2026,7 +2040,7 @@ impl PinnedAllocator {
         let mut bytes_per_page = 0usize;
 
         unsafe {
-            let ptr = fu_allocate_at_least_in(
+            let ptr = fu_allocate_at_least_on_domain_id(
                 self.memory_domain_id.get(),
                 minimum_bytes,
                 &mut allocated_bytes as *mut usize,
@@ -2046,7 +2060,7 @@ impl PinnedAllocator {
         }
     }
 
-    /// Allocates exactly the requested number of bytes on this allocator's NUMA node.
+    /// Allocates exactly the requested number of bytes on this allocator's memory domain.
     ///
     /// # Arguments
     ///
@@ -2063,7 +2077,7 @@ impl PinnedAllocator {
     ///
     /// let topology = Topology::new().unwrap();
     /// let id = topology.memory_domain_id_at_index(MemoryDomain(0));
-    /// let allocator = PinnedAllocator::new(id).unwrap();
+    /// let allocator = DomainAllocator::new(id).unwrap();
     /// let allocation = allocator.allocate(1024).expect("Failed to allocate memory");
     /// assert_eq!(allocation.allocated_bytes(), 1024);
     ///
@@ -2083,7 +2097,7 @@ impl PinnedAllocator {
         }
 
         unsafe {
-            let ptr = fu_allocate_in(self.memory_domain_id.get(), bytes);
+            let ptr = fu_allocate_on_domain_id(self.memory_domain_id.get(), bytes);
 
             if ptr.is_null() {
                 return None;
@@ -2110,7 +2124,7 @@ impl PinnedAllocator {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
     /// let mut allocation = allocator.allocate_for::<u64>(100).expect("Failed to allocate");
     ///
     /// // Verify the allocation size first
@@ -2149,7 +2163,7 @@ impl PinnedAllocator {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).unwrap();
     /// let mut allocation = allocator.allocate_for_at_least::<u32>(1000).expect("Failed to allocate");
     /// let actual_count = allocation.allocated_bytes() / std::mem::size_of::<u32>();
     /// println!("Requested {} u32s, got space for {} u32s", 1000, actual_count);
@@ -2192,19 +2206,19 @@ impl PinnedAllocator {
 /// println!("System has {} memory domains available", domains);
 ///
 /// if domains > 1 {
-///     let allocator_domain1 = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(1))).expect("domain 1 available");
+///     let allocator_domain1 = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(1))).expect("domain 1 available");
 ///     let allocation2 = allocator_domain1.allocate(2048).expect("Failed to allocate on domain 1");
 ///     assert_eq!(allocation2.memory_domain_id(), topology.memory_domain_id_at_index(MemoryDomain(1)));
 /// }
 /// ```
-pub fn default_pinned_allocator(topology: &Topology) -> Option<PinnedAllocator> {
-    PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+pub fn default_pinned_allocator(topology: &Topology) -> Option<DomainAllocator> {
+    DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
 }
 
 /// A Vec-like container that uses NUMA-aware pinned memory allocation.
 ///
 /// `PinnedVec<T>` provides a dynamic array that allocates memory on a specific
-/// NUMA node, which should correspond to a `compute_domain_index` for optimal
+/// memory domain, which should correspond to a `compute_domain_index` for optimal
 /// performance with `ThreadPool`. It automatically manages growth and shrinkage.
 ///
 /// # Examples
@@ -2212,9 +2226,9 @@ pub fn default_pinned_allocator(topology: &Topology) -> Option<PinnedAllocator> 
 /// ```rust
 /// use forkunion::*;
 ///
-/// // Create a vector on NUMA node 0
+/// // Create a vector on memory domain 0
 /// let topology = Topology::new().unwrap();
-/// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+/// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
 /// let mut vec = PinnedVec::<u64>::new_in(allocator);
 ///
 /// // Add elements
@@ -2233,7 +2247,7 @@ pub fn default_pinned_allocator(topology: &Topology) -> Option<PinnedAllocator> 
 /// ```
 #[derive(Debug)]
 pub struct PinnedVec<T> {
-    allocator: PinnedAllocator,
+    allocator: DomainAllocator,
     allocation: Option<AllocationResult>,
     len: usize,
     capacity: usize,
@@ -2245,7 +2259,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `allocator` - The `PinnedAllocator` to use for memory allocation
+    /// * `allocator` - The `DomainAllocator` to use for memory allocation
     ///
     /// # Examples
     ///
@@ -2253,12 +2267,12 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::new_in(allocator);
     /// assert_eq!(vec.len(), 0);
     /// assert_eq!(vec.capacity(), 0);
     /// ```
-    pub fn new_in(allocator: PinnedAllocator) -> Self {
+    pub fn new_in(allocator: DomainAllocator) -> Self {
         Self {
             allocator,
             allocation: None,
@@ -2272,7 +2286,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `allocator` - The `PinnedAllocator` to use for memory allocation
+    /// * `allocator` - The `DomainAllocator` to use for memory allocation
     /// * `capacity` - The initial capacity to allocate
     ///
     /// # Errors
@@ -2285,12 +2299,12 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let vec = PinnedVec::<i32>::with_capacity_in(allocator, 100).expect("Failed to create vec");
     /// assert_eq!(vec.len(), 0);
     /// assert_eq!(vec.capacity(), 100);
     /// ```
-    pub fn with_capacity_in(allocator: PinnedAllocator, capacity: usize) -> Option<Self> {
+    pub fn with_capacity_in(allocator: DomainAllocator, capacity: usize) -> Option<Self> {
         let mut vec = Self {
             allocator,
             allocation: None,
@@ -2342,7 +2356,7 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.reserve(10).expect("Failed to reserve");
     /// assert!(vec.capacity() >= 10);
@@ -2401,7 +2415,7 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// assert_eq!(vec.len(), 1);
@@ -2432,7 +2446,7 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// assert_eq!(vec.pop(), Some(42));
@@ -2458,7 +2472,7 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::new_in(allocator);
     /// vec.push(42).expect("Failed to push");
     /// vec.clear();
@@ -2731,7 +2745,7 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
     /// vec.resize(5, 0).expect("Failed to resize");
     /// vec.fill(42);
@@ -2756,7 +2770,7 @@ impl<T> PinnedVec<T> {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
+    /// let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))).expect("Failed to create alloc");
     /// let mut vec = PinnedVec::<i32>::with_capacity_in(allocator, 5).expect("Failed to create vec");
     /// vec.resize(5, 0).expect("Failed to resize");
     /// vec.fill_with(|| 42);
@@ -2793,743 +2807,291 @@ impl<T> Drop for PinnedVec<T> {
 unsafe impl<T: Send> Send for PinnedVec<T> {}
 unsafe impl<T: Sync> Sync for PinnedVec<T> {}
 
-/// A NUMA-aware distributed vector that manages an array of `PinnedVec`s,
-/// each pinned to a specific NUMA node. This structure enables data locality
-/// for parallel operations by distributing elements in a round-robin fashion
-/// across NUMA nodes, minimizing cross-node memory access penalties.
+/// One symmetric mapping the C allocator stripes across every memory domain and frees as a whole.
 ///
-/// # Examples
-///
-/// ```rust
-/// use forkunion::*;
-///
-/// let topology = Topology::new().unwrap();
-/// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
-/// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
-///
-/// // Fill all vectors across all NUMA nodes with the same value
-/// rr_vec.fill(&mut pool, 42);
-/// ```
-pub struct RoundRobinVec<T> {
-    compute_domains: PinnedVec<PinnedVec<T>>,
-    total_length: usize,
-    total_capacity: usize,
+/// Slice `d` starts at `base + d * stride_bytes` and is bound to its own memory domain. The mapping owns
+/// its storage and unmaps it on drop; like [`AllocationResult`] it carries no topology handle.
+struct SymmetricAllocation {
+    base: NonNull<u8>,
+    stride_bytes: usize,
+    domains: usize,
+    total_bytes: usize,
 }
 
-impl<T> RoundRobinVec<T> {
-    /// Creates a new `RoundRobinVec` with one `PinnedVec` per NUMA node.
-    ///
-    /// # Errors
-    ///
-    /// Returns `None` if any of the NUMA node allocators fail to create.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
-    /// assert_eq!(rr_vec.compute_domains_count(), topology.compute_domains_count());
-    /// ```
-    pub fn new(topology: &Topology) -> Option<Self> {
-        let compute_domains_count = topology.compute_domains_count();
-        if compute_domains_count == 0 {
-            return None;
-        }
-
-        // Use the first NUMA node to allocate the container
-        let container_allocator =
-            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))?;
-        let mut compute_domains =
-            PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
-
-        // Create a PinnedVec for each NUMA node
-        for compute_domain_index in 0..compute_domains_count {
-            // A compute-domain index is not a memory-domain index. They coincide only when the
-            // machine has one memory domain per compute domain; an Apple M5 Pro has three compute
-            // domains over one memory domain, so its id at index 1 comes back as -1 and the allocator fails.
-            let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(
-                topology.local_memory_of(ComputeDomain(compute_domain_index)),
-            ))?;
-            let vec = PinnedVec::new_in(allocator);
-            compute_domains.push(vec).ok()?;
-        }
-
-        let mut total_capacity = 0;
-        for i in 0..compute_domains.len() {
-            total_capacity += compute_domains[i].capacity();
-        }
-
-        Some(Self {
-            compute_domains,
-            total_length: 0,
-            total_capacity,
-        })
-    }
-
-    /// Creates a new `RoundRobinVec` with pre-allocated capacity on each NUMA node.
-    ///
-    /// # Arguments
-    ///
-    /// * `capacity_per_node` - The capacity to allocate on each NUMA node
-    ///
-    /// # Errors
-    ///
-    /// Returns `None` if any of the NUMA node allocators fail to create or allocate.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(&topology, 1000)
-    ///     .expect("Failed to create RoundRobinVec");
-    ///
-    /// for i in 0..rr_vec.compute_domains_count() {
-    ///     assert_eq!(rr_vec.capacity_at(i), 1000);
-    /// }
-    /// ```
-    pub fn with_capacity_per_compute_domain(
-        topology: &Topology,
-        capacity_per_compute_domain: usize,
-    ) -> Option<Self> {
-        let compute_domains_count = topology.compute_domains_count();
-        if compute_domains_count == 0 {
-            return None;
-        }
-
-        // Use the first NUMA node to allocate the container
-        let container_allocator =
-            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))?;
-        let mut compute_domains =
-            PinnedVec::with_capacity_in(container_allocator, compute_domains_count)?;
-
-        // Create a PinnedVec with capacity for each NUMA node
-        for compute_domain_index in 0..compute_domains_count {
-            // A compute-domain index is not a memory-domain index. They coincide only when the
-            // machine has one memory domain per compute domain; an Apple M5 Pro has three compute
-            // domains over one memory domain, so its id at index 1 comes back as -1 and the allocator fails.
-            let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(
-                topology.local_memory_of(ComputeDomain(compute_domain_index)),
-            ))?;
-            let vec = PinnedVec::with_capacity_in(allocator, capacity_per_compute_domain)?;
-            compute_domains.push(vec).ok()?;
-        }
-
-        let mut total_capacity = 0;
-        for i in 0..compute_domains.len() {
-            total_capacity += compute_domains[i].capacity();
-        }
-
-        Some(Self {
-            compute_domains,
-            total_length: 0,
-            total_capacity,
-        })
-    }
-
-    /// Returns the number of compute_domains (and thus the number of `PinnedVec`s).
-    pub fn compute_domains_count(&self) -> usize {
-        self.compute_domains.len()
-    }
-
-    /// Returns the length of the vector at the specified compute_domain.
-    ///
-    /// # Arguments
-    ///
-    /// * `compute_domain_index` - The compute_domain index
-    ///
-    /// # Returns
-    ///
-    /// The length of the vector at the specified compute_domain, or 0 if the node doesn't exist.
-    pub fn len_at(&self, compute_domain_index: usize) -> usize {
-        self.compute_domains[compute_domain_index].len()
-    }
-
-    /// Returns the capacity of the vector at the specified compute_domain.
-    ///
-    /// # Arguments
-    ///
-    /// * `compute_domain_index` - The compute_domain index
-    ///
-    /// # Returns
-    ///
-    /// The capacity of the vector at the specified compute_domain, or 0 if the node doesn't exist.
-    pub fn capacity_at(&self, compute_domain_index: usize) -> usize {
-        self.compute_domains[compute_domain_index].capacity()
-    }
-
-    /// Returns the total length across all NUMA nodes.
-    pub fn len(&self) -> usize {
-        self.total_length
-    }
-
-    /// Returns the total capacity across all NUMA nodes.
-    pub fn capacity(&self) -> usize {
-        self.total_capacity
-    }
-
-    /// Returns `true` if the distributed vector contains no elements.
-    pub fn is_empty(&self) -> bool {
-        self.total_length == 0
-    }
-
-    /// Gets a reference to the `PinnedVec` at the specified compute_domain.
-    ///
-    /// # Arguments
-    ///
-    /// * `compute_domain_index` - The compute_domain index
-    ///
-    /// # Returns
-    ///
-    /// A reference to the `PinnedVec` at the specified compute_domain, or `None` if the node doesn't exist.
-    pub fn get_compute_domain(&self, compute_domain_index: usize) -> Option<&PinnedVec<T>> {
-        self.compute_domains.get(compute_domain_index)
-    }
-
-    /// Gets a mutable reference to the `PinnedVec` at the specified compute_domain.
-    ///
-    /// # Arguments
-    ///
-    /// * `compute_domain_index` - The compute_domain index
-    ///
-    /// # Returns
-    ///
-    /// A mutable reference to the `PinnedVec` at the specified compute_domain, or `None` if the node doesn't exist.
-    pub fn get_compute_domain_mut(
-        &mut self,
-        compute_domain_index: usize,
-    ) -> Option<&mut PinnedVec<T>> {
-        self.compute_domains.get_mut(compute_domain_index)
-    }
-
-    /// Accesses an element at a global `index` using round-robin distribution.
-    /// The element at global `index` is located at `local_index = index / N`
-    /// in the `PinnedVec` on `memory_domain = index % N`, where `N` is the number of NUMA nodes.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The global round-robin index of the element.
-    ///
-    /// # Returns
-    ///
-    /// A reference to the element, or `None` if the index is out of bounds.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
-    /// // Add some elements...
-    /// if let Some(element) = rr_vec.get(5) {
-    ///     println!("Element at index 5: {}", element);
-    /// }
-    /// ```
-    pub fn get(&self, index: usize) -> Option<&T> {
-        if self.compute_domains.is_empty() {
-            return None;
-        }
-
-        let compute_domains_count = self.compute_domains.len();
-        let compute_domain_index = index % compute_domains_count;
-        let local_index = index / compute_domains_count;
-
-        self.compute_domains
-            .get(compute_domain_index)?
-            .get(local_index)
-    }
-
-    /// Mutably accesses an element at a global `index` using round-robin distribution.
-    /// The element at global `index` is located at `local_index = index / N`
-    /// in the `PinnedVec` on `memory_domain = index % N`, where `N` is the number of NUMA nodes.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The global round-robin index of the element.
-    ///
-    /// # Returns
-    ///
-    /// A mutable reference to the element, or `None` if the index is out of bounds.
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        if self.compute_domains.is_empty() {
-            return None;
-        }
-
-        let compute_domains_count = self.compute_domains.len();
-        let compute_domain_index = index % compute_domains_count;
-        let local_index = index / compute_domains_count;
-
-        self.compute_domains
-            .get_mut(compute_domain_index)?
-            .get_mut(local_index)
-    }
-
-    /// Appends an element to the distributed vector, using round-robin distribution
-    /// to select the target NUMA node based on the current total length.
-    ///
-    /// # Arguments
-    ///
-    /// * `value` - The element to add.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if allocation fails on the target NUMA node.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
-    /// rr_vec.push(42).expect("Failed to push");
-    /// assert_eq!(rr_vec.len(), 1);
-    /// ```
-    pub fn push(&mut self, value: T) -> Result<(), &'static str> {
-        if self.compute_domains.is_empty() {
-            return Err("No NUMA nodes available");
-        }
-
-        // Use round-robin distribution based on current total length
-        let target_compute_domain = self.total_length % self.compute_domains.len();
-        let result = self.compute_domains[target_compute_domain].push(value);
-
-        if result.is_ok() {
-            self.total_length += 1;
-        }
-
-        result
-    }
-
-    /// Creates a parallel read-only iterator over all elements in round-robin order.
-    pub fn par_iter(&self) -> ParallelRoundRobin<'_, T>
-    where
-        T: Sync,
-    {
-        ParallelRoundRobin::new(self)
-    }
-
-    /// Creates a parallel mutable iterator over all elements in round-robin order.
-    pub fn par_iter_mut(&mut self) -> ParallelRoundRobinMut<'_, T>
-    where
-        T: Send,
-    {
-        ParallelRoundRobinMut::new(self)
-    }
-
-    /// Executes a closure in parallel on each element, preserving round-robin distribution.
-    pub fn par_for_each<S, F>(&self, pool: &mut ThreadPool, schedule: S, function: F)
-    where
-        T: Sync,
-        S: ParallelSchedule,
-        F: Fn(&T, Prong) + Sync,
-    {
-        self.par_iter().drive(pool, schedule, &function);
-    }
-
-    /// Executes a mutable closure in parallel on each element.
-    pub fn par_for_each_mut<S, F>(&mut self, pool: &mut ThreadPool, schedule: S, function: F)
-    where
-        T: Send,
-        S: ParallelSchedule,
-        F: Fn(&mut T, Prong) + Sync,
-    {
-        self.par_iter_mut().drive(pool, schedule, &function);
-    }
-
-    /// Removes and returns the last element from the distributed vector.
-    /// The element is popped from the NUMA node it was last pushed to, maintaining
-    /// round-robin balance.
-    ///
-    /// # Returns
-    ///
-    /// The last element, or `None` if the vector is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let mut rr_vec = RoundRobinVec::<i32>::new(&topology).expect("Failed to create RoundRobinVec");
-    /// rr_vec.push(42).expect("Failed to push");
-    /// assert_eq!(rr_vec.pop(), Some(42));
-    /// assert_eq!(rr_vec.pop(), None);
-    /// ```
-    pub fn pop(&mut self) -> Option<T> {
-        if self.total_length == 0 {
-            return None;
-        }
-
-        // Pop from the last inserted position (reverse round-robin)
-        let target_compute_domain = (self.total_length - 1) % self.compute_domains.len();
-        let result = self.compute_domains[target_compute_domain].pop();
-
-        if result.is_some() {
-            self.total_length -= 1;
-        }
-
-        result
-    }
-
-    /// Converts a local index within a specific NUMA node to the global round-robin index.
-    ///
-    /// This is useful when you have a reference to an element within a specific `PinnedVec`
-    /// and need to determine its global index in the round-robin distribution.
-    ///
-    /// # Arguments
-    ///
-    /// * `memory_domain` - The memory domain index (0 to memory_domains_count()-1)
-    /// * `local_index` - The local index within that NUMA node's `PinnedVec`
-    ///
-    /// # Returns
-    ///
-    /// The global index where this element would be accessed via `get(global_index)`.
-    pub fn local_to_global_index(&self, compute_domain_index: usize, local_index: usize) -> usize {
-        local_index * self.compute_domains_count() + compute_domain_index
-    }
-
-    /// Converts a global round-robin index to the NUMA node and local index.
-    ///
-    /// This is the inverse of `local_to_global_index`.
-    ///
-    /// # Arguments
-    ///
-    /// * `global_index` - The global index in the round-robin distribution
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (compute_domain_index, local_index) where the element is stored.
-    pub fn global_to_local_index(&self, global_index: usize) -> (usize, usize) {
-        let compute_domains_count = self.compute_domains_count();
-        let compute_domain_index = global_index % compute_domains_count;
-        let local_index = global_index / compute_domains_count;
-        (compute_domain_index, local_index)
-    }
-
-    /// Splits each compute domain's slots across that domain's own threads and runs `function`
-    /// on every thread, so each page is written by a core that is local to it.
-    ///
-    /// `split_len(domain)` says how many slots to divide among the threads of `domain`, and
-    /// `function(domain, base, range)` receives that domain's base pointer plus this thread's
-    /// range within it. The ranges of a domain partition `split_len(domain)` and never overlap,
-    /// so the slots handed to different threads cannot alias.
-    ///
-    /// The closures are shared by reference, never by `&mut`, which is what keeps a stateful
-    /// closure from racing itself across threads.
-    fn for_each_domain_chunk<L, F>(&mut self, pool: &mut ThreadPool, split_len: L, function: F)
-    where
-        L: Fn(usize, usize) -> usize + Sync,
-        F: Fn(usize, usize, &SyncMutPtr<T>, core::ops::Range<usize>) + Sync,
-    {
-        let compute_domains_count = self.compute_domains_count();
-        if compute_domains_count == 0 {
-            return;
-        }
-
-        let domains = SyncConstPtr::new(self.compute_domains.as_slice().as_ptr());
-        let split_len = &split_len;
-        let function = &function;
-
-        pool.scope(|scope| {
-            scope.broadcast(|thread_index, compute_domain_index| {
-                if compute_domain_index >= compute_domains_count {
-                    return;
-                }
-                // SAFETY: `compute_domains` outlives the join and is never resized here; this
-                // reads only the domain's length and base pointer.
-                let domain_vec = unsafe { &*domains.as_ptr().add(compute_domain_index) };
-                let current_len = domain_vec.len();
-                let base = domain_vec.sync_ptr();
-
-                let threads_here = scope.threads_count_in(compute_domain_index);
-                let local_thread = scope.locate_thread_in(thread_index, compute_domain_index);
-                let split =
-                    IndexedSplit::new(split_len(compute_domain_index, current_len), threads_here);
-                let range = split.get(local_thread);
-                if range.is_empty() {
-                    return;
-                }
-                function(compute_domain_index, current_len, &base, range);
-            });
-        });
-
-        // A pool need not reach every compute domain - it may hold fewer threads than there are
-        // domains, or be pinned to a subset. Those domains still belong to us, and skipping them
-        // would leave slots unconstructed while `len` claims otherwise, so the caller sweeps them.
-        // Domains past the pool's own count have no threads by definition, and asking the pool
-        // about them would read past its thread map.
-        let pool_domains_count = pool.compute_domains_count();
-        for compute_domain_index in 0..compute_domains_count {
-            let covered = compute_domain_index < pool_domains_count
-                && pool.threads_count_in(compute_domain_index) != 0;
-            if covered {
-                continue;
-            }
-            // SAFETY: the broadcast has joined, so this thread is the only one touching `domains`.
-            let domain_vec = unsafe { &*domains.as_ptr().add(compute_domain_index) };
-            let current_len = domain_vec.len();
-            let base = domain_vec.sync_ptr();
-            let range = 0..split_len(compute_domain_index, current_len);
-            if range.is_empty() {
-                continue;
-            }
-            function(compute_domain_index, current_len, &base, range);
-        }
-    }
-
-    /// Fills all vectors across all NUMA nodes with copies of the given value,
-    /// using the thread pool for parallel execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `pool` - The thread pool to use for parallel execution
-    /// * `value` - The value to fill all vectors with
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(&topology, 1000)
-    ///     .expect("Failed to create RoundRobinVec");
-    ///
-    /// // Resize all vectors to have some elements
-    /// for i in 0..rr_vec.compute_domains_count() {
-    ///     rr_vec.get_compute_domain_mut(i).unwrap().resize(100, 0).expect("Failed to resize");
-    /// }
-    ///
-    /// // Fill all vectors with the value 42
-    /// rr_vec.fill(&mut pool, 42);
-    /// ```
-    pub fn fill(&mut self, pool: &mut ThreadPool, value: T)
-    where
-        T: Clone + Send + Sync,
-    {
-        let value = &value;
-        self.for_each_domain_chunk(
-            pool,
-            |_domain, current_len| current_len,
-            |_domain, _current_len, base, range| {
-                // SAFETY: the ranges of a domain partition its initialized slots, so the writes
-                // are disjoint and every slot already holds a value to drop.
-                for local_index in range {
-                    unsafe { *base.get(local_index) = value.clone() };
-                }
-            },
-        );
-    }
-
-    /// Fills all vectors across all NUMA nodes with values generated by calling
-    /// a closure once per slot, using the thread pool for parallel execution.
-    ///
-    /// The closure is `Fn`, not `FnMut`: every thread calls it concurrently, so it cannot own
-    /// mutable state. Reach for [`RoundRobinVec::fill_with_index`] when each slot needs a
-    /// distinct, reproducible value.
-    ///
-    /// # Arguments
-    ///
-    /// * `pool` - The thread pool to use for parallel execution
-    /// * `f` - A closure that generates values to fill the vectors with
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<i32>::with_capacity_per_compute_domain(&topology, 1000)
-    ///     .expect("Failed to create RoundRobinVec");
-    ///
-    /// // Resize all vectors to have some elements
-    /// for i in 0..rr_vec.compute_domains_count() {
-    ///     rr_vec.get_compute_domain_mut(i).unwrap().resize(100, 0).expect("Failed to resize");
-    /// }
-    ///
-    /// // Fill all vectors with random values
-    /// rr_vec.fill_with(&mut pool, || rand::random::<i32>());
-    /// ```
-    pub fn fill_with<F>(&mut self, pool: &mut ThreadPool, f: F)
-    where
-        F: Fn() -> T + Sync,
-        T: Send + Sync,
-    {
-        let f = &f;
-        self.for_each_domain_chunk(
-            pool,
-            |_domain, current_len| current_len,
-            |_domain, _current_len, base, range| {
-                // SAFETY: disjoint, in-bounds, initialized slots - see `fill`.
-                for local_index in range {
-                    unsafe { *base.get(local_index) = f() };
-                }
-            },
-        );
-    }
-
-    /// Fills every slot with `f(global_index)`, where `global_index` is the same round-robin
-    /// index accepted by [`RoundRobinVec::get`].
-    ///
-    /// Because each slot is a pure function of its index, the contents are reproducible
-    /// regardless of the thread count or the domain layout - which is what makes a seeded
-    /// fill portable across machines.
-    ///
-    /// # Arguments
-    ///
-    /// * `pool` - The thread pool to use for parallel execution
-    /// * `f` - A closure mapping a global index to the value stored at that index
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use forkunion::*;
-    ///
-    /// let topology = Topology::new().unwrap();
-    /// let mut pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create pool");
-    /// let mut rr_vec = RoundRobinVec::<usize>::new(&topology).expect("Failed to create RoundRobinVec");
-    /// rr_vec.resize(&mut pool, 100, 0).expect("Failed to resize");
-    ///
-    /// rr_vec.fill_with_index(&mut pool, |index| index * 2);
-    /// assert_eq!(*rr_vec.get(7).unwrap(), 14);
-    /// ```
-    pub fn fill_with_index<F>(&mut self, pool: &mut ThreadPool, f: F)
-    where
-        F: Fn(usize) -> T + Sync,
-        T: Send + Sync,
-    {
-        let compute_domains_count = self.compute_domains_count();
-        let f = &f;
-        self.for_each_domain_chunk(
-            pool,
-            |_domain, current_len| current_len,
-            |domain, _current_len, base, range| {
-                // SAFETY: disjoint, in-bounds, initialized slots - see `fill`.
-                for local_index in range {
-                    let global_index = local_index * compute_domains_count + domain;
-                    unsafe { *base.get(local_index) = f(global_index) };
-                }
-            },
-        );
-    }
-
-    /// Clears all vectors across all NUMA nodes, using the thread pool for parallel execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `pool` - The thread pool to use for parallel execution
-    pub fn clear(&mut self, pool: &mut ThreadPool)
-    where
-        T: Send,
-    {
-        self.for_each_domain_chunk(
-            pool,
-            |_domain, current_len| current_len,
-            |_domain, _current_len, base, range| {
-                // SAFETY: the ranges of a domain partition its live elements, so each element is
-                // dropped exactly once, and no two threads touch the same slot.
-                for local_index in range {
-                    unsafe { core::ptr::drop_in_place(base.get(local_index)) };
-                }
-            },
-        );
-
-        // Reset lengths of individual vectors after parallel dropping
-        for i in 0..self.compute_domains.len() {
-            self.compute_domains[i].len = 0;
-        }
-        self.total_length = 0;
-    }
-
-    /// Resizes all vectors across all NUMA nodes to the specified length,
-    /// using the thread pool for parallel execution.
-    ///
-    /// # Arguments
-    ///
-    /// * `new_len` - The new length for all vectors
-    /// * `value` - The value to fill new elements with
-    /// * `pool` - The thread pool to use for parallel execution
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any vector fails to resize.
-    pub fn resize(
-        &mut self,
-        pool: &mut ThreadPool,
-        new_len: usize,
-        value: T,
-    ) -> Result<(), &'static str>
-    where
-        T: Clone + Send + Sync,
-    {
-        let compute_domains_count = self.compute_domains_count();
-        if compute_domains_count == 0 {
-            return Err("No NUMA nodes available");
-        }
-
-        // Calculate how many elements each NUMA node should have. Captures two integers by
-        // value, so it stays `Copy` - and therefore `Sync` - without borrowing `self`.
-        let elements_per_node = new_len / compute_domains_count;
-        let extra_elements = new_len % compute_domains_count;
-        let node_len = move |domain: usize| -> usize {
-            elements_per_node + usize::from(domain < extra_elements)
+impl SymmetricAllocation {
+    /// Allocates one mapping of `bytes_per_domain` per memory domain, or `None` on failure.
+    fn new(topology: &Topology, bytes_per_domain: usize) -> Option<Self> {
+        let mut stride_bytes = 0usize;
+        let mut domains = 0usize;
+        let mut total_bytes = 0usize;
+        let base = unsafe {
+            fu_allocate_symmetric(
+                topology.raw(),
+                bytes_per_domain,
+                &mut stride_bytes,
+                &mut domains,
+                &mut total_bytes,
+                core::ptr::null_mut(),
+            )
         };
+        let base = NonNull::new(base as *mut u8)?;
+        Some(Self {
+            base,
+            stride_bytes,
+            domains,
+            total_bytes,
+        })
+    }
 
-        // Step 1: Centrally handle reallocation for each NUMA node
-        for i in 0..compute_domains_count {
-            let target_len = node_len(i);
-            let current_len = self.compute_domains[i].len();
-            if target_len > current_len {
-                self.compute_domains[i].reserve(target_len - current_len)?;
-            }
-        }
-
-        // Step 2: Parallel construction/destruction of the elements that differ
-        let value = &value;
-        self.for_each_domain_chunk(
-            pool,
-            |domain, current_len| node_len(domain).abs_diff(current_len),
-            |domain, current_len, base, range| {
-                let target_len = node_len(domain);
-                if target_len > current_len {
-                    // Growing: construct new elements in parallel, into uninitialized slots
-                    for i in range {
-                        unsafe { core::ptr::write(base.get(current_len + i), value.clone()) };
-                    }
-                } else {
-                    // Shrinking: drop the surplus elements in parallel
-                    for i in range {
-                        unsafe { core::ptr::drop_in_place(base.get(target_len + i)) };
-                    }
-                }
-            },
-        );
-
-        // Step 3: Update lengths after parallel operations
-        for i in 0..compute_domains_count {
-            self.compute_domains[i].len = node_len(i);
-        }
-
-        self.total_length = new_len;
-        self.total_capacity = self.capacity();
-        Ok(())
+    /// Base of the slice on `memory_domain`, at `base + memory_domain * stride_bytes`.
+    fn slice_base(&self, memory_domain: usize) -> *mut u8 {
+        unsafe { self.base.as_ptr().add(memory_domain * self.stride_bytes) }
     }
 }
 
-unsafe impl<T: Send> Send for RoundRobinVec<T> {}
-unsafe impl<T: Sync> Sync for RoundRobinVec<T> {}
+impl Drop for SymmetricAllocation {
+    fn drop(&mut self) {
+        unsafe { fu_free_symmetric(self.base.as_ptr() as *mut c_void, self.total_bytes) };
+    }
+}
+
+unsafe impl Send for SymmetricAllocation {}
+unsafe impl Sync for SymmetricAllocation {}
+
+/// One full length-`n` copy of a sequence per memory domain, so every thread reads a node-local replica.
+///
+/// A thin owner of one symmetric mapping - replica `d` lives at `base + d * stride_bytes()` and holds `n`
+/// elements. Raw uninitialized storage: the caller fills every replica and keeps them coherent, mirroring
+/// the C++ `replicated_array`. `T` must be plain-old-data - any bit pattern is a valid value - since the
+/// container runs no constructors or destructors.
+pub struct ReplicatedArray<T> {
+    allocation: Option<SymmetricAllocation>,
+    len: usize,
+    _phantom: core::marker::PhantomData<T>,
+}
+
+impl<T: Copy> ReplicatedArray<T> {
+    /// An empty array holding no mapping.
+    pub const fn new() -> Self {
+        Self {
+            allocation: None,
+            len: 0,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+
+    /// Allocates one uninitialized length-`n` replica per memory domain; the caller first-touches them.
+    pub fn try_new(topology: &Topology, n: usize) -> Option<Self> {
+        if n == 0 {
+            return Some(Self::new());
+        }
+        let allocation = SymmetricAllocation::new(topology, n * core::mem::size_of::<T>())?;
+        Some(Self {
+            allocation: Some(allocation),
+            len: n,
+            _phantom: core::marker::PhantomData,
+        })
+    }
+
+    /// The logical length of each replica.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the array holds no elements.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The number of per-domain replicas.
+    pub fn memory_domains_count(&self) -> usize {
+        self.allocation
+            .as_ref()
+            .map_or(0, |allocation| allocation.domains)
+    }
+
+    /// The page-aligned byte distance between consecutive replicas.
+    pub fn stride_bytes(&self) -> usize {
+        self.allocation
+            .as_ref()
+            .map_or(0, |allocation| allocation.stride_bytes)
+    }
+
+    /// Raw start of the replica on `memory_domain`, for concurrent first-touch fills through a raw pointer.
+    pub fn replica_ptr(&self, memory_domain: MemoryDomain) -> *mut T {
+        let allocation = self.allocation.as_ref().expect("empty ReplicatedArray");
+        allocation.slice_base(memory_domain.get()) as *mut T
+    }
+
+    /// The whole replica living on `memory_domain`.
+    pub fn on_memory_domain(&self, memory_domain: MemoryDomain) -> &[T] {
+        unsafe { slice::from_raw_parts(self.replica_ptr(memory_domain), self.len) }
+    }
+
+    /// The whole replica living on `memory_domain`, mutably.
+    pub fn on_memory_domain_mut(&mut self, memory_domain: MemoryDomain) -> &mut [T] {
+        unsafe { slice::from_raw_parts_mut(self.replica_ptr(memory_domain), self.len) }
+    }
+
+    /// One element of the replica on `memory_domain`.
+    pub fn at(&self, memory_domain: MemoryDomain, local_index: usize) -> &T {
+        &self.on_memory_domain(memory_domain)[local_index]
+    }
+}
+
+impl<T: Copy> Default for ReplicatedArray<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+unsafe impl<T: Send> Send for ReplicatedArray<T> {}
+unsafe impl<T: Sync> Sync for ReplicatedArray<T> {}
+
+/// Where a logical element lives - which memory domain, and its index within that shard.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ShardLocation {
+    pub memory_domain: MemoryDomain,
+    pub local_index: usize,
+}
+
+/// A sequence partitioned across memory domains as contiguous segments, each element stored once.
+///
+/// Each domain owns a contiguous logical segment of `segment()` elements, so element `i` lives at
+/// `{i / segment(), i % segment()}` - see [`location_of`](Self::location_of) - and a scan of a domain's
+/// shard is sequential in memory. Backed by one symmetric mapping; the trailing shard may be short. `T`
+/// must be plain-old-data, mirroring [`ReplicatedArray`].
+pub struct ShardedArray<T> {
+    allocation: Option<SymmetricAllocation>,
+    len: usize,
+    segment: usize,
+    _phantom: core::marker::PhantomData<T>,
+}
+
+impl<T: Copy> ShardedArray<T> {
+    /// An empty array holding no mapping.
+    pub const fn new() -> Self {
+        Self {
+            allocation: None,
+            len: 0,
+            segment: 0,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+
+    /// Allocates uninitialized storage for `n` elements partitioned round-robin across the domains.
+    pub fn try_new(topology: &Topology, n: usize) -> Option<Self> {
+        if n == 0 {
+            return Some(Self::new());
+        }
+        let domains = topology.memory_domains_count();
+        if domains == 0 {
+            return None;
+        }
+        let segment = (n + domains - 1) / domains;
+        let allocation = SymmetricAllocation::new(topology, segment * core::mem::size_of::<T>())?;
+        Some(Self {
+            allocation: Some(allocation),
+            len: n,
+            segment,
+            _phantom: core::marker::PhantomData,
+        })
+    }
+
+    /// The logical length, summed across the shards.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the array holds no elements.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The number of shards, one per memory domain.
+    pub fn memory_domains_count(&self) -> usize {
+        self.allocation
+            .as_ref()
+            .map_or(0, |allocation| allocation.domains)
+    }
+
+    /// The page-aligned byte distance between consecutive shards.
+    pub fn stride_bytes(&self) -> usize {
+        self.allocation
+            .as_ref()
+            .map_or(0, |allocation| allocation.stride_bytes)
+    }
+
+    /// The contiguous logical segment size per domain - `ceil(n / memory_domains_count())`.
+    pub fn segment(&self) -> usize {
+        self.segment
+    }
+
+    /// How many elements the shard on `memory_domain` holds - a trailing shard may be shorter.
+    pub fn length_on_memory_domain(&self, memory_domain: MemoryDomain) -> usize {
+        let start = memory_domain.get() * self.segment;
+        if start >= self.len {
+            0
+        } else {
+            (self.len - start).min(self.segment)
+        }
+    }
+
+    /// The memory domain and local index that store logical element `logical_index`.
+    pub fn location_of(&self, logical_index: usize) -> ShardLocation {
+        ShardLocation {
+            memory_domain: MemoryDomain(logical_index / self.segment),
+            local_index: logical_index % self.segment,
+        }
+    }
+
+    /// The logical index of the element at `local_index` on `memory_domain` - inverse of `location_of`.
+    pub fn logical_index_of(&self, memory_domain: MemoryDomain, local_index: usize) -> usize {
+        memory_domain.get() * self.segment + local_index
+    }
+
+    /// Raw start of the shard on `memory_domain`, for concurrent fills through a raw pointer.
+    pub fn shard_ptr(&self, memory_domain: MemoryDomain) -> *mut T {
+        let allocation = self.allocation.as_ref().expect("empty ShardedArray");
+        allocation.slice_base(memory_domain.get()) as *mut T
+    }
+
+    /// The whole shard living on `memory_domain`.
+    pub fn on_memory_domain(&self, memory_domain: MemoryDomain) -> &[T] {
+        unsafe {
+            slice::from_raw_parts(
+                self.shard_ptr(memory_domain),
+                self.length_on_memory_domain(memory_domain),
+            )
+        }
+    }
+
+    /// The whole shard living on `memory_domain`, mutably.
+    pub fn on_memory_domain_mut(&mut self, memory_domain: MemoryDomain) -> &mut [T] {
+        let len = self.length_on_memory_domain(memory_domain);
+        unsafe { slice::from_raw_parts_mut(self.shard_ptr(memory_domain), len) }
+    }
+
+    /// The single home of a logical element.
+    pub fn at(&self, memory_domain: MemoryDomain, local_index: usize) -> &T {
+        &self.on_memory_domain(memory_domain)[local_index]
+    }
+}
+
+impl<T: Copy> Default for ShardedArray<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+unsafe impl<T: Send> Send for ShardedArray<T> {}
+unsafe impl<T: Sync> Sync for ShardedArray<T> {}
 
 /// A thread-safe wrapper for raw pointers used in parallel operations.
 ///
 /// # Safety
 /// This wrapper is only safe when used with NUMA-aware thread pools where
-/// each thread accesses different memory locations (different NUMA nodes).
+/// each thread accesses different memory locations - different memory domains.
 pub struct SafePtr<T>(*mut T);
 unsafe impl<T> Send for SafePtr<T> {}
 unsafe impl<T> Sync for SafePtr<T> {}
@@ -4217,7 +3779,7 @@ where
         let topology = Topology::new().expect("failed to probe topology");
         let mut scratch: PinnedVec<CacheAligned<Option<(usize, I::Item)>>> =
             PinnedVec::with_capacity_in(
-                PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+                DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
                     .expect("failed to get allocator"),
                 threads,
             )
@@ -4297,7 +3859,7 @@ where
         let topology = Topology::new().expect("failed to probe topology");
         let mut scratch: PinnedVec<CacheAligned<Option<(usize, I::Item)>>> =
             PinnedVec::with_capacity_in(
-                PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+                DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
                     .expect("failed to get allocator"),
                 threads,
             )
@@ -4453,13 +4015,10 @@ where
         !self.any(|x| !predicate(x))
     }
 
-    // Convenience methods using NUMA-aware RoundRobinVec for scratch buffers
-    // Each compute_domain gets its own CacheAligned accumulator pinned to local NUMA node!
-    /// Parallel reduction with NUMA-aware scratch allocation.
+    /// Parallel reduction with a cache-aligned per-thread scratch accumulator.
     ///
-    /// Automatically allocates cache-aligned scratch buffers on each NUMA node
-    /// using `RoundRobinVec`. Each compute_domain gets one `CacheAligned<T>` accumulator
-    /// pinned to its local memory - threads access local NUMA memory!
+    /// Allocates one `CacheAligned<T>` accumulator per thread in a node-local `PinnedVec`, so threads
+    /// fold into local memory before the serial combine.
     ///
     /// Nearly identical to Rayon's reduce API, just requires explicit pool.
     ///
@@ -4495,12 +4054,12 @@ where
         // Create cache-aligned scratch: one CacheAligned<T> per thread
         // Note: Using PinnedVec per compute_domain for true NUMA-awareness would be ideal,
         // but for simplicity we use a contiguous allocation here. The OS will still
-        // tend to place this on the NUMA node of the allocating thread.
+        // tend to place this on the memory domain of the allocating thread.
         // POLISH: a fresh Topology is probed here only because `ThreadPool` does not carry one;
         // it must outlive `scratch`. A `&Topology` threaded through the reduce adapters removes this.
         let topology = Topology::new().expect("failed to probe topology");
         let mut scratch = PinnedVec::with_capacity_in(
-            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
                 .expect("failed to get allocator"),
             threads,
         )
@@ -4624,30 +4183,6 @@ impl IntoParallelIterator for core::ops::Range<usize> {
 
     fn into_par_iter(self) -> Self::Iter {
         ParallelRange::new(self)
-    }
-}
-
-impl<'a, T> IntoParallelIterator for &'a RoundRobinVec<T>
-where
-    T: Sync,
-{
-    type Item = &'a T;
-    type Iter = ParallelRoundRobin<'a, T>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        ParallelRoundRobin::new(self)
-    }
-}
-
-impl<'a, T> IntoParallelIterator for &'a mut RoundRobinVec<T>
-where
-    T: Send,
-{
-    type Item = &'a mut T;
-    type Iter = ParallelRoundRobinMut<'a, T>;
-
-    fn into_par_iter(self) -> Self::Iter {
-        ParallelRoundRobinMut::new(self)
     }
 }
 
@@ -4983,117 +4518,6 @@ where
     }
 }
 
-pub struct ParallelRoundRobin<'a, T> {
-    compute_domains_ptr: SyncConstPtr<PinnedVec<T>>,
-    compute_domains_len: usize,
-    total_len: usize,
-    _marker: PhantomData<&'a [T]>,
-}
-
-impl<'a, T> ParallelRoundRobin<'a, T> {
-    fn new(vec: &'a RoundRobinVec<T>) -> Self {
-        let slice = vec.compute_domains.as_slice();
-        Self {
-            compute_domains_ptr: SyncConstPtr::new(slice.as_ptr()),
-            compute_domains_len: slice.len(),
-            total_len: vec.total_length,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, T> ParallelIterator for ParallelRoundRobin<'a, T>
-where
-    T: Sync,
-{
-    type Item = &'a T;
-
-    fn len(&self) -> usize {
-        self.total_len
-    }
-
-    fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F)
-    where
-        S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
-    {
-        if self.total_len == 0 || self.compute_domains_len == 0 {
-            return;
-        }
-
-        let compute_domains_ptr = self.compute_domains_ptr;
-        let compute_domains_len = self.compute_domains_len;
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
-        schedule.dispatch(pool, self.total_len, move |prong| {
-            let index = prong.task_index;
-            let compute_domain_index = index % compute_domains_len;
-            let local_index = index / compute_domains_len;
-            let base = compute_domains_ptr.as_ptr();
-            let compute_domain = unsafe { &*base.add(compute_domain_index) };
-            let slice = compute_domain.as_slice();
-            let item = unsafe { slice.get_unchecked(local_index) };
-            let func = unsafe { &*consumer_ptr.as_ptr() };
-            func(item, prong);
-        });
-    }
-}
-
-pub struct ParallelRoundRobinMut<'a, T> {
-    compute_domains_ptr: SyncConstPtr<PinnedVec<T>>,
-    compute_domains_len: usize,
-    total_len: usize,
-    _marker: PhantomData<&'a mut [T]>,
-}
-
-impl<'a, T> ParallelRoundRobinMut<'a, T> {
-    fn new(vec: &'a mut RoundRobinVec<T>) -> Self {
-        let slice = vec.compute_domains.as_slice();
-        Self {
-            compute_domains_ptr: SyncConstPtr::new(slice.as_ptr()),
-            compute_domains_len: slice.len(),
-            total_len: vec.total_length,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, T> ParallelIterator for ParallelRoundRobinMut<'a, T>
-where
-    T: Send,
-{
-    type Item = &'a mut T;
-
-    fn len(&self) -> usize {
-        self.total_len
-    }
-
-    fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F)
-    where
-        S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
-    {
-        if self.total_len == 0 || self.compute_domains_len == 0 {
-            return;
-        }
-
-        let compute_domains_ptr = self.compute_domains_ptr;
-        let compute_domains_len = self.compute_domains_len;
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
-        schedule.dispatch(pool, self.total_len, move |prong| {
-            let index = prong.task_index;
-            let compute_domain_index = index % compute_domains_len;
-            let local_index = index / compute_domains_len;
-            let base = compute_domains_ptr.as_ptr();
-            let compute_domain = unsafe { &*base.add(compute_domain_index) };
-            let base_ptr = compute_domain.sync_ptr();
-            let raw = unsafe { base_ptr.get(local_index) };
-            let item = unsafe { &mut *raw };
-            let func = unsafe { &*consumer_ptr.as_ptr() };
-            func(item, prong);
-        });
-    }
-}
-
 pub mod prelude {
     pub use super::{
         DynamicScheduler, IntoParallelIterator, ParallelIterator, ParallelIteratorExt,
@@ -5182,6 +4606,78 @@ mod tests {
     fn hw_threads() -> usize {
         let topology = Topology::new().unwrap();
         topology.logical_cores_count().max(1)
+    }
+
+    /// Each replica is an independent length-`n` buffer, so a domain-dependent fill must read back
+    /// exactly on its own domain - any aliasing between replicas would corrupt the pattern.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn replicated_array_per_domain_buffer() {
+        let topology = Topology::new().unwrap();
+        let n = 4096usize;
+        let mut replicas: ReplicatedArray<u32> =
+            ReplicatedArray::try_new(&topology, n).expect("replicated array");
+        assert_eq!(replicas.len(), n);
+        assert_eq!(
+            replicas.memory_domains_count(),
+            topology.memory_domains_count()
+        );
+
+        let domains = replicas.memory_domains_count();
+        for domain in 0..domains {
+            let replica = replicas.on_memory_domain_mut(MemoryDomain(domain));
+            assert_eq!(replica.len(), n);
+            for (index, slot) in replica.iter_mut().enumerate() {
+                *slot = (domain * n + index) as u32;
+            }
+        }
+
+        for domain in 0..domains {
+            for index in 0..n {
+                assert_eq!(
+                    *replicas.at(MemoryDomain(domain), index),
+                    (domain * n + index) as u32
+                );
+            }
+        }
+    }
+
+    /// The shards tile the logical range exactly once, and `location_of` is the inverse of
+    /// `logical_index_of` - every element has a single home and the two mappings agree.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn sharded_array_segment_round_trip() {
+        let topology = Topology::new().unwrap();
+        let n = 4096usize;
+        let mut shards: ShardedArray<u32> =
+            ShardedArray::try_new(&topology, n).expect("sharded array");
+        let domains = shards.memory_domains_count();
+        let segment = shards.segment();
+        assert_eq!(shards.len(), n);
+
+        let footprint: usize = (0..domains)
+            .map(|domain| shards.length_on_memory_domain(MemoryDomain(domain)))
+            .sum();
+        assert_eq!(footprint, n);
+
+        for domain in 0..domains {
+            let shard = shards.on_memory_domain_mut(MemoryDomain(domain));
+            for (local, slot) in shard.iter_mut().enumerate() {
+                *slot = (domain * segment + local) as u32;
+            }
+        }
+
+        for logical in 0..n {
+            let location = shards.location_of(logical);
+            assert_eq!(
+                shards.logical_index_of(location.memory_domain, location.local_index),
+                logical
+            );
+            assert_eq!(
+                *shards.at(location.memory_domain, location.local_index),
+                logical as u32
+            );
+        }
     }
 
     #[cfg_attr(miri, ignore)]
@@ -5571,20 +5067,24 @@ mod tests {
     #[test]
     fn pinned_allocator_creation() {
         let topology = Topology::new().unwrap();
-        let numa_count = topology.memory_domains_count();
-        assert!(numa_count > 0, "System should have at least one NUMA node");
+        let memory_domains = topology.memory_domains_count();
+        assert!(
+            memory_domains > 0,
+            "system should have at least one memory domain"
+        );
 
-        // Test valid NUMA node
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
-            .expect("NUMA node 0 should be available");
+        // Valid memory domain
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+            .expect("memory domain 0 should be available");
         assert_eq!(allocator.memory_domain_id().get(), 0);
 
-        // Test invalid NUMA node
-        let invalid_allocator =
-            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(numa_count + 10)));
+        // Invalid memory domain
+        let invalid_allocator = DomainAllocator::new(
+            topology.memory_domain_id_at_index(MemoryDomain(memory_domains + 10)),
+        );
         assert!(
             invalid_allocator.is_none(),
-            "Invalid NUMA node should return None"
+            "an invalid memory domain should return None"
         );
     }
 
@@ -5592,7 +5092,7 @@ mod tests {
     #[test]
     fn basic_allocation() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let allocation = allocator
             .allocate(1024)
@@ -5610,7 +5110,7 @@ mod tests {
     #[test]
     fn allocate_zero_bytes() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let allocation = allocator.allocate(0);
         assert!(
@@ -5623,7 +5123,7 @@ mod tests {
     #[test]
     fn allocate_at_least() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let allocation = allocator
             .allocate_at_least(1000)
@@ -5642,7 +5142,7 @@ mod tests {
     #[test]
     fn pinned_vec_creation() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.len(), 0);
@@ -5655,7 +5155,7 @@ mod tests {
     #[test]
     fn pinned_vec_with_capacity() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::with_capacity_in(allocator, 10).expect("Failed to create vec");
         assert_eq!(vec.len(), 0);
@@ -5668,7 +5168,7 @@ mod tests {
     #[test]
     fn pinned_vec_push_pop() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
@@ -5694,7 +5194,7 @@ mod tests {
     #[test]
     fn pinned_vec_indexing() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(10).expect("Failed to push");
@@ -5715,7 +5215,7 @@ mod tests {
     #[test]
     fn pinned_vec_clear() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
@@ -5732,7 +5232,7 @@ mod tests {
     #[test]
     fn pinned_vec_insert_remove() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
@@ -5757,7 +5257,7 @@ mod tests {
     #[test]
     fn pinned_vec_reserve() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.capacity(), 0);
@@ -5777,7 +5277,7 @@ mod tests {
     #[test]
     fn pinned_vec_extend_from_slice() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         let data = [1, 2, 3, 4, 5];
@@ -5793,7 +5293,7 @@ mod tests {
     #[test]
     fn pinned_vec_iterators() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
@@ -5820,7 +5320,7 @@ mod tests {
     #[test]
     fn pinned_vec_slices() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
@@ -5842,7 +5342,7 @@ mod tests {
     #[test]
     fn pinned_vec_growth() {
         let topology = Topology::new().unwrap();
-        let allocator = PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)))
             .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
@@ -5861,9 +5361,10 @@ mod tests {
     #[test]
     fn pinned_vec_invalid_memory_domain() {
         let topology = Topology::new().unwrap();
-        let numa_count = topology.memory_domains_count();
-        let allocator =
-            PinnedAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(numa_count + 1)));
+        let memory_domains = topology.memory_domains_count();
+        let allocator = DomainAllocator::new(
+            topology.memory_domain_id_at_index(MemoryDomain(memory_domains + 1)),
+        );
         assert!(allocator.is_none());
     }
 
@@ -5954,72 +5455,6 @@ mod tests {
         for (idx, val) in values.iter().enumerate() {
             assert_eq!(*val, idx * idx);
         }
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn round_robin_parallel_mut() {
-        let topology = Topology::new().unwrap();
-        let mut pool = spawn(&topology, hw_threads());
-        let mut rr_vec = RoundRobinVec::<usize>::with_capacity_per_compute_domain(&topology, 8)
-            .expect("round robin vec");
-
-        // Populate evenly
-        for value in 0..32 {
-            rr_vec.push(value).expect("push");
-        }
-
-        rr_vec
-            .par_iter_mut()
-            .with_pool(&mut pool)
-            .for_each(|value| {
-                *value += 1;
-            });
-
-        for index in 0..rr_vec.len() {
-            assert_eq!(rr_vec.get(index), Some(&(index + 1)));
-        }
-    }
-
-    /// Every slot is a pure function of its global index, so the contents may not depend on how
-    /// many threads filled them. The predecessor of `fill_with` shared one `&mut FnMut` across
-    /// every thread, and a stateful closure lost most of its increments to the race.
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn round_robin_fill_with_index_is_deterministic() {
-        let topology = Topology::new().unwrap();
-        for threads in [1usize, 3, 17] {
-            let mut pool = spawn(&topology, threads);
-            let mut rr_vec = RoundRobinVec::<usize>::new(&topology).expect("round robin vec");
-            rr_vec.resize(&mut pool, 1000, 0).expect("resize");
-
-            rr_vec.fill_with_index(&mut pool, |index| index * 3 + 1);
-
-            assert_eq!(rr_vec.len(), 1000);
-            for index in 0..rr_vec.len() {
-                assert_eq!(
-                    rr_vec.get(index),
-                    Some(&(index * 3 + 1)),
-                    "threads={threads}"
-                );
-            }
-        }
-    }
-
-    /// `fill_with` writes every live slot exactly once, leaving no element untouched.
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn round_robin_fill_with_covers_every_slot() {
-        let topology = Topology::new().unwrap();
-        let mut pool = spawn(&topology, hw_threads());
-        let mut rr_vec = RoundRobinVec::<usize>::new(&topology).expect("round robin vec");
-        rr_vec.resize(&mut pool, 500, 0).expect("resize");
-
-        rr_vec.fill_with(&mut pool, || 7);
-        assert!((0..rr_vec.len()).all(|index| rr_vec.get(index) == Some(&7)));
-
-        rr_vec.fill(&mut pool, 9);
-        assert!((0..rr_vec.len()).all(|index| rr_vec.get(index) == Some(&9)));
     }
 
     #[cfg_attr(miri, ignore)]

@@ -74,14 +74,23 @@ const c = struct {
 
     // Allocation
     extern fn fu_memory_domain_id_at_index(topology: *anyopaque, memory_domain_index: usize) i32;
-    extern fn fu_allocate_in(memory_domain_id: i32, bytes: usize) ?*anyopaque;
-    extern fn fu_allocate_at_least_in(
+    extern fn fu_allocate_on_domain_id(memory_domain_id: i32, bytes: usize) ?*anyopaque;
+    extern fn fu_allocate_at_least_on_domain_id(
         memory_domain_id: i32,
         minimum_bytes: usize,
         allocated_bytes: *usize,
         bytes_per_page: *usize,
     ) ?*anyopaque;
-    extern fn fu_free_in(memory_domain_id: i32, pointer: *anyopaque, bytes: usize) void;
+    extern fn fu_free_on_domain_id(memory_domain_id: i32, pointer: *anyopaque, bytes: usize) void;
+    extern fn fu_allocate_symmetric(
+        topology: *anyopaque,
+        bytes_per_domain: usize,
+        stride_bytes: *usize,
+        memory_domains_count: *usize,
+        total_bytes: *usize,
+        bytes_per_page: *usize,
+    ) ?*anyopaque;
+    extern fn fu_free_symmetric(base: *anyopaque, total_bytes: usize) void;
 
     // Pool lifecycle & introspection
     extern fn fu_pool_new(name: ?[*:0]const u8, allowed: u32) ?*anyopaque;
@@ -249,7 +258,7 @@ pub fn runtimeCapabilitiesString(buf: []u8) []const u8 {
 /// An explicit, owned handle to this machine's discovered compute and memory topology.
 ///
 /// Build one with `init`, query it through the methods below, and hand it to pool constructors
-/// and NUMA allocators so they know which machine they are placing work and pages onto.
+/// and memory-domain allocators so they know which machine they are placing work and pages onto.
 pub const Topology = struct {
     handle: *anyopaque,
 
@@ -269,8 +278,8 @@ pub const Topology = struct {
         return c.fu_logical_cores_count(self.handle);
     }
 
-    /// Returns the number of NUMA nodes available
-    pub fn countMemoryDomains(self: Topology) usize {
+    /// Returns the number of memory domains available
+    pub fn memoryDomainsCount(self: Topology) usize {
         return c.fu_memory_domains_count(self.handle);
     }
 
@@ -394,7 +403,7 @@ pub const AllocationResult = struct {
 
     /// Frees the allocation
     pub fn free(self: AllocationResult) void {
-        c.fu_free_in(self.memory_domain_id, @ptrCast(self.ptr), self.allocated_bytes);
+        c.fu_free_on_domain_id(self.memory_domain_id, @ptrCast(self.ptr), self.allocated_bytes);
     }
 };
 
@@ -403,7 +412,7 @@ pub fn allocateAtLeast(memory_domain_id: i32, minimum_bytes: usize) ?AllocationR
     var allocated_bytes: usize = undefined;
     var bytes_per_page: usize = undefined;
 
-    const ptr = c.fu_allocate_at_least_in(
+    const ptr = c.fu_allocate_at_least_on_domain_id(
         memory_domain_id,
         minimum_bytes,
         &allocated_bytes,
@@ -420,12 +429,16 @@ pub fn allocateAtLeast(memory_domain_id: i32, minimum_bytes: usize) ?AllocationR
 
 /// Allocates exactly the requested bytes on a memory domain; id from `Topology.memoryDomainIdAtIndex`.
 pub fn allocate(memory_domain_id: i32, bytes: usize) ?[*]u8 {
-    const ptr = c.fu_allocate_in(memory_domain_id, bytes) orelse return null;
+    const ptr = c.fu_allocate_on_domain_id(memory_domain_id, bytes) orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
-/// Memory-domain-pinned allocator compatible with Zig's allocator interface.
-pub const PinnedAllocator = struct {
+/// Allocator bound to a single memory domain, compatible with Zig's `std.mem.Allocator` interface.
+///
+/// This type is the allocation API: build one for a memory domain's OS id - from
+/// `Topology.memoryDomainIdAtIndex` - and it both hands out `AllocationResult`s through
+/// `allocateAtLeast`/`allocate` and backs a `std.mem.Allocator` through `allocator`.
+pub const DomainAllocator = struct {
     memory_domain_id: i32,
 
     const Self = @This();
@@ -443,8 +456,34 @@ pub const PinnedAllocator = struct {
         .free = free,
     };
 
-    pub fn init(memory_domain_id: i32) Self {
+    /// Binds to the memory domain named by @p memory_domain_id, or null if the id is the -1 sentinel.
+    pub fn init(memory_domain_id: i32) ?Self {
+        if (memory_domain_id < 0) return null;
         return .{ .memory_domain_id = memory_domain_id };
+    }
+
+    /// Allocates at least @p minimum_bytes on this domain with the optimal page size, or null on failure.
+    pub fn allocateAtLeast(self: Self, minimum_bytes: usize) ?AllocationResult {
+        var allocated_bytes: usize = undefined;
+        var bytes_per_page: usize = undefined;
+        const ptr = c.fu_allocate_at_least_on_domain_id(
+            self.memory_domain_id,
+            minimum_bytes,
+            &allocated_bytes,
+            &bytes_per_page,
+        ) orelse return null;
+        return .{
+            .memory_domain_id = self.memory_domain_id,
+            .ptr = @ptrCast(@alignCast(ptr)),
+            .allocated_bytes = allocated_bytes,
+            .bytes_per_page = bytes_per_page,
+        };
+    }
+
+    /// Allocates exactly @p bytes on this domain, or null on failure.
+    pub fn allocate(self: Self, bytes: usize) ?[*]u8 {
+        const ptr = c.fu_allocate_on_domain_id(self.memory_domain_id, bytes) orelse return null;
+        return @ptrCast(@alignCast(ptr));
     }
 
     pub fn allocator(self: *Self) Allocator {
@@ -499,7 +538,7 @@ pub const PinnedAllocator = struct {
 
         var allocated_bytes: usize = undefined;
         var bytes_per_page: usize = undefined;
-        const raw_ptr = c.fu_allocate_at_least_in(
+        const raw_ptr = c.fu_allocate_at_least_on_domain_id(
             self.memory_domain_id,
             request_bytes,
             &allocated_bytes,
@@ -509,7 +548,7 @@ pub const PinnedAllocator = struct {
         const base_addr = @intFromPtr(raw_ptr);
         const data_addr = alignment.forward(base_addr + header_size);
         if (data_addr + len > base_addr + allocated_bytes) {
-            c.fu_free_in(self.memory_domain_id, raw_ptr, allocated_bytes);
+            c.fu_free_on_domain_id(self.memory_domain_id, raw_ptr, allocated_bytes);
             return null;
         }
 
@@ -551,9 +590,194 @@ pub const PinnedAllocator = struct {
         const header_ptr = @as(*Header, @ptrFromInt(@intFromPtr(buf.ptr) - @sizeOf(Header)));
         const header = header_ptr.*;
         const base_ptr = @as(*anyopaque, @ptrFromInt(header.base_addr));
-        c.fu_free_in(self.memory_domain_id, base_ptr, header.allocated_bytes);
+        c.fu_free_on_domain_id(self.memory_domain_id, base_ptr, header.allocated_bytes);
     }
 };
+
+/// One full length-`len` copy of a sequence per memory domain, so every thread reads a node-local replica.
+///
+/// A thin owner of one symmetric mapping the allocator stripes across the nodes - replica `d` lives at
+/// `base + d * stride_bytes` and holds `len` elements. Raw uninitialized storage: the caller fills every
+/// replica and keeps them coherent, mirroring the C++ `replicated_array`. `T` must be plain-old-data,
+/// since the container runs no constructors or destructors.
+pub fn ReplicatedArray(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        base_bytes: ?[*]u8 = null,
+        stride_bytes: usize = 0,
+        domains: usize = 0,
+        total_bytes: usize = 0,
+        len: usize = 0,
+
+        /// Allocates one uninitialized length-`n` replica per memory domain, or null on failure.
+        pub fn init(topology: Topology, n: usize) ?Self {
+            if (n == 0) return Self{};
+            var stride_bytes: usize = 0;
+            var domains: usize = 0;
+            var total_bytes: usize = 0;
+            var bytes_per_page: usize = 0;
+            const base_bytes = c.fu_allocate_symmetric(
+                topology.handle,
+                n * @sizeOf(T),
+                &stride_bytes,
+                &domains,
+                &total_bytes,
+                &bytes_per_page,
+            ) orelse return null;
+            return .{
+                .base_bytes = @ptrCast(@alignCast(base_bytes)),
+                .stride_bytes = stride_bytes,
+                .domains = domains,
+                .total_bytes = total_bytes,
+                .len = n,
+            };
+        }
+
+        /// Unmaps the whole striped mapping.
+        pub fn deinit(self: *Self) void {
+            if (self.base_bytes) |base_bytes| c.fu_free_symmetric(@ptrCast(base_bytes), self.total_bytes);
+            self.* = .{};
+        }
+
+        /// Whether the container holds no elements.
+        pub fn isEmpty(self: Self) bool {
+            return self.len == 0;
+        }
+
+        /// The typed base pointer of the first replica's storage.
+        pub fn base(self: Self) [*]T {
+            return @ptrCast(@alignCast(self.base_bytes.?));
+        }
+
+        /// The number of per-domain replicas.
+        pub fn memoryDomainsCount(self: Self) usize {
+            return self.domains;
+        }
+
+        /// The page-aligned byte distance between consecutive replicas.
+        pub fn strideBytes(self: Self) usize {
+            return self.stride_bytes;
+        }
+
+        /// The whole replica living on `memory_domain_index`.
+        pub fn onMemoryDomain(self: Self, memory_domain_index: usize) []T {
+            const slice_base = self.base_bytes.? + memory_domain_index * self.stride_bytes;
+            const typed: [*]T = @ptrCast(@alignCast(slice_base));
+            return typed[0..self.len];
+        }
+
+        /// One element of the replica on `memory_domain_index`.
+        pub fn at(self: Self, memory_domain_index: usize, local_index: usize) *T {
+            return &self.onMemoryDomain(memory_domain_index)[local_index];
+        }
+    };
+}
+
+/// A sequence partitioned across memory domains as contiguous segments, each element stored once.
+///
+/// Each domain owns a contiguous logical segment of `segment` elements, so element `i` lives at
+/// `{i / segment, i % segment}` - see `locationOf` - and a scan of a domain's shard is sequential in
+/// memory. Backed by one symmetric mapping; the trailing shard may be short. `T` must be plain-old-data,
+/// mirroring `ReplicatedArray`.
+pub fn ShardedArray(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        base_bytes: ?[*]u8 = null,
+        stride_bytes: usize = 0,
+        domains: usize = 0,
+        total_bytes: usize = 0,
+        len: usize = 0,
+        segment: usize = 0,
+
+        /// Allocates uninitialized storage for `n` elements partitioned round-robin across the domains.
+        pub fn init(topology: Topology, n: usize) ?Self {
+            if (n == 0) return Self{};
+            const domains = topology.memoryDomainsCount();
+            if (domains == 0) return null;
+            const segment = (n + domains - 1) / domains;
+            var stride_bytes: usize = 0;
+            var domains_out: usize = 0;
+            var total_bytes: usize = 0;
+            var bytes_per_page: usize = 0;
+            const base_bytes = c.fu_allocate_symmetric(
+                topology.handle,
+                segment * @sizeOf(T),
+                &stride_bytes,
+                &domains_out,
+                &total_bytes,
+                &bytes_per_page,
+            ) orelse return null;
+            return .{
+                .base_bytes = @ptrCast(@alignCast(base_bytes)),
+                .stride_bytes = stride_bytes,
+                .domains = domains_out,
+                .total_bytes = total_bytes,
+                .len = n,
+                .segment = segment,
+            };
+        }
+
+        /// Unmaps the whole striped mapping.
+        pub fn deinit(self: *Self) void {
+            if (self.base_bytes) |base_bytes| c.fu_free_symmetric(@ptrCast(base_bytes), self.total_bytes);
+            self.* = .{};
+        }
+
+        /// Whether the container holds no elements.
+        pub fn isEmpty(self: Self) bool {
+            return self.len == 0;
+        }
+
+        /// The typed base pointer of the first shard's storage.
+        pub fn base(self: Self) [*]T {
+            return @ptrCast(@alignCast(self.base_bytes.?));
+        }
+
+        /// The number of shards, one per memory domain.
+        pub fn memoryDomainsCount(self: Self) usize {
+            return self.domains;
+        }
+
+        /// The page-aligned byte distance between consecutive shards.
+        pub fn strideBytes(self: Self) usize {
+            return self.stride_bytes;
+        }
+
+        /// How many elements the shard on `memory_domain_index` holds - a trailing shard may be shorter.
+        pub fn lengthOnMemoryDomain(self: Self, memory_domain_index: usize) usize {
+            const start = memory_domain_index * self.segment;
+            if (start >= self.len) return 0;
+            return @min(self.len - start, self.segment);
+        }
+
+        /// The memory domain and local index that store logical element `logical_index`.
+        pub fn locationOf(self: Self, logical_index: usize) struct { memory_domain: usize, local_index: usize } {
+            return .{
+                .memory_domain = logical_index / self.segment,
+                .local_index = logical_index % self.segment,
+            };
+        }
+
+        /// The logical index of the element at `local_index` on `memory_domain_index` - inverse of `locationOf`.
+        pub fn logicalIndexOf(self: Self, memory_domain_index: usize, local_index: usize) usize {
+            return memory_domain_index * self.segment + local_index;
+        }
+
+        /// The whole shard living on `memory_domain_index`.
+        pub fn onMemoryDomain(self: Self, memory_domain_index: usize) []T {
+            const slice_base = self.base_bytes.? + memory_domain_index * self.stride_bytes;
+            const typed: [*]T = @ptrCast(@alignCast(slice_base));
+            return typed[0..self.lengthOnMemoryDomain(memory_domain_index)];
+        }
+
+        /// The single home of a logical element.
+        pub fn at(self: Self, memory_domain_index: usize, local_index: usize) *T {
+            return &self.onMemoryDomain(memory_domain_index)[local_index];
+        }
+    };
+}
 
 /// Thread pool for fork-join parallelism
 pub const Pool = struct {
@@ -603,7 +827,7 @@ pub const Pool = struct {
 
     /// Spawns a thread pool pinned to a single compute domain (cores of one QoS + locality).
     ///
-    /// The pool's threads and NUMA-local allocations stay on `compute_domain_index`, in
+    /// The pool's threads and memory-domain-local allocations stay on `compute_domain_index`, in
     /// `0..countComputeDomains()`. Spawn one per compute domain and coordinate them from a
     /// single thread with the generation-token API. On builds without NUMA, only compute
     /// domain 0 is valid.
@@ -1024,7 +1248,7 @@ test "system metadata" {
     const cores = topo.countLogicalCores();
     try std.testing.expect(cores > 0);
 
-    const numa = topo.countMemoryDomains();
+    const numa = topo.memoryDomainsCount();
     try std.testing.expect(numa > 0);
 
     const colocs = topo.countComputeDomains();
@@ -1225,8 +1449,8 @@ test "NUMA allocator integrates with std collections" {
 
     const topo = try Topology.init();
     defer topo.deinit();
-    var pinned_alloc = PinnedAllocator.init(topo.memoryDomainIdAtIndex(0));
-    const allocator = pinned_alloc.allocator();
+    var domain_alloc = DomainAllocator.init(topo.memoryDomainIdAtIndex(0)) orelse return error.SkipZigTest;
+    const allocator = domain_alloc.allocator();
 
     var list = try std.ArrayList(u64).initCapacity(allocator, 0);
     defer list.deinit(allocator);
@@ -1341,4 +1565,57 @@ test "generation polling on exclusive pool" {
 
     // All 4 worker threads should have executed
     try std.testing.expectEqual(4, counter.load(.acquire));
+}
+
+test "ReplicatedArray per-domain buffer" {
+    // Each replica is an independent length-`n` buffer, so a domain-dependent fill must read back
+    // exactly on its own domain - any aliasing between replicas would corrupt the pattern.
+    const topo = try Topology.init();
+    defer topo.deinit();
+
+    const n: usize = 4096;
+    var replicas = ReplicatedArray(u32).init(topo, n) orelse return error.OutOfMemory;
+    defer replicas.deinit();
+    try std.testing.expectEqual(n, replicas.len);
+    try std.testing.expectEqual(topo.memoryDomainsCount(), replicas.memoryDomainsCount());
+
+    const domains = replicas.memoryDomainsCount();
+    for (0..domains) |domain| {
+        const replica = replicas.onMemoryDomain(domain);
+        try std.testing.expectEqual(n, replica.len);
+        for (replica, 0..) |*slot, index| slot.* = @intCast(domain * n + index);
+    }
+    for (0..domains) |domain| {
+        for (0..n) |index| {
+            try std.testing.expectEqual(@as(u32, @intCast(domain * n + index)), replicas.at(domain, index).*);
+        }
+    }
+}
+
+test "ShardedArray segment round trip" {
+    // The shards tile the logical range exactly once, and `locationOf` is the inverse of
+    // `logicalIndexOf` - every element has a single home and the two mappings agree.
+    const topo = try Topology.init();
+    defer topo.deinit();
+
+    const n: usize = 4096;
+    var shards = ShardedArray(u32).init(topo, n) orelse return error.OutOfMemory;
+    defer shards.deinit();
+    const domains = shards.memoryDomainsCount();
+    const segment = shards.segment;
+    try std.testing.expectEqual(n, shards.len);
+
+    var footprint: usize = 0;
+    for (0..domains) |domain| footprint += shards.lengthOnMemoryDomain(domain);
+    try std.testing.expectEqual(n, footprint);
+
+    for (0..domains) |domain| {
+        const shard = shards.onMemoryDomain(domain);
+        for (shard, 0..) |*slot, local| slot.* = @intCast(domain * segment + local);
+    }
+    for (0..n) |logical| {
+        const location = shards.locationOf(logical);
+        try std.testing.expectEqual(logical, shards.logicalIndexOf(location.memory_domain, location.local_index));
+        try std.testing.expectEqual(@as(u32, @intCast(logical)), shards.at(location.memory_domain, location.local_index).*);
+    }
 }

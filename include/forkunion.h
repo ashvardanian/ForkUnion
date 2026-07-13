@@ -61,7 +61,7 @@
  *  On Linux, when NUMA and PThreads are available, the library can also leverage @b NUMA-aware
  *  memory allocations and pin threads to specific physical cores to increase memory locality.
  *  It should reduce memory access latency by around 35% on average, compared to remote accesses.
- *  @sa `fu_memory_domains_count`, `fu_allocate_at_least_in`, `fu_free_in`.
+ *  @sa `fu_memory_domains_count`, `fu_allocate_at_least_on_domain_id`, `fu_free_on_domain_id`.
  *
  *  On heterogeneous chips, cores with a different @b "Quality-of-Service", or QoS, may be combined.
  *  A typical example is laptop/desktop chips, having 1 NUMA node, but 3 tiers of CPU cores:
@@ -327,7 +327,7 @@ size_t fu_compute_cache_bytes_in(fu_topology_t, size_t compute_domain_index);
  *  @ref fu_memory_level_in, lower being faster: HBM < DDR < CXL. It is the unit the allocator targets.
  *  A memory domain may be @b cpuless, as with a CXL expander or GPU-attached HBM, and may be local to
  *  @b several compute domains, as when performance and efficiency cores share one DDR controller.
- *  @sa `fu_volume_ram_in`, `fu_memory_level_in`, `fu_local_memory_of`, `fu_allocate_in`.
+ *  @sa `fu_volume_ram_in`, `fu_memory_level_in`, `fu_local_memory_of`, `fu_allocate_on_domain_id`.
  */
 size_t fu_memory_domains_count(fu_topology_t);
 
@@ -359,8 +359,8 @@ size_t fu_memory_levels_count(fu_topology_t);
  *  the compute-domain index is out of range.
  *
  *  The convenience bridge for the common "run here, allocate near here" pattern: pass the result
- *  to `fu_allocate_in`. For the full cost picture use `fu_memory_distance`.
- *  @sa `fu_memory_distance`, `fu_allocate_in`.
+ *  to `fu_allocate_on_domain_id`. For the full cost picture use `fu_memory_distance`.
+ *  @sa `fu_memory_distance`, `fu_allocate_on_domain_id`.
  */
 size_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index);
 
@@ -399,7 +399,7 @@ size_t fu_memory_latency(fu_topology_t, size_t compute_domain_index, size_t memo
  *  @brief Returns the RAM volume in bytes of a given memory domain.
  *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
  *  @retval Number of bytes of RAM in that memory domain, regardless of page size; 0 if out of range.
- *  @sa `fu_volume_ram`, `fu_allocate_in`.
+ *  @sa `fu_volume_ram`, `fu_allocate_on_domain_id`.
  */
 size_t fu_volume_ram_in(fu_topology_t, size_t memory_domain_index);
 
@@ -416,7 +416,7 @@ size_t fu_volume_ram(fu_topology_t);
  *  @retval Bytes backed by free huge pages in that memory domain; 0 if out of range or unavailable.
  *
  *  Huge pages reduce TLB pressure by mapping memory in larger units than the base page.
- *  @sa `fu_huge_pages_count_in`, `fu_allocate_at_least_in`.
+ *  @sa `fu_huge_pages_count_in`, `fu_allocate_at_least_on_domain_id`.
  */
 size_t fu_volume_huge_pages_in(fu_topology_t, size_t memory_domain_index);
 
@@ -451,12 +451,12 @@ size_t fu_huge_pages_count(fu_topology_t);
  *  @brief Resolves a memory domain's dense index to the OS id the allocators take.
  *  @param[in] topology Machine topology from `fu_topology_new`.
  *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @retval The OS memory-domain id - a NUMA node - to hand to `fu_allocate_in`, or -1 if out of range.
+ *  @retval The OS memory-domain id - a NUMA node - to hand to `fu_allocate_on_domain_id`, or -1 if out of range.
  *
  *  The allocators key off the OS id rather than the topology, so an allocation can outlive the handle.
  *  Look the id up once - typically near a compute domain via `fu_local_memory_of` - then allocate and
  *  free with it alone.
- *  @sa `fu_allocate_in`, `fu_local_memory_of`, `fu_memory_domains_count`.
+ *  @sa `fu_allocate_on_domain_id`, `fu_local_memory_of`, `fu_memory_domains_count`.
  */
 fu_memory_domain_id_t fu_memory_domain_id_at_index(fu_topology_t topology, size_t memory_domain_index);
 
@@ -464,7 +464,7 @@ fu_memory_domain_id_t fu_memory_domain_id_at_index(fu_topology_t topology, size_
  *  @brief Allocates memory in @p memory_domain_id with the largest suitable page size.
  *  @param[in] memory_domain_id Target memory domain, from `fu_memory_domain_id_at_index`.
  *  @param[in] minimum_bytes Minimum number of bytes to allocate, must be > 0.
- *  @param[out] allocated_bytes Receives the actual allocation size (>= @p minimum_bytes), must not be NULL.
+ *  @param[out] allocated_bytes Receives the actual allocation size - at least @p minimum_bytes - must not be NULL.
  *  @param[out] bytes_per_page Receives the page size used for the allocation, must not be NULL.
  *  @retval Pointer to allocated memory, or NULL if allocation failed.
  *  @note This API is @b thread-safe and can be called from any thread.
@@ -477,25 +477,25 @@ fu_memory_domain_id_t fu_memory_domain_id_at_index(fu_topology_t topology, size_
  *  @code{.c}
  *  fu_memory_domain_id_t domain = fu_memory_domain_id_at_index(topology, fu_local_memory_of(topology, compute_domain));
  *  void *pointer = NULL; size_t actual_bytes = 0, page = 0;
- *  if ((pointer = fu_allocate_at_least_in(domain, 1u << 20, &actual_bytes, &page)))
- *      fu_free_in(domain, pointer, actual_bytes);
+ *  if ((pointer = fu_allocate_at_least_on_domain_id(domain, 1u << 20, &actual_bytes, &page)))
+ *      fu_free_on_domain_id(domain, pointer, actual_bytes);
  *  @endcode
- *  @sa `fu_free_in`, `fu_memory_domain_id_at_index`.
+ *  @sa `fu_free_on_domain_id`, `fu_memory_domain_id_at_index`.
  */
-void *fu_allocate_at_least_in(fu_memory_domain_id_t memory_domain_id, size_t minimum_bytes, size_t *allocated_bytes,
-                              size_t *bytes_per_page);
+void *fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t minimum_bytes,
+                                        size_t *allocated_bytes, size_t *bytes_per_page);
 
 /**
  *  @brief Allocates exactly @p bytes in @p memory_domain_id.
  *  @param[in] memory_domain_id Target memory domain, from `fu_memory_domain_id_at_index`.
  *  @param[in] bytes Number of bytes to allocate, must be > 0.
  *  @retval Pointer to allocated memory, or NULL if allocation failed.
- *  @note This API is @b thread-safe. Unlike `fu_allocate_at_least_in`, it does not over-allocate for
+ *  @note This API is @b thread-safe. Unlike `fu_allocate_at_least_on_domain_id`, it does not over-allocate for
  *  page optimization - use it for standard-allocator compatibility.
- *  @note The pointer is aligned to at least the cache-line default, matching `fu_allocate_at_least_in`.
- *  @sa `fu_free_in`, `fu_allocate_at_least_in`.
+ *  @note The pointer is aligned to at least the cache-line default, matching `fu_allocate_at_least_on_domain_id`.
+ *  @sa `fu_free_on_domain_id`, `fu_allocate_at_least_on_domain_id`.
  */
-void *fu_allocate_in(fu_memory_domain_id_t memory_domain_id, size_t bytes);
+void *fu_allocate_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t bytes);
 
 /**
  *  @brief Releases memory allocated in @p memory_domain_id.
@@ -503,9 +503,42 @@ void *fu_allocate_in(fu_memory_domain_id_t memory_domain_id, size_t bytes);
  *  @param[in] pointer Pointer to the memory to release, must not be NULL.
  *  @param[in] bytes Number of bytes to release; must match the `allocated_bytes` from allocation.
  *  @note This API is @b thread-safe. A mismatched @p bytes is undefined behavior.
- *  @sa `fu_allocate_at_least_in`, `fu_allocate_in`.
+ *  @sa `fu_allocate_at_least_on_domain_id`, `fu_allocate_on_domain_id`.
  */
-void fu_free_in(fu_memory_domain_id_t memory_domain_id, void *pointer, size_t bytes);
+void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer, size_t bytes);
+
+/**
+ *  @brief Allocates one @b symmetric mapping - `bytes_per_domain` striped across every memory domain.
+ *  @param[in] topology Machine topology from `fu_topology_new`.
+ *  @param[in] bytes_per_domain Minimum usable bytes per domain slice; the slice stride is page-rounded up from it.
+ *  @param[out] stride_bytes Receives the page-aligned byte distance between slices, must not be NULL.
+ *  @param[out] memory_domains_count Receives the number of domain slices, must not be NULL.
+ *  @param[out] total_bytes Receives the whole mapping size to hand back to `fu_free_symmetric`, must not be NULL.
+ *  @param[out] bytes_per_page Receives the page size used, may be NULL.
+ *  @retval Base pointer of the mapping, or NULL if allocation failed.
+ *  @note This API is @b thread-safe. Slice @b `d` begins at `base + d * *stride_bytes` and is bound to its
+ *  own memory domain; a machine with no NUMA API collapses the mapping to a single heap-backed slice.
+ *
+ *  Prefers the largest available huge-page size to minimize TLB pressure, so the stride may exceed
+ *  @p bytes_per_domain - always read @p stride_bytes.
+ *  @code{.c}
+ *  size_t stride = 0, domains = 0, total = 0, page = 0;
+ *  void *base = fu_allocate_symmetric(topology, 1u << 20, &stride, &domains, &total, &page);
+ *  if (base) fu_free_symmetric(base, total);
+ *  @endcode
+ *  @sa `fu_free_symmetric`, `fu_local_memory_of`, `fu_memory_domains_count`.
+ */
+void *fu_allocate_symmetric(fu_topology_t topology, size_t bytes_per_domain, size_t *stride_bytes,
+                            size_t *memory_domains_count, size_t *total_bytes, size_t *bytes_per_page);
+
+/**
+ *  @brief Releases a symmetric mapping from `fu_allocate_symmetric`.
+ *  @param[in] base Base pointer returned by `fu_allocate_symmetric`, must not be NULL.
+ *  @param[in] total_bytes The `total_bytes` the allocation reported; a mismatch is undefined behavior.
+ *  @note This API is @b thread-safe. The size is required - the Linux backing unmaps the whole range.
+ *  @sa `fu_allocate_symmetric`.
+ */
+void fu_free_symmetric(void *base, size_t total_bytes);
 
 #pragma endregion Memory
 

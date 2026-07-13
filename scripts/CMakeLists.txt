@@ -108,53 +108,65 @@ if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleC
     endif ()
 endif ()
 
-# The N-body benchmark: C++ for clear state ownership, but linking the pre-compiled C ABI so it resolves the busy-wait
-# waiter at runtime - the whole point, since AArch64 `WFET` is unreachable through the compile-time C++
-# `preferred_yield_t`.
-add_executable(forkunion_nbody nbody.cpp)
-set_target_properties(
-    forkunion_nbody
-    PROPERTIES CXX_STANDARD 17
-               CXX_STANDARD_REQUIRED ON
-               CXX_EXTENSIONS OFF
-               RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-target_link_libraries(forkunion_nbody PRIVATE forkunion_static)
-
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    if (UNIX AND NOT APPLE)
-        target_link_libraries(forkunion_nbody PRIVATE -latomic)
-    endif ()
-endif ()
-
-if (CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_options(
-        forkunion_nbody PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+# Both demo benchmarks share identical wiring - C++ for clear state ownership, but linking the pre-compiled C ABI so the
+# runtime busy-wait waiter resolves at runtime - the whole point, since AArch64 `WFET` is unreachable through the
+# compile-time C++ `preferred_yield_t`. The only per-target difference is `-ffast-math`, passed as @p fast_math.
+function (add_forkunion_benchmark target source fast_math)
+    add_executable(${target} ${source})
+    set_target_properties(
+        ${target}
+        PROPERTIES CXX_STANDARD 17
+                   CXX_STANDARD_REQUIRED ON
+                   CXX_EXTENSIONS OFF
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
-endif ()
+    target_link_libraries(${target} PRIVATE forkunion_static)
 
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(STATUS "Enabling OpenMP for forkunion_nbody on GCC")
-    target_compile_options(forkunion_nbody PRIVATE -fopenmp -ffast-math)
-    target_link_options(forkunion_nbody PRIVATE -fopenmp)
-elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    find_program(BREW_EXECUTABLE brew)
-    if (BREW_EXECUTABLE)
-        execute_process(
-            COMMAND ${BREW_EXECUTABLE} --prefix libomp
-            OUTPUT_VARIABLE LIBOMP_PREFIX
-            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
-        )
-        if (LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}/include/omp.h")
-            message(STATUS "Enabling OpenMP for forkunion_nbody on Clang with Homebrew libomp")
-            target_include_directories(forkunion_nbody PRIVATE ${LIBOMP_PREFIX}/include)
-            target_link_directories(forkunion_nbody PRIVATE ${LIBOMP_PREFIX}/lib)
-            target_compile_options(forkunion_nbody PRIVATE -Xclang -fopenmp)
-            target_link_libraries(forkunion_nbody PRIVATE omp)
-        else ()
-            message(STATUS "Homebrew libomp not found - OpenMP disabled for forkunion_nbody")
+    # Link against `libatomic` for Linux toolchains that might need it
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        if (UNIX AND NOT APPLE)
+            target_link_libraries(${target} PRIVATE -latomic)
         endif ()
-    else ()
-        message(STATUS "Homebrew not found - OpenMP disabled for forkunion_nbody")
     endif ()
-endif ()
+
+    if (CMAKE_BUILD_TYPE STREQUAL "Release")
+        target_compile_options(
+            ${target} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+        )
+    endif ()
+    if (fast_math)
+        target_compile_options(${target} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffast-math>)
+    endif ()
+
+    # OpenMP: native on GCC, Homebrew `libomp` on Apple/Clang.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        message(STATUS "Enabling OpenMP for ${target} on GCC")
+        target_compile_options(${target} PRIVATE -fopenmp)
+        target_link_options(${target} PRIVATE -fopenmp)
+    elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        find_program(BREW_EXECUTABLE brew)
+        if (BREW_EXECUTABLE)
+            execute_process(
+                COMMAND ${BREW_EXECUTABLE} --prefix libomp
+                OUTPUT_VARIABLE LIBOMP_PREFIX
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+            )
+            if (LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}/include/omp.h")
+                message(STATUS "Enabling OpenMP for ${target} on Clang with Homebrew libomp")
+                target_include_directories(${target} PRIVATE ${LIBOMP_PREFIX}/include)
+                target_link_directories(${target} PRIVATE ${LIBOMP_PREFIX}/lib)
+                target_compile_options(${target} PRIVATE -Xclang -fopenmp)
+                target_link_libraries(${target} PRIVATE omp)
+            else ()
+                message(STATUS "Homebrew libomp not found - OpenMP disabled for ${target}")
+            endif ()
+        else ()
+            message(STATUS "Homebrew not found - OpenMP disabled for ${target}")
+        endif ()
+    endif ()
+endfunction ()
+
+# N-body: fast-math on - the fast reciprocal-sqrt kernel is an approximation already.
+add_forkunion_benchmark(forkunion_nbody nbody.cpp ON)
+# Triangle counting: exact integer work, so no fast-math; the CSR is replicated per memory domain.
+add_forkunion_benchmark(forkunion_triangles triangles.cpp OFF)

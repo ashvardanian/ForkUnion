@@ -72,6 +72,7 @@
 #include "forkunion/types.hpp"        // Vocabulary: prongs, buffers, index splitting, claim cursors
 #include "forkunion/capabilities.hpp" // Yields, `cpu_capabilities`, `ram_capabilities`
 #include "forkunion/topology.hpp"     // `memory_domain`, `compute_domain_t`, `machine_topology`, the harvests
+#include "forkunion/allocators.hpp"   // NUMA allocators, `replicated_array`, `sharded_array`
 #include "forkunion/flat.hpp"         // `flat_pool`, the portable STL thread-pool
 #include "forkunion/distributed.hpp"  // `colocated_pool`, `distributed_pool`, NUMA memory
 #include "forkunion/logging.hpp"      // Human-readable topology dumps

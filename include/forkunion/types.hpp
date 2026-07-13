@@ -777,6 +777,43 @@ struct allocation_result {
 };
 
 /**
+ *  @brief Result of a @b symmetric allocation - one mapping whose equal-stride slices sit on each domain.
+ *  @tparam value_type_ The element type; the base pointer is `value_type_ *`.
+ *
+ *  Slice @b `d` begins at the byte address `ptr + d * stride_bytes` - see `slice` - and holds `count`
+ *  elements. Every slice is a uniform distance `stride_bytes` apart - the CPU analog of a GPU symmetric
+ *  heap. The stride is in bytes, not elements, because it is page-aligned and a page rarely divides
+ *  `sizeof(value_type)`.
+ */
+template <typename value_type_, typename size_type_ = std::size_t>
+struct symmetric_allocation_result {
+    using value_type = value_type_;
+    using pointer_type = value_type_ *;
+    using size_type = size_type_;
+
+    /** @brief Base of the mapping, or nullptr on failure. */
+    pointer_type ptr {nullptr};
+    /** @brief Usable elements per domain slice - what was requested. */
+    size_type count {0};
+    /** @brief Page-aligned @b byte distance between consecutive slice bases; `>= count * sizeof(value_type)`. */
+    size_type stride_bytes {0};
+    /** @brief Number of domain slices. */
+    size_type domains {0};
+    /** @brief Total mapped volume in bytes - `domains * stride_bytes`. */
+    size_type bytes {0};
+    /** @brief Number of memory pages mapped across all slices. */
+    size_type pages {0};
+
+    explicit constexpr operator bool() const noexcept { return ptr != nullptr && count > 0; }
+    size_type bytes_per_page() const noexcept { return pages ? bytes / pages : 0; }
+
+    /** @brief Base of the slice on memory domain @p domain_index, at `ptr + domain_index * stride_bytes`. */
+    pointer_type slice(size_type domain_index) const noexcept {
+        return reinterpret_cast<pointer_type>(reinterpret_cast<char *>(ptr) + domain_index * stride_bytes);
+    }
+};
+
+/**
  *  @brief Detects allocators exposing our @b sized `allocate_at_least`, reporting `bytes` and `pages`.
  *
  *  Deliberately keys on the `bytes` member rather than on the function name. C++ 23 gave
@@ -840,13 +877,6 @@ class limited_array {
 /**
  *  @brief An owning, allocator-aware array whose size is fixed once, at `try_resize`.
  *  @sa `limited_array` for bounded counts, `dynamic_padded_array` when each element wants its own line.
- *
- *  Deliberately not a `std::vector`: there is no capacity, no growth policy, and no exception. A
- *  `try_resize` either hands back a fully-constructed array or leaves an empty one, which is what
- *  lets a harvest fail without a `goto` unwinding three raw pointers by hand.
- *
- *  Elements are value-initialized and never reallocated, so a pointer taken into the array stays
- *  valid until the next `try_resize` - the topology relies on that to slice its core-id list.
  */
 template <typename value_type_, typename allocator_type_ = std::allocator<value_type_>>
 class dynamic_array {
@@ -861,8 +891,10 @@ class dynamic_array {
     allocator_t allocator_ {};
     /** @brief Pointer to the heap block, or nullptr when empty. */
     value_t *data_ {nullptr};
-    /** @brief Number of elements in the block, fixed at the last `try_resize`. */
+    /** @brief Number of live elements. */
     std::size_t size_ {0};
+    /** @brief Allocated element slots; `>= size_`, doubled by `try_push_back` when full. */
+    std::size_t capacity_ {0};
 
     void destroy_all() noexcept {
         if constexpr (!std::is_trivially_destructible_v<value_t>)
@@ -877,7 +909,7 @@ class dynamic_array {
 
     dynamic_array(dynamic_array &&other) noexcept
         : allocator_(std::move(other.allocator_)), data_(std::exchange(other.data_, nullptr)),
-          size_(std::exchange(other.size_, 0)) {}
+          size_(std::exchange(other.size_, 0)), capacity_(std::exchange(other.capacity_, 0)) {}
 
     dynamic_array &operator=(dynamic_array &&other) noexcept {
         if (this != &other) {
@@ -885,6 +917,7 @@ class dynamic_array {
             allocator_ = std::move(other.allocator_);
             data_ = std::exchange(other.data_, nullptr);
             size_ = std::exchange(other.size_, 0);
+            capacity_ = std::exchange(other.capacity_, 0);
         }
         return *this;
     }
@@ -896,13 +929,15 @@ class dynamic_array {
     void reset() noexcept {
         if (data_) {
             destroy_all();
-            allocator_.deallocate(data_, size_);
+            allocator_.deallocate(data_, capacity_);
             data_ = nullptr;
         }
         size_ = 0;
+        capacity_ = 0;
     }
 
-    /** @retval false on allocation failure, leaving the array empty rather than half-built. */
+    /** @brief Reallocates to exactly @p new_size value-initialized elements, discarding any prior contents.
+     *  @retval false on allocation failure, leaving the array empty rather than half-built. */
     bool try_resize(std::size_t const new_size) noexcept {
         reset();
         if (new_size == 0) return true;
@@ -916,8 +951,42 @@ class dynamic_array {
             for (std::size_t i = 0; i < new_size; ++i) ::new (static_cast<void *>(fresh + i)) value_t();
         data_ = fresh;
         size_ = new_size;
+        capacity_ = new_size;
         return true;
     }
+
+    /** @brief Grows capacity to at least @p new_capacity, preserving the live elements. */
+    bool try_reserve(std::size_t const new_capacity) noexcept {
+        static_assert(std::is_trivially_copyable_v<value_t> || std::is_nothrow_move_constructible_v<value_t>,
+                      "try_reserve moves elements; the value type must be trivially copyable or nothrow-movable");
+        if (new_capacity <= capacity_) return true;
+        value_t *fresh = allocator_.allocate(new_capacity);
+        if (!fresh) return false; // ! Allocation failed; the array is untouched
+        if (size_ != 0) {
+            if constexpr (std::is_trivially_copyable_v<value_t>) { std::memcpy(fresh, data_, size_ * sizeof(value_t)); }
+            else
+                for (std::size_t i = 0; i < size_; ++i) {
+                    ::new (static_cast<void *>(fresh + i)) value_t(std::move(data_[i]));
+                    data_[i].~value_t();
+                }
+        }
+        if (data_) allocator_.deallocate(data_, capacity_);
+        data_ = fresh;
+        capacity_ = new_capacity;
+        return true;
+    }
+
+    /** @brief Appends @p value, doubling capacity when full. @retval false on allocation failure. */
+    bool try_push_back(value_t const &value) noexcept {
+        static_assert(std::is_nothrow_copy_constructible_v<value_t>,
+                      "try_push_back copies the value; the value type must be nothrow-copy-constructible");
+        if (size_ == capacity_ && !try_reserve(capacity_ ? capacity_ * 2 : 4)) return false;
+        ::new (static_cast<void *>(data_ + size_)) value_t(value);
+        ++size_;
+        return true;
+    }
+
+    std::size_t capacity() const noexcept { return capacity_; }
 
     std::size_t size() const noexcept { return size_; }
     bool empty() const noexcept { return size_ == 0; }
@@ -1237,6 +1306,7 @@ struct indexed_split {
 };
 
 using indexed_split_t = indexed_split<>;
+
 /**
  *  @brief Pre-C++20 sentinel type for iterators.
  *  @see   https://en.cppreference.com/w/cpp/iterator/default_sentinel.html
@@ -1644,6 +1714,68 @@ constexpr bool can_be_for_slice_callback() noexcept {
 #define FU_DETECT_CONCEPTS_ 0
 #define FU_REQUIRES_(condition)
 #endif // FU_DETECT_CPP_20_
+
+/**
+ *  @brief A zero-setup thread-pool that runs every task on the calling thread.
+ *
+ *  A drop-in @b serial executor - it satisfies `is_pool` and `is_unsafe_pool` and offers the same
+ *  scheduling surface as `flat_pool` - `for_threads`, `for_n`, `for_n_dynamic`, `for_slices` - but with
+ *  one thread on one compute domain, no `try_spawn`, and no allocation. `unsafe_for_threads` runs the
+ *  fork synchronously as thread 0; everything else composes through `broadcast_join` exactly as the real
+ *  pools do. Useful as a serial baseline and as the default executor for the domain-aware containers.
+ */
+struct dummy_pool_t {
+    using index_t = std::size_t;
+    using thread_index_t = index_t;
+    using compute_domain_index_t = index_t;
+    using epoch_index_t = index_t;
+    using generation_t = epoch_index_t;
+    using prong_t = prong<index_t>;
+    using indexed_split_t = indexed_split<index_t>;
+
+    thread_index_t threads_count() const noexcept { return 1; }
+    caller_exclusivity_t caller_exclusivity() const noexcept { return caller_inclusive_k; }
+    index_t compute_domains_count() const noexcept { return 1; }
+    thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain) const noexcept { return 1; }
+    index_t thread_compute_domain(FU_MAYBE_UNUSED_ thread_index_t thread) const noexcept { return 0; }
+    thread_index_t thread_local_index(FU_MAYBE_UNUSED_ thread_index_t thread,
+                                      FU_MAYBE_UNUSED_ index_t compute_domain) const noexcept {
+        return 0;
+    }
+
+    template <typename fork_type_>
+    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
+        fork(thread_index_t {0});
+        return 1; // ! Tokens are always odd; the work already ran
+    }
+    void unsafe_join(FU_MAYBE_UNUSED_ generation_t generation) noexcept {}
+    void unsafe_join() noexcept {}
+    bool is_complete(FU_MAYBE_UNUSED_ generation_t generation) const noexcept { return true; }
+
+    template <typename fork_type_ = dummy_lambda_t>
+    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    broadcast_join<dummy_pool_t, fork_type_> for_threads(fork_type_ &&fork) noexcept {
+        return {*this, std::forward<fork_type_>(fork)};
+    }
+    template <typename fork_type_ = dummy_lambda_t>
+    FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
+    broadcast_join<dummy_pool_t, invoke_for_slices<fork_type_, index_t>> for_slices(index_t n,
+                                                                                    fork_type_ &&fork) noexcept {
+        return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
+    }
+    template <typename fork_type_ = dummy_lambda_t>
+    FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
+    broadcast_join<dummy_pool_t, invoke_for_n<fork_type_, index_t>> for_n(index_t n, fork_type_ &&fork) noexcept {
+        return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
+    }
+    template <typename fork_type_ = dummy_lambda_t>
+    FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
+    broadcast_join<dummy_pool_t, invoke_for_n<fork_type_, index_t>> for_n_dynamic(index_t n,
+                                                                                  fork_type_ &&fork) noexcept {
+        return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
+    }
+};
 
 } // namespace forkunion
 } // namespace ashvardanian

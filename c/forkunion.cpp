@@ -495,9 +495,9 @@ fu_memory_domain_id_t fu_memory_domain_id_at_index(fu_topology_t topology, size_
         .memory_domain_id;
 }
 
-void *fu_allocate_at_least_in(fu_memory_domain_id_t memory_domain_id, size_t minimum_bytes, size_t *allocated_bytes,
-                              size_t *bytes_per_page) {
-    fu::memory_domain_allocator_t allocator(static_cast<fu::memory_domain_id_t>(memory_domain_id));
+void *fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t minimum_bytes,
+                                        size_t *allocated_bytes, size_t *bytes_per_page) {
+    fu::domain_allocator_t allocator(static_cast<fu::memory_domain_id_t>(memory_domain_id));
     auto result = allocator.allocate_at_least(minimum_bytes);
     if (!result) return nullptr;
     *allocated_bytes = result.count;
@@ -505,14 +505,34 @@ void *fu_allocate_at_least_in(fu_memory_domain_id_t memory_domain_id, size_t min
     return result.ptr;
 }
 
-void *fu_allocate_in(fu_memory_domain_id_t memory_domain_id, size_t bytes) {
-    fu::memory_domain_allocator_t allocator(static_cast<fu::memory_domain_id_t>(memory_domain_id));
+void *fu_allocate_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t bytes) {
+    fu::domain_allocator_t allocator(static_cast<fu::memory_domain_id_t>(memory_domain_id));
     return allocator.allocate(bytes);
 }
 
-void fu_free_in(fu_memory_domain_id_t memory_domain_id, void *pointer, FU_MAYBE_UNUSED_ size_t bytes) {
-    fu::memory_domain_allocator_t allocator(static_cast<fu::memory_domain_id_t>(memory_domain_id));
+void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer, FU_MAYBE_UNUSED_ size_t bytes) {
+    fu::domain_allocator_t allocator(static_cast<fu::memory_domain_id_t>(memory_domain_id));
     allocator.deallocate(reinterpret_cast<char *>(pointer), bytes);
+}
+
+void *fu_allocate_symmetric(fu_topology_t topology, size_t bytes_per_domain, size_t *stride_bytes,
+                            size_t *memory_domains_count, size_t *total_bytes, size_t *bytes_per_page) {
+    if (!topology) return nullptr;
+    fu::symmetric_memory_allocator_t allocator(*upcast_topology(topology));
+    auto result = allocator.allocate_at_least(bytes_per_domain);
+    if (!result) return nullptr;
+    if (stride_bytes) *stride_bytes = result.stride_bytes;
+    if (memory_domains_count) *memory_domains_count = result.domains;
+    if (total_bytes) *total_bytes = result.bytes;
+    if (bytes_per_page) *bytes_per_page = result.bytes_per_page();
+    return result.ptr;
+}
+
+void fu_free_symmetric(void *base, size_t total_bytes) {
+    fu::symmetric_memory_allocator_t::allocation_type allocation {};
+    allocation.ptr = reinterpret_cast<char *>(base);
+    allocation.bytes = total_bytes;
+    fu::symmetric_memory_allocator_t {}.deallocate(allocation);
 }
 
 #pragma endregion Memory
