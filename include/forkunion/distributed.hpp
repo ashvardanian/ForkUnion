@@ -209,8 +209,10 @@ struct colocated_pool {
     explicit colocated_pool(char const *name = "forkunion") noexcept {
         // Accept NULL or empty names by falling back to a sensible default
         char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
-        std::strncpy(name_, effective_name, sizeof(name_) - 1);
-        name_[sizeof(name_) - 1] = '\0';
+        std::size_t const source_length = std::strlen(effective_name);
+        std::size_t const name_length = source_length < sizeof(name_) ? source_length : sizeof(name_) - 1;
+        std::memcpy(name_, effective_name, name_length);
+        name_[name_length] = '\0';
     }
 
     ~colocated_pool() noexcept { terminate(); }
@@ -1132,8 +1134,10 @@ struct distributed_pool {
     explicit distributed_pool(char const *name) noexcept {
         // Accept null or empty names by falling back to a sensible default
         char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
-        std::strncpy(name_, effective_name, sizeof(name_) - 1);
-        name_[sizeof(name_) - 1] = '\0';
+        std::size_t const source_length = std::strlen(effective_name);
+        std::size_t const name_length = source_length < sizeof(name_) ? source_length : sizeof(name_) - 1;
+        std::memcpy(name_, effective_name, name_length);
+        name_[name_length] = '\0';
     }
 
     ~distributed_pool() noexcept { terminate(); }

@@ -153,6 +153,7 @@ result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_ty
     case fu::pool_kind_t::flat_k: return visit_kind<fu::pool_kind_t::flat_k>(visitor, variants);
     case fu::pool_kind_t::unknown_k: return empty;
     }
+    return empty; // An out-of-enum `kind_` is undefined behavior upstream; stay total for `-Wreturn-type`.
 }
 
 /** @brief Runs @p visitor on the live pool for its side effects; a no-op on empty storage. */
