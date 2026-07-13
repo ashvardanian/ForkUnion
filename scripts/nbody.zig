@@ -1,10 +1,10 @@
 //! N-Body simulation benchmark comparing different parallelism libraries.
 //!
 //! Compares the synchronization overhead of different thread-pool implementations:
-//! - forkunion_static: static work division (N tasks pre-divided into thread slices)
-//! - forkunion_dynamic: dynamic work-stealing (ForkUnion's work-stealing scheduler)
-//! - forkunion_replicated_static: static, with body positions replicated into each domain's local memory
-//! - forkunion_replicated_dynamic: work-stealing, over the same per-domain replicas
+//! - forkunion_static_shared: static work division (N tasks pre-divided into thread slices)
+//! - forkunion_dynamic_shared: dynamic work-stealing (ForkUnion's work-stealing scheduler)
+//! - forkunion_static_replicated: static, with body positions replicated into each domain's local memory
+//! - forkunion_dynamic_replicated: work-stealing, over the same per-domain replicas
 //! - std_threads: static work division (one raw std.Thread per slice, joined per pass)
 //! - libxev: dynamic lock-free queue (Mitchell Hashimoto's lock-free thread pool)
 //!
@@ -14,15 +14,15 @@
 //! Environment variables:
 //! - NBODY_COUNT: number of bodies (default: number of threads)
 //! - NBODY_ITERATIONS: number of iterations (default: 1000)
-//! - NBODY_BACKEND: one of the backend names above (default: forkunion_static)
+//! - NBODY_BACKEND: one of the backend names above (default: forkunion_static_shared)
 //! - NBODY_THREADS: number of threads (default: CPU count)
 //!
 //! Build and run from the scripts/ directory:
 //! ```sh
 //! cd scripts
 //! zig build -Doptimize=ReleaseFast
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static ./zig-out/bin/nbody
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_replicated_static ./zig-out/bin/nbody
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static_shared ./zig-out/bin/nbody
+//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static_replicated ./zig-out/bin/nbody
 //! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=libxev ./zig-out/bin/nbody
 //! ```
 
@@ -120,55 +120,48 @@ inline fn applyForce(b: *Body, f: *const Vector3) void {
     b.position.z += b.velocity.z * DT;
 }
 
+// Compile-time axes - Zig takes real enums as comptime parameters. nbody is all-to-all, so there is
+// no decomposition axis - only schedule and placement.
+const Schedule = enum { static, dynamic };
+const Placement = enum { shared, replicated };
+
 // ForkUnion kernels
 
+/// Everything either pass of a ForkUnion backend reads or writes; the comptime placement elides the rest.
+const WorkContext = struct {
+    bodies_ptr: [*]Body,
+    forces_ptr: [*]Vector3,
+    topology: fu.Topology,
+    replicas: ?*fu.ReplicatedArray(Body),
+    n: usize,
+};
+
+/// The all-to-all sweep: every body reads every other, from the shared array or its node-local replica.
+fn forceKernel(comptime placement: Placement) fn (fu.Prong, WorkContext) void {
+    return struct {
+        fn calc(prong: fu.Prong, work: WorkContext) void {
+            var acc = Vector3{};
+            if (placement == .replicated) {
+                const local = work.replicas.?.onMemoryDomain(work.topology.localMemoryOf(prong.compute_domain_index));
+                const bi = &local[prong.task_index];
+                for (0..work.n) |j| acc.addAssign(gravitationalForce(bi, &local[j]));
+            } else {
+                const bi = &work.bodies_ptr[prong.task_index];
+                for (0..work.n) |j| acc.addAssign(gravitationalForce(bi, &work.bodies_ptr[j]));
+            }
+            work.forces_ptr[prong.task_index] = acc;
+        }
+    }.calc;
+}
+
 /// The second pass every ForkUnion backend shares: integrate each body by its accumulated force.
-fn applyPass(pool: *const fu.Pool, bodies: []Body, forces: []Vector3) void {
-    const ApplyContext = struct {
-        bodies_ptr: [*]Body,
-        forces_ptr: [*]const Vector3,
-    };
-    pool.forN(bodies.len, struct {
-        fn apply(prong: fu.Prong, context: ApplyContext) void {
-            applyForce(&context.bodies_ptr[prong.task_index], &context.forces_ptr[prong.task_index]);
-        }
-    }.apply, ApplyContext{ .bodies_ptr = bodies.ptr, .forces_ptr = forces.ptr });
+fn applyKernel(prong: fu.Prong, work: WorkContext) void {
+    applyForce(&work.bodies_ptr[prong.task_index], &work.forces_ptr[prong.task_index]);
 }
 
-fn iterationForkUnionStatic(pool: *const fu.Pool, bodies: []Body, forces: []Vector3) void {
-    const n = bodies.len;
-    const CalcContext = struct {
-        bodies_ptr: [*]const Body,
-        forces_ptr: [*]Vector3,
-        n: usize,
-    };
-    pool.forN(n, struct {
-        fn calc(prong: fu.Prong, context: CalcContext) void {
-            const bi = &context.bodies_ptr[prong.task_index];
-            var acc = Vector3{};
-            for (0..context.n) |j| acc.addAssign(gravitationalForce(bi, &context.bodies_ptr[j]));
-            context.forces_ptr[prong.task_index] = acc;
-        }
-    }.calc, CalcContext{ .bodies_ptr = bodies.ptr, .forces_ptr = forces.ptr, .n = n });
-    applyPass(pool, bodies, forces);
-}
-
-fn iterationForkUnionDynamic(pool: *const fu.Pool, bodies: []Body, forces: []Vector3) void {
-    const n = bodies.len;
-    const CalcContext = struct {
-        bodies_ptr: [*]const Body,
-        forces_ptr: [*]Vector3,
-        n: usize,
-    };
-    pool.forNDynamic(n, struct {
-        fn calc(prong: fu.Prong, context: CalcContext) void {
-            const bi = &context.bodies_ptr[prong.task_index];
-            var acc = Vector3{};
-            for (0..context.n) |j| acc.addAssign(gravitationalForce(bi, &context.bodies_ptr[j]));
-            context.forces_ptr[prong.task_index] = acc;
-        }
-    }.calc, CalcContext{ .bodies_ptr = bodies.ptr, .forces_ptr = forces.ptr, .n = n });
-    applyPass(pool, bodies, forces);
+/// Dispatches `kernel` over `n` tasks on the chosen schedule: pre-divided static, or work-stolen dynamic.
+fn forNScheduled(comptime schedule: Schedule, pool: *const fu.Pool, n: usize, comptime kernel: anytype, work: WorkContext) void {
+    if (schedule == .static) pool.forN(n, kernel, work) else pool.forNDynamic(n, kernel, work);
 }
 
 // ForkUnion replicated kernels
@@ -214,46 +207,30 @@ fn refreshReplicas(pool: *const fu.Pool, topology: fu.Topology, bodies: []const 
     }.refresh, RefreshContext{ .pool = pool, .topology = topology, .bodies = bodies.ptr, .replicas = replicas, .n = bodies.len });
 }
 
-fn iterationForkUnionReplicatedStatic(pool: *const fu.Pool, topology: fu.Topology, bodies: []Body, forces: []Vector3, replicas: *fu.ReplicatedArray(Body)) void {
-    refreshReplicas(pool, topology, bodies, replicas);
+/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion backends
+/// are its instantiations. The all-to-all sweep reads either the shared array or each thread's node-local
+/// replica; the apply pass then integrates the canonical bodies.
+fn iterationForkUnion(
+    comptime schedule: Schedule,
+    comptime placement: Placement,
+    pool: *const fu.Pool,
+    topology: fu.Topology,
+    bodies: []Body,
+    forces: []Vector3,
+    replicas: ?*fu.ReplicatedArray(Body),
+) void {
     const n = bodies.len;
-    const CalcContext = struct {
-        topology: fu.Topology,
-        replicas: *fu.ReplicatedArray(Body),
-        forces_ptr: [*]Vector3,
-        n: usize,
-    };
-    pool.forN(n, struct {
-        fn calc(prong: fu.Prong, context: CalcContext) void {
-            const local_bodies = context.replicas.onMemoryDomain(context.topology.localMemoryOf(prong.compute_domain_index));
-            const bi = &local_bodies[prong.task_index];
-            var acc = Vector3{};
-            for (0..context.n) |j| acc.addAssign(gravitationalForce(bi, &local_bodies[j]));
-            context.forces_ptr[prong.task_index] = acc;
-        }
-    }.calc, CalcContext{ .topology = topology, .replicas = replicas, .forces_ptr = forces.ptr, .n = n });
-    applyPass(pool, bodies, forces);
-}
+    if (placement == .replicated) refreshReplicas(pool, topology, bodies, replicas.?);
 
-fn iterationForkUnionReplicatedDynamic(pool: *const fu.Pool, topology: fu.Topology, bodies: []Body, forces: []Vector3, replicas: *fu.ReplicatedArray(Body)) void {
-    refreshReplicas(pool, topology, bodies, replicas);
-    const n = bodies.len;
-    const CalcContext = struct {
-        topology: fu.Topology,
-        replicas: *fu.ReplicatedArray(Body),
-        forces_ptr: [*]Vector3,
-        n: usize,
+    const work = WorkContext{
+        .bodies_ptr = bodies.ptr,
+        .forces_ptr = forces.ptr,
+        .topology = topology,
+        .replicas = replicas,
+        .n = n,
     };
-    pool.forNDynamic(n, struct {
-        fn calc(prong: fu.Prong, context: CalcContext) void {
-            const local_bodies = context.replicas.onMemoryDomain(context.topology.localMemoryOf(prong.compute_domain_index));
-            const bi = &local_bodies[prong.task_index];
-            var acc = Vector3{};
-            for (0..context.n) |j| acc.addAssign(gravitationalForce(bi, &local_bodies[j]));
-            context.forces_ptr[prong.task_index] = acc;
-        }
-    }.calc, CalcContext{ .topology = topology, .replicas = replicas, .forces_ptr = forces.ptr, .n = n });
-    applyPass(pool, bodies, forces);
+    forNScheduled(schedule, pool, n, forceKernel(placement), work);
+    pool.forN(n, applyKernel, work);
 }
 
 // std.Thread backend (static work division)
@@ -401,20 +378,12 @@ const Backend = struct {
     engine: Engine,
 };
 
-fn runForkUnionStatic(context: *Context) void {
-    iterationForkUnionStatic(context.pool.?, context.bodies, context.forces);
-}
-
-fn runForkUnionDynamic(context: *Context) void {
-    iterationForkUnionDynamic(context.pool.?, context.bodies, context.forces);
-}
-
-fn runForkUnionReplicatedStatic(context: *Context) void {
-    iterationForkUnionReplicatedStatic(context.pool.?, context.topology, context.bodies, context.forces, context.replicas.?);
-}
-
-fn runForkUnionReplicatedDynamic(context: *Context) void {
-    iterationForkUnionReplicatedDynamic(context.pool.?, context.topology, context.bodies, context.forces, context.replicas.?);
+fn runForkUnion(comptime schedule: Schedule, comptime placement: Placement) fn (*Context) void {
+    return struct {
+        fn call(context: *Context) void {
+            iterationForkUnion(schedule, placement, context.pool.?, context.topology, context.bodies, context.forces, context.replicas);
+        }
+    }.call;
 }
 
 fn runStdThreads(context: *Context) void {
@@ -428,10 +397,10 @@ fn runLibxev(context: *Context) void {
 }
 
 const backends = [_]Backend{
-    .{ .name = "forkunion_static", .run = runForkUnionStatic, .engine = .forkunion },
-    .{ .name = "forkunion_dynamic", .run = runForkUnionDynamic, .engine = .forkunion },
-    .{ .name = "forkunion_replicated_static", .run = runForkUnionReplicatedStatic, .engine = .forkunion_replicated },
-    .{ .name = "forkunion_replicated_dynamic", .run = runForkUnionReplicatedDynamic, .engine = .forkunion_replicated },
+    .{ .name = "forkunion_static_shared", .run = runForkUnion(.static, .shared), .engine = .forkunion },
+    .{ .name = "forkunion_dynamic_shared", .run = runForkUnion(.dynamic, .shared), .engine = .forkunion },
+    .{ .name = "forkunion_static_replicated", .run = runForkUnion(.static, .replicated), .engine = .forkunion_replicated },
+    .{ .name = "forkunion_dynamic_replicated", .run = runForkUnion(.dynamic, .replicated), .engine = .forkunion_replicated },
     .{ .name = "std_threads", .run = runStdThreads, .engine = .std_threads },
     .{ .name = "libxev", .run = runLibxev, .engine = .libxev },
 };
@@ -453,7 +422,7 @@ pub fn main() !void {
     var n_bodies = envUsize("NBODY_COUNT", 0);
     if (n_bodies == 0) n_bodies = n_threads;
 
-    const backend = envString("NBODY_BACKEND", "forkunion_static");
+    const backend = envString("NBODY_BACKEND", "forkunion_static_shared");
 
     const bodies = try allocator.alloc(Body, n_bodies);
     defer allocator.free(bodies);

@@ -8,32 +8,33 @@
 //! Crucially, the hubs are adjacent. R-MAT keeps recursing into the same quadrant, so the high-degree
 //! vertices cluster at low indices, and a static split hands one thread nearly all of them.
 //!
-//! The obvious decomposition is one task per vertex, which is what `vertex_centric_static` and `vertex_centric_dynamic`
-//! do. `vertex_centric_static` is hopeless: the slice holding the hubs decides the makespan. A GPU flattens the
-//! adjacency into a tape of equally-sized work items - one per `u < v` edge - and hands each thread a
-//! contiguous run. Balancing the item count still sinks the slice that owns the hubs, so `edge_centric`
-//! weighs each item by `degree(u) + degree(v)`, prefix-sums the weights, and cuts the cost axis into
-//! equal parts - a static dispatch that beats a stealing one.
+//! The obvious decomposition is one task per vertex, which is what the vertex-centric backends do. Static
+//! is hopeless: the slice holding the hubs decides the makespan. A GPU flattens the adjacency into a tape
+//! of equally-sized work items - one per `u < v` edge - and hands each thread a contiguous run. Balancing
+//! the item count still sinks the slice that owns the hubs, so the edge-centric static backends weigh each
+//! item by `degree(u) + degree(v)`, prefix-sum the weights, and cut the cost axis into equal parts - a
+//! static dispatch that beats a stealing one.
 //!
-//! The CSR is read-only once built, so `edge_centric_replicated` gives every memory domain its own
-//! replica - a `ReplicatedArray` per CSR array - and no thread ever reaches across the interconnect for
-//! a neighbour list.
+//! The CSR is read-only once built, so the `_replicated` backends give every memory domain its own replica
+//! - a `ReplicatedArray` per CSR array - and no thread ever reaches across the interconnect for a
+//! neighbour list.
 //!
 //! To control the script, several environment variables are used:
 //!
 //! - `TRIANGLES_SCALE` - the graph has `2^scale` vertices - default 18.
 //! - `TRIANGLES_EDGE_FACTOR` - edges generated per vertex, before deduplication - default 16.
-//! - `TRIANGLES_BACKEND` - backend to use - default `forkunion_vertex_centric_static`.
+//! - `TRIANGLES_BACKEND` - backend to use - default `forkunion_vertex_centric_static_shared`.
 //! - `TRIANGLES_THREADS` - number of threads to use - default all hardware threads.
 //! - `TRIANGLES_ITERATIONS` - repeat the count this many times, reporting the per-pass time - default 1.
 //! - `TRIANGLES_CHECK` - also count serially, and fail unless the totals agree.
 //!
-//! The backends include: `forkunion_vertex_centric_static`, `forkunion_vertex_centric_dynamic`, `forkunion_edge_centric`,
-//! `forkunion_edge_centric_replicated`, `rayon_static`, and `rayon_dynamic`. To compile and run:
+//! The ForkUnion backends are the eight cells of
+//! `forkunion_{vertex_centric,edge_centric}_{static,dynamic}_{shared,replicated}`; the baselines are
+//! `rayon_static` and `rayon_dynamic`. To compile and run:
 //!
 //! ```sh
 //! cargo build --example triangles --release
-//! time TRIANGLES_SCALE=20 TRIANGLES_BACKEND=forkunion_edge_centric target/release/examples/triangles
+//! time TRIANGLES_SCALE=20 TRIANGLES_BACKEND=forkunion_edge_centric_static_shared target/release/examples/triangles
 //! ```
 use std::env;
 use std::error::Error;
@@ -335,84 +336,180 @@ struct Ctx<'a> {
     threads: usize,
 }
 
-/// One task per vertex, split statically - the naive baseline the hubs sink.
-fn run_vertex_centric_static(c: &mut Ctx) {
-    let graph = c.graph;
-    let counters = SyncMutPtr::new(c.counters.as_mut_ptr());
-    let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    fu::for_n(pool, graph.vertices() as usize, move |prong| {
-        let triangles = count_triangles_at_vertex(&graph, prong.task_index as u32);
-        // SAFETY: `prong.thread_index` is unique per thread and tasks on one thread run in order.
-        unsafe {
-            (*counters.get(prong.thread_index)).0 += triangles;
-        }
-    });
+// Compile-time axes as marker types - stable Rust cannot take a custom enum as a const-generic param.
+trait Decomposition {
+    const VERTEX_CENTRIC: bool;
+}
+struct VertexCentric;
+struct EdgeCentric;
+impl Decomposition for VertexCentric {
+    const VERTEX_CENTRIC: bool = true;
+}
+impl Decomposition for EdgeCentric {
+    const VERTEX_CENTRIC: bool = false;
+}
+trait Schedule {
+    const STATIC_SCHEDULE: bool;
+}
+struct Static;
+struct Dynamic;
+impl Schedule for Static {
+    const STATIC_SCHEDULE: bool = true;
+}
+impl Schedule for Dynamic {
+    const STATIC_SCHEDULE: bool = false;
+}
+trait Placement {
+    const REPLICATED: bool;
+}
+struct Shared;
+struct Replicated;
+impl Placement for Shared {
+    const REPLICATED: bool = false;
+}
+impl Placement for Replicated {
+    const REPLICATED: bool = true;
 }
 
-/// One task per vertex, work-stolen - stealing recovers the balance a static split loses.
-fn run_vertex_centric_dynamic(c: &mut Ctx) {
-    let graph = c.graph;
-    let counters = SyncMutPtr::new(c.counters.as_mut_ptr());
-    let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    fu::for_n_dynamic(pool, graph.vertices() as usize, move |prong| {
-        let triangles = count_triangles_at_vertex(&graph, prong.task_index as u32);
-        // SAFETY: as in the static variant above.
-        unsafe {
-            (*counters.get(prong.thread_index)).0 += triangles;
-        }
-    });
+/// The read-only inputs one counting pass hands to every task, small and `Copy` so it moves into a task
+/// closure for free. `graph` is the shared host view; `replicas` and `topology` are present only for the
+/// replicated placements, to resolve a compute domain to its node-local view.
+#[derive(Copy, Clone)]
+struct WorkCtx<'a> {
+    graph: CsrView<'a>,
+    replicas: Option<&'a ReplicatedCsr>,
+    topology: Option<&'a fu::Topology>,
 }
 
-/// Cut the cost axis into equal slices, merge-path each cut onto the item axis - atomics-free.
-fn run_edge_centric(c: &mut Ctx) {
-    let graph = c.graph;
-    let threads = c.threads;
+/// The CSR a thread on `compute_domain` reads: the shared host view, or its node-local replica.
+#[inline]
+fn graph_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> CsrView<'a> {
+    if P::REPLICATED {
+        work.replicas.expect("replicas").on_memory_domain(
+            work.topology
+                .expect("topology")
+                .local_memory_of(fu::ComputeDomain(compute_domain)),
+        )
+    } else {
+        work.graph
+    }
+}
+
+/// Counts every triangle whose smallest vertex is this task's vertex.
+#[inline]
+fn count_at_vertex_kernel<P: Placement>(work: WorkCtx, prong: fu::Prong) -> u64 {
+    let graph = graph_at::<P>(work, prong.compute_domain_index);
+    count_triangles_at_vertex(&graph, prong.task_index as u32)
+}
+
+/// Counts every triangle on this task's single tape item, resolving its owner independently.
+#[inline]
+fn count_on_item_kernel<P: Placement>(work: WorkCtx, prong: fu::Prong) -> u64 {
+    let graph = graph_at::<P>(work, prong.compute_domain_index);
+    let item = prong.task_index as u64;
+    count_triangles_on_item(&graph, item, graph.owner_of(item))
+}
+
+/// Edge-centric static, replicated: nested balanced split of the cost axis - between compute domains,
+/// then their threads - so this thread walks the run of the tape its node owns.
+#[inline]
+fn count_slice_replicated_kernel<P: Placement>(
+    work: WorkCtx,
+    scope: &fu::Scope<'_>,
+    thread_index: usize,
+    compute_domain_index: usize,
+) -> u64 {
+    let graph = graph_at::<P>(work, compute_domain_index);
+    let domains = scope.compute_domains_count();
+    let threads_here = scope.threads_count_in(compute_domain_index);
+    let local_index = scope.locate_thread_in(thread_index, compute_domain_index);
     let total = graph.total_work() as usize;
-    let counters = SyncMutPtr::new(c.counters.as_mut_ptr());
-    let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    pool.broadcast(|thread_index, _compute_domain_index| {
-        let cost = fu::IndexedSplit::new(total, threads).get(thread_index);
-        let first = graph.item_at_work(cost.start as u64);
-        let last = graph.item_at_work(cost.end as u64);
-        let triangles = count_triangles_on_slice(&graph, first, last - first);
-        // SAFETY: `thread_index` is the unique global index, so each thread owns one counter.
-        unsafe {
-            (*counters.get(thread_index)).0 += triangles;
-        }
-    });
+    let domain_cost = fu::IndexedSplit::new(total, domains).get(compute_domain_index);
+    let thread_cost = fu::IndexedSplit::new(domain_cost.len(), threads_here).get(local_index);
+    let first = graph.item_at_work((domain_cost.start + thread_cost.start) as u64);
+    let last =
+        graph.item_at_work((domain_cost.start + thread_cost.start + thread_cost.len()) as u64);
+    count_triangles_on_slice(&graph, first, last - first)
 }
 
-/// `edge_centric` with the cost axis cut per compute domain, each thread reading its node's replica.
-fn run_edge_centric_replicated(c: &mut Ctx) {
-    let replicas = c.replicas.expect("replicas");
-    let topology = c.topology.expect("topology");
+/// Edge-centric static, shared: cut the whole cost axis into `threads` balanced runs and walk this
+/// thread's run of the tape.
+#[inline]
+fn count_slice_shared_kernel(work: WorkCtx, threads: usize, thread_index: usize) -> u64 {
+    let graph = work.graph;
+    let total = graph.total_work() as usize;
+    let cost = fu::IndexedSplit::new(total, threads).get(thread_index);
+    let first = graph.item_at_work(cost.start as u64);
+    let last = graph.item_at_work(cost.end as u64);
+    count_triangles_on_slice(&graph, first, last - first)
+}
+
+/// Sweeps an index-parallel pass over `[0, n)`, split statically or work-stolen per the schedule axis.
+#[inline]
+fn for_n<S: Schedule, F: Fn(fu::Prong) + Sync>(pool: &mut fu::ThreadPool, n: usize, body: F) {
+    if S::STATIC_SCHEDULE {
+        fu::for_n(pool, n, body);
+    } else {
+        fu::for_n_dynamic(pool, n, body);
+    }
+}
+
+/// One counting pass, specialized over the three axes; the eight ForkUnion backends are its instantiations.
+fn run<D: Decomposition, S: Schedule, P: Placement>(c: &mut Ctx) {
+    let threads = c.threads;
     let counters = SyncMutPtr::new(c.counters.as_mut_ptr());
+    let work = WorkCtx {
+        graph: c.graph,
+        replicas: if P::REPLICATED { c.replicas } else { None },
+        topology: if P::REPLICATED { c.topology } else { None },
+    };
     let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    pool.scope(|scope| {
-        scope.broadcast(|thread_index, compute_domain_index| {
-            let memory_domain = topology.local_memory_of(fu::ComputeDomain(compute_domain_index));
-            let replica = replicas.on_memory_domain(memory_domain);
 
-            let domains = scope.compute_domains_count();
-            let threads_here = scope.threads_count_in(compute_domain_index);
-            let local_index = scope.locate_thread_in(thread_index, compute_domain_index);
-            let total = replica.total_work() as usize;
-
-            // Two nested balanced splits of the cost axis: first between compute domains, then between
-            // the threads of this domain - reusing the same fair-chunk splitter as the count-axis loops.
-            let domain_cost = fu::IndexedSplit::new(total, domains).get(compute_domain_index);
-            let thread_cost =
-                fu::IndexedSplit::new(domain_cost.len(), threads_here).get(local_index);
-            let first = replica.item_at_work((domain_cost.start + thread_cost.start) as u64);
-            let last = replica
-                .item_at_work((domain_cost.start + thread_cost.start + thread_cost.len()) as u64);
-            let triangles = count_triangles_on_slice(&replica, first, last - first);
-            // SAFETY: `thread_index` is the unique global index, so each thread owns one counter.
+    if D::VERTEX_CENTRIC {
+        // One task per vertex: static sinks on the hubs, dynamic steals the balance back.
+        let vertices = work.graph.vertices() as usize;
+        for_n::<S, _>(pool, vertices, move |prong| {
+            // SAFETY: each thread owns a unique counter; tasks on one thread run in order.
             unsafe {
-                (*counters.get(thread_index)).0 += triangles;
+                (*counters.get(prong.thread_index)).0 += count_at_vertex_kernel::<P>(work, prong);
             }
         });
-    });
+    } else if S::STATIC_SCHEDULE {
+        // Edge-centric static: cut the cost axis into balanced runs so the layout balances, not a scheduler.
+        if P::REPLICATED {
+            pool.scope(|scope| {
+                scope.broadcast(|thread_index, compute_domain_index| {
+                    let triangles = count_slice_replicated_kernel::<P>(
+                        work,
+                        scope,
+                        thread_index,
+                        compute_domain_index,
+                    );
+                    // SAFETY: `thread_index` is the unique global index, so each thread owns one counter.
+                    unsafe {
+                        (*counters.get(thread_index)).0 += triangles;
+                    }
+                });
+            });
+        } else {
+            pool.broadcast(|thread_index, _compute_domain_index| {
+                let triangles = count_slice_shared_kernel(work, threads, thread_index);
+                // SAFETY: `thread_index` is the unique global index, so each thread owns one counter.
+                unsafe {
+                    (*counters.get(thread_index)).0 += triangles;
+                }
+            });
+        }
+    } else {
+        // Edge-centric dynamic: one tape item per task, work-stolen; each resolves its owner independently.
+        let tape_length = work.graph.tape_length() as usize;
+        for_n::<S, _>(pool, tape_length, move |prong| {
+            // SAFETY: each thread owns a unique counter.
+            unsafe {
+                (*counters.get(prong.thread_index)).0 += count_on_item_kernel::<P>(work, prong);
+            }
+        });
+    }
 }
 
 /// One contiguous vertex stripe per worker, no stealing - the Rayon baseline the hubs sink.
@@ -469,23 +566,43 @@ struct Backend {
 
 const BACKENDS: &[Backend] = &[
     Backend {
-        name: "forkunion_vertex_centric_static",
-        run: run_vertex_centric_static,
+        name: "forkunion_vertex_centric_static_shared",
+        run: run::<VertexCentric, Static, Shared>,
         engine: Engine::ForkUnion,
     },
     Backend {
-        name: "forkunion_vertex_centric_dynamic",
-        run: run_vertex_centric_dynamic,
+        name: "forkunion_vertex_centric_dynamic_shared",
+        run: run::<VertexCentric, Dynamic, Shared>,
         engine: Engine::ForkUnion,
     },
     Backend {
-        name: "forkunion_edge_centric",
-        run: run_edge_centric,
+        name: "forkunion_vertex_centric_static_replicated",
+        run: run::<VertexCentric, Static, Replicated>,
+        engine: Engine::ForkUnionReplicated,
+    },
+    Backend {
+        name: "forkunion_vertex_centric_dynamic_replicated",
+        run: run::<VertexCentric, Dynamic, Replicated>,
+        engine: Engine::ForkUnionReplicated,
+    },
+    Backend {
+        name: "forkunion_edge_centric_static_shared",
+        run: run::<EdgeCentric, Static, Shared>,
         engine: Engine::ForkUnion,
     },
     Backend {
-        name: "forkunion_edge_centric_replicated",
-        run: run_edge_centric_replicated,
+        name: "forkunion_edge_centric_dynamic_shared",
+        run: run::<EdgeCentric, Dynamic, Shared>,
+        engine: Engine::ForkUnion,
+    },
+    Backend {
+        name: "forkunion_edge_centric_static_replicated",
+        run: run::<EdgeCentric, Static, Replicated>,
+        engine: Engine::ForkUnionReplicated,
+    },
+    Backend {
+        name: "forkunion_edge_centric_dynamic_replicated",
+        run: run::<EdgeCentric, Dynamic, Replicated>,
         engine: Engine::ForkUnionReplicated,
     },
     Backend {
@@ -524,7 +641,10 @@ fn hardware_threads() -> usize {
 fn main() -> Result<(), Box<dyn Error>> {
     let scale = env_usize("TRIANGLES_SCALE", 18);
     let edge_factor = env_usize("TRIANGLES_EDGE_FACTOR", 16);
-    let backend = env_string("TRIANGLES_BACKEND", "forkunion_vertex_centric_static");
+    let backend = env_string(
+        "TRIANGLES_BACKEND",
+        "forkunion_vertex_centric_static_shared",
+    );
     let check = env_flag("TRIANGLES_CHECK");
     let mut threads = env_usize("TRIANGLES_THREADS", 0);
     let mut iterations = env_usize("TRIANGLES_ITERATIONS", 1);

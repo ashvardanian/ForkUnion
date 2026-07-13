@@ -6,27 +6,27 @@
 //! handful of hub vertices carry most of the arithmetic, and R-MAT clusters them at low indices, so a
 //! static split hands one thread nearly all of them.
 //!
-//! `forkunion_vertex_centric_static` and `forkunion_vertex_centric_dynamic` put one task per vertex;
-//! `forkunion_vertex_centric_static` is hopeless because the slice holding the hubs decides the makespan.
-//! `forkunion_edge_centric` flattens the adjacency into a tape of one item per `u < v` edge, weighs each
-//! item by `degree(u) + degree(v)`, prefix-sums the weights, and cuts the cost axis into equal parts - a
-//! static dispatch that beats a stealing one. `forkunion_edge_centric_replicated` gives every memory domain
-//! its own read-only replica of the CSR, so no thread reaches across the interconnect for a neighbour list.
+//! The vertex-centric backends put one task per vertex; static is hopeless because the slice holding the
+//! hubs decides the makespan. The edge-centric backends flatten the adjacency into a tape of one item per
+//! `u < v` edge, weigh each item by `degree(u) + degree(v)`, prefix-sum the weights, and cut the cost axis
+//! into equal parts - a static dispatch that beats a stealing one. The `_replicated` backends give every
+//! memory domain its own read-only replica of the CSR, so no thread reaches across the interconnect.
 //!
 //! Environment variables:
 //! - TRIANGLES_SCALE: the graph has `2^scale` vertices (default 18)
 //! - TRIANGLES_EDGE_FACTOR: edges generated per vertex, before deduplication (default 16)
-//! - TRIANGLES_BACKEND: one of the backend names below (default forkunion_vertex_centric_static)
+//! - TRIANGLES_BACKEND: one of the backend names below (default forkunion_vertex_centric_static_shared)
 //! - TRIANGLES_THREADS: number of threads (default all hardware threads)
 //! - TRIANGLES_ITERATIONS: repeat the count this many times, reporting the per-pass time (default 1)
 //! - TRIANGLES_CHECK: also count serially, and fail unless the totals agree
 //!
-//! The backends include: forkunion_vertex_centric_static, forkunion_vertex_centric_dynamic, forkunion_edge_centric,
-//! forkunion_edge_centric_replicated, std_threads. Build and run from the scripts/ directory:
+//! The ForkUnion backends are the eight cells of
+//! forkunion_{vertex_centric,edge_centric}_{static,dynamic}_{shared,replicated}; the baseline is
+//! std_threads. Build and run from the scripts/ directory:
 //! ```sh
 //! cd scripts
 //! zig build -Doptimize=ReleaseFast
-//! time TRIANGLES_SCALE=20 TRIANGLES_BACKEND=forkunion_edge_centric ./zig-out/bin/triangles
+//! time TRIANGLES_SCALE=20 TRIANGLES_BACKEND=forkunion_edge_centric_static_shared ./zig-out/bin/triangles
 //! ```
 
 const std = @import("std");
@@ -429,64 +429,112 @@ const Backend = struct {
     engine: Engine,
 };
 
-fn runVertexCentricStatic(context: *Context) void {
-    const WorkContext = struct { graph: CsrView, counters: [*]Counter };
-    context.pool.?.forN(context.graph.vertices(), struct {
-        fn calc(prong: fu.Prong, c: WorkContext) void {
-            // Each thread owns one counter; tasks on one thread run in order, so the add is race-free.
-            c.counters[prong.thread_index].value += countTrianglesAtVertex(&c.graph, @intCast(prong.task_index));
-        }
-    }.calc, WorkContext{ .graph = context.graph, .counters = context.counters.ptr });
+// Compile-time axes - Zig takes real enums as comptime parameters.
+const Decomposition = enum { vertex, edge };
+const Schedule = enum { static, dynamic };
+const Placement = enum { shared, replicated };
+
+/// Everything any cell's kernel might read; unused fields are cheap and the comptime axes elide them.
+const WorkContext = struct {
+    graph: CsrView,
+    replicas: ?*const ReplicatedCsr,
+    topology: fu.Topology,
+    pool: *const fu.Pool,
+    counters: [*]Counter,
+    threads: u64,
+
+    fn of(context: *Context) WorkContext {
+        return .{
+            .graph = context.graph,
+            .replicas = context.replicas,
+            .topology = context.topology,
+            .pool = context.pool.?,
+            .counters = context.counters.ptr,
+            .threads = @intCast(context.n_threads),
+        };
+    }
+};
+
+/// The CSR a thread on `compute_domain` reads: the shared host view, or its node-local replica.
+fn graphAt(comptime placement: Placement, work: WorkContext, compute_domain: usize) CsrView {
+    if (placement == .replicated)
+        return work.replicas.?.onMemoryDomain(work.topology.localMemoryOf(compute_domain));
+    return work.graph;
 }
 
-fn runVertexCentricDynamic(context: *Context) void {
-    const WorkContext = struct { graph: CsrView, counters: [*]Counter };
-    context.pool.?.forNDynamic(context.graph.vertices(), struct {
-        fn calc(prong: fu.Prong, c: WorkContext) void {
-            c.counters[prong.thread_index].value += countTrianglesAtVertex(&c.graph, @intCast(prong.task_index));
+/// Vertex-centric kernel: one task per vertex, tallying its triangles into the running thread's counter.
+fn vertexKernel(comptime placement: Placement) fn (fu.Prong, WorkContext) void {
+    return struct {
+        fn calc(prong: fu.Prong, work: WorkContext) void {
+            const graph = graphAt(placement, work, prong.compute_domain_index);
+            work.counters[prong.thread_index].value += countTrianglesAtVertex(&graph, @intCast(prong.task_index));
         }
-    }.calc, WorkContext{ .graph = context.graph, .counters = context.counters.ptr });
+    }.calc;
 }
 
-fn runEdgeCentric(context: *Context) void {
-    const WorkContext = struct { graph: CsrView, counters: [*]Counter, threads: u64 };
-    context.pool.?.forThreads(struct {
-        fn work(thread_index: usize, compute_domain_index: usize, c: WorkContext) void {
-            _ = compute_domain_index;
-            const total = c.graph.totalWork();
-            const thread: u64 = @intCast(thread_index);
-            const first = c.graph.itemAtWork(total * thread / c.threads);
-            const last = c.graph.itemAtWork(total * (thread + 1) / c.threads);
-            c.counters[thread_index].value += countTrianglesOnSlice(&c.graph, first, last - first);
+/// Edge-centric dynamic kernel: one tape item per task, work-stolen; each resolves its own owner.
+fn edgeItemKernel(comptime placement: Placement) fn (fu.Prong, WorkContext) void {
+    return struct {
+        fn calc(prong: fu.Prong, work: WorkContext) void {
+            const graph = graphAt(placement, work, prong.compute_domain_index);
+            const item: u64 = @intCast(prong.task_index);
+            work.counters[prong.thread_index].value += countTrianglesOnItem(&graph, item, graph.ownerOf(item));
         }
-    }.work, WorkContext{ .graph = context.graph, .counters = context.counters.ptr, .threads = @intCast(context.n_threads) });
+    }.calc;
 }
 
-fn runEdgeCentricReplicated(context: *Context) void {
-    const WorkContext = struct {
-        pool: *const fu.Pool,
-        topology: fu.Topology,
-        replicas: *const ReplicatedCsr,
-        counters: [*]Counter,
-    };
-    context.pool.?.forThreads(struct {
-        fn work(thread_index: usize, compute_domain_index: usize, c: WorkContext) void {
-            const memory_domain = c.topology.localMemoryOf(compute_domain_index);
-            const replica = c.replicas.onMemoryDomain(memory_domain);
-
-            const domains: u64 = @intCast(c.pool.compute_domains());
-            const threads_here: u64 = @intCast(c.pool.countThreadsIn(compute_domain_index));
-            const local_index: u64 = @intCast(c.pool.locateThreadIn(thread_index, compute_domain_index));
-            const domain: u64 = @intCast(compute_domain_index);
-            const total = replica.totalWork();
-            const domain_low = total * domain / domains;
-            const domain_high = total * (domain + 1) / domains;
-            const domain_work = domain_high - domain_low;
-            const first = replica.itemAtWork(domain_low + domain_work * local_index / threads_here);
-            const last = replica.itemAtWork(domain_low + domain_work * (local_index + 1) / threads_here);
-            c.counters[thread_index].value += countTrianglesOnSlice(&replica, first, last - first);
+/// Edge-centric static kernel: cut the cost axis into balanced runs; the layout balances, not a scheduler.
+fn edgeSliceKernel(comptime placement: Placement) fn (usize, usize, WorkContext) void {
+    return struct {
+        fn calc(thread_index: usize, compute_domain_index: usize, work: WorkContext) void {
+            const graph = graphAt(placement, work, compute_domain_index);
+            var first: u64 = undefined;
+            var last: u64 = undefined;
+            if (placement == .replicated) {
+                // Nested balanced split: between compute domains, then their threads.
+                const domains: u64 = @intCast(work.pool.compute_domains());
+                const threads_here: u64 = @intCast(work.pool.countThreadsIn(compute_domain_index));
+                const local_index: u64 = @intCast(work.pool.locateThreadIn(thread_index, compute_domain_index));
+                const domain: u64 = @intCast(compute_domain_index);
+                const total = graph.totalWork();
+                const domain_low = total * domain / domains;
+                const domain_high = total * (domain + 1) / domains;
+                const domain_work = domain_high - domain_low;
+                first = graph.itemAtWork(domain_low + domain_work * local_index / threads_here);
+                last = graph.itemAtWork(domain_low + domain_work * (local_index + 1) / threads_here);
+            } else {
+                const total = graph.totalWork();
+                const thread: u64 = @intCast(thread_index);
+                first = graph.itemAtWork(total * thread / work.threads);
+                last = graph.itemAtWork(total * (thread + 1) / work.threads);
+            }
+            work.counters[thread_index].value += countTrianglesOnSlice(&graph, first, last - first);
         }
-    }.work, WorkContext{ .pool = context.pool.?, .topology = context.topology, .replicas = context.replicas.?, .counters = context.counters.ptr });
+    }.calc;
+}
+
+/// Dispatches `kernel` over `n` tasks on the chosen schedule: pre-divided static, or work-stolen dynamic.
+fn forNScheduled(comptime schedule: Schedule, pool: *const fu.Pool, n: usize, comptime kernel: anytype, work: WorkContext) void {
+    if (schedule == .static) pool.forN(n, kernel, work) else pool.forNDynamic(n, kernel, work);
+}
+
+/// One counting pass, specialized over the three axes; the eight ForkUnion backends are its instantiations.
+fn run(comptime decomposition: Decomposition, comptime schedule: Schedule, comptime placement: Placement) fn (*Context) void {
+    return struct {
+        fn call(context: *Context) void {
+            const work = WorkContext.of(context);
+            switch (decomposition) {
+                // One task per vertex: static sinks on the hubs, dynamic steals the balance back.
+                .vertex => forNScheduled(schedule, context.pool.?, context.graph.vertices(), vertexKernel(placement), work),
+                .edge => if (schedule == .static)
+                    // The layout balances the cost axis, so a plain per-thread split beats a scheduler.
+                    context.pool.?.forThreads(edgeSliceKernel(placement), work)
+                else
+                    // One tape item per task, work-stolen; each resolves its owner.
+                    forNScheduled(.dynamic, context.pool.?, @intCast(context.graph.tapeLength()), edgeItemKernel(placement), work),
+            }
+        }
+    }.call;
 }
 
 fn runStdThreads(context: *Context) void {
@@ -495,10 +543,14 @@ fn runStdThreads(context: *Context) void {
 }
 
 const backends = [_]Backend{
-    .{ .name = "forkunion_vertex_centric_static", .run = runVertexCentricStatic, .engine = .forkunion },
-    .{ .name = "forkunion_vertex_centric_dynamic", .run = runVertexCentricDynamic, .engine = .forkunion },
-    .{ .name = "forkunion_edge_centric", .run = runEdgeCentric, .engine = .forkunion },
-    .{ .name = "forkunion_edge_centric_replicated", .run = runEdgeCentricReplicated, .engine = .forkunion_replicated },
+    .{ .name = "forkunion_vertex_centric_static_shared", .run = run(.vertex, .static, .shared), .engine = .forkunion },
+    .{ .name = "forkunion_vertex_centric_dynamic_shared", .run = run(.vertex, .dynamic, .shared), .engine = .forkunion },
+    .{ .name = "forkunion_vertex_centric_static_replicated", .run = run(.vertex, .static, .replicated), .engine = .forkunion_replicated },
+    .{ .name = "forkunion_vertex_centric_dynamic_replicated", .run = run(.vertex, .dynamic, .replicated), .engine = .forkunion_replicated },
+    .{ .name = "forkunion_edge_centric_static_shared", .run = run(.edge, .static, .shared), .engine = .forkunion },
+    .{ .name = "forkunion_edge_centric_dynamic_shared", .run = run(.edge, .dynamic, .shared), .engine = .forkunion },
+    .{ .name = "forkunion_edge_centric_static_replicated", .run = run(.edge, .static, .replicated), .engine = .forkunion_replicated },
+    .{ .name = "forkunion_edge_centric_dynamic_replicated", .run = run(.edge, .dynamic, .replicated), .engine = .forkunion_replicated },
     .{ .name = "std_threads", .run = runStdThreads, .engine = .std_threads },
 };
 
@@ -512,7 +564,7 @@ pub fn main() !void {
 
     const scale = envUsize("TRIANGLES_SCALE", 18);
     const edge_factor = envUsize("TRIANGLES_EDGE_FACTOR", 16);
-    const backend = envString("TRIANGLES_BACKEND", "forkunion_vertex_centric_static");
+    const backend = envString("TRIANGLES_BACKEND", "forkunion_vertex_centric_static_shared");
     const check = envFlag("TRIANGLES_CHECK");
     var n_threads = envUsize("TRIANGLES_THREADS", 0);
     var iterations = envUsize("TRIANGLES_ITERATIONS", 1);

@@ -29,33 +29,33 @@
  *  Balancing the item @b count is not enough, though: an item on a hub scans a longer adjacency, so
  *  `tape_slices` still sinks the slice that owns the hubs. The fix is to weigh each item by the work
  *  it will do - `degree(u) + degree(v)` - prefix-sum those weights, and cut the @b cost axis into
- *  equal parts. A binary search maps each cut back onto the item axis. That is what `edge_centric`
- *  does, and it is why a static dispatch can beat a stealing one here.
+ *  equal parts. A binary search maps each cut back onto the item axis. That is what the edge-centric
+ *  static backends do, and it is why a static dispatch can beat a stealing one here.
  *
  *  @section Memory
  *
  *  The CSR is read-only once built, so every memory domain gets its own replica - a `replicated_array`
  *  per CSR array, striped across the nodes by the symmetric allocator - and no thread ever reaches
- *  across the interconnect for a neighbour list. `edge_centric_replicated` cuts the cost axis between
+ *  across the interconnect for a neighbour list. `edge_centric_static_replicated` cuts the cost axis between
  *  compute domains, then between the threads of each, and reads only the local replica.
  *
  *  To control the script, several environment variables are used:
  *
  *  - `TRIANGLES_SCALE` - the graph has `2^scale` vertices - default 18.
  *  - `TRIANGLES_EDGE_FACTOR` - edges generated per vertex, before deduplication - default 16.
- *  - `TRIANGLES_BACKEND` - backend to use - default `forkunion_vertex_centric_static`.
+ *  - `TRIANGLES_BACKEND` - backend to use - default `forkunion_vertex_centric_static_shared`.
  *  - `TRIANGLES_THREADS` - number of threads to use - default all hardware threads.
  *  - `TRIANGLES_ITERATIONS` - repeat the count this many times, reporting the per-pass time - default 1.
  *  - `TRIANGLES_CHECK` - also count serially, and fail unless the totals agree.
  *
- *  The backends include: `forkunion_vertex_centric_static`, `forkunion_vertex_centric_dynamic`,
- * `forkunion_edge_centric`, `forkunion_edge_centric_replicated`, `openmp_static`, `openmp_dynamic`, and
- * `openmp_guided`. To compile and run:
+ *  The ForkUnion backends are the eight cells of
+ *  `forkunion_{vertex_centric,edge_centric}_{static,dynamic}_{shared,replicated}`; the baselines are
+ *  `openmp_static`, `openmp_dynamic`, and `openmp_guided`. To compile and run:
  *
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release
  *  cmake --build build_release --config Release
- *  time TRIANGLES_SCALE=20 TRIANGLES_BACKEND=forkunion_edge_centric build_release/forkunion_triangles
+ *  time TRIANGLES_SCALE=20 TRIANGLES_BACKEND=forkunion_edge_centric_static_shared build_release/forkunion_triangles
  *  @endcode
  */
 #include <algorithm> // `std::sort`, `std::unique`, `std::lower_bound`, `std::upper_bound`
@@ -342,58 +342,86 @@ struct replicated_csr_t {
 /** @brief Everything a backend reads or writes for one counting pass; the harness owns the lifetimes. */
 struct run_context_t {
     csr_view_t graph;                       // ? The shared host view - what every non-replicated backend reads
-    replicated_csr_t const &replicas;       // ? Per-node replicas, populated only for `edge_centric_replicated`
+    replicated_csr_t const &replicas;       // ? Per-node replicas, populated only for the `_replicated` cells
     distributed_pool_t &pool;               // ? One pool spawned for every ForkUnion backend
     fu::machine_topology_t const &topology; // ? The compute-to-memory bridge for the replicated split
     fu::span<counter_t> counters;           // ? Per-thread tallies the harness zeroes and sums
     std::size_t threads;
 };
 
-/** @brief One task per vertex, split statically - the naive baseline the hubs sink. */
-static void run_vertex_centric_static(run_context_t &c) noexcept {
-    c.pool.for_n(c.graph.vertices(), [&](fu::prong_t prong) noexcept {
-        c.counters[prong.thread].value += count_triangles_at_vertex(c.graph, static_cast<vertex_t>(prong.task));
-    });
+/** @brief One task per vertex vs one work item per edge; the counting granularity. */
+enum class decomposition_k : unsigned int { vertex_k, edge_k };
+/** @brief Pre-split across threads vs work-stolen. */
+enum class schedule_k : unsigned int { static_k, dynamic_k };
+/** @brief One shared CSR vs one read-only CSR replica per memory domain. */
+enum class placement_k : unsigned int { shared_k, replicated_k };
+
+/** @brief Runs @p body over `[0, n)`, statically pre-split or work-stolen per the compile-time schedule. */
+template <schedule_k schedule_, class body_type_>
+static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
+    if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
+    else
+        pool.for_n_dynamic(n, body);
 }
 
-/** @brief One task per vertex, work-stolen - stealing recovers the balance a static split loses. */
-static void run_vertex_centric_dynamic(run_context_t &c) noexcept {
-    c.pool.for_n_dynamic(c.graph.vertices(), [&](fu::prong_t prong) noexcept {
-        c.counters[prong.thread].value += count_triangles_at_vertex(c.graph, static_cast<vertex_t>(prong.task));
-    });
-}
+/**
+ *  @brief One counting pass, specialized over the three axes at compile time.
+ *
+ *  Eight ForkUnion backends are the eight instantiations of this one body - `if constexpr` picks the
+ *  granularity, the schedule, and where each thread reads its CSR from, so no cell is copy-pasted.
+ */
+template <decomposition_k decomposition_, schedule_k schedule_, placement_k placement_>
+static void run(run_context_t &c) noexcept {
+    using local_prong_t = typename distributed_pool_t::prong_t; // ? Carries `compute_domain` for the replica read
+    // The CSR a thread on @p compute_domain should read: the shared host view, or its node-local replica.
+    auto graph_at = [&](std::size_t compute_domain) noexcept -> csr_view_t {
+        if constexpr (placement_ == placement_k::replicated_k)
+            return c.replicas.on_memory_domain(
+                c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain)));
+        else
+            return c.graph;
+    };
 
-/** @brief Cut the cost axis into equal slices, merge-path each cut onto the item axis - atomics-free. */
-static void run_edge_centric(run_context_t &c) noexcept {
-    fu::indexed_split_t const work_split {c.graph.total_work(), c.threads};
-    c.pool.for_threads([&](std::size_t thread) noexcept {
-        fu::indexed_range_t const cost = work_split[thread];
-        tape_offset_t const first = c.graph.item_at_work(cost.first);
-        tape_offset_t const last = c.graph.item_at_work(cost.first + cost.count);
-        c.counters[thread].value += count_triangles_on_slice(c.graph, first, last - first);
-    });
-}
-
-/** @brief `edge_centric` with the cost axis cut per compute domain, each thread reading its node's replica. */
-static void run_edge_centric_replicated(run_context_t &c) noexcept {
-    c.pool.for_threads([&](fu::local_thread_t thread) noexcept {
+    // One task per vertex: static sinks on the hubs, dynamic steals the balance back.
+    auto vertex_body = [&](local_prong_t prong) noexcept {
+        c.counters[prong.thread].value +=
+            count_triangles_at_vertex(graph_at(prong.compute_domain), static_cast<vertex_t>(prong.task));
+    };
+    // Edge-centric static: cut the cost axis into balanced runs so the layout balances, not a scheduler.
+    auto edge_slice_body = [&](fu::local_thread_t thread) noexcept {
         std::size_t const compute_domain = static_cast<std::size_t>(thread.compute_domain);
-        fu::memory_domain_index_t const memory_domain =
-            c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain));
-        csr_view_t const replica = c.replicas.on_memory_domain(memory_domain);
+        csr_view_t const graph = graph_at(compute_domain);
+        tape_offset_t first = 0, last = 0;
+        if constexpr (placement_ == placement_k::replicated_k) {
+            // Nested balanced split of the cost axis: between compute domains, then between their threads.
+            std::size_t const domains = c.pool.compute_domains_count();
+            std::size_t const threads_here = c.pool.threads_count(compute_domain);
+            std::size_t const local_index = c.pool.thread_local_index(thread, compute_domain);
+            fu::indexed_range_t const domain_cost = fu::indexed_split_t {graph.total_work(), domains}[compute_domain];
+            fu::indexed_range_t const thread_cost = fu::indexed_split_t {domain_cost.count, threads_here}[local_index];
+            first = graph.item_at_work(domain_cost.first + thread_cost.first);
+            last = graph.item_at_work(domain_cost.first + thread_cost.first + thread_cost.count);
+        }
+        else {
+            fu::indexed_range_t const cost = fu::indexed_split_t {graph.total_work(), c.threads}[thread];
+            first = graph.item_at_work(cost.first);
+            last = graph.item_at_work(cost.first + cost.count);
+        }
+        c.counters[thread].value += count_triangles_on_slice(graph, first, last - first);
+    };
+    // Edge-centric dynamic: one tape item per task, work-stolen; each resolves its owner independently.
+    auto edge_item_body = [&](local_prong_t prong) noexcept {
+        csr_view_t const graph = graph_at(prong.compute_domain);
+        tape_offset_t const item = static_cast<tape_offset_t>(prong.task);
+        c.counters[prong.thread].value += count_triangles_on_item(graph, item, graph.owner_of(item));
+    };
 
-        std::size_t const domains = c.pool.compute_domains_count();
-        std::size_t const threads_here = c.pool.threads_count(compute_domain);
-        std::size_t const local_index = c.pool.thread_local_index(thread, compute_domain);
-
-        // Two nested balanced splits of the cost axis: first between compute domains, then between the
-        // threads of this domain - reusing the same fair-chunk splitter as the count-axis loops.
-        fu::indexed_range_t const domain_cost = fu::indexed_split_t {replica.total_work(), domains}[compute_domain];
-        fu::indexed_range_t const thread_cost = fu::indexed_split_t {domain_cost.count, threads_here}[local_index];
-        tape_offset_t const first = replica.item_at_work(domain_cost.first + thread_cost.first);
-        tape_offset_t const last = replica.item_at_work(domain_cost.first + thread_cost.first + thread_cost.count);
-        c.counters[thread].value += count_triangles_on_slice(replica, first, last - first);
-    });
+    if constexpr (decomposition_ == decomposition_k::vertex_k)
+        for_n_scheduled<schedule_>(c.pool, c.graph.vertices(), vertex_body);
+    else if constexpr (schedule_ == schedule_k::static_k)
+        c.pool.for_threads(edge_slice_body);
+    else
+        for_n_scheduled<schedule_k::dynamic_k>(c.pool, c.graph.tape_length(), edge_item_body);
 }
 
 #if defined(_OPENMP)
@@ -435,11 +463,22 @@ struct backend_t {
     engine_t engine;
 };
 
+using dc = decomposition_k;
+using sc = schedule_k;
+using pl = placement_k;
 static constexpr backend_t backends_k[] = {
-    {"forkunion_vertex_centric_static", run_vertex_centric_static, engine_t::forkunion_k},
-    {"forkunion_vertex_centric_dynamic", run_vertex_centric_dynamic, engine_t::forkunion_k},
-    {"forkunion_edge_centric", run_edge_centric, engine_t::forkunion_k},
-    {"forkunion_edge_centric_replicated", run_edge_centric_replicated, engine_t::forkunion_replicated_k},
+    {"forkunion_vertex_centric_static_shared", &run<dc::vertex_k, sc::static_k, pl::shared_k>, engine_t::forkunion_k},
+    {"forkunion_vertex_centric_dynamic_shared", &run<dc::vertex_k, sc::dynamic_k, pl::shared_k>, engine_t::forkunion_k},
+    {"forkunion_vertex_centric_static_replicated", &run<dc::vertex_k, sc::static_k, pl::replicated_k>,
+     engine_t::forkunion_replicated_k},
+    {"forkunion_vertex_centric_dynamic_replicated", &run<dc::vertex_k, sc::dynamic_k, pl::replicated_k>,
+     engine_t::forkunion_replicated_k},
+    {"forkunion_edge_centric_static_shared", &run<dc::edge_k, sc::static_k, pl::shared_k>, engine_t::forkunion_k},
+    {"forkunion_edge_centric_dynamic_shared", &run<dc::edge_k, sc::dynamic_k, pl::shared_k>, engine_t::forkunion_k},
+    {"forkunion_edge_centric_static_replicated", &run<dc::edge_k, sc::static_k, pl::replicated_k>,
+     engine_t::forkunion_replicated_k},
+    {"forkunion_edge_centric_dynamic_replicated", &run<dc::edge_k, sc::dynamic_k, pl::replicated_k>,
+     engine_t::forkunion_replicated_k},
 #if defined(_OPENMP)
     {"openmp_static", run_openmp_static, engine_t::openmp_k},
     {"openmp_dynamic", run_openmp_dynamic, engine_t::openmp_k},
@@ -471,7 +510,7 @@ static bool env_flag(char const *name) noexcept { return env_string(name, nullpt
 int main() {
     std::size_t const scale = env_usize("TRIANGLES_SCALE", 18);
     std::size_t const edge_factor = env_usize("TRIANGLES_EDGE_FACTOR", 16);
-    std::string_view const backend = env_string("TRIANGLES_BACKEND", "forkunion_vertex_centric_static");
+    std::string_view const backend = env_string("TRIANGLES_BACKEND", "forkunion_vertex_centric_static_shared");
     bool const check = env_flag("TRIANGLES_CHECK");
     std::size_t threads = env_usize("TRIANGLES_THREADS", 0);
     std::size_t iterations = env_usize("TRIANGLES_ITERATIONS", 1);

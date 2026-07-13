@@ -7,11 +7,11 @@
  *
  *  - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
  *  - `NBODY_ITERATIONS` - number of iterations to run the simulation (default: 1000).
- *  - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static`).
+ *  - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static_shared`).
  *  - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
  *
- *  The backends include: `openmp_static`, `openmp_dynamic`, `forkunion_static`, `forkunion_dynamic`,
- *  `forkunion_replicated_static`, and `forkunion_replicated_dynamic`.
+ *  The backends include: `openmp_static`, `openmp_dynamic`, `forkunion_static_shared`, `forkunion_dynamic_shared`,
+ *  `forkunion_static_replicated`, and `forkunion_dynamic_replicated`.
  *  To compile and run on all cores in Linux:
  *
  *  @code{.sh}
@@ -28,9 +28,9 @@
  *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
  *      NBODY_BACKEND=openmp_dynamic build_release/forkunion_nbody
  *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=forkunion_static build_release/forkunion_nbody
+ *      NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
  *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=forkunion_dynamic build_release/forkunion_nbody
+ *      NBODY_BACKEND=forkunion_dynamic_shared build_release/forkunion_nbody
  *  @endcode
  *
  *  On macOS, you may need to install OpenMP support via Homebrew:
@@ -44,7 +44,7 @@
  *    -D CMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib"
  *  cmake --build build_release --config Release
  *  NBODY_COUNT=128 NBODY_THREADS=$(sysctl -n hw.logicalcpu) NBODY_ITERATIONS=1000000 \
- *    NBODY_BACKEND=forkunion_static build_release/forkunion_nbody
+ *    NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
  *  @endcode
  */
 #include <chrono>  // `std::chrono::steady_clock`
@@ -167,66 +167,54 @@ struct nbody_context_t {
     fu::machine_topology_t const &topology; // ? The compute-to-memory bridge for the replicated read
 };
 
-/** @brief All-to-all forces over the shared array, one task per body, split statically. */
-static void run_forkunion_static(nbody_context_t &c) noexcept {
-    std::size_t const n = c.bodies.size();
-    fu::span<body_t> const bodies = c.bodies;
-    fu::span<vector3_t> const forces = c.forces;
-    c.pool.for_n(n, [=](std::size_t i) noexcept {
-        vector3_t f {0.0, 0.0, 0.0};
-        for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
-        forces[i] = f;
-    });
-    c.pool.for_n(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
+/** @brief Pre-split across threads vs work-stolen. */
+enum class schedule_k : unsigned int { static_k, dynamic_k };
+/** @brief One shared body array vs one position replica per memory domain. */
+enum class placement_k : unsigned int { shared_k, replicated_k };
+
+/** @brief Runs @p body over `[0, n)`, statically pre-split or work-stolen per the compile-time schedule. */
+template <schedule_k schedule_, class body_type_>
+static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
+    if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
+    else
+        pool.for_n_dynamic(n, body);
 }
 
-/** @brief The `forkunion_static` step, work-stolen instead of split statically. */
-static void run_forkunion_dynamic(nbody_context_t &c) noexcept {
-    std::size_t const n = c.bodies.size();
-    fu::span<body_t> const bodies = c.bodies;
-    fu::span<vector3_t> const forces = c.forces;
-    c.pool.for_n_dynamic(n, [=](std::size_t i) noexcept {
-        vector3_t f {0.0, 0.0, 0.0};
-        for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
-        forces[i] = f;
-    });
-    c.pool.for_n_dynamic(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
-}
-
-/** @brief Refresh every node's replica, then read only the node-local copy in the O(n^2) sweep. */
-static void run_forkunion_replicated_static(nbody_context_t &c) noexcept {
+/**
+ *  @brief One simulation step, specialized over the schedule and placement axes at compile time.
+ *
+ *  The all-to-all sweep cannot be sharded - every body reads every other - so the only locality to win
+ *  is the read side: replicate the positions once per step, then keep the quadratic loop node-local.
+ *  The four ForkUnion backends are the four instantiations of this one body.
+ */
+template <schedule_k schedule_, placement_k placement_>
+static void run(nbody_context_t &c) noexcept {
     using local_prong_t = typename distributed_pool_t::prong_t;
     std::size_t const n = c.bodies.size();
     fu::span<body_t> const bodies = c.bodies;
     fu::span<vector3_t> const forces = c.forces;
-    refresh_replicas(c.topology, c.pool, c.replicas, bodies);
-    c.pool.for_n(n, [&](local_prong_t prong) noexcept {
-        auto const local = c.replicas.on_memory_domain(
-            c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(prong.compute_domain)));
-        body_t const body_i = local[prong.task];
-        vector3_t f {0.0, 0.0, 0.0};
-        for (std::size_t j = 0; j < n; ++j) f += gravitational_force(body_i, local[j]);
-        forces[prong.task] = f;
-    });
-    c.pool.for_n(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
-}
 
-/** @brief The replicated step, work-stolen instead of split statically. */
-static void run_forkunion_replicated_dynamic(nbody_context_t &c) noexcept {
-    using local_prong_t = typename distributed_pool_t::prong_t;
-    std::size_t const n = c.bodies.size();
-    fu::span<body_t> const bodies = c.bodies;
-    fu::span<vector3_t> const forces = c.forces;
-    refresh_replicas(c.topology, c.pool, c.replicas, bodies);
-    c.pool.for_n_dynamic(n, [&](local_prong_t prong) noexcept {
-        auto const local = c.replicas.on_memory_domain(
-            c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(prong.compute_domain)));
-        body_t const body_i = local[prong.task];
+    if constexpr (placement_ == placement_k::replicated_k) refresh_replicas(c.topology, c.pool, c.replicas, bodies);
+
+    // Force pass: all-to-all, reading the shared array or the thread's node-local replica.
+    auto calc = [&](local_prong_t prong) noexcept {
         vector3_t f {0.0, 0.0, 0.0};
-        for (std::size_t j = 0; j < n; ++j) f += gravitational_force(body_i, local[j]);
+        if constexpr (placement_ == placement_k::replicated_k) {
+            auto const local = c.replicas.on_memory_domain(
+                c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(prong.compute_domain)));
+            body_t const body_i = local[prong.task];
+            for (std::size_t j = 0; j < n; ++j) f += gravitational_force(body_i, local[j]);
+        }
+        else {
+            for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[prong.task], bodies[j]);
+        }
         forces[prong.task] = f;
-    });
-    c.pool.for_n_dynamic(n, [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); });
+    };
+    // Apply pass: integrate the canonical body by its force - identical for both placements.
+    auto integrate = [&](local_prong_t prong) noexcept { apply_force(bodies[prong.task], forces[prong.task]); };
+
+    for_n_scheduled<schedule_>(c.pool, n, calc);
+    for_n_scheduled<schedule_>(c.pool, n, integrate);
 }
 
 #if defined(_OPENMP)
@@ -273,11 +261,13 @@ struct backend_t {
     engine_t engine;
 };
 
+using sc = schedule_k;
+using pl = placement_k;
 static constexpr backend_t backends_k[] = {
-    {"forkunion_static", run_forkunion_static, engine_t::forkunion_k},
-    {"forkunion_dynamic", run_forkunion_dynamic, engine_t::forkunion_k},
-    {"forkunion_replicated_static", run_forkunion_replicated_static, engine_t::forkunion_replicated_k},
-    {"forkunion_replicated_dynamic", run_forkunion_replicated_dynamic, engine_t::forkunion_replicated_k},
+    {"forkunion_static_shared", &run<sc::static_k, pl::shared_k>, engine_t::forkunion_k},
+    {"forkunion_dynamic_shared", &run<sc::dynamic_k, pl::shared_k>, engine_t::forkunion_k},
+    {"forkunion_static_replicated", &run<sc::static_k, pl::replicated_k>, engine_t::forkunion_replicated_k},
+    {"forkunion_dynamic_replicated", &run<sc::dynamic_k, pl::replicated_k>, engine_t::forkunion_replicated_k},
 #if defined(_OPENMP)
     {"openmp_static", run_openmp_static, engine_t::openmp_k},
     {"openmp_dynamic", run_openmp_dynamic, engine_t::openmp_k},
@@ -306,7 +296,7 @@ static std::size_t env_usize(char const *name, std::size_t fallback) noexcept {
 int main() {
     std::size_t n = env_usize("NBODY_COUNT", 0);
     std::size_t const iterations = env_usize("NBODY_ITERATIONS", 1000);
-    std::string_view const backend = env_string("NBODY_BACKEND", "forkunion_static");
+    std::string_view const backend = env_string("NBODY_BACKEND", "forkunion_static_shared");
     std::size_t threads = env_usize("NBODY_THREADS", 0);
     if (threads == 0) threads = fu::allowed_cores_count();
     if (n == 0) n = threads;

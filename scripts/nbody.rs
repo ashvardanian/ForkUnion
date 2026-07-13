@@ -4,15 +4,14 @@
 //!
 //! - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
 //! - `NBODY_ITERATIONS` - number of iterations to run the simulation (default: 1000).
-//! - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static`).
+//! - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static_shared`).
 //! - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
 //!
-//! The backends include: `forkunion_static`, `forkunion_dynamic`, `forkunion_iter_static`,
-//! `forkunion_iter_dynamic`, `forkunion_replicated_static`, `forkunion_replicated_dynamic`,
-//! `rayon_static`, `rayon_dynamic`, and `tokio`. The `forkunion_iter_*` backends are Rust-only - they
-//! drive the same sweep through the parallel-iterator adapters. The `forkunion_replicated_*` backends
-//! replicate the body positions into each memory domain's local storage - on a machine with one domain
-//! the replicas collapse to one, so they run everywhere. To compile and run:
+//! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`, plus
+//! Rust-only `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the
+//! parallel-iterator adapters; the baselines are `rayon_static`, `rayon_dynamic`, and `tokio`. The
+//! `_replicated` backends replicate the body positions into each memory domain's local storage - on a
+//! machine with one domain the replicas collapse to one, so they run everywhere. To compile and run:
 //!
 //! ```sh
 //! cargo run --example nbody --release
@@ -29,9 +28,9 @@
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
 //!     NBODY_BACKEND=rayon_static target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=forkunion_static target/release/examples/nbody
+//!     NBODY_BACKEND=forkunion_static_shared target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=forkunion_replicated_static target/release/examples/nbody
+//!     NBODY_BACKEND=forkunion_static_replicated target/release/examples/nbody
 //! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
 //!     NBODY_BACKEND=tokio target/release/examples/nbody
 //! ```
@@ -152,48 +151,29 @@ struct Ctx<'a> {
     tokio: Option<&'a TokioRuntime>,
 }
 
-/// All-to-all forces over the shared array, one task per body, split statically.
-fn iteration_fu_static(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
-    let n = bodies.len();
-    {
-        let bodies_ref = &*bodies;
-        fu::for_each_prong_mut(pool, forces, move |force, prong| {
-            let bi = &bodies_ref[prong.task_index];
-            let mut accumulator = Vector3::default();
-            for bj in bodies_ref.iter().take(n) {
-                accumulator += gravitational_force(bi, bj);
-            }
-            *force = accumulator;
-        });
-    }
-    {
-        let forces_ref = &*forces;
-        fu::for_each_prong_mut(pool, bodies, move |body, prong| {
-            apply_force(body, &forces_ref[prong.task_index]);
-        });
-    }
+// Compile-time axes as marker types - stable Rust cannot take a custom enum as a const-generic param.
+// nbody is all-to-all, so there is no decomposition axis - only schedule and placement.
+trait Schedule {
+    const STATIC_SCHEDULE: bool;
 }
-
-/// The `forkunion_static` step, work-stolen instead of split statically.
-fn iteration_fu_dynamic(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
-    let n = bodies.len();
-    {
-        let bodies_ref = &*bodies;
-        fu::for_each_prong_mut_dynamic(pool, forces, move |force, prong| {
-            let bi = &bodies_ref[prong.task_index];
-            let mut accumulator = Vector3::default();
-            for bj in bodies_ref.iter().take(n) {
-                accumulator += gravitational_force(bi, bj);
-            }
-            *force = accumulator;
-        });
-    }
-    {
-        let forces_ref = &*forces;
-        fu::for_each_prong_mut_dynamic(pool, bodies, move |body, prong| {
-            apply_force(body, &forces_ref[prong.task_index]);
-        });
-    }
+struct Static;
+struct Dynamic;
+impl Schedule for Static {
+    const STATIC_SCHEDULE: bool = true;
+}
+impl Schedule for Dynamic {
+    const STATIC_SCHEDULE: bool = false;
+}
+trait Placement {
+    const REPLICATED: bool;
+}
+struct Shared;
+struct Replicated;
+impl Placement for Shared {
+    const REPLICATED: bool = false;
+}
+impl Placement for Replicated {
+    const REPLICATED: bool = true;
 }
 
 /// The same all-to-all sweep, driven through the Rayon-style parallel-iterator adapters.
@@ -307,89 +287,103 @@ fn refresh_replicas(
     });
 }
 
-/// Borrows every replica as a read-only, `Sync` base pointer, indexed by compute domain, so the hot
-/// loop never calls back into the topology to bridge compute to memory.
-fn replicated_domain_ptrs(
-    topology: &fu::Topology,
-    replicas: &fu::ReplicatedArray<Body>,
-) -> Vec<fu::SyncConstPtr<Body>> {
-    (0..topology.compute_domains_count())
-        .map(|compute_domain| {
-            let memory_domain = topology.local_memory_of(fu::ComputeDomain(compute_domain));
-            fu::SyncConstPtr::new(replicas.replica_ptr(memory_domain) as *const Body)
-        })
-        .collect()
+/// The read-only inputs one simulation step hands to every task, small and `Copy` so it moves into a
+/// task closure for free. The pointers stand in for the `bodies` and `forces` slices, and - only when the
+/// placement is replicated - `topology` and `replicas` bridge a compute domain to its node-local copy.
+#[derive(Copy, Clone)]
+struct WorkCtx<'a> {
+    bodies_ptr: fu::SyncConstPtr<Body>,
+    forces_ptr: fu::SyncConstPtr<Vector3>,
+    topology: Option<&'a fu::Topology>,
+    replicas: Option<&'a fu::ReplicatedArray<Body>>,
+    n: usize,
 }
 
-/// The all-to-all interaction cannot be sharded - every body reads every other body - so the only
-/// locality left to win is the read side: replicate the positions once per iteration, then keep the
-/// quadratic inner loop entirely inside the caller's own memory domain.
-fn iteration_fu_replicated_static(
+/// The `n` bodies a thread on `compute_domain` reads: the shared canonical array, or its node-local
+/// replica when the placement is replicated.
+#[inline]
+fn bodies_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> &'a [Body] {
+    let base = if P::REPLICATED {
+        let memory_domain = work
+            .topology
+            .expect("topology")
+            .local_memory_of(fu::ComputeDomain(compute_domain));
+        work.replicas.expect("replicas").replica_ptr(memory_domain) as *const Body
+    } else {
+        work.bodies_ptr.as_ptr()
+    };
+    // SAFETY: both the canonical array and every replica hold `n` initialized bodies, read-only for the
+    // duration of the force pass, which joins before the apply pass or the next refresh mutates them.
+    unsafe { core::slice::from_raw_parts(base, work.n) }
+}
+
+/// The all-to-all force on the body owning this task, summed over the array it reads.
+#[inline]
+fn force_kernel<P: Placement>(work: WorkCtx, prong: fu::Prong) -> Vector3 {
+    let local = bodies_at::<P>(work, prong.compute_domain_index);
+    let bi = &local[prong.task_index];
+    let mut accumulator = Vector3::default();
+    for bj in local {
+        accumulator += gravitational_force(bi, bj);
+    }
+    accumulator
+}
+
+/// Integrates one canonical body by the force computed for it - identical for both placements.
+#[inline]
+fn apply_kernel(work: WorkCtx, body: &mut Body, prong: fu::Prong) {
+    // SAFETY: `forces` holds `n` initialized elements, read-only while the apply pass mutates `bodies`.
+    let force = unsafe { work.forces_ptr.get(prong.task_index) };
+    apply_force(body, force);
+}
+
+/// Sweeps a mutating pass over `data`, split statically or work-stolen per the schedule axis.
+#[inline]
+fn for_each<S: Schedule, T: Send + Sync, F: Fn(&mut T, fu::Prong) + Sync + Send>(
+    pool: &mut fu::ThreadPool,
+    data: &mut [T],
+    body: F,
+) {
+    if S::STATIC_SCHEDULE {
+        fu::for_each_prong_mut(pool, data, body);
+    } else {
+        fu::for_each_prong_mut_dynamic(pool, data, body);
+    }
+}
+
+/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion backends
+/// are its instantiations. The all-to-all sweep cannot be sharded - every body reads every other - so the
+/// only locality to win is the read side: replicate the positions once per step, then keep the quadratic
+/// loop node-local.
+fn iteration_forkunion<S: Schedule, P: Placement>(
     topology: &fu::Topology,
     pool: &mut fu::ThreadPool,
     bodies: &mut [Body],
     forces: &mut [Vector3],
-    replicas: &fu::ReplicatedArray<Body>,
+    replicas: Option<&fu::ReplicatedArray<Body>>,
 ) {
     let n = bodies.len();
-    refresh_replicas(topology, pool, replicas, bodies);
-    {
-        let locals = replicated_domain_ptrs(topology, replicas);
-        let locals = &locals[..];
-        fu::for_each_prong_mut(pool, forces, move |force, prong| {
-            // SAFETY: every replica holds `n` initialized bodies and is only read here; the refresh
-            // above joined, and this dispatch joins before `replicas` is touched again.
-            let local = unsafe {
-                core::slice::from_raw_parts(locals[prong.compute_domain_index].as_ptr(), n)
-            };
-            let bi = &local[prong.task_index];
-            let mut accumulator = Vector3::default();
-            for bj in local {
-                accumulator += gravitational_force(bi, bj);
-            }
-            *force = accumulator;
-        });
+    if P::REPLICATED {
+        refresh_replicas(topology, pool, replicas.expect("replicas"), bodies);
     }
-    {
-        let forces_ref = &*forces;
-        fu::for_each_prong_mut(pool, bodies, move |body, prong| {
-            apply_force(body, &forces_ref[prong.task_index]);
-        });
-    }
-}
 
-/// The replicated step, work-stolen instead of split statically.
-fn iteration_fu_replicated_dynamic(
-    topology: &fu::Topology,
-    pool: &mut fu::ThreadPool,
-    bodies: &mut [Body],
-    forces: &mut [Vector3],
-    replicas: &fu::ReplicatedArray<Body>,
-) {
-    let n = bodies.len();
-    refresh_replicas(topology, pool, replicas, bodies);
-    {
-        let locals = replicated_domain_ptrs(topology, replicas);
-        let locals = &locals[..];
-        fu::for_each_prong_mut_dynamic(pool, forces, move |force, prong| {
-            // SAFETY: as in the static variant above.
-            let local = unsafe {
-                core::slice::from_raw_parts(locals[prong.compute_domain_index].as_ptr(), n)
-            };
-            let bi = &local[prong.task_index];
-            let mut accumulator = Vector3::default();
-            for bj in local {
-                accumulator += gravitational_force(bi, bj);
-            }
-            *force = accumulator;
-        });
-    }
-    {
-        let forces_ref = &*forces;
-        fu::for_each_prong_mut_dynamic(pool, bodies, move |body, prong| {
-            apply_force(body, &forces_ref[prong.task_index]);
-        });
-    }
+    let work = WorkCtx {
+        bodies_ptr: fu::SyncConstPtr::new(bodies.as_ptr()),
+        forces_ptr: fu::SyncConstPtr::new(forces.as_ptr()),
+        topology: if P::REPLICATED { Some(topology) } else { None },
+        replicas: if P::REPLICATED { replicas } else { None },
+        n,
+    };
+
+    // Force pass: all-to-all, reading the shared array or each thread's node-local replica.
+    for_each::<S, _, _>(pool, forces, move |force, prong| {
+        *force = force_kernel::<P>(work, prong);
+    });
+
+    // Apply pass: integrate each canonical body by its force - identical for both placements.
+    for_each::<S, _, _>(pool, bodies, move |body, prong| {
+        apply_kernel(work, body, prong);
+    });
 }
 
 /// One contiguous stripe per worker, no stealing - Rayon's `par_chunks_mut`.
@@ -488,14 +482,10 @@ async fn iteration_tokio_blocking(
 
 // The registry entries - each unwraps only the engine its backend was set up with.
 
-fn run_forkunion_static(c: &mut Ctx) {
+fn run_forkunion<S: Schedule, P: Placement>(c: &mut Ctx) {
     let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    iteration_fu_static(pool, c.bodies, c.forces);
-}
-
-fn run_forkunion_dynamic(c: &mut Ctx) {
-    let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    iteration_fu_dynamic(pool, c.bodies, c.forces);
+    let topology = c.topology.expect("topology");
+    iteration_forkunion::<S, P>(topology, pool, c.bodies, c.forces, c.replicas);
 }
 
 fn run_forkunion_iter_static(c: &mut Ctx) {
@@ -506,20 +496,6 @@ fn run_forkunion_iter_static(c: &mut Ctx) {
 fn run_forkunion_iter_dynamic(c: &mut Ctx) {
     let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
     iteration_fu_iter_dynamic(pool, c.bodies, c.forces);
-}
-
-fn run_forkunion_replicated_static(c: &mut Ctx) {
-    let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    let replicas = c.replicas.expect("replicas");
-    let topology = c.topology.expect("topology");
-    iteration_fu_replicated_static(topology, pool, c.bodies, c.forces, replicas);
-}
-
-fn run_forkunion_replicated_dynamic(c: &mut Ctx) {
-    let pool = c.pool.as_deref_mut().expect("ForkUnion pool");
-    let replicas = c.replicas.expect("replicas");
-    let topology = c.topology.expect("topology");
-    iteration_fu_replicated_dynamic(topology, pool, c.bodies, c.forces, replicas);
 }
 
 fn run_rayon_static(c: &mut Ctx) {
@@ -560,34 +536,34 @@ struct Backend {
 
 const BACKENDS: &[Backend] = &[
     Backend {
-        name: "forkunion_static",
-        run: run_forkunion_static,
+        name: "forkunion_static_shared",
+        run: run_forkunion::<Static, Shared>,
         engine: Engine::ForkUnion,
     },
     Backend {
-        name: "forkunion_dynamic",
-        run: run_forkunion_dynamic,
+        name: "forkunion_dynamic_shared",
+        run: run_forkunion::<Dynamic, Shared>,
         engine: Engine::ForkUnion,
     },
     Backend {
-        name: "forkunion_iter_static",
+        name: "forkunion_static_replicated",
+        run: run_forkunion::<Static, Replicated>,
+        engine: Engine::ForkUnionReplicated,
+    },
+    Backend {
+        name: "forkunion_dynamic_replicated",
+        run: run_forkunion::<Dynamic, Replicated>,
+        engine: Engine::ForkUnionReplicated,
+    },
+    Backend {
+        name: "forkunion_iter_static_shared",
         run: run_forkunion_iter_static,
         engine: Engine::ForkUnion,
     },
     Backend {
-        name: "forkunion_iter_dynamic",
+        name: "forkunion_iter_dynamic_shared",
         run: run_forkunion_iter_dynamic,
         engine: Engine::ForkUnion,
-    },
-    Backend {
-        name: "forkunion_replicated_static",
-        run: run_forkunion_replicated_static,
-        engine: Engine::ForkUnionReplicated,
-    },
-    Backend {
-        name: "forkunion_replicated_dynamic",
-        run: run_forkunion_replicated_dynamic,
-        engine: Engine::ForkUnionReplicated,
     },
     Backend {
         name: "rayon_static",
@@ -610,7 +586,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Every knob this script understands, read once, up front.
     let count = env_usize("NBODY_COUNT", 0);
     let iterations = env_usize("NBODY_ITERATIONS", 1_000);
-    let backend = env_string("NBODY_BACKEND", "forkunion_static");
+    let backend = env_string("NBODY_BACKEND", "forkunion_static_shared");
     let mut threads = env_usize("NBODY_THREADS", 0);
     if threads == 0 {
         threads = hardware_threads();
