@@ -486,7 +486,9 @@ inline capabilities_t cpu_capabilities() noexcept {
     // On non-Apple ARM systems, try to read the system register
     // Note: This may fail on some systems where userspace access is restricted
     std::uint64_t id_aa64isar2_el0 = 0;
-    __asm__ __volatile__("mrs %0, ID_AA64ISAR2_EL0" : "=r"(id_aa64isar2_el0) : : "memory");
+    // `ID_AA64ISAR2_EL0` is `S3_0_C0_C6_2`; the named form needs `-march=armv8.6-a+` to assemble, so the
+    // generic `S<op0>_<op1>_<Cn>_<Cm>_<op2>` encoding is used instead - every assembler accepts it.
+    __asm__ __volatile__("mrs %0, S3_0_C0_C6_2" : "=r"(id_aa64isar2_el0) : : "memory");
     // WFET is bits [3:0], value 2 indicates WFET support
     std::uint64_t const wfet_field = id_aa64isar2_el0 & 0xF;
     if (wfet_field >= 2) caps |= capability_arm64_wfet_k;
