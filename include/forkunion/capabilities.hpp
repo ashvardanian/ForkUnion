@@ -10,6 +10,14 @@
 #include <chrono> // `std::chrono::steady_clock` for the one-shot TSC calibration
 #endif
 
+/*  Where inline assembly is unavailable - MSVC - the same instructions are reached through intrinsics. */
+#if !FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_X86_64_
+#include <intrin.h>    // `__rdtsc`, `__cpuidex`
+#include <immintrin.h> // `_mm_pause`, `_umonitor`, `_umwait`
+#elif !FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_ARM64_
+#include <intrin.h> // `__yield`
+#endif
+
 /*  Runtime `Zawrs` detection on Linux RISC-V goes through the `riscv_hwprobe` syscall, but only when
  *  this kernel's headers actually define it. Without them we fall back to the compile-time
  *  `__riscv_zawrs` macro, and claim nothing if neither is available. */
@@ -25,8 +33,6 @@
 namespace ashvardanian {
 namespace forkunion {
 
-#if FU_DETECT_ASM_YIELDS_ // We need inline assembly support
-
 #if FU_DETECT_ARCH_X86_64_
 
 /** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
@@ -35,7 +41,11 @@ struct x86_pause_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
                            bound_type_ = {}) const noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
         __asm__ __volatile__("pause");
+#else
+        _mm_pause();
+#endif
     }
 };
 
@@ -55,16 +65,22 @@ struct x86_pause_t {
  *  crystal field zero, so we then time a short `RDTSC` span against the steady clock.
  */
 inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
-    // Ask leaf 0x15 for the TSC-to-crystal ratio. Using intrinsics from `<cpuid.h>` it may look like:
-    //
-    //      unsigned denominator, numerator, crystal_hz, unused;
-    //      __get_cpuid(0x15, &denominator, &numerator, &crystal_hz, &unused);
-    //
-    // To avoid includes, using inline Assembly:
-    std::uint32_t denominator, numerator, crystal_hz, unused;
+    // Ask leaf 0x15 for the TSC-to-crystal ratio. Inline assembly issues CPUID directly to avoid an
+    // include; MSVC has none and calls `<intrin.h>`'s `__cpuidex`, the cousin of libc's
+    // `__get_cpuid(0x15, &denominator, &numerator, &crystal_hz, &unused)`.
+    std::uint32_t denominator, numerator, crystal_hz;
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+    std::uint32_t unused;
     __asm__ __volatile__("cpuid"
                          : "=a"(denominator), "=b"(numerator), "=c"(crystal_hz), "=d"(unused)
                          : "a"(0x15u), "c"(0u));
+#else
+    int leaf15[4];
+    __cpuidex(leaf15, 0x15, 0);
+    denominator = static_cast<std::uint32_t>(leaf15[0]);
+    numerator = static_cast<std::uint32_t>(leaf15[1]);
+    crystal_hz = static_cast<std::uint32_t>(leaf15[2]);
+#endif
     if (denominator != 0 && numerator != 0 && crystal_hz != 0) {
         std::uint64_t const tsc_hz = static_cast<std::uint64_t>(crystal_hz) * numerator / denominator;
         std::uint64_t const cycles_per_us = tsc_hz / 1'000'000ull;
@@ -72,13 +88,19 @@ inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
     }
 
     // The leaf was blank, as on many parts: measure how many TSC cycles pass over a fixed wall span.
-    std::uint32_t start_lo, start_hi, end_lo, end_hi;
     auto const started_at = std::chrono::steady_clock::now();
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+    std::uint32_t start_lo, start_hi, end_lo, end_hi;
     __asm__ __volatile__("rdtsc" : "=a"(start_lo), "=d"(start_hi));
     while (std::chrono::steady_clock::now() - started_at < std::chrono::milliseconds(2)) {}
     __asm__ __volatile__("rdtsc" : "=a"(end_lo), "=d"(end_hi));
     std::uint64_t const start_cycles = (static_cast<std::uint64_t>(start_hi) << 32) | start_lo;
     std::uint64_t const end_cycles = (static_cast<std::uint64_t>(end_hi) << 32) | end_lo;
+#else
+    std::uint64_t const start_cycles = __rdtsc();
+    while (std::chrono::steady_clock::now() - started_at < std::chrono::milliseconds(2)) {}
+    std::uint64_t const end_cycles = __rdtsc();
+#endif
     std::uint64_t const elapsed_ns = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at).count());
 
@@ -125,11 +147,14 @@ struct x86_tpause_t {
         if (!arm_monitor_(watched, observed)) return;
 
         // Build a deadline one microsecond of TSC cycles ahead of now.
+#if FU_DETECT_INLINE_ASM_SUPPORT_
         std::uint32_t rdtsc_lo, rdtsc_hi;
         __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
-        std::uint64_t const deadline =
-            ((static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo) + x86_tsc_cycles_per_micro();
-        umwait_until_(deadline);
+        std::uint64_t const now_cycles = (static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo;
+#else
+        std::uint64_t const now_cycles = __rdtsc();
+#endif
+        umwait_until_(now_cycles + x86_tsc_cycles_per_micro());
     }
 
     /** @brief Waits for the store with no effective cap, for a single-word loop. */
@@ -151,13 +176,16 @@ struct x86_tpause_t {
     static inline bool arm_monitor_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
         void const *const watched_address = &watched;
 
-        // Arm this core's address-range monitor on the watched line. Using intrinsics from
-        // `<x86intrin.h>` it may look like:
-        //
-        //      _umonitor(const_cast<void *>(watched_address));
-        //
-        // To avoid includes, hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
+        // Arm this core's address-range monitor on the watched line. Where inline assembly is available
+        // the UMONITOR opcode is hand-encoded so no header is pulled in; MSVC has no inline assembly and
+        // instead calls the `<immintrin.h>` intrinsic the encoding stands in for - the same one that in
+        // pseudo-code reads `_umonitor(const_cast<void *>(watched_address))`.
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
         __asm__ __volatile__(".byte 0xf3, 0x0f, 0xae, 0xf0" : : "a"(watched_address) : "memory");
+#else
+        _umonitor(const_cast<void *>(watched_address));
+#endif
 
         // A normal load does not disarm the monitor, so re-check: if the word already moved, don't wait.
         return watched.load(std::memory_order_acquire) == observed;
@@ -165,21 +193,21 @@ struct x86_tpause_t {
 
     /** @brief Sleeps in the shallow C0.1 state until @p deadline as a TSC value, an interrupt, or a store. */
     static inline void umwait_until_(std::uint64_t const deadline) noexcept {
+        // Sleep in the shallow, fast-waking C0.1 state via control bit 0 = 1. As with the monitor above,
+        // inline assembly hand-encodes the opcode to avoid an include, while MSVC calls the
+        // `<immintrin.h>` intrinsic - in pseudo-code, `_umwait(shallow_c0_1_state, deadline)`.
+        constexpr std::uint32_t shallow_c0_1_state = 1;
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        // Hand-encoding UMWAIT r32 as `F2 0F AE /6`, with the control in ECX and the deadline in EDX:EAX:
         std::uint32_t const deadline_lo = static_cast<std::uint32_t>(deadline);
         std::uint32_t const deadline_hi = static_cast<std::uint32_t>(deadline >> 32);
-
-        // Sleep in the shallow, fast-waking C0.1 state via control bit 0 = 1. Using intrinsics it may
-        // look like:
-        //
-        //      _umwait(shallow_c0_1_state, deadline);
-        //
-        // To avoid includes, hand-encoding UMWAIT r32 as `F2 0F AE /6` with the control in ECX and
-        // the deadline in EDX:EAX:
-        constexpr std::uint32_t shallow_c0_1_state = 1;
         __asm__ __volatile__(".byte 0xf2, 0x0f, 0xae, 0xf1"
                              :
                              : "a"(deadline_lo), "d"(deadline_hi), "c"(shallow_c0_1_state)
                              : "cc", "memory");
+#else
+        (void)_umwait(shallow_c0_1_state, deadline);
+#endif
     }
 };
 
@@ -199,9 +227,17 @@ struct arm64_yield_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
                            bound_type_ = {}) const noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
         __asm__ __volatile__("yield");
+#else
+        __yield();
+#endif
     }
 };
+
+// `WFET` and the exclusive-monitor `LDAXR`/`CLREX` it rides on have no MSVC intrinsic, so the timed
+// waiter is inline-assembly only; MSVC-ARM64 stays on the `arm64_yield_t` hint above.
+#if FU_DETECT_INLINE_ASM_SUPPORT_
 
 #if defined(__clang__)
 #pragma clang attribute push(__attribute__((target("arch=armv8-a"))), apply_to = function)
@@ -316,6 +352,8 @@ struct arm64_wfet_t {
 #pragma GCC pop_options
 #endif
 
+#endif // FU_DETECT_INLINE_ASM_SUPPORT_
+
 #endif // FU_DETECT_ARCH_ARM64_
 
 #if FU_DETECT_ARCH_RISC5_
@@ -412,8 +450,6 @@ struct risc5_wrs_t {
 
 #endif // FU_DETECT_ARCH_RISC5_
 
-#endif
-
 /**
  *  @brief The fastest waiter this build may use with @b no runtime feature probe.
  *
@@ -427,15 +463,15 @@ struct risc5_wrs_t {
  *  is a runtime fact there, detected via `sysctl` on Apple or `HWCAP2_WFXT` on Linux, so a caller
  *  reaches `arm64_wfet_t` through the C ABI's runtime capability dispatch rather than at compile time.
  */
-#if FU_DETECT_ASM_YIELDS_ && FU_DETECT_ARCH_X86_64_
+#if FU_DETECT_ARCH_X86_64_
 #if defined(__WAITPKG__)
 using preferred_yield_t = x86_tpause_t;
 #else
 using preferred_yield_t = x86_pause_t;
 #endif
-#elif FU_DETECT_ASM_YIELDS_ && FU_DETECT_ARCH_ARM64_
+#elif FU_DETECT_ARCH_ARM64_
 using preferred_yield_t = arm64_yield_t;
-#elif FU_DETECT_ASM_YIELDS_ && FU_DETECT_ARCH_RISC5_
+#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
 #if defined(__riscv_zawrs)
 using preferred_yield_t = risc5_wrs_t;
 #else
@@ -457,18 +493,17 @@ inline capabilities_t cpu_capabilities() noexcept {
     // Check for basic PAUSE instruction support (always available on x86-64)
     caps |= capability_x86_pause_k;
 
-#if FU_DETECT_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
-    // CPUID to check for WAITPKG support (TPAUSE instruction)
-    std::uint32_t eax, ebx, ecx, edx;
-
-    // CPUID leaf 7, sub-leaf 0 for structured extended feature flags
-    eax = 7, ecx = 0;
-    __asm__ __volatile__("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax), "c"(ecx) : "memory");
-
-    // WAITPKG is bit 5 in ECX
+    // CPUID leaf 7, sub-leaf 0: WAITPKG (backing UMWAIT/TPAUSE) is bit 5 of ECX.
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+    std::uint32_t eax = 7, ebx, ecx, edx;
+    __asm__ __volatile__("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax), "c"(0u) : "memory");
     if (ecx & (1u << 5)) caps |= capability_x86_tpause_k;
     fu_unused_(ebx);
     fu_unused_(edx);
+#else
+    int leaf7[4];
+    __cpuidex(leaf7, 7, 0);
+    if (static_cast<std::uint32_t>(leaf7[2]) & (1u << 5)) caps |= capability_x86_tpause_k;
 #endif
 
 #elif FU_DETECT_ARCH_ARM64_
@@ -482,7 +517,7 @@ inline capabilities_t cpu_capabilities() noexcept {
     size_t size = sizeof(wfet_support);
     if (sysctlbyname("hw.optional.arm.FEAT_WFxT", &wfet_support, &size, NULL, 0) == 0 && wfet_support)
         caps |= capability_arm64_wfet_k;
-#elif FU_DETECT_ASM_YIELDS_ // We use inline assembly - unavailable in MSVC
+#elif FU_DETECT_INLINE_ASM_SUPPORT_ // We use inline assembly - unavailable in MSVC
     // On non-Apple ARM systems, try to read the system register
     // Note: This may fail on some systems where userspace access is restricted
     std::uint64_t id_aa64isar2_el0 = 0;

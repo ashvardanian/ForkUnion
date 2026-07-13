@@ -50,43 +50,39 @@ struct pool_variants_t {
     };
 
     using pool_traits_t = max_size_align< //
-#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         fu::flat_pool<thread_allocator_t, fu::x86_pause_t>,  //
         fu::flat_pool<thread_allocator_t, fu::x86_tpause_t>, //
-#endif
-#if FU_DETECT_ARCH_ARM64_
+#elif FU_DETECT_ARCH_ARM64_
         fu::flat_pool<thread_allocator_t, fu::arm64_yield_t>, //
-        fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t>,  //
+#if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
+        fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t>, //
 #endif
-#if FU_DETECT_ARCH_RISC5_
+#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
         fu::flat_pool<thread_allocator_t, fu::risc5_pause_t>, //
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t>,   //
 #endif
-#endif // FU_DETECT_ASM_YIELDS_
 
         fu::colocated_pool<fu::standard_yield_t>,   // ? Single-compute-domain pools
         fu::distributed_pool<fu::standard_yield_t>, // ? Whole-machine pools
-#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
         fu::colocated_pool<fu::x86_pause_t>,    //
         fu::colocated_pool<fu::x86_tpause_t>,   //
         fu::distributed_pool<fu::x86_pause_t>,  //
         fu::distributed_pool<fu::x86_tpause_t>, //
-#endif
-#if FU_DETECT_ARCH_ARM64_
+#elif FU_DETECT_ARCH_ARM64_
         fu::colocated_pool<fu::arm64_yield_t>,   //
-        fu::colocated_pool<fu::arm64_wfet_t>,    //
         fu::distributed_pool<fu::arm64_yield_t>, //
-        fu::distributed_pool<fu::arm64_wfet_t>,  //
+#if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
+        fu::colocated_pool<fu::arm64_wfet_t>,   //
+        fu::distributed_pool<fu::arm64_wfet_t>, //
 #endif
-#if FU_DETECT_ARCH_RISC5_
+#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
         fu::colocated_pool<fu::risc5_pause_t>,   //
         fu::colocated_pool<fu::risc5_wrs_t>,     //
         fu::distributed_pool<fu::risc5_pause_t>, //
         fu::distributed_pool<fu::risc5_wrs_t>,   //
 #endif
-#endif // FU_DETECT_ASM_YIELDS_
 
         fu::flat_pool<thread_allocator_t, fu::standard_yield_t> //
         >;
@@ -121,25 +117,23 @@ struct pool_variants_t {
  */
 template <fu::pool_kind_t kind_, typename visitor_type_>
 auto visit_kind(visitor_type_ &&visitor, pool_variants_t &variants) {
-#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
     if (variants.capabilities_ & fu::capability_x86_tpause_k)
         return visitor(*reinterpret_cast<typename pool_for<kind_, fu::x86_tpause_t>::type *>(variants.storage_));
     if (variants.capabilities_ & fu::capability_x86_pause_k)
         return visitor(*reinterpret_cast<typename pool_for<kind_, fu::x86_pause_t>::type *>(variants.storage_));
-#endif
-#if FU_DETECT_ARCH_ARM64_
+#elif FU_DETECT_ARCH_ARM64_
+#if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
     if (variants.capabilities_ & fu::capability_arm64_wfet_k)
         return visitor(*reinterpret_cast<typename pool_for<kind_, fu::arm64_wfet_t>::type *>(variants.storage_));
+#endif
     if (variants.capabilities_ & fu::capability_arm64_yield_k)
         return visitor(*reinterpret_cast<typename pool_for<kind_, fu::arm64_yield_t>::type *>(variants.storage_));
-#endif
-#if FU_DETECT_ARCH_RISC5_
+#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
     if (variants.capabilities_ & fu::capability_risc5_wrs_k)
         return visitor(*reinterpret_cast<typename pool_for<kind_, fu::risc5_wrs_t>::type *>(variants.storage_));
     if (variants.capabilities_ & fu::capability_risc5_pause_k)
         return visitor(*reinterpret_cast<typename pool_for<kind_, fu::risc5_pause_t>::type *>(variants.storage_));
-#endif
 #endif
     return visitor(*reinterpret_cast<typename pool_for<kind_, fu::standard_yield_t>::type *>(variants.storage_));
 }
@@ -177,7 +171,6 @@ void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
 template <fu::pool_kind_t pool_kind_, typename... args_types_>
 static void construct_pool(pool_variants_t &variants, FU_MAYBE_UNUSED_ fu::capabilities_t effective,
                            args_types_ &&...args) noexcept {
-#if FU_DETECT_ASM_YIELDS_
 #if FU_DETECT_ARCH_X86_64_
     if (effective & fu::capability_x86_tpause_k)
         return variants.construct<typename pool_for<pool_kind_, fu::x86_tpause_t>::type>(
@@ -185,16 +178,16 @@ static void construct_pool(pool_variants_t &variants, FU_MAYBE_UNUSED_ fu::capab
     if (effective & fu::capability_x86_pause_k)
         return variants.construct<typename pool_for<pool_kind_, fu::x86_pause_t>::type>(
             std::forward<args_types_>(args)...);
-#endif
-#if FU_DETECT_ARCH_ARM64_
+#elif FU_DETECT_ARCH_ARM64_
+#if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
     if (effective & fu::capability_arm64_wfet_k)
         return variants.construct<typename pool_for<pool_kind_, fu::arm64_wfet_t>::type>(
             std::forward<args_types_>(args)...);
+#endif
     if (effective & fu::capability_arm64_yield_k)
         return variants.construct<typename pool_for<pool_kind_, fu::arm64_yield_t>::type>(
             std::forward<args_types_>(args)...);
-#endif
-#if FU_DETECT_ARCH_RISC5_
+#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
     if (effective & fu::capability_risc5_wrs_k)
         return variants.construct<typename pool_for<pool_kind_, fu::risc5_wrs_t>::type>(
             std::forward<args_types_>(args)...);
@@ -202,7 +195,6 @@ static void construct_pool(pool_variants_t &variants, FU_MAYBE_UNUSED_ fu::capab
         return variants.construct<typename pool_for<pool_kind_, fu::risc5_pause_t>::type>(
             std::forward<args_types_>(args)...);
 #endif
-#endif // FU_DETECT_ASM_YIELDS_
     return variants.construct<typename pool_for<pool_kind_, fu::standard_yield_t>::type>(
         std::forward<args_types_>(args)...);
 }

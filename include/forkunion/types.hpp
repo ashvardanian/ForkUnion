@@ -319,10 +319,13 @@
 #define fu_unlikely_(x) (x)
 #endif
 
+/*  Whether GNU-style inline assembly (`__asm__`) is available. GCC and Clang have it; MSVC does not on
+ *  x86-64 or AArch64, and reaches the same instructions through intrinsics instead. Gates only the paths
+ *  that genuinely need inline asm - the hand-encoded `WFET`/`WRS` opcodes and the MSR/register reads. */
 #if defined(__GNUC__) || defined(__clang__)
-#define FU_DETECT_ASM_YIELDS_ 1
+#define FU_DETECT_INLINE_ASM_SUPPORT_ 1
 #else
-#define FU_DETECT_ASM_YIELDS_ 0
+#define FU_DETECT_INLINE_ASM_SUPPORT_ 0
 #endif
 
 namespace ashvardanian {
