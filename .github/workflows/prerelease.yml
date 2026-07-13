@@ -458,9 +458,9 @@ jobs:
           - name: musl (Alpine)
             image: alpine:3.20
             setup: apk add --no-cache git build-base cmake
-          - name: glibc 2.17 (manylinux2014)
-            image: quay.io/pypa/manylinux2014_x86_64
-            setup: yum install -y git gcc gcc-c++ make && pipx install cmake
+          - name: glibc 2.28 (manylinux_2_28)
+            image: quay.io/pypa/manylinux_2_28_x86_64
+            setup: dnf install -y git gcc gcc-c++ make && pipx install cmake
     steps:
       - name: Install toolchain
         run: ${{ matrix.setup }}
