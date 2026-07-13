@@ -364,7 +364,9 @@ struct risc5_pause_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
     inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
                            bound_type_ = {}) const noexcept {
-        __asm__ __volatile__("pause");
+        // Zihintpause `PAUSE` is `FENCE W, 0`; the mnemonic needs `-march=...+zihintpause` to assemble,
+        // so the fixed encoding is emitted directly - it decodes as a no-op fence on cores without it.
+        __asm__ __volatile__(".4byte 0x0100000f");
     }
 };
 
@@ -441,8 +443,9 @@ struct risc5_wrs_t {
             return (current_bits & 0xffffffffull) == (observed_bits & 0xffffffffull);
         }
         else {
-            // No sub-word LR exists, so fall back to the pause hint and skip the `WRS`.
-            __asm__ __volatile__("pause");
+            // No sub-word LR exists, so fall back to the pause hint and skip the `WRS`. Same fixed
+            // Zihintpause encoding as `risc5_pause_t` - the mnemonic needs `+zihintpause` to assemble.
+            __asm__ __volatile__(".4byte 0x0100000f");
             return false;
         }
     }
