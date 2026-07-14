@@ -558,7 +558,10 @@ struct colocated_pool {
             if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
 #if FU_ON_FREEBSD
             // FreeBSD rejects `SCHED_IDLE`; its idle class is reached through `rtprio` instead.
-            ::rtprio rtp {RTP_PRIO_IDLE, RTP_PRIO_MAX}; // ? Lowest priority within the idle class
+            // ! Elaborated `struct` tag: `<sys/rtprio.h>` also declares an `rtprio()` function that
+            // ! would otherwise hide the type name here.
+            // ? Lowest priority within the idle class
+            struct ::rtprio rtp {RTP_PRIO_IDLE, RTP_PRIO_MAX};
             ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
 #else
             sched_param param {};
@@ -672,7 +675,7 @@ struct colocated_pool {
                 // for another thread; its QoS class is fixed at creation.
 #if FU_ON_FREEBSD
                 // Restore the timesharing class - "make runnable", not "boost to realtime".
-                ::rtprio rtp {RTP_PRIO_NORMAL, 0};
+                struct ::rtprio rtp {RTP_PRIO_NORMAL, 0};
                 ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
 #else
                 sched_param param {};

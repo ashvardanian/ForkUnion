@@ -319,6 +319,163 @@ static bool test_oversubscribed_threads(fu_capabilities_t mask) {
     return result;
 }
 
+/** Context for the `for_slices` test. */
+struct for_slices_context_t {
+    atomic_uint *executions;
+    size_t n;
+    atomic_bool bounds_violated;
+    atomic_bool empty_slice;
+};
+
+static void for_slices_callback(void *context_punned, size_t first, size_t count, size_t thread,
+                                size_t compute_domain) {
+    (void)thread;
+    (void)compute_domain;
+    struct for_slices_context_t *context = (struct for_slices_context_t *)context_punned;
+    if (count == 0) atomic_store(&context->empty_slice, true);
+    if (first + count > context->n) {
+        atomic_store(&context->bounds_violated, true);
+        return;
+    }
+    for (size_t i = 0; i != count; ++i) atomic_fetch_add(&context->executions[first + i], 1);
+}
+
+static bool test_for_slices(fu_capabilities_t mask) {
+    fu_pool_t pool = spawn_default_pool("test_for_slices", mask, fu_caller_inclusive_k);
+    if (!pool) return false;
+
+    size_t const n = 1000;
+    atomic_uint *executions = calloc(n, sizeof(atomic_uint));
+    struct for_slices_context_t context = {.executions = executions, .n = n};
+
+    fu_pool_for_slices(pool, n, for_slices_callback, &context);
+
+    bool result = !atomic_load(&context.bounds_violated) && !atomic_load(&context.empty_slice);
+    for (size_t i = 0; i < n && result; ++i) result = atomic_load(&executions[i]) == 1;
+
+    free(executions);
+    fu_pool_delete(pool);
+    return result;
+}
+
+static bool test_sleep_wake(fu_capabilities_t mask) {
+    fu_pool_t pool = spawn_default_pool("test_sleep", mask, fu_caller_inclusive_k);
+    if (!pool) return false;
+
+    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    struct for_n_context_t context = {.counter = 0, .visited = visited};
+
+    /* Each batch naps the workers, then the dispatch itself must wake them - exactly once per task. */
+    bool result = true;
+    for (size_t batch = 0; batch != 2 && result; ++batch) {
+        fu_pool_sleep(pool, 100);
+        atomic_store(&context.counter, 0);
+        fu_pool_for_n(pool, default_parallel_tasks_k, for_n_callback, &context);
+        result = atomic_load(&context.counter) == default_parallel_tasks_k &&
+                 contains_iota(visited, default_parallel_tasks_k);
+    }
+
+    free(visited);
+    fu_pool_delete(pool);
+    return result;
+}
+
+/* The C mirror of the C++ topology invariants: counts agree, cores partition, levels stay in range. */
+static bool test_topology_introspection(fu_capabilities_t mask) {
+    (void)mask;
+    size_t const cores = fu_logical_cores_count(machine_topology);
+    size_t const memory_domains = fu_memory_domains_count(machine_topology);
+    size_t const compute_domains = fu_compute_domains_count(machine_topology);
+    size_t const compute_levels = fu_compute_levels_count(machine_topology);
+    if (cores == 0 || memory_domains == 0 || compute_domains == 0 || compute_levels == 0) return false;
+    if (compute_levels > compute_domains) return false;
+
+    /* Every core belongs to exactly one compute domain, and every level ordinal stays in range. */
+    size_t cores_across_domains = 0;
+    for (size_t i = 0; i < compute_domains; ++i) {
+        size_t const domain_cores = fu_logical_cores_count_in(machine_topology, i);
+        if (domain_cores == 0) return false;
+        if (fu_compute_level_in(machine_topology, i) >= compute_levels) return false;
+        cores_across_domains += domain_cores;
+    }
+    if (cores_across_domains != cores) return false;
+
+    /* Per-domain RAM never exceeds the machine, and the ids handed out are valid allocator inputs. */
+    size_t const total_ram = fu_volume_ram(machine_topology);
+    for (size_t i = 0; i < memory_domains; ++i) {
+        if (fu_memory_domain_id_at_index(machine_topology, i) < 0) return false;
+        if (total_ram != 0 && fu_volume_ram_in(machine_topology, i) > total_ram) return false;
+    }
+    return true;
+}
+
+/* Per-domain worker counts must sum to the pool total, and global ids must localize contiguously. */
+static bool test_pool_domain_accounting(fu_capabilities_t mask) {
+    fu_pool_t pool = spawn_default_pool("test_accounting", mask, fu_caller_inclusive_k);
+    if (!pool) return false;
+
+    bool result = true;
+    size_t const threads = fu_pool_threads_count(pool);
+    size_t const domains = fu_pool_compute_domains_count(pool);
+    if (domains == 0) result = false;
+
+    size_t prefix = 0;
+    for (size_t domain = 0; domain < domains && result; ++domain) {
+        size_t const local_threads = fu_pool_threads_count_in(pool, domain);
+        if (local_threads == 0) {
+            result = false;
+            break;
+        }
+        /* Workers are numbered contiguously per domain, so the prefix boundaries must localize to 0. */
+        if (fu_pool_locate_thread_in(pool, prefix, domain) != 0) result = false;
+        if (fu_pool_locate_thread_in(pool, prefix + local_threads - 1, domain) != local_threads - 1) result = false;
+        prefix += local_threads;
+    }
+    if (prefix != threads) result = false;
+
+    fu_pool_delete(pool);
+    return result;
+}
+
+/* The allocators fall back to the heap where no placement exists, so the round-trip must succeed everywhere. */
+static bool test_allocations_on_domains(fu_capabilities_t mask) {
+    (void)mask;
+    size_t const domains = fu_memory_domains_count(machine_topology);
+    if (domains == 0) return false;
+
+    size_t const bytes = 1u << 20;
+    for (size_t index = 0; index < domains; ++index) {
+        fu_memory_domain_id_t const domain_id = fu_memory_domain_id_at_index(machine_topology, index);
+
+        unsigned char *plain = fu_allocate_on_domain_id(domain_id, bytes);
+        if (!plain) return false;
+        memset(plain, 0x5A, bytes);
+        bool const plain_ok = plain[0] == 0x5A && plain[bytes - 1] == 0x5A;
+        fu_free_on_domain_id(domain_id, plain, bytes);
+        if (!plain_ok) return false;
+
+        size_t allocated = 0, page = 0;
+        unsigned char *sized = fu_allocate_at_least_on_domain_id(domain_id, bytes, &allocated, &page);
+        if (!sized) return false;
+        bool const sized_ok = allocated >= bytes;
+        memset(sized, 0x5A, allocated);
+        fu_free_on_domain_id(domain_id, sized, allocated);
+        if (!sized_ok) return false;
+    }
+
+    size_t stride = 0, mapped_domains = 0, total = 0, page = 0;
+    unsigned char *base = fu_allocate_symmetric(machine_topology, 4096, &stride, &mapped_domains, &total, &page);
+    if (!base) return false;
+    bool result = mapped_domains == domains && stride >= 4096 && total == mapped_domains * stride;
+    for (size_t d = 0; d < mapped_domains && result; ++d) {
+        unsigned char *slice = base + d * stride;
+        memset(slice, (int)(d + 1), 4096);
+        result = slice[0] == (unsigned char)(d + 1) && slice[4095] == (unsigned char)(d + 1);
+    }
+    fu_free_symmetric(base, total);
+    return result;
+}
+
 /* GCC nested functions extension test */
 #if defined(__GNUC__) && !defined(__clang__)
 
@@ -393,8 +550,7 @@ static bool test_clang_blocks(fu_capabilities_t mask) {
 
 #endif // defined(__clang__) && defined(__BLOCKS__)
 
-/**
- */
+/** Runs every unit test under one capability @p mask, accumulating the tallies for `main`'s verdict. */
 static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *failures_out) {
     static struct {
         char const *name;
@@ -408,8 +564,13 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
         {"`generation` polling", test_generation_polling},
         {"`for_n` for uncomfortable input size", test_uncomfortable_input_size},
         {"`for_n` static scheduling", test_for_n},
+        {"`for_slices` slice scheduling", test_for_slices},
         {"`for_n_dynamic` dynamic scheduling", test_for_n_dynamic},
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads},
+        {"`sleep` and wake exactly-once", test_sleep_wake},
+        {"topology introspection invariants", test_topology_introspection},
+        {"per-compute-domain pool accounting", test_pool_domain_accounting},
+        {"allocations on every memory domain", test_allocations_on_domains},
 #if defined(__GNUC__) && !defined(__clang__)
         {"GCC nested functions extension", test_gcc_nested_functions},
 #endif
@@ -421,12 +582,11 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
     char mask_name[256];
     fu_name_capabilities(mask, mask_name, sizeof(mask_name));
 
-    size_t passes = 0, failures = 0;
     for (size_t i = 0; i < sizeof(unit_tests) / sizeof(unit_tests[0]); ++i) {
-        printf("Running %s... for `%s` capability", unit_tests[i].name, mask_name);
+        printf("Running %s for `%s`... ", unit_tests[i].name, mask_name);
         bool const ok = unit_tests[i].function(mask);
         printf(ok ? "PASS\n" : "FAIL\n");
-        passes += ok, failures += !ok;
+        *passes_out += ok, *failures_out += !ok;
     }
 }
 
@@ -470,16 +630,24 @@ int main(void) {
     size_t failures = 0;
     for (size_t i = 0; i < sizeof(yield_variants) / sizeof(*yield_variants); ++i) {
         fu_capabilities_t yield_variant = yield_variants[i];
-        for (size_t i = 0; i < sizeof(topology_variants) / sizeof(*topology_variants); ++i) {
-            fu_capabilities_t topology_variant = topology_variants[i];
-            fu_capabilities_t wanted_mask = yield_variant | topology_variant;
-            if ((wanted_mask & runtime_mask & comptime_mask) != wanted_mask) continue; // ! Skip bad combos
-            run_battery(wanted_mask, &passes, &failures);
+
+        /* A yield the machine lacks would be silently narrowed by `fu_pool_new`, so the battery
+         * would mislabel which variant it exercised. Facility bits only need to be compiled in -
+         * the runtime mask never carries them, and the library narrows the rest per pool. */
+        if ((yield_variant & runtime_mask) != yield_variant) continue;
+        for (size_t j = 0; j < sizeof(topology_variants) / sizeof(*topology_variants); ++j) {
+            fu_capabilities_t topology_variant = topology_variants[j];
+            if ((topology_variant & comptime_mask) != topology_variant) continue;
+            run_battery(yield_variant | topology_variant, &passes, &failures);
         }
     }
 
     fu_topology_delete(machine_topology);
 
+    if (passes + failures == 0) {
+        fprintf(stderr, "No capability combination was runnable - the filter is broken\n");
+        return EXIT_FAILURE;
+    }
     if (failures > 0) {
         fprintf(stderr, "%zu/%zu test runs failed\n", failures, failures + passes);
         return EXIT_FAILURE;
