@@ -10,8 +10,8 @@
  *  - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static_shared`).
  *  - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
  *
- *  The backends include: `openmp_static`, `openmp_dynamic`, `forkunion_static_shared`, `forkunion_dynamic_shared`,
- *  `forkunion_static_replicated`, and `forkunion_dynamic_replicated`.
+ *  The backends include: `forkunion_{static,dynamic}_{shared,replicated}`, `openmp_{static,dynamic}`,
+ *  and `taskflow_{static,dynamic}`.
  *  To compile and run on all cores in Linux:
  *
  *  @code{.sh}
@@ -47,9 +47,11 @@
  *    NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
  *  @endcode
  */
-#include <chrono>  // `std::chrono::steady_clock`
 #include <cstring> // `std::memcpy`
-#include <random>  // `std::uniform_real_distribution`, `std::mt19937`
+
+#include <chrono>   // `std::chrono::steady_clock`
+#include <random>   // `std::uniform_real_distribution`, `std::mt19937`
+#include <optional> // `std::optional` - the executor, spawned only when chosen
 
 // Clang generally defines `_OPENMP` when OpenMP, but compiling it is
 // tricky and the header may not be available.
@@ -60,6 +62,9 @@
 #undef _OPENMP
 #endif
 #endif
+
+#include <taskflow/taskflow.hpp>           // `tf::Executor`, `tf::Taskflow`
+#include <taskflow/algorithm/for_each.hpp> // `for_each_index`, partitioners
 
 #include <forkunion.hpp>
 
@@ -127,7 +132,7 @@ inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
  *  Linux and Apple both. Only the @b memory placement is NUMA-specific, and `replicated_array` already
  *  falls back to a heap-backed replica where no NUMA API exists, so a machine with one memory domain sees
  *  the per-node replicas collapse to one. One pool serves every ForkUnion backend.  */
-using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t>;
+using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t, fu::preferred_cache_hints_t>;
 
 /*  Copies canonical `bodies` into every per-domain replica, each written by the cores local to its node so
  *  the pages first-touch there. Every compute domain sharing a memory domain cooperates on that node's one
@@ -162,9 +167,12 @@ void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t
 struct nbody_context_t {
     fu::span<body_t> bodies;                // ? Canonical positions, updated in place each step
     fu::span<vector3_t> forces;             // ? Scratch for the accumulated force per body
-    distributed_pool_t &pool;               // ? One pool spawned for every ForkUnion backend
     fu::replicated_array<body_t> &replicas; // ? Per-node position replicas, filled only for `replicated_*`
     fu::machine_topology_t const &topology; // ? The compute-to-memory bridge for the replicated read
+    distributed_pool_t *pool = nullptr;     // ? Spawned by `main` only for the ForkUnion backends
+    tf::Executor *taskflow = nullptr;       // ? Spawned by `main` only for the `taskflow_*` backends
+    std::optional<tf::Taskflow> force_pass; // ? Taskflow graphs are built once and re-run every step, the way
+    std::optional<tf::Taskflow> apply_pass; // ? Taskflow is meant to be used - never rebuilt on the hot path
 };
 
 /** @brief Pre-split across threads vs work-stolen. */
@@ -173,7 +181,7 @@ enum class schedule_k : unsigned int { static_k, dynamic_k };
 enum class placement_k : unsigned int { shared_k, replicated_k };
 
 /** @brief Runs @p body over `[0, n)`, statically pre-split or work-stolen per the compile-time schedule. */
-template <schedule_k schedule_, class body_type_>
+template <schedule_k schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
     if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
     else
@@ -194,7 +202,7 @@ static void run(nbody_context_t &c) noexcept {
     fu::span<body_t> const bodies = c.bodies;
     fu::span<vector3_t> const forces = c.forces;
 
-    if constexpr (placement_ == placement_k::replicated_k) refresh_replicas(c.topology, c.pool, c.replicas, bodies);
+    if constexpr (placement_ == placement_k::replicated_k) refresh_replicas(c.topology, *c.pool, c.replicas, bodies);
 
     // Force pass: all-to-all, reading the shared array or the thread's node-local replica.
     auto calc = [&](local_prong_t prong) noexcept {
@@ -213,8 +221,8 @@ static void run(nbody_context_t &c) noexcept {
     // Apply pass: integrate the canonical body by its force - identical for both placements.
     auto integrate = [&](local_prong_t prong) noexcept { apply_force(bodies[prong.task], forces[prong.task]); };
 
-    for_n_scheduled<schedule_>(c.pool, n, calc);
-    for_n_scheduled<schedule_>(c.pool, n, integrate);
+    for_n_scheduled<schedule_>(*c.pool, n, calc);
+    for_n_scheduled<schedule_>(*c.pool, n, integrate);
 }
 
 #if defined(_OPENMP)
@@ -247,11 +255,44 @@ static void run_openmp_dynamic(nbody_context_t &c) noexcept {
 }
 #endif
 
+/*  The Taskflow baselines - the same all-to-all sweep under `tf::for_each_index`. The executor is spawned
+ *  once by `main`, and the two task graphs are built once on the first step and re-run thereafter - exactly
+ *  how Taskflow is meant to be used. Rebuilding a `tf::Taskflow` every step, or spawning a fresh
+ *  `tf::Executor` per dispatch, would measure graph construction, not the dispatch this benchmark isolates.
+ *  The graphs capture the `bodies`/`forces` spans, whose pointers never move, so one build stays valid. */
+template <typename partitioner_>
+static void run_taskflow(nbody_context_t &c, partitioner_ partitioner) noexcept {
+    tf::Executor &executor = *c.taskflow;
+    if (!c.force_pass) {
+        std::size_t const n = c.bodies.size();
+        fu::span<body_t> const bodies = c.bodies;
+        fu::span<vector3_t> const forces = c.forces;
+        c.force_pass.emplace();
+        c.force_pass->for_each_index(
+            std::size_t(0), n, std::size_t(1),
+            [=](std::size_t i) noexcept {
+                vector3_t f {0.0, 0.0, 0.0};
+                for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
+                forces[i] = f;
+            },
+            partitioner);
+        c.apply_pass.emplace();
+        c.apply_pass->for_each_index(
+            std::size_t(0), n, std::size_t(1), [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); },
+            partitioner);
+    }
+    executor.run(*c.force_pass).wait();
+    executor.run(*c.apply_pass).wait();
+}
+static void run_taskflow_static(nbody_context_t &c) noexcept { run_taskflow(c, tf::StaticPartitioner()); }
+static void run_taskflow_dynamic(nbody_context_t &c) noexcept { run_taskflow(c, tf::DynamicPartitioner(1)); }
+
 /** @brief Which execution engine a backend runs on, so `main` builds exactly the resource it needs. */
 enum class engine_t : unsigned int {
     forkunion_k,            // ? Spawns the shared ForkUnion pool
     forkunion_replicated_k, // ? Also allocates the per-node position replicas
     openmp_k,               // ? Runs under `omp parallel for`, needing no pool object
+    taskflow_k,             // ? Runs on a reused `tf::Executor`, needing no pool object
 };
 
 /** @brief The dispatch table - a name, its per-step function, and the engine it runs on. */
@@ -272,6 +313,8 @@ static constexpr backend_t backends_k[] = {
     {"openmp_static", run_openmp_static, engine_t::openmp_k},
     {"openmp_dynamic", run_openmp_dynamic, engine_t::openmp_k},
 #endif
+    {"taskflow_static", run_taskflow_static, engine_t::taskflow_k},
+    {"taskflow_dynamic", run_taskflow_dynamic, engine_t::taskflow_k},
 };
 
 #pragma endregion Backends
@@ -343,14 +386,16 @@ int main() {
     bool const needs_pool =
         selected->engine == engine_t::forkunion_k || selected->engine == engine_t::forkunion_replicated_k;
     fu::machine_topology_t topology;
-    distributed_pool_t pool;
     fu::replicated_array<body_t> replicas;
+    std::optional<distributed_pool_t> pool; // ? Spawned for the ForkUnion backends
+    std::optional<tf::Executor> taskflow;   // ? Spawned for the Taskflow backends
     if (needs_pool) {
         if (!topology.try_harvest()) {
             std::fprintf(stderr, "Failed to harvest the memory topology\n");
             return EXIT_FAILURE;
         }
-        if (!pool.try_spawn(topology, threads)) {
+        pool.emplace();
+        if (!pool->try_spawn(topology, threads)) {
             std::fprintf(stderr, "Failed to spawn the thread pool\n");
             return EXIT_FAILURE;
         }
@@ -359,16 +404,21 @@ int main() {
             return EXIT_FAILURE;
         }
     }
+    if (selected->engine == engine_t::taskflow_k) taskflow.emplace(threads);
 #if defined(_OPENMP)
     omp_set_num_threads(static_cast<int>(threads));
 #endif
 
-    nbody_context_t context {bodies_view, forces_view, pool, replicas, topology};
+    nbody_context_t context {bodies_view, forces_view, replicas, topology};
+    if (pool) context.pool = &*pool;
+    if (taskflow) context.taskflow = &*taskflow;
     auto const started = std::chrono::steady_clock::now();
     for (std::size_t i = 0; i < iterations; ++i) selected->run(context);
-    double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() //
-                           / static_cast<double>(iterations);
-    std::printf("%.*s: %zu bodies, %zu iters in %.3f s\n", static_cast<int>(backend.size()), backend.data(), n,
-                iterations, seconds);
+    double const total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    double const microseconds_per_iteration = total_seconds / static_cast<double>(iterations) * 1e6;
+    // Per-iteration latency is the comparable unit - one `for_each` dispatch over `n` bodies. The total
+    // wall time follows for reference, since a fast dispatch rounds to zero when printed in seconds.
+    std::printf("%.*s: %zu bodies, %zu iters, %.2f us/iter (%.2f s total)\n", static_cast<int>(backend.size()),
+                backend.data(), n, iterations, microseconds_per_iteration, total_seconds);
     return EXIT_SUCCESS;
 }

@@ -399,10 +399,11 @@ fn iteration_rayon_static(pool: &RayonPool, bodies: &mut [Body], forces: &mut [V
             .for_each(|(chunk_index, force_chunk)| {
                 let start = chunk_index * stride;
                 for (local, force) in force_chunk.iter_mut().enumerate() {
-                    let i = start + local;
+                    let bi = &bodies[start + local];
                     let mut accumulator = Vector3::default();
-                    for j in 0..n {
-                        accumulator += gravitational_force(&bodies[i], &bodies[j]);
+                    // Iterator form elides the per-element bounds check, like the ForkUnion backends above.
+                    for bj in bodies.iter().take(n) {
+                        accumulator += gravitational_force(bi, bj);
                     }
                     *force = accumulator;
                 }
@@ -431,9 +432,11 @@ fn iteration_rayon_dynamic(pool: &RayonPool, bodies: &mut [Body], forces: &mut [
             .with_max_len(1)
             .enumerate()
             .for_each(|(i, force)| {
+                let bi = &bodies[i];
                 let mut accumulator = Vector3::default();
-                for j in 0..n {
-                    accumulator += gravitational_force(&bodies[i], &bodies[j]);
+                // Iterator form elides the per-element bounds check, like the ForkUnion backends above.
+                for bj in bodies.iter().take(n) {
+                    accumulator += gravitational_force(bi, bj);
                 }
                 *force = accumulator;
             });
@@ -684,7 +687,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     for _ in 0..iterations {
         (selected.run)(&mut context);
     }
-    let seconds = started.elapsed().as_secs_f64() / iterations as f64;
-    println!("{backend}: {bodies_n} bodies, {iterations} iters in {seconds:.3} s");
+    let total_seconds = started.elapsed().as_secs_f64();
+    let us_per_iter = total_seconds / iterations as f64 * 1e6;
+    // Per-iteration latency is the comparable unit - one `for_each` dispatch over the bodies.
+    println!("{backend}: {bodies_n} bodies, {iterations} iters, {us_per_iter:.2} us/iter ({total_seconds:.2} s total)");
     Ok(())
 }

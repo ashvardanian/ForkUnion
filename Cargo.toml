@@ -43,8 +43,8 @@ place-threads-by-affinity = []             # ? Force binding worker threads to c
 portable = []                   # ? Force every optional capability off, leaving the STL pool
 
 [profile.release]
-opt-level = 2     # Corresponds to -O2
-lto = true        # Enables Link Time Optimization for further optimizations
+opt-level = 3     # Corresponds to -O3, matching the C++ benchmarks it is compared against
+lto = false       # No LTO, matching the C++ and Zig benchmarks; fat LTO could not cross into the C core anyway
 codegen-units = 1 # May increase compilation time but optimizes further
 rpath = false     # On some systems, setting this to false can help with optimizations
 

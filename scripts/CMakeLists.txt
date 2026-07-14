@@ -110,14 +110,39 @@ if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleC
     endif ()
 endif ()
 
+# Taskflow: a third comparison backend for the C++ benchmarks, fetched into the build tree so no submodule is vendored.
+# `FIND_PACKAGE_ARGS` lets a system install satisfy configure without a clone.
+find_package(Threads REQUIRED)
+include(FetchContent)
+set(TF_BUILD_TESTS
+    OFF
+    CACHE BOOL "" FORCE
+)
+set(TF_BUILD_EXAMPLES
+    OFF
+    CACHE BOOL "" FORCE
+)
+set(TF_BUILD_PROFILER
+    OFF
+    CACHE BOOL "" FORCE
+)
+FetchContent_Declare(
+    taskflow
+    GIT_REPOSITORY https://github.com/taskflow/taskflow.git
+    GIT_TAG v4.1.0
+    FIND_PACKAGE_ARGS NAMES Taskflow
+)
+FetchContent_MakeAvailable(taskflow)
+
 # Both demo benchmarks share identical wiring - C++ for clear state ownership, but linking the pre-compiled C ABI so the
 # runtime busy-wait waiter resolves at runtime - the whole point, since AArch64 `WFET` is unreachable through the
 # compile-time C++ `preferred_yield_t`. The only per-target difference is `-ffast-math`, passed as @p fast_math.
 function (add_forkunion_benchmark target source fast_math)
     add_executable(${target} ${source})
+    # C++20 for the benchmark harness (the library itself stays C++17); Taskflow v4 requires C++20 concepts.
     set_target_properties(
         ${target}
-        PROPERTIES CXX_STANDARD 17
+        PROPERTIES CXX_STANDARD 20
                    CXX_STANDARD_REQUIRED ON
                    CXX_EXTENSIONS OFF
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -166,6 +191,9 @@ function (add_forkunion_benchmark target source fast_math)
             message(STATUS "Homebrew not found - OpenMP disabled for ${target}")
         endif ()
     endif ()
+
+    # Taskflow: header-only, so linking the interface target only adds the include path and a threads dependency.
+    target_link_libraries(${target} PRIVATE Taskflow::Taskflow Threads::Threads)
 endfunction ()
 
 # N-body: fast-math on - the fast reciprocal-sqrt kernel is an approximation already.
