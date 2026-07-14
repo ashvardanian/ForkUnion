@@ -198,8 +198,17 @@ typedef enum fu_capabilities_t {
     /** The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation. */
     fu_capability_huge_transparent_pages_k = 1 << 13,
     /** The domain-aware `colocated_pool` and `distributed_pool` are compiled. Built:
-       `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`. */
+     *  `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`. */
     fu_capability_colocate_pools_on_domain_k = 1 << 14,
+    /** `CLDEMOTE` moves a just-written line toward the shared LLC and retains it. Reporting-only:
+     *  the emitter is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, never dispatched. */
+    fu_capability_x86_cldemote_k = 1 << 15,
+    /** `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
+     *  EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`. */
+    fu_capability_arm64_dc_cvac_k = 1 << 16,
+    /** The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
+     *  the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet. */
+    fu_capability_risc5_zicbom_k = 1 << 17,
 
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |

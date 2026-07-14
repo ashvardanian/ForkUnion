@@ -483,6 +483,127 @@ using preferred_yield_t = risc5_pause_t;
 using preferred_yield_t = standard_yield_t;
 #endif
 
+#if FU_DETECT_ARCH_X86_64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
+/**
+ *  @brief x86 cache hints: `CLDEMOTE` toward the LLC, `PREFETCHW` for write-intent promotion.
+ *  @note Both live in hint or reserved-NOP space, so neither can fault on any x86-64 part; whether
+ *        `CLDEMOTE` actually bites is reported by `capability_x86_cldemote_k` - detected, never
+ *        dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
+ *        MSVC encodes the same bytes through `_mm_cldemote` / `_m_prefetchw`, no `/arch` needed.
+ */
+struct x86_cache_hints_t {
+    static constexpr capabilities_t capability_k = capability_x86_cldemote_k;
+    inline void operator()(void const *address, demote_line_t) const noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        __asm__ __volatile__(".byte 0x0f, 0x1c, 0x00" ::"a"(address) : "memory"); // ? `cldemote (%rax)`
+#else
+        _mm_cldemote(address); // ? The same `0F 1C /0` hint; `<immintrin.h>`, VS 2019 16.2+
+#endif
+    }
+    inline void operator()(void const *address, promote_line_t) const noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        __asm__ __volatile__(".byte 0x0f, 0x0d, 0x08" ::"a"(address) : "memory"); // ? `prefetchw (%rax)`
+#else
+        _m_prefetchw(address); // ? `<intrin.h>`; PREFETCHW is a Windows 8.1 x64 install requirement
+#endif
+    }
+};
+#endif // FU_DETECT_ARCH_X86_64_
+
+#if FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+/**
+ *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes.
+ *  @note There is no demote on Arm - the clean is the nearest thing: the next claimer's snoop finds
+ *        a clean line instead of forcing a dirty intervention, at the price of a memory write. The
+ *        clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
+ *        `FU_WITH_DEMOTE_CACHE_LINES` gate requires `FU_ON_LINUX` on this architecture. The
+ *        persistence-targeted `DC CVAP`/`CVADP` are deliberately absent: UNDEFINED without
+ *        `FEAT_DPB`/`FEAT_DPB2`, and they buy a NUMA hand-off nothing.
+ */
+struct arm64_cache_hints_t {
+    static constexpr capabilities_t capability_k = capability_arm64_dc_cvac_k;
+    inline void operator()(void const *address, demote_line_t) const noexcept {
+        __asm__ __volatile__("dc cvac, %0" ::"r"(address) : "memory");
+    }
+    inline void operator()(void const *address, promote_line_t) const noexcept {
+        __asm__ __volatile__("prfm pstl1keep, [%0]" ::"r"(address) : "memory");
+    }
+};
+#endif // FU_DETECT_ARCH_ARM64_
+
+#if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
+/**
+ *  @brief AArch64 promotion only, for kernels that keep `SCTLR_EL1.UCI` clear - Windows and the
+ *         BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
+ *  @note Mirrors `risc5_cache_hints_t`'s shape: the promote is a `PRFM` hint that cannot fault
+ *        anywhere. MSVC reaches it through `__prefetch2(address, 0x10)`, whose prfop immediate
+ *        `0b10000` spells PST-L1-KEEP - the same encoding the asm arm emits.
+ */
+struct arm64_prefetch_cache_hints_t {
+    static constexpr capabilities_t capability_k = capabilities_unknown_k;
+    inline void operator()(void const *, demote_line_t) const noexcept {}
+    inline void operator()(void const *address, promote_line_t) const noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        __asm__ __volatile__("prfm pstl1keep, [%0]" ::"r"(address) : "memory");
+#else
+        __prefetch2(address, 0x10); // ? `prfm pstl1keep, [x0]`; `<intrin.h>`, VS 2019 16.1+
+#endif
+    }
+};
+#endif // FU_DETECT_ARCH_ARM64_
+
+#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_
+/**
+ *  @brief RISC-V promotion only: `prefetch.w` is an `ORI x0, ...` hint that cannot fault, with or
+ *         without Zicbop silicon.
+ *  @note The `cbo.clean` demote is deliberately a no-op here: it raises illegal-instruction unless
+ *        the kernel set `senvcfg.CBCFE`, which only `hwprobe` can attest at runtime - so it belongs
+ *        to a runtime-dispatch tier behind `capability_risc5_zicbom_k`, never a compile-time policy.
+ */
+struct risc5_cache_hints_t {
+    static constexpr capabilities_t capability_k = capabilities_unknown_k;
+    inline void operator()(void const *, demote_line_t) const noexcept {}
+    inline void operator()(void const *address, promote_line_t) const noexcept {
+        register void const *address_register __asm__("a0") = address;
+        __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
+    }
+};
+
+/**
+ *  @brief RISC-V cache hints where `hwprobe` attested Zicbom: `cbo.clean` writes the dirty block
+ *         back toward another cache or memory, and `prefetch.w` promotes with write intent.
+ *  @note Never selected at compile time - `cbo.clean` raises illegal-instruction unless the kernel
+ *        set `senvcfg.CBCFE`, which only the `capability_risc5_zicbom_k` runtime bit can attest -
+ *        so this functor is reachable exclusively through the C ABI's runtime cascade.
+ */
+struct risc5_cbo_cache_hints_t {
+    static constexpr capabilities_t capability_k = capability_risc5_zicbom_k;
+    inline void operator()(void const *address, demote_line_t) const noexcept {
+        register void const *address_register __asm__("a0") = address;
+        __asm__ __volatile__(".4byte 0x0015200f" ::"r"(address_register) : "memory"); // ? `cbo.clean (a0)`
+    }
+    inline void operator()(void const *address, promote_line_t) const noexcept {
+        register void const *address_register __asm__("a0") = address;
+        __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
+    }
+};
+#endif // FU_DETECT_ARCH_RISC5_
+
+/*  One deterministic cache-hints policy per build, mirroring `preferred_yield_t`: the gate is the
+ *  Layer-2 tri-state, never runtime silicon - everything a selected functor emits is trap-free
+ *  wherever its gate holds, so no dispatch and no reporting bit ever guards an emission.  */
+#if FU_WITH_DEMOTE_CACHE_LINES && FU_DETECT_ARCH_X86_64_
+using preferred_cache_hints_t = x86_cache_hints_t;
+#elif FU_WITH_DEMOTE_CACHE_LINES && FU_DETECT_ARCH_ARM64_
+using preferred_cache_hints_t = arm64_cache_hints_t;
+#elif FU_WITH_PROMOTE_CACHE_LINES && FU_DETECT_ARCH_ARM64_
+using preferred_cache_hints_t = arm64_prefetch_cache_hints_t; // ? Windows/BSD: the clean traps, the hint stays
+#elif FU_WITH_PROMOTE_CACHE_LINES && FU_DETECT_ARCH_RISC5_
+using preferred_cache_hints_t = risc5_cache_hints_t;
+#else
+using preferred_cache_hints_t = standard_cache_hints_t;
+#endif
+
 /**
  *  @brief Represents the CPU capabilities for hardware-friendly yielding.
  *  @sa `ram_capabilities` to get the full set of library capabilities.
@@ -495,17 +616,21 @@ inline capabilities_t cpu_capabilities() noexcept {
     // Check for basic PAUSE instruction support (always available on x86-64)
     caps |= capability_x86_pause_k;
 
-    // CPUID leaf 7, sub-leaf 0: WAITPKG (backing UMWAIT/TPAUSE) is bit 5 of ECX.
+    // CPUID leaf 7, sub-leaf 0, ECX: WAITPKG (backing UMWAIT/TPAUSE) is bit 5; CLDEMOTE is bit 25.
+    // The CLDEMOTE bit reports whether the hint bites - Sapphire-Rapids-class parts - it never
+    // gates emission, which the compile-time `preferred_cache_hints_t` decides.
 #if FU_DETECT_INLINE_ASM_SUPPORT_
     std::uint32_t eax = 7, ebx, ecx, edx;
     __asm__ __volatile__("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax), "c"(0u) : "memory");
     if (ecx & (1u << 5)) caps |= capability_x86_tpause_k;
+    if (ecx & (1u << 25)) caps |= capability_x86_cldemote_k;
     fu_unused_(ebx);
     fu_unused_(edx);
 #else
     int leaf7[4];
     __cpuidex(leaf7, 7, 0);
     if (static_cast<std::uint32_t>(leaf7[2]) & (1u << 5)) caps |= capability_x86_tpause_k;
+    if (static_cast<std::uint32_t>(leaf7[2]) & (1u << 25)) caps |= capability_x86_cldemote_k;
 #endif
 
 #elif FU_DETECT_ARCH_ARM64_
@@ -531,6 +656,12 @@ inline capabilities_t cpu_capabilities() noexcept {
     if (wfet_field >= 2) caps |= capability_arm64_wfet_k;
 #endif
 
+    // `DC CVAC` is a base-ISA clean; what varies is whether EL0 may issue it. Linux sets
+    // `SCTLR_EL1.UCI`, so the capability is a kernel attestation, not a silicon probe.
+#if FU_ON_LINUX
+    caps |= capability_arm64_dc_cvac_k;
+#endif
+
 #elif FU_DETECT_ARCH_RISC5_
 
     // Basic PAUSE is available on RISC-V with the Zihintpause extension
@@ -546,6 +677,17 @@ inline capabilities_t cpu_capabilities() noexcept {
     long const probe_result = ::syscall(SYS_riscv_hwprobe, &probe, static_cast<std::size_t>(1),
                                         static_cast<std::size_t>(0), static_cast<void *>(nullptr), 0u);
     if (probe_result == 0 && (probe.value & RISCV_HWPROBE_EXT_ZAWRS) != 0) caps |= capability_risc5_wrs_k;
+#endif
+
+    // Zicbom user-mode cache-block management: `hwprobe` is the only sound attestation, since the
+    // kernel only advertises the extension where it also set `senvcfg.CBCFE` - a compile-time
+    // `+zicbom` proves nothing about the kernel, so unlike Zawrs there is no compile-time shortcut.
+    // The `#ifdef` guards older uapi headers that predate the key.
+#if defined(FU_DETECT_RISCV_HWPROBE_) && defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_EXT_ZICBOM)
+    riscv_hwprobe cbo_probe {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
+    long const cbo_result = ::syscall(SYS_riscv_hwprobe, &cbo_probe, static_cast<std::size_t>(1),
+                                      static_cast<std::size_t>(0), static_cast<void *>(nullptr), 0u);
+    if (cbo_result == 0 && (cbo_probe.value & RISCV_HWPROBE_EXT_ZICBOM) != 0) caps |= capability_risc5_zicbom_k;
 #endif
 
 #endif

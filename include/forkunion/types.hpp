@@ -325,6 +325,7 @@
 #else
 #define FU_DETECT_ARCH_PPC64_ 0
 #endif
+
 #if defined(__i386__) || defined(_M_IX86)
 #define FU_DETECT_ARCH_X86_32_ 1
 #else
@@ -367,6 +368,43 @@
 #define FU_DETECT_INLINE_ASM_SUPPORT_ 1
 #else
 #define FU_DETECT_INLINE_ASM_SUPPORT_ 0
+#endif
+
+/*  Whether MSVC's cache-hint intrinsics are available: `_mm_cldemote` and `_m_prefetchw` on x64,
+ *  `__prefetch2` on AArch64 - all encoded unconditionally, no `/arch` flag needed. 1922 == VS 2019
+ *  16.2, the release that introduced `_mm_cldemote`. clang-cl takes the inline-asm path above. */
+#if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER >= 1922
+#define FU_DETECT_HINT_INTRINSICS_ 1
+#else
+#define FU_DETECT_HINT_INTRINSICS_ 0
+#endif
+
+/** @brief Can we deterministically push a freshly-written cache line away from this core?
+ *  @note x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the
+ *        `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
+ *        and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
+ *        unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
+ *        reached only through the runtime capability, never this gate. */
+#if !defined(FU_WITH_DEMOTE_CACHE_LINES)
+#define FU_WITH_DEMOTE_CACHE_LINES                                    \
+    ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
+     (FU_DETECT_ARCH_X86_64_ || (FU_DETECT_ARCH_ARM64_ && FU_ON_LINUX)))
+#endif
+
+/** @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
+ *  @note Every ISA here places its write-prefetch in hint space - x86 `PREFETCHW`, AArch64
+ *        `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
+#if !defined(FU_WITH_PROMOTE_CACHE_LINES)
+#define FU_WITH_PROMOTE_CACHE_LINES                                   \
+    ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
+     (FU_DETECT_ARCH_X86_64_ || FU_DETECT_ARCH_ARM64_ || FU_DETECT_ARCH_RISC5_))
+#endif
+
+#if FU_WITH_DEMOTE_CACHE_LINES && !(FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
+#error "FU_WITH_DEMOTE_CACHE_LINES emits hint opcodes; it needs GNU inline assembly or MSVC intrinsics"
+#endif
+#if FU_WITH_DEMOTE_CACHE_LINES && !(FU_DETECT_ARCH_X86_64_ || FU_DETECT_ARCH_ARM64_)
+#error "FU_WITH_DEMOTE_CACHE_LINES names no demote-capable ISA on this target"
 #endif
 
 namespace ashvardanian {
@@ -507,6 +545,25 @@ enum capabilities_t : unsigned int {
      */
     capability_colocate_pools_on_domain_k = 1 << 14,
 
+    /**
+     *  `CLDEMOTE` moves a just-written line from this core's private caches toward the shared LLC and
+     *  retains it there. Runtime-detected on Sapphire-Rapids-class parts; the emitting functor is
+     *  chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, so this bit reports, it never dispatches.
+     */
+    capability_x86_cldemote_k = 1 << 15,
+    /**
+     *  `DC CVAC` cleans a dirty line to the coherency point - the nearest thing AArch64 has to a
+     *  demote: the next claimer's snoop finds a clean line instead of forcing a dirty intervention.
+     *  Set where EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+     */
+    capability_arm64_dc_cvac_k = 1 << 16,
+    /**
+     *  The kernel enabled user-mode Zicbom cache-block management (`senvcfg.CBCFE`), attested through
+     *  `hwprobe` - the only sound signal, since a compile-time `+zicbom` proves nothing about the
+     *  kernel. No compile-time policy emits `cbo.clean` yet; the bit is the hook for runtime dispatch.
+     */
+    capability_risc5_zicbom_k = 1 << 17,
+
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
                              capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
@@ -552,6 +609,9 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_arm64_wfet_k: return "arm64_wfet";
     case capability_risc5_pause_k: return "risc5_pause";
     case capability_risc5_wrs_k: return "risc5_wrs";
+    case capability_x86_cldemote_k: return "x86_cldemote";
+    case capability_arm64_dc_cvac_k: return "arm64_dc_cvac";
+    case capability_risc5_zicbom_k: return "risc5_zicbom";
     case capability_os_threads_k: return "os_threads";
     case capability_topology_k: return "topology";
     case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";
@@ -1262,6 +1322,39 @@ template <typename yield_type_, typename value_type_, typename thread_index_type
 struct is_wait_functor {
     static constexpr bool value =
         std::is_nothrow_invocable_v<yield_type_ &, std::atomic<value_type_> const &, value_type_, thread_index_type_>;
+};
+
+/** @brief Tag for pushing a just-written line away, toward the LLC or the coherency point. */
+struct demote_line_t {};
+/** @brief Tag for pulling a line toward this core with write intent, ahead of an atomic claim. */
+struct promote_line_t {};
+/** @brief Canonical `demote_line_t` value, mirroring the `wait_capped_k` tag convention. */
+inline constexpr demote_line_t demote_line_k {};
+/** @brief Canonical `promote_line_t` value, mirroring the `wait_uncapped_k` tag convention. */
+inline constexpr promote_line_t promote_line_k {};
+
+/**
+ *  @brief The do-nothing cache-hints policy - the default, and the fallback for every ISA gap.
+ *  @sa `preferred_cache_hints_t` in `capabilities.hpp`, which picks the per-ISA emitters where
+ *      `FU_WITH_DEMOTE_CACHE_LINES` / `FU_WITH_PROMOTE_CACHE_LINES` hold.
+ */
+struct standard_cache_hints_t {
+    static constexpr capabilities_t capability_k = capabilities_unknown_k;
+    inline void operator()(void const *, demote_line_t) const noexcept {}
+    inline void operator()(void const *, promote_line_t) const noexcept {}
+};
+
+/**
+ *  @brief Whether @p hints_type_ is a valid cache-hints policy: callable with both line tags.
+ *
+ *  Every policy takes the address of the line being handed away or claimed, plus a tag choosing the
+ *  direction. A policy for an ISA with no matching instruction implements the overload as a no-op,
+ *  so callers never branch - the emptiness compiles away.
+ */
+template <typename hints_type_>
+struct is_cache_hints_functor {
+    static constexpr bool value = std::is_nothrow_invocable_v<hints_type_ &, void const *, demote_line_t> &&
+                                  std::is_nothrow_invocable_v<hints_type_ &, void const *, promote_line_t>;
 };
 
 /**
