@@ -26,7 +26,12 @@
 //! - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
 //!
 //! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`; the
-//! baselines are `rayon_static` and `rayon_dynamic`. To compile and run:
+//! baselines are `rayon_static` and `rayon_dynamic`, at the same one-vertex dynamic grain -
+//! `with_max_len(1)` in Rayon, `for_n_dynamic` here. Cells run bare, with no pinning environment;
+//! the residual spread on SMT machines is preemption - one delayed hyperthread stalls every barrier
+//! of a pass - which the fixed window amortizes. The `_replicated` backends are a deliberate non-win
+//! on this workload: the hot traffic is the shared label array every round must see fresh, so
+//! replicating the read-only CSR pays nothing here, unlike N-body's replicated bodies. To compile and run:
 //!
 //! ```sh
 //! RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks

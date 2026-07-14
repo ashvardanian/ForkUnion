@@ -18,9 +18,12 @@
 //! cargo run --release --features benchmarks --bin forkunion_nbody
 //! ```
 //!
-//! Each backend runs a fixed wall-clock window - 10 seconds by default, enough to amortize
-//! scheduling noise - and reports the dispatch rate it sustained. First build the release binary
-//! (plain `cargo build` grants neither native-CPU flag), then benchmark each backend separately:
+//! Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
+//! rate it sustained. Contended-atomic paths amplify any background noise, and short dynamic runs
+//! swing ~±30%, so the window sizes the iteration count to the machine instead of guessing it per
+//! backend. Published comparisons run under `numactl --interleave=all`; the sibling C++ build also
+//! adds `-ffast-math`, which Rust cannot express globally. First build the release binary (plain
+//! `cargo build` grants neither native-CPU flag), then benchmark each backend separately:
 //!
 //! ```sh
 //! # Build once

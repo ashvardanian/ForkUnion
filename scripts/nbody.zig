@@ -11,6 +11,10 @@
 //! On a machine with one memory domain the replicas collapse to one, and the portable allocator backs
 //! them, so the `replicated_*` backends compile and run everywhere.
 //!
+//! Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
+//! rate it sustained: contended-atomic paths amplify any background noise, and short dynamic runs
+//! swing ~±30%, so the window sizes the iteration count to the machine instead of guessing it.
+//!
 //! Environment variables:
 //! - NBODY_COUNT: number of bodies (default: number of threads)
 //! - NBODY_SECONDS: wall-clock budget per run, reporting the sustained rate (default: 10)
@@ -19,6 +23,7 @@
 //! - NBODY_THREADS: number of threads (default: CPU count)
 //!
 //! Build and run from the scripts/ directory:
+//!
 //! ```sh
 //! cd scripts
 //! zig build -Doptimize=ReleaseFast

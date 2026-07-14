@@ -21,8 +21,12 @@
  *  NBODY_COUNT=128 NBODY_THREADS=$(nproc) build_release/forkunion_nbody
  *  @endcode
  *
- *  Each backend runs a fixed wall-clock window - 10 seconds by default, enough to amortize
- *  scheduling noise - and reports the dispatch rate it sustained:
+ *  Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
+ *  rate it sustained. Contended-atomic paths amplify any background noise, and short dynamic runs
+ *  swing ~±30%, so the window sizes the iteration count to the machine instead of guessing it per
+ *  backend. Published comparisons run under `numactl --interleave=all` with
+ *  `OMP_PROC_BIND=spread OMP_PLACES=cores`; this C++ build also adds `-ffast-math`, which Rust
+ *  cannot express globally. To benchmark each backend:
  *
  *  @code{.sh}
  *  NBODY_COUNT=512 NBODY_BACKEND=openmp_static build_release/forkunion_nbody

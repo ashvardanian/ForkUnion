@@ -41,7 +41,18 @@
  *  - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
  *
  *  The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
- *  the baselines are `{openmp,taskflow}_{static,dynamic}`. To compile and run:
+ *  the baselines are `{openmp,taskflow}_{static,dynamic}`.
+ *
+ *  @section Benchmarking Protocol
+ *
+ *  Every runtime schedules the same one-vertex dynamic tasks: `schedule(dynamic, 1)` in OpenMP,
+ *  `tf::DynamicPartitioner(1)` in Taskflow, and `for_n_dynamic` here. Cells run bare - core-granular
+ *  pinning like `OMP_PROC_BIND=spread OMP_PLACES=cores` collapses a bandwidth-bound sweep ~16x for
+ *  OpenMP and for any pool inheriting the caller's mask. The residual spread on SMT machines is
+ *  preemption - one delayed hyperthread stalls every barrier of a pass - which the fixed window
+ *  amortizes. The `_replicated` backends are a deliberate non-win on this workload: the hot traffic
+ *  is the shared label array every round must see fresh, so replicating the read-only CSR pays
+ *  nothing here, unlike N-body's replicated bodies. To compile and run:
  *
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release

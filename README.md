@@ -1,20 +1,20 @@
-# ForkUnion 🍴
-
-ForkUnion is arguably the lowest-latency OpenMP-style NUMA-aware minimalistic scoped thread-pool designed for 'Fork-Join' parallelism in C++, C, Rust, and Zig, avoiding × [mutexes & system calls](#locks-and-mutexes), × [dynamic memory allocations](#memory-allocations), × [CAS-primitives](#atomics-and-cas), and × [false-sharing](#alignment--false-sharing) of CPU cache-lines on the hot path 🍴
-
-## Motivation
-
-Most "thread-pools" are not, in fact, thread-pools, but rather "task-queues" that are designed to synchronize a concurrent dynamically growing list of heap-allocated globally accessible shared objects.
-In C++ terms, think of it as a `std::queue<std::function<void()>>` protected by a `std::mutex`, where each thread waits for the next task to be available and then executes it on some random core chosen by the OS scheduler.
-All of that is slow... and true across C++, C, and Rust projects.
-Short of [OpenMP](https://en.wikipedia.org/wiki/OpenMP), practically every other solution has high dispatch latency and noticeable memory overhead.
-OpenMP, however, is not ideal for fine-grained parallelism and is less portable than the C++ and Rust standard libraries.
+# ForkUnion
 
 [![`forkunion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
 
-This is where __`forkunion`__ comes in.
-It's a C++ 17 library with C 99, Rust, and Zig bindings ([previously Rust implementation was standalone in v1](#why-not-reimplement-it-in-rust)).
-It supports pinning threads to specific [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual CPU cores, making it much easier to ensure data locality and halving the latency of individual loads in Big Data applications.
+__ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, and Zig — built for tight `#pragma omp parallel for`-style loops, not task queues. 🍴
+
+On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks-and-mutexes), __zero__ [CAS operations](#atomics-and-cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
+So dispatch latency stays flat into the hundreds of cores, precisely where task-queue runtimes like Rayon collapse and even OpenMP begins to slip.
+It is also unique in parking idle workers on hardware timed-wait instructions — x86 `TPAUSE`, Arm `WFET`, RISC-V `Zawrs` — instead of spinning hot or trapping into the kernel.
+
+> __128-thread Intel Xeon 8468 in NVIDIA DGX-H100 · running low-latency N-body simulation:__ Taskflow `666 µs` · Rayon `483 µs` · OpenMP `115 µs` → __ForkUnion `40 µs`__ per parallel-for.
+> [Full tables ↓](#performance)
+
+It already powers NUMA-aware vector search in [USearch](https://github.com/unum-cloud/usearch) and [NumKong](https://github.com/ashvardanian/NumKong), and is exhaustively tested for boundary-conditions scheduling with miniaturized `uint8_t` indices, is compatible with your big-endian 32-bit IBM mainframe, and ships with `no_std` and Miri coverage.
+The core is a C++ 17 library; the C 99, Rust, and Zig APIs bind it, and all four can pin threads to [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual cores and allocate node-local memory.
+Despite being much more deeply tied to hardware and OS than alternatives, ForkUnion supports Linux, FreeBSD, Windows, macOS, Android, and iOS, including asymmetric compute and memory topologies.
+Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux and Windows, and elsewhere allocation falls back to a single memory domain.
 
 ## Basic Usage
 
@@ -36,8 +36,8 @@ For additional flow control and tuning, following helpers are available:
 - `sleep(microseconds)` - for longer naps,
 - `terminate` - to kill the threads before the destructor is called,
 - `unsafe_for_threads` - to broadcast a callback without blocking, returning a generation token,
-- `unsafe_join` - to block until the completion of a broadcasted generation.
-- `is_complete` - to poll a generation token for completion without blocking,
+- `unsafe_join` - to block until the completion of a broadcasted generation,
+- `is_complete` - to poll a generation token for completion without blocking.
 
 Every dispatch is identified by an always-odd `generation` token.
 On `caller_exclusive_k` pools you can dispatch, overlap your own work, poll `is_complete`, and join - the classic poll-then-join pattern.
@@ -45,7 +45,7 @@ On `caller_inclusive_k` pools the calling thread owes one slice of the work, whi
 The same rule shapes the RAII guard returned by `for_threads` and the `for_n` family: on exclusive pools the work starts at the guard's construction, while on inclusive pools it runs at `join` or destruction.
 
 On Linux, in C++, given the maturity and flexibility of the HPC ecosystem, it provides [NUMA extensions](#non-uniform-memory-access-numa).
-That includes the `colocated_pool` analog of the `basic_pool` and the `linux_numa_allocator` for allocating memory in a specific memory domain.
+That includes the `colocated_pool` analog of the `flat_pool` and the `linux_numa_allocator` for allocating memory in a specific memory domain.
 Those are out-of-the-box compatible with the higher-level APIs.
 Most interestingly, for Big Data applications, a higher-level `distributed_pool` class will address and balance the work across all compute domains.
 
@@ -57,7 +57,7 @@ To integrate into your Rust project, add the following lines to Cargo.toml:
 [dependencies]
 forkunion = "2.3.1"                                          # detect what the platform offers
 forkunion = { version = "2.3.1", features = ["portable"] }   # STL thread pool only
-forkunion = { version = "2.3.1", features = ["numa-memory"] } # require NUMA-aware allocations
+forkunion = { version = "2.3.1", features = ["place-memory-on-domain"] } # require NUMA-aware allocations
 ```
 
 Or for the preview development version:
@@ -71,8 +71,9 @@ A minimal example may look like this:
 
 ```rust
 use forkunion as fu;
-let mut pool = fu::spawn(2);
-pool.for_threads(|thread_index, compute_domain_index| {
+let topology = fu::Topology::new().expect("Failed to detect hardware topology");
+let mut pool = fu::spawn(&topology, 2);
+pool.for_threads(&|thread_index, compute_domain_index| {
     println!("Hello from thread # {} on compute domain # {}", thread_index + 1, compute_domain_index + 1);
 });
 ```
@@ -103,8 +104,8 @@ use forkunion as fu;
 fn heavy_math(_: usize) {}
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut pool = fu::ThreadPool::try_spawn(4)?;
-    let mut pool = fu::ThreadPool::try_named_spawn("heavy-math", 4)?;
+    let topology = fu::Topology::new()?;
+    let mut pool = fu::ThreadPool::try_named_spawn(&topology, "heavy-math", 4)?;
     pool.for_n_dynamic(400, |prong| {
         heavy_math(prong.task_index);
     });
@@ -112,13 +113,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-Free functions report the [hardware topology](#hardware-topology), to size and place work:
+The `Topology` handle reports the [hardware topology](#hardware-topology), to size and place work:
 
 ```rust
-for domain in 0..fu::compute_domains_count() {
-    println!("domain {domain}: {} cores, level {}, allocate on memory domain {}",
-        fu::logical_cores_count_in(domain), fu::compute_level_in(domain),
-        fu::local_memory_of(domain));
+let topology = fu::Topology::new()?;
+for domain in 0..topology.compute_domains_count() {
+    let domain = fu::ComputeDomain(domain);
+    println!("domain {}: {} cores, level {}, allocate on memory domain {}",
+        domain.get(), topology.logical_cores_count_in(domain),
+        topology.compute_level_in(domain), topology.local_memory_of(domain).get());
 }
 ```
 
@@ -150,14 +153,14 @@ target_link_libraries(your_target PRIVATE forkunion::forkunion)
 Then, include the header in your C++ code:
 
 ```cpp
-#include <forkunion.hpp>   // `basic_pool_t`
+#include <forkunion.hpp>    // `flat_pool_t`
 #include <cstdio>           // `stderr`
 #include <cstdlib>          // `EXIT_SUCCESS`
 
 namespace fu = ashvardanian::forkunion;
 
 int main() {
-    alignas(fu::default_alignment_k) fu::basic_pool_t pool;
+    alignas(fu::default_alignment_k) fu::flat_pool_t pool;
     if (!pool.try_spawn(fu::allowed_cores_count())) {
         std::fprintf(stderr, "Failed to fork the threads\n");
         return EXIT_FAILURE;
@@ -195,23 +198,18 @@ int main() {
 ```
 
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
-Every kernel facility the library uses is detected by default, and each can be pinned with
-`-D FORKUNION_WITH_<CAPABILITY>=ON` or `OFF` - such as `FORKUNION_WITH_NUMA_MEMORY` or
-`FORKUNION_WITH_THREAD_PINNING`. Call `fu_comptime_capabilities_string()` to see what survived,
-and `fu_runtime_capabilities_string()` to see what the machine underneath actually offers.
+Every kernel and ISA facility the library uses is detected by default.
+CMake pins each with an `AUTO`/`ON`/`OFF` tri-state like `-D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON` or `-D FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=OFF`.
+Finer preprocessor gates - like the cache-line hints `FU_WITH_DEMOTE_CACHE_LINES` and `FU_WITH_PROMOTE_CACHE_LINES` - accept the same overrides as compile definitions.
+Call `fu_comptime_capabilities()` to see what survived the build, `fu_runtime_capabilities()` to see what the machine underneath actually offers, and `fu_name_capabilities()` to render either mask as text.
 
 
 ### Intro in Zig
 
-To integrate into your Zig project, add ForkUnion to your `build.zig.zon`:
+To integrate into your Zig project, let `zig fetch` pin the dependency and its content hash into `build.zig.zon`:
 
-```zig
-.dependencies = .{
-    .forkunion = .{
-        .url = "https://github.com/ashvardanian/ForkUnion/archive/refs/tags/v2.3.0.tar.gz",
-        .hash = "12200000000000000000000000000000000000000000000000000000000000000000",
-    },
-},
+```bash
+zig fetch --save=forkunion https://github.com/ashvardanian/ForkUnion/archive/refs/tags/v2.3.1.tar.gz
 ```
 
 Then import and use in your code:
@@ -220,13 +218,18 @@ Then import and use in your code:
 const std = @import("std");
 const fu = @import("forkunion");
 
+const Context = struct { results: []i32 };
+
 pub fn main() !void {
-    var pool = try fu.Pool.init(allocator, 4, .inclusive);
+    const topology = try fu.Topology.init();
+    defer topology.deinit();
+    var pool = try fu.Pool.init(topology, 4, .inclusive);
     defer pool.deinit();
 
     // Execute work on each thread (OpenMP-style parallel)
     pool.forThreads(struct {
         fn work(thread_idx: usize, compute_domain_idx: usize) void {
+            _ = compute_domain_idx;
             std.debug.print("Thread {}\n", .{thread_idx});
         }
     }.work, {});
@@ -237,18 +240,19 @@ pub fn main() !void {
         fn process(prong: fu.Prong, ctx: Context) void {
             ctx.results[prong.task_index] = @intCast(prong.task_index * 2);
         }
-    }.process, .{ .results = &results });
+    }.process, Context{ .results = results[0..] });
 }
 ```
 
-Top-level functions report the [hardware topology](#hardware-topology), to size and place work:
+The `Topology` handle reports the [hardware topology](#hardware-topology), to size and place work:
 
 ```zig
+const topology = try fu.Topology.init();
+defer topology.deinit();
 var domain: usize = 0;
-while (domain < fu.countComputeDomains()) : (domain += 1) {
+while (domain < topology.countComputeDomains()) : (domain += 1) {
     std.debug.print("domain {d}: {d} cores, level {d}, allocate on memory domain {d}\n", .{
-        domain,                      fu.countLogicalCoresIn(domain),
-        fu.computeLevelIn(domain),   fu.localMemoryOf(domain),
+        domain, topology.countLogicalCoresIn(domain), topology.computeLevelIn(domain), topology.localMemoryOf(domain),
     });
 }
 ```
@@ -267,7 +271,7 @@ To integrate using CMake:
 FetchContent_Declare(
     forkunion
     GIT_REPOSITORY https://github.com/ashvardanian/ForkUnion
-    GIT_TAG v2.3.0
+    GIT_TAG v2.3.1
 )
 FetchContent_MakeAvailable(forkunion)
 target_link_libraries(your_target PRIVATE forkunion::forkunion_static)
@@ -410,15 +414,37 @@ Compile: `clang -std=c11 -fblocks test.c -lforkunion_static -lpthread -lnuma -lB
 
 ## Alternatives & Differences
 
-Many other thread-pool implementations are more feature-rich but have different limitations and design goals.
+Most "thread-pools" are not thread-pools at all, but task-queues - think a `std::queue<std::function<void()>>` behind a `std::mutex`, executing each heap-allocated task on whatever core the OS scheduler picks.
+That shape is what most alternatives are built around, and it is the wrong shape for a tight `parallel for`:
 
 - Modern C++: [`taskflow/taskflow`](https://github.com/taskflow/taskflow), [`progschj/ThreadPool`](https://github.com/progschj/ThreadPool), [`bshoshany/thread-pool`](https://github.com/bshoshany/thread-pool)
 - Traditional C++: [`vit-vit/CTPL`](https://github.com/vit-vit/CTPL), [`mtrebi/thread-pool`](https://github.com/mtrebi/thread-pool)
 - Rust: [`tokio-rs/tokio`](https://github.com/tokio-rs/tokio), [`rayon-rs/rayon`](https://github.com/rayon-rs/rayon), [`smol-rs/smol`](https://github.com/smol-rs/smol)
 - Zig: [`std.Thread.Pool`](https://ziglang.org/documentation/master/std/#std.Thread.Pool)
 
-Those are not designed for the same OpenMP-like use cases as __`forkunion`__.
-Instead, they primarily focus on task queuing, which requires significantly more work.
+__Reach for ForkUnion__ when you have data-parallel loops, bulk-synchronous phases, or NUMA-sharded scans, and you want them to dispatch in nanoseconds with neither an allocator nor the kernel on the hot path.
+__Reach for something else__ when you need task graphs, async I/O, futures and promises, work that outlives its scope, or nested parallelism — Taskflow, Tokio, and oneTBB are built for exactly that, and ForkUnion deliberately bans it.
+
+The trade-offs line up like this, verified against each project's own source and documentation:
+
+| Property                        | ForkUnion               | OpenMP             | Rayon                      | Taskflow              | oneTBB                |
+| :------------------------------ | :---------------------- | :----------------- | :------------------------- | :-------------------- | :-------------------- |
+| Hot-path heap allocations       | __None__                | ≈ None ¹           | Per spawned task ²         | Per task node         | Per task, pooled      |
+| Syscalls to dispatch            | __None__                | Spin, then futex   | Spin/yield, then futex     | Spin, then futex      | Spin, then futex      |
+| Dynamic-schedule primitive      | __`fetch_add` cursors__ | CAS retry loop ³   | Chase-Lev CAS deque ⁴      | Chase-Lev CAS deque ⁴ | Chase-Lev CAS deque ⁴ |
+| NUMA pinning & local allocators | __Yes__                 | Yes ⁵              | No                         | No ⁶                  | Partial ⁷             |
+| Hardware timed-wait             | __Yes__                 | x86 only, opt-in ⁸ | No                         | No                    | No                    |
+| Languages                       | C++ · C · Rust · Zig    | C · C++ · Fortran  | Rust                       | C++                   | C++                   |
+| Design center                   | Fork-join loops         | Loops + tasks      | Stealing tasks + iterators | Task-graph DAG        | Stealing tasks        |
+
+> ¹ OpenMP reuses a persistent thread team, so a repeated `parallel for` over a fixed-size team does not re-create it; the per-region worksharing descriptor is reused but not provably allocation-free on every path.
+> ² Rayon keeps `join` and parallel-iterator jobs on the stack, but `scope`/`spawn` heap-allocate one job per task, and the Chase-Lev deque grows on the heap under deep nesting.
+> ³ libgomp and libomp hand out `schedule(dynamic)` iterations with an atomic fetch-add plus a CAS retry loop.
+> ⁴ Rayon, Taskflow, and oneTBB all steal through a Chase-Lev deque whose steal path is a CAS.
+> ⁵ `OMP_PROC_BIND` / `OMP_PLACES` pin threads, and the OpenMP 5 allocator and memory-space API places memory.
+> ⁶ Taskflow exposes only a manual `WorkerInterface` hook for affinity, nothing automatic.
+> ⁷ oneTBB pins threads to a NUMA node via `task_arena` constraints, but does not place memory locally for you.
+> ⁸ Only LLVM/Intel `libomp` issues x86 `UMONITOR` / `UMWAIT`, gated behind `KMP_USER_LEVEL_MWAIT` and off by default; there is no Arm `WFET` or RISC-V `Zawrs` path in any OpenMP runtime.
 
 ### Locks and Mutexes
 
@@ -509,7 +535,7 @@ Where no topology is harvested, every query degrades to a single compute domain 
 Handling NUMA isn't trivial and is only supported on Linux with the help of the [`libnuma` library](https://github.com/numactl/numactl).
 It provides the `mbind` interface to pin specific memory regions to particular memory domains, as well as helper functions to query the system topology, which are exposed via the `forkunion::machine_topology` template.
 
-Let's say you are working on a Big Data application, like brute-forcing Vector Search using the [SimSIMD](https://github.com/ashvardanian/simsimd) library on a 2 dual-socket CPU system, similar to [USearch](https://github.com/unum-cloud/usearch/pulls).
+Let's say you are working on a Big Data application, like brute-forcing Vector Search using the [NumKong](https://github.com/ashvardanian/NumKong) library on a 2 dual-socket CPU system, similar to [USearch](https://github.com/unum-cloud/usearch/pulls).
 The first part of that program may be responsible for sharding the incoming stream of data between distinct memory regions.
 That part, in our simple example will be single-threaded:
 
@@ -517,7 +543,7 @@ That part, in our simple example will be single-threaded:
 #include <vector> // `std::vector`
 #include <span> // `std::span`
 #include <forkunion.hpp> // `linux_numa_allocator`, `machine_topology_t`, `distributed_pool_t`
-#include <simsimd/simsimd.h> // `simsimd_f32_cos`, `simsimd_distance_t`
+#include <numkong/spatial.h> // `nk_angular_f32`, `nk_f64_t`
 
 namespace fu = ashvardanian::forkunion;
 using floats_alloc_t = fu::linux_numa_allocator<float>;
@@ -550,7 +576,7 @@ A minimal example would look like this:
 ```cpp
 /// On each compute domain we'll synchronize the threads
 struct search_result_t {
-    simsimd_distance_t best_distance {std::numeric_limits<simsimd_distance_t>::max()};
+    nk_f64_t best_distance {std::numeric_limits<nk_f64_t>::max()};
     std::size_t best_index {0};
 };
 
@@ -565,7 +591,7 @@ search_result_t search(std::span<float, dimensions> query) {
     if (need_to_spawn_threads) {
         assert(machine_topology.try_harvest() && "Failed to harvest NUMA topology");
         assert(machine_topology.memory_domains_count() == 2 && "Expected exactly 2 NUMA nodes");
-        assert(distributed_pool.try_spawn(machine_topology, sizeof(search_result_t)) && "Failed to spawn NUMA pools");
+        assert(distributed_pool.try_spawn(machine_topology) && "Failed to spawn NUMA pools");
     }
 
     search_result_t result;
@@ -587,8 +613,8 @@ search_result_t search(std::span<float, dimensions> query) {
             std::size_t const local_index = local_begin + i;
             std::size_t const global_index = shard_base + local_index;
 
-            simsimd_distance_t distance;
-            simsimd_f32_cos(query.data(), shard.data() + local_index * dimensions, dimensions, &distance);
+            nk_f64_t distance;
+            nk_angular_f32(query.data(), shard.data() + local_index * dimensions, dimensions, &distance);
             thread_local_result = pick_best(thread_local_result, {distance, global_index});
         }
 
@@ -625,10 +651,14 @@ Those instructions, like [`WFET` on Arm](https://developer.arm.com/documentation
 | `arm64_yield_t` | AArch64      | `YIELD`     | EL0        |
 | `arm64_wfet_t`  | AArch64+WFXT | `WFET`      | EL0        |
 | `risc5_pause_t` | RISC-V       | `PAUSE`     | U          |
+| `risc5_wrs_t`   | RISC-V+Zawrs | `WRS.NTO`   | U          |
 
 No kernel calls.
 No futexes.
 Works in tight loops.
+
+The `TPAUSE`, `WFET`, and `WRS.NTO` wrappers go a step further than a spin hint: they are _timed_ light-sleep waits, so the pool parks a worker in a low-power state with a per-loop upper bound rather than burning the core.
+The waiter is also thread-aware — `micro_yield(thread_id)` lets each worker back off on its own schedule.
 
 ### Rayon-style Parallel Iterators
 
@@ -723,79 +753,70 @@ let total = (&data[..])
 
 ## Performance
 
-One of the most common parallel workloads is the N-body simulation ¹.
-Implementations are available in C++, Rust, and Zig in `scripts/nbody.cpp`, `scripts/nbody.rs`, and `scripts/nbody.zig`, respectively.
-All are lightweight and involve little logic outside of number-crunching, so each can be easily profiled with `time` and introspected with `perf` Linux tools.
-Additional NUMA-aware Search examples are available in `scripts/search.rs`.
+Two benchmarks measure two different things, each against the same runtimes — __ForkUnion__, [__OpenMP__](https://www.openmp.org), [__Rayon__](https://github.com/rayon-rs/rayon), and [__Taskflow__](https://github.com/taskflow/taskflow) — on deliberately equal footing ¹.
+N-body stresses the __dispatch path__: every task costs the same, so what is left over is scheduling latency.
+Connected Components by label propagation stresses the __fork-join frequency__: one bandwidth-bound sweep per round until no label changes, so every round re-pays the dispatch-and-join tax.
+Implementations live in `scripts/nbody.{cpp,rs,zig}` and `scripts/propagation.{cpp,rs,zig}`, and every binary generates a __bit-identical graph__ from the same counter-based SplitMix64 generator, so cells compare exactly across languages.
 
-In all of the following measurements we allocate $N=128$ bodies and cycle for $I=1e6$ iterations.
-That's a small enough job to truly pressure the communication primitives, rather than the arithmetic.
+### N-Body — Dispatch Latency
 
----
+Microseconds per iteration at `N=512` bodies on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
+Lower is better; this is where fork-join runtimes genuinely differ.
 
-The most popular parallel programming toolkit in the world is __OpenMP__, which also happens to be tightly integrated into modern __C/C++__ compilers.
-It's vastly superior to [Taskflow](https://github.com/taskflow/taskflow) and most other C++ libraries, so we prefer it as our baseline for performance comparisons:
+| Machine                    | ForkUnion, C++ | ForkUnion, Rust |  OpenMP, C++ |  Rayon, Rust | Taskflow, C++ |
+| :------------------------- | -------------: | --------------: | -----------: | -----------: | ------------: |
+| 18× Apple M5 Pro, macOS    | __24 / 26 µs__ |      28 / 32 µs | 115 / 137 µs | 222 / 339 µs |    83 / 94 µs |
+| 128× Intel SPR, Linux      | __40 / 67 µs__ |      54 / 86 µs | 115 / 226 µs | 483 / 739 µs |  666 / 694 µs |
+| 192× AWS Graviton 5, Linux |              — |               — |            — |            — |             — |
 
-| Machine            | OpenMP (D) | OpenMP (S) | ForkUnion (D) | ForkUnion (S) |
-| :----------------- | ---------: | ---------: | ------------: | ------------: |
-| 16x Intel SPR      |      18.9s |      12.4s |         16.8s |          8.7s |
-| 128x Intel SPR     |   1m:40.6s |   1m:10.3s |         27.8s |         23.3s |
-| 12x Apple M2       | 1m:34.8s ² | 1m:25.9s ² |         31.5s |         20.3s |
-| 18x Apple M5 Pro ³ |   1m:53.4s |   1m:46.9s |         13.4s |          9.9s |
-| 96x Graviton 4     |      32.2s |      20.8s |         39.8s |         26.0s |
+### Connected Components — Fork-Join Frequency
 
-The most popular parallel programming toolkit in the __Rust__ ecosystem is [__Rayon__](https://github.com/rayon-rs/rayon).
-It's vastly faster than [Tokio](https://github.com/tokio-rs/tokio), yet still loses to ForkUnion by an order of magnitude or more on larger systems:
+Traversed edges per second on a ~27M-edge "necklace" of R-MAT communities, on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
+Higher is better; every pass converges in exactly 84 rounds - 84 fork-join dispatches - bit-identical in every cell and language.
 
-| Machine            |  Rayon (D) |  Rayon (S) |  ForkUnion (D) |  ForkUnion (S) |
-| :----------------- | ---------: | ---------: | -------------: | -------------: |
-| 16x Intel SPR      |    🔄 45.4s |    🔄 32.1s | 18.1s, 🔄 22.4s | 12.4s, 🔄 12.9s |
-| 128x Intel SPR     | 🔄 7m:41.2s | 🔄 6m:13.5s | 30.1s, 🔄 36.2s | 17.2s, 🔄 17.9s |
-| 12x Apple M2       | 🔄 1m:47.8s | 🔄 1m:07.1s | 24.5s, 🔄 26.8s | 11.0s, 🔄 11.8s |
-| 18x Apple M5 Pro ³ | 🔄 3m:57.9s | 🔄 3m:09.0s | 11.0s, 🔄 12.0s |   9.0s, 🔄 9.1s |
-| 96x Graviton 4     | 🔄 2m:13.9s | 🔄 1m:35.6s |          18.9s |          10.1s |
+| Machine                    |        ForkUnion, C++ |   ForkUnion, Rust |       OpenMP, C++ |       Rayon, Rust |    Taskflow, C++ |
+| :------------------------- | --------------------: | ----------------: | ----------------: | ----------------: | ---------------: |
+| 18× Apple M5 Pro, macOS    | __24.7 / 20.5 GTEPS__ | 19.4 / 20.2 GTEPS | 23.0 / 18.3 GTEPS | 23.8 / 14.6 GTEPS | 21.4 / 1.3 GTEPS |
+| 128× Intel SPR, Linux      | __65.2 / 31.4 GTEPS__ | 46.5 / 20.9 GTEPS |  28.2 / 0.4 GTEPS |   8.5 / 6.5 GTEPS | 25.1 / 0.5 GTEPS |
+| 192× AWS Graviton 5, Linux |                     — |                 — |                 — |                 — |                — |
 
-__Zig__ has a less mature library ecosystem, featuring [Spice](https://github.com/judofyr/spice) and [libXEV](https://github.com/mitchellh/libxev).
-Neither, however, provides a comparable bulk-synchronous API.
-Both typically execute all of the submitted tasks on a single thread, so their numbers wouldn't line up against the rest.
-That leaves the standard library thread-pool as our only point of comparison:
+What the spread means - all on the 128× SPR, same binaries, same graph:
 
-| Machine            | Standard (S) | ForkUnion (D) | ForkUnion (S) |
-| :----------------- | -----------: | ------------: | ------------: |
-| 16x Intel SPR      |      2m52.0s |         18.2s |         12.8s |
-| 128x Intel SPR     |            - |         43.5s |         19.2s |
-| 12x Apple M2       |      1m44.8s |         33.2s |         12.2s |
-| 18x Apple M5 Pro ³ |     2m:07.0s |         10.3s |          8.8s |
-| 96x Graviton 4     |            - |             - |             - |
+- __The static column is the fork-join tax, compounded 84 times per pass__: every runtime sweeps the identical bandwidth-bound round, so the entire spread is scheduling - dispatch latency, barrier cost, and thread placement - never arithmetic.
+- __The dynamic column is the claim architecture, ~88M one-vertex claims per pass__: ForkUnion claims from private `fetch_add` cursors, Rayon steals halves through its CAS deques, and OpenMP's and Taskflow's shared queues collapse - a 128-thread contention effect for OpenMP, whose queue survives the M5 Pro's 18 threads, while Taskflow's collapse reproduces even there.
+- __The two ForkUnion columns are the same pool underneath__: the scheduler, the graph, and the labels are bit-identical, so the gap between them - Rust ahead on SPR, behind on the M5 Pro - is compiler codegen of the compute loops, not the claims.
 
-> ¹ Another common workload is "Parallel Reductions" covered in a separate [repository](https://github.com/ashvardanian/ParallelReductionsBenchmark).
-> ² When a combination of performance and efficiency cores is used, dynamic stealing may be more efficient than static slicing.
-> ³ The M5 Pro reports two performance levels, named "Super" and "Performance" - six wide-cache cores and twelve narrower ones, with no efficiency tier at all - so ² does not apply to it. Its three L2 clusters make it one memory domain across three compute domains.
-> It's also fair to say, that OpenMP is not optimized for AppleClang.
-> 🔄 Rotation emoji stands for iterators, the default way to use Rayon and the opt-in slower, but more convenient variant for ForkUnion.
+> ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, one warmup pass, and the same one-vertex dynamic grain in every runtime.
+> The finer per-benchmark protocol - scheduling equivalents, page-placement controls, and what each knob defaults to - lives in the `scripts/nbody.*` and `scripts/propagation.*` headers.
 
-You can rerun those benchmarks with the following commands:
+You can rerun these benchmarks with the following commands:
 
 ```bash
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release
 cmake --build build_release --config Release
-time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static build_release/forkunion_nbody
-time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_dynamic build_release/forkunion_nbody
+# Rust examples: plain `cargo build` grants neither flag, so parity needs both set explicitly
+RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
+# N-body: microseconds per dispatch, sustained over a fixed window (NBODY_SECONDS, default 10 s)
+NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+NBODY_COUNT=512 NBODY_BACKEND=taskflow_dynamic build_release/forkunion_nbody
+# Connected components: traversal throughput on a necklace graph; PROPAGATION_COMMUNITIES controls the rounds
+PROPAGATION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
+PROPAGATION_BACKEND=rayon_dynamic target/release/forkunion_propagation
 ```
-
-> Consult the header of `scripts/nbody.cpp` and `scripts/nbody.rs` for additional benchmarking options.
 
 ## Safety & Logic
 
-There are only 3 core atomic variables in this thread-pool, and 1 for dynamically-stealing tasks.
+There are only 3 core atomic variables in this thread-pool, plus 1 private claim cursor per worker for dynamically-stealing tasks.
 Let's call every invocation of a `for_*` API - a "fork", and every exit from it a "join".
 
-| Variable           | Users Perspective            | Internal Usage                        |
-| :----------------- | :--------------------------- | :------------------------------------ |
-| `stop`             | Stop the entire thread-pool  | Tells workers when to exit the loop   |
-| `fork_generation`  | "Forks" called since init    | Tells workers to wake up on new forks |
-| `threads_to_sync`  | Threads not joined this fork | Tells main thread when workers finish |
-| `dynamic_progress` | Progress within this fork    | Tells workers which jobs to take      |
+| Variable          | Users Perspective             | Internal Usage                        |
+| :---------------- | :---------------------------- | :------------------------------------ |
+| `stop`            | Stop the entire thread-pool   | Tells workers when to exit the loop   |
+| `fork_generation` | "Forks" called since init     | Tells workers to wake up on new forks |
+| `threads_to_sync` | Threads not joined this fork  | Tells main thread when workers finish |
+| `claim.next`      | One worker's stealable cursor | Next task in that worker's slice      |
+
+The next task for `for_n_dynamic` calls is drained by neighbors from `claim.next` in coprime order once their own slice runs dry, overshooting by at most one.
 
 ### Why don't we need atomics for "total_threads"?
 
@@ -879,7 +900,7 @@ For Rust, use the following commands to verify no_std compatibility:
 ```bash
 rustup toolchain install
 cargo build --lib --no-default-features --release
-cargo build --lib --no-default-features --features numa --release
+cargo build --lib --no-default-features --features place-memory-on-domain --release
 cargo doc --lib --no-default-features --no-deps
 ```
 
@@ -888,7 +909,7 @@ Verify the tests pass:
 ```bash
 cargo test --lib --release
 cargo test --doc --release
-cargo test --lib --features numa --release
+cargo test --lib --features place-memory-on-domain --release
 ```
 
 Rust provides a lot of tooling for concurrency testing, like Miri and Loom.
@@ -906,18 +927,18 @@ cargo msrv find --ignore-lockfile
 For Zig, use the following commands:
 
 ```bash
-zig build test --summary all            # run tests
-zig build -Dnuma-memory=true            # require NUMA-aware allocations (Linux)
-zig build -Dportable=true               # STL thread pool only
+zig build test --summary all               # run tests
+zig build -Dplace-memory-on-domain=true    # require NUMA-aware allocations (Linux)
+zig build -Dportable=true                  # STL thread pool only
 
-# Run benchmark from the `scripts` directory
+# Run benchmarks from the `scripts` directory
 cd scripts
 zig build -Doptimize=ReleaseFast
-time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static \
-    ./zig-out/bin/nbody_zig
+NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
+PROPAGATION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
 ```
 
-Check the `scripts/nbody.zig` header for additional benchmarking options.
+Check the `scripts/nbody.zig` and `scripts/propagation.zig` headers for additional benchmarking options.
 
 ## License
 
