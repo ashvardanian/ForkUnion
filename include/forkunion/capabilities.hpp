@@ -553,6 +553,22 @@ inline capabilities_t cpu_capabilities() noexcept {
     return caps;
 }
 
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+/**
+ *  @brief Probes whether this process may actually place memory - `numa_available` only proves libnuma
+ *         is present, while seccomp or a cgroup `cpuset.mems` can still refuse `mbind`.
+ */
+inline bool linux_can_place_memory_on_domain() noexcept {
+    std::size_t const page_bytes = static_cast<std::size_t>(::numa_pagesize());
+    void *probe = ::mmap(nullptr, page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (probe == MAP_FAILED) return false;
+    unsigned long node_mask = 1ul; // Node 0, always present where a topology exists
+    long const status = ::mbind(probe, page_bytes, MPOL_BIND, &node_mask, sizeof(node_mask) * 8, 0);
+    ::munmap(probe, page_bytes);
+    return status == 0;
+}
+#endif
+
 /**
  *  @brief The memory-placement facilities this machine offers - NUMA and huge/large pages.
  *  @sa `cpu_capabilities` for the busy-wait side; together they form `runtime_capabilities`.
@@ -568,8 +584,8 @@ inline capabilities_t ram_capabilities() noexcept {
     if (::GetLargePageMinimum() != 0) caps |= capability_place_huge_pages_on_domain_k;
 
 #elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-    // Check for NUMA support
-    if (::numa_available() >= 0) caps |= capability_place_memory_on_domain_k;
+    // NUMA placement is claimed only when a real one-page `mbind` succeeds, not merely when libnuma loads.
+    if (::numa_available() >= 0 && linux_can_place_memory_on_domain()) caps |= capability_place_memory_on_domain_k;
 
     // Check for huge pages support - simplest method is checking if the global directory exists
     {

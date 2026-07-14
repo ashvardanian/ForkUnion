@@ -27,8 +27,9 @@ FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_
     node_mask_as_bitset.maskp = &node_mask.n[0];
     ::numa_bitmask_setbit(&node_mask_as_bitset, static_cast<unsigned int>(memory_domain_id));
     // ! `MPOL_F_STATIC_NODES` is a @b mode flag - it belongs OR-ed into the policy, not in the trailing
-    // ! `flags` argument, which only accepts `MPOL_MF_*`. The trailing flags carry `MPOL_MF_MOVE` so any
-    // ! already-faulted pages migrate to the node, not just future faults.
+    // ! `flags` argument, which only accepts `MPOL_MF_*`. Those flags are 0: this memory is freshly mapped
+    // ! and unfaulted, so there is nothing to migrate, and `MPOL_MF_MOVE` would only demand a `CAP_SYS_NICE`
+    // ! that a sandbox may refuse.
     int mbind_mode_flag;
 #if defined(MPOL_F_STATIC_NODES)
     mbind_mode_flag = MPOL_F_STATIC_NODES;
@@ -37,7 +38,7 @@ FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_
 #endif // MPOL_F_STATIC_NODES
 
     long binding_status =
-        ::mbind(ptr, size_bytes, MPOL_BIND | mbind_mode_flag, &node_mask.n[0], sizeof(node_mask) * 8, MPOL_MF_MOVE);
+        ::mbind(ptr, size_bytes, MPOL_BIND | mbind_mode_flag, &node_mask.n[0], sizeof(node_mask) * 8, 0);
     if (binding_status < 0) return false; // ! Binding failed
     return true;                          // ? Binding succeeded
 #else
@@ -269,15 +270,17 @@ FU_MAYBE_UNUSED_ static inline void *linux_symmetric_allocate(machine_topology_t
     void *base = ::mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
     if (base == MAP_FAILED) return nullptr; // ! Mapping failed
 
-    for (std::size_t domain = 0; domain != domains; ++domain) {
-        memory_domain_id_t const memory_domain_id =
-            topology.memory_domain_at(static_cast<memory_domain_index_t>(domain)).memory_domain_id;
-        void *slice = static_cast<char *>(base) + domain * stride_bytes;
-        if (!linux_numa_bind(slice, stride_bytes, memory_domain_id)) {
-            ::munmap(base, total_bytes); // ? A slice would not bind; clean up
-            return nullptr;              // ! Binding failed
+    // A single memory domain needs no placement - the one slice is the whole mapping on the only node.
+    if (domains > 1)
+        for (std::size_t domain = 0; domain != domains; ++domain) {
+            memory_domain_id_t const memory_domain_id =
+                topology.memory_domain_at(static_cast<memory_domain_index_t>(domain)).memory_domain_id;
+            void *slice = static_cast<char *>(base) + domain * stride_bytes;
+            if (!linux_numa_bind(slice, stride_bytes, memory_domain_id)) {
+                ::munmap(base, total_bytes); // ? A slice would not bind; clean up
+                return nullptr;              // ! Binding failed
+            }
         }
-    }
     return base;
 #else
     fu_unused_(topology);
