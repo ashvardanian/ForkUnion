@@ -6,7 +6,8 @@
  *  To control the script, several environment variables are used:
  *
  *  - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
- *  - `NBODY_ITERATIONS` - number of iterations to run the simulation (default: 1000).
+ *  - `NBODY_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
+ *  - `NBODY_ITERATIONS` - run an exact iteration count instead, when set.
  *  - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static_shared`).
  *  - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
  *
@@ -20,17 +21,14 @@
  *  NBODY_COUNT=128 NBODY_THREADS=$(nproc) build_release/forkunion_nbody
  *  @endcode
  *
- *  The default profiling scheme is to 1M iterations for 128 particles on each backend:
+ *  Each backend runs a fixed wall-clock window - 10 seconds by default, enough to amortize
+ *  scheduling noise - and reports the dispatch rate it sustained:
  *
  *  @code{.sh}
- *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=openmp_static build_release/forkunion_nbody
- *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=openmp_dynamic build_release/forkunion_nbody
- *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
- *  time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
- *      NBODY_BACKEND=forkunion_dynamic_shared build_release/forkunion_nbody
+ *  NBODY_COUNT=512 NBODY_BACKEND=openmp_static build_release/forkunion_nbody
+ *  NBODY_COUNT=512 NBODY_BACKEND=openmp_dynamic build_release/forkunion_nbody
+ *  NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+ *  NBODY_COUNT=512 NBODY_BACKEND=forkunion_dynamic_shared build_release/forkunion_nbody
  *  @endcode
  *
  *  On macOS, you may need to install OpenMP support via Homebrew:
@@ -43,7 +41,7 @@
  *    -D CMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \
  *    -D CMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib"
  *  cmake --build build_release --config Release
- *  NBODY_COUNT=128 NBODY_THREADS=$(sysctl -n hw.logicalcpu) NBODY_ITERATIONS=1000000 \
+ *  NBODY_COUNT=512 NBODY_THREADS=$(sysctl -n hw.logicalcpu) \
  *    NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
  *  @endcode
  */
@@ -330,6 +328,13 @@ static char const *env_string(char const *name, char const *fallback) noexcept {
     return value ? value : fallback;
 #endif
 }
+
+/** @brief Parses a fractional environment variable, or @p fallback when unset. */
+static double env_double(char const *name, double fallback) noexcept {
+    char const *value = env_string(name, nullptr);
+    return value ? std::atof(value) : fallback;
+}
+
 /** @brief Parses an unsigned environment variable, or @p fallback when unset. */
 static std::size_t env_usize(char const *name, std::size_t fallback) noexcept {
     char const *value = env_string(name, nullptr);
@@ -338,7 +343,8 @@ static std::size_t env_usize(char const *name, std::size_t fallback) noexcept {
 
 int main() {
     std::size_t n = env_usize("NBODY_COUNT", 0);
-    std::size_t const iterations = env_usize("NBODY_ITERATIONS", 1000);
+    double const budget_seconds = env_double("NBODY_SECONDS", 10);   // ? The primary knob: a fixed window
+    std::size_t const iterations = env_usize("NBODY_ITERATIONS", 0); // ? Overrides with an exact count when set
     std::string_view const backend = env_string("NBODY_BACKEND", "forkunion_static_shared");
     std::size_t threads = env_usize("NBODY_THREADS", 0);
     if (threads == 0) threads = fu::allowed_cores_count();
@@ -412,13 +418,22 @@ int main() {
     nbody_context_t context {bodies_view, forces_view, replicas, topology};
     if (pool) context.pool = &*pool;
     if (taskflow) context.taskflow = &*taskflow;
+    // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
+    // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
+    // no per-backend iteration guessing. `NBODY_ITERATIONS` forces an exact count instead.
     auto const started = std::chrono::steady_clock::now();
-    for (std::size_t i = 0; i < iterations; ++i) selected->run(context);
+    std::size_t passes = 0;
+    if (iterations > 0)
+        for (; passes < iterations; ++passes) selected->run(context);
+    else
+        do {
+            selected->run(context), ++passes;
+        } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
     double const total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    double const microseconds_per_iteration = total_seconds / static_cast<double>(iterations) * 1e6;
+    double const microseconds_per_iteration = total_seconds / static_cast<double>(passes) * 1e6;
     // Per-iteration latency is the comparable unit - one `for_each` dispatch over `n` bodies. The total
     // wall time follows for reference, since a fast dispatch rounds to zero when printed in seconds.
     std::printf("%.*s: %zu bodies, %zu iters, %.2f us/iter (%.2f s total)\n", static_cast<int>(backend.size()),
-                backend.data(), n, iterations, microseconds_per_iteration, total_seconds);
+                backend.data(), n, passes, microseconds_per_iteration, total_seconds);
     return EXIT_SUCCESS;
 }

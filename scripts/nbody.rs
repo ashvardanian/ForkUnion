@@ -3,7 +3,8 @@
 //! To control the script, several environment variables are used:
 //!
 //! - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
-//! - `NBODY_ITERATIONS` - number of iterations to run the simulation (default: 1000).
+//! - `NBODY_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
+//! - `NBODY_ITERATIONS` - run an exact iteration count instead, when set.
 //! - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static_shared`).
 //! - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
 //!
@@ -14,25 +15,22 @@
 //! machine with one domain the replicas collapse to one, so they run everywhere. To compile and run:
 //!
 //! ```sh
-//! cargo run --example nbody --release
+//! cargo run --release --features benchmarks --bin forkunion_nbody
 //! ```
 //!
-//! The default profiling scheme is 1M iterations for 128 particles on each backend. First build the
-//! release binary, then benchmark each backend separately:
+//! Each backend runs a fixed wall-clock window - 10 seconds by default, enough to amortize
+//! scheduling noise - and reports the dispatch rate it sustained. First build the release binary
+//! (plain `cargo build` grants neither native-CPU flag), then benchmark each backend separately:
 //!
 //! ```sh
 //! # Build once
-//! cargo build --example nbody --release
+//! RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
 //!
-//! # Linux benchmarks (use nproc for CPU count)
-//! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=rayon_static target/release/examples/nbody
-//! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=forkunion_static_shared target/release/examples/nbody
-//! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=forkunion_static_replicated target/release/examples/nbody
-//! time NBODY_COUNT=128 NBODY_THREADS=$(nproc) NBODY_ITERATIONS=1000000 \
-//!     NBODY_BACKEND=tokio target/release/examples/nbody
+//! # Benchmark each backend
+//! NBODY_COUNT=512 NBODY_BACKEND=rayon_static target/release/forkunion_nbody
+//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared target/release/forkunion_nbody
+//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
+//! NBODY_COUNT=512 NBODY_BACKEND=tokio target/release/forkunion_nbody
 //! ```
 use rand::{Rng, SeedableRng};
 use std::env;
@@ -117,6 +115,14 @@ fn hardware_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+/// Parses a fractional environment variable, or `fallback` when unset or unparseable.
+fn env_f64(name: &str, fallback: f64) -> f64 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(fallback)
 }
 
 /// Parses an unsigned environment variable, or `fallback` when unset or unparseable.
@@ -588,7 +594,8 @@ const BACKENDS: &[Backend] = &[
 fn main() -> Result<(), Box<dyn Error>> {
     // Every knob this script understands, read once, up front.
     let count = env_usize("NBODY_COUNT", 0);
-    let iterations = env_usize("NBODY_ITERATIONS", 1_000);
+    let budget_seconds = env_f64("NBODY_SECONDS", 10.0); // ? The primary knob: a fixed window
+    let iterations = env_usize("NBODY_ITERATIONS", 0); // ? Overrides with an exact count when set
     let backend = env_string("NBODY_BACKEND", "forkunion_static_shared");
     let mut threads = env_usize("NBODY_THREADS", 0);
     if threads == 0 {
@@ -683,13 +690,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         tokio: tokio_runtime.as_ref(),
     };
 
+    // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
+    // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
+    // no per-backend iteration guessing. `NBODY_ITERATIONS` forces an exact count instead.
     let started = Instant::now();
-    for _ in 0..iterations {
-        (selected.run)(&mut context);
+    let mut passes = 0usize;
+    if iterations > 0 {
+        for _ in 0..iterations {
+            (selected.run)(&mut context);
+            passes += 1;
+        }
+    } else {
+        while {
+            (selected.run)(&mut context);
+            passes += 1;
+            started.elapsed().as_secs_f64() < budget_seconds
+        } {}
     }
     let total_seconds = started.elapsed().as_secs_f64();
-    let us_per_iter = total_seconds / iterations as f64 * 1e6;
+    let us_per_iter = total_seconds / passes as f64 * 1e6;
     // Per-iteration latency is the comparable unit - one `for_each` dispatch over the bodies.
-    println!("{backend}: {bodies_n} bodies, {iterations} iters, {us_per_iter:.2} us/iter ({total_seconds:.2} s total)");
+    println!("{backend}: {bodies_n} bodies, {passes} iters, {us_per_iter:.2} us/iter ({total_seconds:.2} s total)");
     Ok(())
 }

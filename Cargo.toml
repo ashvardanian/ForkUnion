@@ -33,6 +33,7 @@ cc = "1.2.40"
 [features]
 default = ["std"]
 std = []
+benchmarks = ["dep:rayon", "dep:rand", "dep:tokio"] # ? The demo binaries and their baseline runtimes
 
 # Kernel facilities. Left alone, each is decided by `include/forkunion/types.hpp` from the platform
 # and from whether `<numa.h>` is present; these only override that. See `build.rs`.
@@ -48,19 +49,24 @@ lto = false       # No LTO, matching the C++ and Zig benchmarks; fat LTO could n
 codegen-units = 1 # May increase compilation time but optimizes further
 rpath = false     # On some systems, setting this to false can help with optimizations
 
-[[example]]
-name = "nbody"
+# Proper `[[bin]]` targets rather than examples, so the binaries land in `target/release/` directly,
+# mirroring CMake's `build_release/` and Zig's `zig-out/bin/`. The `benchmarks` feature gates them and
+# their baseline runtimes, so library consumers never pull Rayon or Tokio.
+[[bin]]
+name = "forkunion_nbody"
 path = "scripts/nbody.rs"
 test = false
 bench = false
+required-features = ["benchmarks"]
 
-[[example]]
-name = "propagation"
+[[bin]]
+name = "forkunion_propagation"
 path = "scripts/propagation.rs"
 test = false
 bench = false
+required-features = ["benchmarks"]
 
-[dev-dependencies]
-rayon = "1.11"
-rand = "0.9"
-tokio = { version = "1.46.1", features = ["rt-multi-thread", "sync"] }
+[dependencies]
+rayon = { version = "1.11", optional = true }
+rand = { version = "0.9", optional = true }
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "sync"], optional = true }

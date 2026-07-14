@@ -21,15 +21,16 @@
 //! - `PROPAGATION_EDGE_FACTOR` - edges generated per vertex, before deduplication - default 16.
 //! - `PROPAGATION_BACKEND` - backend to use - default `forkunion_static_shared`.
 //! - `PROPAGATION_THREADS` - number of threads to use - default all hardware threads.
-//! - `PROPAGATION_ITERATIONS` - repeat the convergence this many times, reporting the per-pass time - default 1.
+//! - `PROPAGATION_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
+//! - `PROPAGATION_ITERATIONS` - run an exact pass count instead, when set.
 //! - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
 //!
 //! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`; the
 //! baselines are `rayon_static` and `rayon_dynamic`. To compile and run:
 //!
 //! ```sh
-//! cargo build --example propagation --release
-//! time PROPAGATION_SCALE=14 PROPAGATION_COMMUNITIES=64 PROPAGATION_BACKEND=forkunion_static_shared target/release/examples/propagation
+//! RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
+//! PROPAGATION_BACKEND=forkunion_static_shared target/release/forkunion_propagation
 //! ```
 use std::env;
 use std::error::Error;
@@ -552,6 +553,15 @@ const BACKENDS: &[Backend] = &[
     },
 ];
 
+/// Parses a fractional environment variable, or `fallback` when unset or unparseable.
+fn env_f64(name: &str, fallback: f64) -> f64 {
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(fallback)
+}
+
+/// Parses an unsigned environment variable, or `fallback` when unset or unparseable.
 fn env_usize(name: &str, fallback: usize) -> usize {
     env::var(name)
         .ok()
@@ -566,7 +576,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let backend =
         env::var("PROPAGATION_BACKEND").unwrap_or_else(|_| "forkunion_static_shared".into());
     let mut threads = env_usize("PROPAGATION_THREADS", 0);
-    let iterations = env_usize("PROPAGATION_ITERATIONS", 1).max(1);
+    let budget_seconds = env_f64("PROPAGATION_SECONDS", 10.0); // ? The primary knob: a fixed window
+    let iterations = env_usize("PROPAGATION_ITERATIONS", 0); // ? Overrides with an exact count when set
     let check = env::var("PROPAGATION_CHECK").is_ok();
     if threads == 0 {
         threads = std::thread::available_parallelism()
@@ -666,11 +677,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     // pass, and by a different amount for each backend.
     (selected.run)(&mut context);
 
+    // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
+    // long enough to amortize scheduling noise - and reports the rate it sustained, with no
+    // per-backend pass-count guessing. `PROPAGATION_ITERATIONS` forces an exact count instead.
     let started = Instant::now();
-    for _ in 0..iterations {
-        (selected.run)(&mut context);
+    let mut passes = 0usize;
+    if iterations > 0 {
+        for _ in 0..iterations {
+            (selected.run)(&mut context);
+            passes += 1;
+        }
+    } else {
+        while {
+            (selected.run)(&mut context);
+            passes += 1;
+            started.elapsed().as_secs_f64() < budget_seconds
+        } {}
     }
-    let seconds = started.elapsed().as_secs_f64() / iterations as f64;
+    let seconds = started.elapsed().as_secs_f64() / passes as f64;
     let rounds = context.rounds;
 
     // The fixed point sits in both buffers - the terminal round changed nothing - so read either.

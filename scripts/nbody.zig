@@ -13,7 +13,8 @@
 //!
 //! Environment variables:
 //! - NBODY_COUNT: number of bodies (default: number of threads)
-//! - NBODY_ITERATIONS: number of iterations (default: 1000)
+//! - NBODY_SECONDS: wall-clock budget per run, reporting the sustained rate (default: 10)
+//! - NBODY_ITERATIONS: run an exact iteration count instead, when set
 //! - NBODY_BACKEND: one of the backend names above (default: forkunion_static_shared)
 //! - NBODY_THREADS: number of threads (default: CPU count)
 //!
@@ -21,9 +22,9 @@
 //! ```sh
 //! cd scripts
 //! zig build -Doptimize=ReleaseFast
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static_shared ./zig-out/bin/nbody
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=forkunion_static_replicated ./zig-out/bin/nbody
-//! time NBODY_COUNT=128 NBODY_ITERATIONS=1000000 NBODY_BACKEND=libxev ./zig-out/bin/nbody
+//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
+//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated ./zig-out/bin/forkunion_nbody
+//! NBODY_COUNT=512 NBODY_BACKEND=libxev ./zig-out/bin/forkunion_nbody
 //! ```
 
 const std = @import("std");
@@ -43,6 +44,12 @@ fn envString(name: [*:0]const u8, fallback: []const u8) []const u8 {
 /// Parses an unsigned environment variable, falling back silently on absence or a bad value.
 fn envUsize(name: [*:0]const u8, fallback: usize) usize {
     if (envVar(name)) |text| return std.fmt.parseInt(usize, text, 10) catch fallback;
+    return fallback;
+}
+
+/// Parses a fractional environment variable, falling back silently on absence or a bad value.
+fn envF64(name: [*:0]const u8, fallback: f64) f64 {
+    if (envVar(name)) |text| return std.fmt.parseFloat(f64, text) catch fallback;
     return fallback;
 }
 
@@ -417,7 +424,8 @@ pub fn main() !void {
     var n_threads = envUsize("NBODY_THREADS", 0);
     if (n_threads == 0) n_threads = topology.countLogicalCores();
 
-    const n_iters = envUsize("NBODY_ITERATIONS", 1000);
+    const budget_seconds = envF64("NBODY_SECONDS", 10); // The primary knob: a fixed window
+    const n_iters = envUsize("NBODY_ITERATIONS", 0); // Overrides with an exact count when set
 
     var n_bodies = envUsize("NBODY_COUNT", 0);
     if (n_bodies == 0) n_bodies = n_threads;
@@ -481,12 +489,27 @@ pub fn main() !void {
         .allocator = allocator,
         .n_threads = n_threads,
     };
+    // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
+    // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
+    // no per-backend iteration guessing. NBODY_ITERATIONS forces an exact count instead.
+    const budget_ns: u64 = @intFromFloat(budget_seconds * std.time.ns_per_s);
     const started = monotonicNanos();
-    for (0..n_iters) |_| selected.run(&context);
+    var passes: usize = 0;
+    if (n_iters > 0) {
+        for (0..n_iters) |_| selected.run(&context);
+        passes = n_iters;
+    } else {
+        while (true) {
+            selected.run(&context);
+            passes += 1;
+            if (monotonicNanos() - started >= budget_ns) break;
+        }
+    }
     const elapsed_ns = monotonicNanos() - started;
-    const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s / @as(f64, @floatFromInt(n_iters));
+    const total_seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+    const us_per_iter = total_seconds / @as(f64, @floatFromInt(passes)) * std.time.us_per_s;
 
     var line_buffer: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buffer, "{s}: {} bodies, {} iters in {d:.3} s\n", .{ backend, n_bodies, n_iters, seconds }) catch return;
+    const line = std.fmt.bufPrint(&line_buffer, "{s}: {} bodies, {} iters, {d:.2} us/iter ({d:.2} s total)\n", .{ backend, n_bodies, passes, us_per_iter, total_seconds }) catch return;
     writeStdout(line);
 }

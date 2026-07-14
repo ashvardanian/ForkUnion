@@ -36,7 +36,8 @@
  *  - `PROPAGATION_EDGE_FACTOR` - edges generated per vertex, before deduplication - default 16.
  *  - `PROPAGATION_BACKEND` - backend to use - default `forkunion_static_shared`.
  *  - `PROPAGATION_THREADS` - number of threads to use - default all hardware threads.
- *  - `PROPAGATION_ITERATIONS` - repeat the convergence this many times, reporting the per-pass time - default 1.
+ *  - `PROPAGATION_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
+ *  - `PROPAGATION_ITERATIONS` - run an exact pass count instead, when set.
  *  - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
  *
  *  The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
@@ -45,8 +46,7 @@
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release
  *  cmake --build build_release --config Release
- *  time PROPAGATION_SCALE=14 PROPAGATION_COMMUNITIES=64 PROPAGATION_BACKEND=forkunion_static_shared
- * build_release/forkunion_propagation
+ *  PROPAGATION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
  *  @endcode
  */
 #include <cstdint> // `std::uint32_t`
@@ -506,6 +506,13 @@ static char const *env_string(char const *name, char const *fallback) noexcept {
 #endif
 }
 
+/** @brief Parses a fractional environment variable, or @p fallback when unset. */
+static double env_double(char const *name, double fallback) noexcept {
+    char const *value = env_string(name, nullptr);
+    return value ? std::atof(value) : fallback;
+}
+
+/** @brief Parses an unsigned environment variable, or @p fallback when unset. */
 static std::size_t env_usize(char const *name, std::size_t fallback) noexcept {
     char const *value = env_string(name, nullptr);
     return value ? static_cast<std::size_t>(std::strtoull(value, nullptr, 10)) : fallback;
@@ -517,7 +524,8 @@ int main() {
     std::size_t const edge_factor = env_usize("PROPAGATION_EDGE_FACTOR", 16);
     std::string_view const backend = env_string("PROPAGATION_BACKEND", "forkunion_static_shared");
     std::size_t threads = env_usize("PROPAGATION_THREADS", 0);
-    std::size_t const iterations = env_usize("PROPAGATION_ITERATIONS", 1);
+    double const budget_seconds = env_double("PROPAGATION_SECONDS", 10);   // ? The primary knob: a fixed window
+    std::size_t const iterations = env_usize("PROPAGATION_ITERATIONS", 0); // ? Overrides with an exact count when set
     bool const check = env_string("PROPAGATION_CHECK", nullptr) != nullptr;
     if (threads == 0) threads = fu::allowed_cores_count();
     if ((communities << scale) > (std::size_t(1) << 32)) {
@@ -605,10 +613,19 @@ int main() {
     // pass, and by a different amount for each backend.
     selected->run(context);
 
+    // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
+    // long enough to amortize scheduling noise - and reports the rate it sustained, with no
+    // per-backend pass-count guessing. `PROPAGATION_ITERATIONS` forces an exact count instead.
     auto const started = std::chrono::steady_clock::now();
-    for (std::size_t it = 0; it < iterations; ++it) selected->run(context);
+    std::size_t passes = 0;
+    if (iterations > 0)
+        for (; passes < iterations; ++passes) selected->run(context);
+    else
+        do {
+            selected->run(context), ++passes;
+        } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
     double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() //
-                           / static_cast<double>(iterations);
+                           / static_cast<double>(passes);
 
     // The fixed point sits in both buffers - the terminal round changed nothing - so read either.
     std::uint64_t components = 0, checksum = 0;
