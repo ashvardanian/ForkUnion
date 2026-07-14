@@ -201,12 +201,6 @@ struct colocated_pool {
     /** @brief Generation clock: odd while a fork is in flight, even when idle. */
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
-    /**
-     *  @brief The single cursor `invoke_distributed_for_n_dynamic` drains across compute domains.
-     *  @note This pool's own `for_n_dynamic` uses the per-thread cursors inside `pinned_thread_t` instead.
-     */
-    alignas(alignment_k) std::atomic<index_t> dynamic_progress_ {0};
-
   public:
     colocated_pool(colocated_pool &&) = delete;
     colocated_pool(colocated_pool const &) = delete;
@@ -255,9 +249,6 @@ struct colocated_pool {
      *  @note This API is @b not synchronized.
      */
     thread_index_t first_thread() const noexcept { return first_thread_; }
-
-    /** @brief Exposes the cross-domain cursor drained by `invoke_distributed_for_n_dynamic`. */
-    std::atomic<index_t> &unsafe_dynamic_progress_ref() noexcept { return dynamic_progress_; }
 
     /** @brief Exposes a thread's private claim cursor, kept inside its `pinned_thread_t`. */
     claim_t &unsafe_dynamic_claim_ref(thread_index_t const thread) noexcept { return pthreads_[thread].claim; }
@@ -995,15 +986,27 @@ class invoke_distributed_for_n {
  *
  *  @section Scheduling Logic
  *
- *  Assuming the latency of accessing an atomic variable on a remote NUMA node is high, this "invoker"
- *  performs work-stealing in a different way. Let's say we receive N tasks and we have T threads
- *  across C compute_domains. Each compute_domain takes (N/C) tasks and splits them between (T/C) threads.
- *  Once threads in one pool saturate their local (N/C) tasks, they start looping through other
- *  compute_domains and stealing tasks from them, until all tasks are completed.
+ *  The same protocol as `invoke_for_n_dynamic`, applied at two levels. Let's say we receive N tasks
+ *  for T threads across C compute_domains. Each compute_domain takes (N/C) tasks, reserves one
+ *  trailing static prong per local thread, and splits the rest into one contiguous slice per local
+ *  thread - so every thread drains its own slice with an @b uncontended `fetch_add` on a cursor line
+ *  nobody else touches. A drained thread first helps its same-domain neighbours, walking them in a
+ *  coprime order, and only when the whole domain runs dry does it cross the interconnect - walking
+ *  the other domains in a coprime order, and each domain's threads in a coprime order again.
  *
- *  The hardest decision there is to how to chose the next "non-native" compute_domain to steal from.
- *  Linear probing will produce unbalanced contention. A tree-like probing will produce a more balanced
- *  outcome.
+ *  Tasks are still claimed one at a time, so the makespan guarantee of greedy list scheduling
+ *  survives; a cursor line is only ever shared once a thread actually runs dry, which is exactly
+ *  when the extra line transfer is worth paying.
+ *
+ *  @section Overflow Considerations, One Level Up
+ *
+ *  The flat invoker's proof balances a slice's trailing reservation against its visitor count -
+ *  both equal `threads` there, so no cursor passes `max(n, threads)`. Here the reservation is per
+ *  domain (`threads_local` static prongs) while helping is pool-wide, so a slice may be visited by
+ *  all T threads and its cursor may settle past `n` - by less than `T` increments. No out-of-range
+ *  task is ever dispatched (`task >= end` guards every claim), and the read-only probe in
+ *  `drain_claim` drives the drained-slice regime to zero overshoot, so wrapping would need `n`
+ *  within a core-count of the index type's maximum.
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_distributed_for_n_dynamic {
@@ -1012,64 +1015,99 @@ class invoke_distributed_for_n_dynamic {
     fork_type_ fork_;
     index_type_ n_;
 
+    /** @brief Where one domain's tasks live and how they split across its threads. Computed the
+     *         same way by `reset_slices_` (to publish cursors) and `operator()` (to place the
+     *         static prong), so the two can never drift. */
+    struct domain_layout_t {
+        /** @brief This domain's task span inside `[0, n_)`. */
+        indexed_range<index_type_> range;
+        /** @brief Workers pinned here; 0 for a domain the spawn skipped. */
+        index_type_ threads;
+        /** @brief Global index of this domain's first worker. */
+        index_type_ first_thread;
+        /** @brief Leading cursor-drained tasks; the trailing `threads` are static prongs. */
+        index_type_ dynamic;
+    };
+
+    domain_layout_t layout_of_(indexed_range<index_type_> const range, index_type_ const domain) const noexcept {
+        index_type_ const threads = pool_.threads_count(domain);
+        index_type_ const dynamic = range.count > threads ? static_cast<index_type_>(range.count - threads) : 0;
+        return {range, threads, pool_.first_thread(domain), dynamic};
+    }
+
+    /** @brief Helps every thread of @p compute_domain, in a coprime order seeded by the caller. */
+    void drain_domain_(index_type_ const compute_domain, index_type_ const thread,
+                       local_prong<index_type_> &prong) noexcept {
+        index_type_ const threads_local = pool_.threads_count(compute_domain);
+        if (!threads_local) return; // ? A domain the spawn left empty owns no slices
+        index_type_ const first_thread = pool_.first_thread(compute_domain);
+        coprime_permutation_range<index_type_> victims(first_thread, threads_local, thread);
+        for (auto victim = victims.begin(); victim != default_sentinel_t {}; ++victim)
+            if (*victim != thread) drain_claim(pool_, *victim, prong, fork_);
+    }
+
   public:
     invoke_distributed_for_n_dynamic(pool_type_ &pool, index_type_ n, fork_type_ &&fork) noexcept
         : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n) {
-
-        // Reset the local progress to zero in each compute_domain
-        index_type_ const compute_domains_count = pool_.compute_domains_count();
-        for (index_type_ i = 0; i < compute_domains_count; ++i)
-            pool_.unsafe_dynamic_progress_ref(i).store(0, std::memory_order_release);
+        reset_slices_();
     }
 
     void operator()(index_type_ const thread) noexcept {
         index_type_ const compute_domains_count = pool_.compute_domains_count();
         assert(compute_domains_count > 0 && "There must be at least one compute_domain");
 
-        // In each compute_domains part, take one static prong per thread, if present.
-        indexed_split<index_type_> split_between_compute_domains(n_, compute_domains_count);
+        // The prong's compute_domain is INVARIANT across every steal: it names the domain THIS
+        // thread is pinned to, never the victim's - so a stolen task still reads the thief's
+        // node-local replica; replicas are identical, only their distances differ. The drain
+        // helpers mutate `.task` only.
         index_type_ const native_compute_domain = pool_.thread_compute_domain(thread);
-        {
-            index_type_ const threads_local = pool_.threads_count(native_compute_domain);
-            indexed_range<index_type_> const range_local = split_between_compute_domains[native_compute_domain];
-            index_type_ const n_local = range_local.count;
-            index_type_ const n_local_dynamic = n_local > threads_local ? n_local - threads_local : 0;
+        local_prong<index_type_> prong(0, thread, native_compute_domain);
 
-            // Run (up to) one static prong on the current thread
-            index_type_ const thread_local_index = pool_.thread_local_index(thread, native_compute_domain);
-            index_type_ const one_static_prong_index = static_cast<index_type_>(n_local_dynamic + thread_local_index);
-            local_prong<index_type_> prong( //
-                static_cast<index_type_>(range_local.first + one_static_prong_index), thread, native_compute_domain);
-            if (one_static_prong_index < n_local) fork_(prong);
+        // Run (up to) one static prong from the native domain's trailing reservation.
+        indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
+        domain_layout_t const home = layout_of_(split_between_compute_domains[native_compute_domain], //
+                                                native_compute_domain);
+        index_type_ const local = pool_.thread_local_index(thread, native_compute_domain);
+        index_type_ const static_index = static_cast<index_type_>(home.dynamic + local);
+        if (static_index < home.range.count) { // ? Fewer tasks than threads leaves the domain's tail idle
+            prong.task = static_cast<index_type_>(home.range.first + static_index);
+            fork_(prong);
         }
 
-        coprime_permutation_range<index_type_> probing_strategy(0, compute_domains_count, thread);
-        auto probe_iterator = probing_strategy.begin();
+        // Home domain first: our own slice (still uncontended), then the same-domain neighbours -
+        // the `!= thread` guard inside drain_domain_ keeps us from re-draining the slice we just
+        // finished.
+        drain_claim(pool_, thread, prong, fork_);
+        drain_domain_(native_compute_domain, thread, prong);
 
-        // Next we will probe every compute_domain:
-        index_type_ compute_domains_remaining = compute_domains_count;
-        index_type_ current_compute_domain = native_compute_domain;
-        while (compute_domains_remaining) {
-            index_type_ const threads_local = pool_.threads_count(current_compute_domain);
-            std::atomic<index_type_> &local_progress = pool_.unsafe_dynamic_progress_ref(current_compute_domain);
-            indexed_range<index_type_> const range_local = split_between_compute_domains[current_compute_domain];
-            index_type_ const n_local = range_local.count;
-            index_type_ const n_local_dynamic = n_local > threads_local ? n_local - threads_local : 0;
+        // Only once the whole home domain is dry do we cross the interconnect, coprime over the
+        // domains (the `!= native` guard skips the one we already drained) and coprime over each
+        // domain's threads. This guard cannot dissolve the way the flat invoker's did: both the
+        // walk's stride and its start derive from `seed % length`, so seeding every thread to start
+        // at `native` would also hand every thread the same stride - the very stampede onto one
+        // remote domain the coprime order exists to prevent.
+        coprime_permutation_range<index_type_> other_domains(0, compute_domains_count, thread);
+        for (auto domain = other_domains.begin(); domain != default_sentinel_t {}; ++domain)
+            if (*domain != native_compute_domain) drain_domain_(*domain, thread, prong);
+    }
 
-            // Same loop as in `invoke_for_n_dynamic::operator()`
-            while (true) {
-                index_type_ prong_local_offset = local_progress.fetch_add(1, std::memory_order_relaxed);
-                bool const beyond_last_prong = prong_local_offset >= n_local_dynamic;
-                if (beyond_last_prong) break;
-                local_prong<index_type_> prong(range_local.first + prong_local_offset, thread, current_compute_domain);
-                fork_(prong);
-            }
+  private:
+    /** @brief Publishes one contiguous slice per thread in every domain. Runs before the broadcast. */
+    void reset_slices_() noexcept {
+        typename pool_type_::cache_hints_t cache_hints;
+        index_type_ const compute_domains_count = pool_.compute_domains_count();
+        indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
+        for (index_type_ domain = 0; domain < compute_domains_count; ++domain) {
+            domain_layout_t const layout = layout_of_(split_between_compute_domains[domain], domain);
+            if (!layout.threads) continue; // ? A domain the spawn left empty owns no slices
 
-            // Now pick some other compute_domain to probe.
-            compute_domains_remaining--;
-            if (compute_domains_remaining) {
-                do { ++probe_iterator; } while (*probe_iterator == native_compute_domain); // At most 2 iterations
-                current_compute_domain = *probe_iterator;
+            indexed_split<index_type_> const split_local(layout.dynamic, layout.threads);
+            for (index_type_ local = 0; local < layout.threads; ++local) {
+                indexed_range<index_type_> const slice = split_local[local];
+                auto &claim = pool_.unsafe_dynamic_claim_ref(static_cast<index_type_>(layout.first_thread + local));
+                claim.end = static_cast<index_type_>(layout.range.first + slice.first + slice.count);
+                claim.next.store(static_cast<index_type_>(layout.range.first + slice.first), std::memory_order_release);
+                cache_hints(&claim, demote_line_k); // ? Publish away, so each owner's first claim skips this core
             }
         }
     }
@@ -1176,9 +1214,17 @@ struct distributed_pool {
         return compute_domain_cells_ && compute_domain_cells_[0] && compute_domain_cells_[0].only().pool.is_lock_free();
     }
 
-    /** @brief Exposes one compute domain's cross-domain cursor, drained by `invoke_distributed_for_n_dynamic`. */
-    std::atomic<index_t> &unsafe_dynamic_progress_ref(index_t compute_domain) noexcept {
-        return compute_domain_cells_[compute_domain].only().pool.unsafe_dynamic_progress_ref();
+    /** @brief Global index of the first worker in @p compute_domain; workers are numbered contiguously. */
+    thread_index_t first_thread(index_t compute_domain) const noexcept {
+        assert(compute_domain < compute_domain_cells_.size() && "Compute domain index out of bounds");
+        return compute_domain_cells_[compute_domain].only().pool.first_thread();
+    }
+
+    /** @brief Exposes one worker's private claim cursor, drained by `invoke_distributed_for_n_dynamic`. */
+    dynamic_claim<index_t> &unsafe_dynamic_claim_ref(thread_index_t const thread) noexcept {
+        index_t const compute_domain = thread_compute_domain(thread);
+        return compute_domain_cells_[compute_domain].only().pool.unsafe_dynamic_claim_ref(
+            thread_local_index(thread, compute_domain));
     }
 
 #pragma region Core API

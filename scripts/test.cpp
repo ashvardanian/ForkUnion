@@ -701,6 +701,59 @@ static void test_for_n_dynamic_stealing() noexcept {
     expect(thread_0_runs.load() < own_slice); // ! Nobody stole, so this test proves nothing
 }
 
+/**
+ *  @brief Exhausts the distributed `for_n_dynamic` across task-count regimes, on a real multi-domain box.
+ *
+ *  Proves exactly-once dispatch for every boundary the two-level slicing exposes - fewer tasks than
+ *  threads, exactly as many, one more, and a large skewed run - and, with one thread crawling, that at
+ *  least one task was executed by a thread pinned to a @b different domain than the one owning its
+ *  slice, so the cross-interconnect path is exercised rather than silently idle. The index type here is
+ *  `std::size_t`; the small-type wrap-around regimes live in the flat pool's `fu8`/`fu16` stress suite.
+ */
+template <typename make_pool_type_ = make_pool_t>
+static void test_distributed_for_n_dynamic_exhaustive() noexcept {
+
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    expect(pool.try_spawn(maker.scope()));
+
+    std::size_t const threads = pool.threads_count();
+    std::size_t const domains = pool.compute_domains_count();
+    if (domains < 2) skip("needs 2+ compute domains"); // ? The cross-domain walk is dead code otherwise
+    if (threads < 4) skip("needs 4+ threads");
+
+    using pool_prong_t = typename std::remove_reference<decltype(pool)>::type::prong_t;
+
+    // The owner of a task index mirrors the invoker's own split: domain `d` owns `split[d]`.
+    auto owner_domain_of = [&](std::size_t n, std::size_t task) noexcept -> std::size_t {
+        return fu::indexed_split<std::size_t>(n, domains).index_of(task);
+    };
+
+    std::size_t const regimes[] = {1, threads / 2, threads, threads + 1, 2 * threads + 3, 8192};
+    for (std::size_t const n : regimes) {
+        bool const crawl = n == 8192; // ? Only the large run needs forced imbalance
+        std::atomic<std::size_t> total {0};
+        std::atomic<std::size_t> cross_domain_runs {0};
+        std::vector<std::atomic<unsigned>> executions(n);
+        for (auto &e : executions) e.store(0, std::memory_order_relaxed);
+
+        pool.for_n_dynamic(n, [&](pool_prong_t prong) noexcept {
+            if (crawl && prong.thread == 0) { // ? A spin, not a sleep, so the pool's yields don't mask it
+                volatile std::size_t sink = 0;
+                for (std::size_t i = 0; i < 200000; ++i) sink = sink + i;
+            }
+            if (owner_domain_of(n, prong.task) != static_cast<std::size_t>(prong.compute_domain))
+                cross_domain_runs.fetch_add(1, std::memory_order_relaxed);
+            executions[prong.task].fetch_add(1, std::memory_order_relaxed);
+            total.fetch_add(1, std::memory_order_relaxed);
+        });
+
+        expect_eq(total.load(), n);                                              // ! Some task ran twice, or never
+        for (std::size_t i = 0; i < n; ++i) expect_eq(executions[i].load(), 1u); // ! Every task exactly once
+        if (crawl) expect(cross_domain_runs.load() > 0); // ! No steal crossed the interconnect; proves nothing
+    }
+}
+
 /** @brief Stress-tests the implementation by oversubscribing the number of threads. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_oversubscribed_threads() noexcept {
@@ -988,6 +1041,9 @@ int main(void) {
         {"NUMA `for_n` for uncomfortable input size", test_uncomfortable_input_size<make_distributed_pool_t>},
         {"NUMA `for_n` static scheduling", test_for_n<make_distributed_pool_t>},
         {"NUMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_distributed_pool_t>},
+        {"NUMA `for_n_dynamic` stalled thread stolen from", test_for_n_dynamic_stealing<make_distributed_pool_t>},
+        {"NUMA `for_n_dynamic` exhaustive multi-domain",
+         test_distributed_for_n_dynamic_exhaustive<make_distributed_pool_t>},
         {"NUMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_distributed_pool_t>},
         {"NUMA `terminate` avoided", test_mixed_restart<false, make_distributed_pool_t>},
         {"NUMA `terminate` and re-spawn", test_mixed_restart<true, make_distributed_pool_t>},

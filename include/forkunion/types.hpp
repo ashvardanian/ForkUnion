@@ -1450,6 +1450,18 @@ struct indexed_split {
 
     inline index_t smallest_size() const noexcept { return quotient_; }
     inline index_t largest_size() const noexcept { return quotient_ + (remainder_ > 0); }
+
+    /**
+     *  @brief The chunk owning task @p task - the inverse of `operator[]`, in closed form.
+     *  @note The first `remainder_` chunks are one task larger, so the boundary between the two
+     *        regimes sits at `remainder_ * (quotient_ + 1)`; a `quotient_` of zero puts every valid
+     *        task in the first regime, so the division by `quotient_` below is never reached.
+     */
+    inline index_t index_of(index_t const task) const noexcept {
+        index_t const larger_chunks_end = static_cast<index_t>(remainder_ * (quotient_ + 1));
+        if (task < larger_chunks_end) return static_cast<index_t>(task / (quotient_ + 1));
+        return static_cast<index_t>(remainder_ + (task - larger_chunks_end) / quotient_);
+    }
 };
 
 using indexed_split_t = indexed_split<>;
@@ -1641,6 +1653,39 @@ struct dynamic_claim {
 using dynamic_claim_t = dynamic_claim<>;
 
 /**
+ *  @brief Drains whatever is left of one thread's slice into @p fork - the shared core of both the
+ *         flat and the distributed `for_n_dynamic` invokers, so its invariants live in one place.
+ *
+ *  A read-only probe first: a drained slice is skipped in Shared state - no dirtying add, no line
+ *  migration - which is the entire cost of visiting an empty neighbour once a small dispatch runs
+ *  dry. A live slice is promoted with write intent while the probe's branch resolves, claimed one
+ *  task at a time - the makespan guarantee of greedy list scheduling - and demoted once our
+ *  overshooting add has dirtied it, so the next visitor snoops the LLC instead of this core.
+ */
+template <typename index_type_, typename prong_type_, typename fork_type_, typename cache_hints_type_>
+inline void drain_claim(dynamic_claim<index_type_> &claim, prong_type_ &prong, fork_type_ &fork,
+                        cache_hints_type_ cache_hints) noexcept {
+    if (claim.next.load(std::memory_order_relaxed) >= claim.end) return;
+    cache_hints(&claim, promote_line_k); // ? Overlap the exclusive-ownership fetch with the branch
+    while (true) {
+        index_type_ const task = claim.next.fetch_add(1, std::memory_order_relaxed);
+        if (task >= claim.end) break; // ? Overshoots by one, and only once per thread
+        prong.task = task;
+        fork(prong);
+    }
+    cache_hints(&claim, demote_line_k); // ? Our overshooting add left the line dirty; hand it away
+}
+
+/**
+ *  @brief Drains whatever is left of the @p slice thread's claim in @p pool, whether or not we own it.
+ *  @sa The `dynamic_claim` overload above, where the probe and the overshoot invariants live.
+ */
+template <typename pool_type_, typename index_type_, typename prong_type_, typename fork_type_>
+inline void drain_claim(pool_type_ &pool, index_type_ const slice, prong_type_ &prong, fork_type_ &fork) noexcept {
+    drain_claim(pool.unsafe_dynamic_claim_ref(slice), prong, fork, typename pool_type_::cache_hints_t {});
+}
+
+/**
  *  @brief Wraps the metadata needed for `for_n_dynamic` APIs for `broadcast_join` compatibility.
  *
  *  @section Scheduling Logic
@@ -1665,10 +1710,11 @@ using dynamic_claim_t = dynamic_claim<>;
  *  without worrying about the overflow. The way to achieve that is to preprocess the trailing `threads`
  *  of elements externally, before entering this loop!
  *
- *  That trailing reservation also bounds the cursors. Every thread touches a given slice exactly once
- *  - the owner drains it, each other thread helps drain it once, and the `!= thread` guard below keeps
- *  the owner from doing both - and each visit overshoots by at most one increment, since `drain_` leaves
- *  the moment it reads `>= end`. A cursor therefore settles at exactly `end + threads`.
+ *  That trailing reservation also bounds the cursors. Every thread visits a given slice exactly once -
+ *  each thread's coprime walk is a permutation of all the slices, beginning with its own - and a visit
+ *  overshoots by at most one increment, since `drain_claim` leaves the moment it reads `>= end` and its
+ *  read-only probe skips already-drained slices without any increment at all. A cursor therefore never
+ *  passes `end + threads`.
  *
  *  Two regimes bound that. When `n > threads` the last slice ends at `n - threads`, so no cursor passes
  *  `n`. When `n <= threads` every slice is empty and `end == 0`, so no cursor passes `threads` - which
@@ -1689,62 +1735,32 @@ class invoke_for_n_dynamic {
     /** @brief Number of tasks handed out dynamically; the trailing `threads_` are static prongs. */
     index_type_ dynamic_count() const noexcept { return n_ > threads_ ? static_cast<index_type_>(n_ - threads_) : 0; }
 
-    /** @brief Runs whatever is left of @p slice, whether or not we own it. */
-    void drain_(index_type_ const slice, prong<index_type_> &prong) noexcept {
-        dynamic_claim<index_type_> &claim = pool_.unsafe_dynamic_claim_ref(slice);
-        while (true) {
-            index_type_ const task = claim.next.fetch_add(1, std::memory_order_relaxed);
-            if (task >= claim.end) break; // ? Overshoots by one, and only once per thread
-            prong.task = task;
-            fork_(prong);
-        }
-    }
-
   public:
     invoke_for_n_dynamic(pool_type_ &pool, index_type_ n, index_type_ threads, fork_type_ &&fork) noexcept
         : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n), threads_(threads) {
         reset_slices_();
     }
 
-    invoke_for_n_dynamic(invoke_for_n_dynamic &&other) noexcept // ? Need to manually define the `move` due to atomics
-        : pool_(other.pool_), fork_(std::move(other.fork_)), n_(other.n_), threads_(other.threads_) {
-        other.n_ = 0;
-        reset_slices_();
-    }
-
     void operator()(index_type_ const thread) noexcept {
 
-        // A single-thread pool has no neighbours and keeps no cursors - just run the loop.
-        if (threads_ == 1) {
-            prong<index_type_> prong(0, thread);
-            for (index_type_ task = 0; task < n_; ++task) {
-                prong.task = task;
-                fork_(prong);
-            }
-            return;
-        }
-
-        index_type_ const n_dynamic = dynamic_count();
-        assert((n_dynamic + threads_) >= n_dynamic && "Overflow detected");
-
         // Run (up to) one static prong on the current thread
+        index_type_ const n_dynamic = dynamic_count();
         index_type_ const one_static_prong_index = static_cast<index_type_>(n_dynamic + thread);
         prong<index_type_> prong(one_static_prong_index, thread);
         if (one_static_prong_index < n_) fork_(prong);
 
-        // Drain our own slice first - nobody else is touching this cache line yet
-        drain_(thread, prong);
-
-        // Then help the others, in a coprime order so drained threads don't collide on one victim
+        // Help everyone, in a coprime order so drained threads don't collide on one victim. The walk
+        // starts at our own slice - `first_offset_ = seed % length` with `seed = thread < threads_` -
+        // so the uncontended line is drained first and no self-guard is needed.
         coprime_permutation_range<index_type_> victims(0, threads_, thread);
         for (auto victim = victims.begin(); victim != default_sentinel_t {}; ++victim)
-            if (*victim != thread) drain_(*victim, prong);
+            drain_claim(pool_, *victim, prong, fork_);
     }
 
   private:
     /** @brief Publishes one contiguous slice per thread. Runs on the caller, before the broadcast. */
     void reset_slices_() noexcept {
-        if (threads_ <= 1) return; // ? No cursors exist on a single-thread pool
+        typename pool_type_::cache_hints_t cache_hints;
         index_type_ const n_dynamic = dynamic_count();
         indexed_split<index_type_> const split(n_dynamic, threads_);
         for (index_type_ thread = 0; thread < threads_; ++thread) {
@@ -1752,6 +1768,7 @@ class invoke_for_n_dynamic {
             dynamic_claim<index_type_> &claim = pool_.unsafe_dynamic_claim_ref(thread);
             claim.end = static_cast<index_type_>(range.first + range.count);
             claim.next.store(range.first, std::memory_order_release);
+            cache_hints(&claim, demote_line_k); // ? Publish away, so each owner's first claim skips this core
         }
     }
 };
