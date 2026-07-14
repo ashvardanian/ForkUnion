@@ -1207,7 +1207,7 @@ class dynamic_padded_array {
         if (new_objects_count == 0) return true;
 
         // An `alignas(128)` object placement-newed into 16-byte-aligned storage is undefined, and it
-        // is exactly what happens when the object is a pool cell and the allocator is `std::allocator`.
+        // is exactly what happens when the object is a sub-pool and the allocator is `std::allocator`.
         // `linux_numa_allocator` hands back page-aligned memory and hides the bug; Apple's does not.
         constexpr std::size_t object_alignment_k = alignof(object_t);
         constexpr bool over_aligned_k = object_alignment_k > alignof(std::max_align_t);
@@ -1244,15 +1244,6 @@ class dynamic_padded_array {
         for (std::size_t i = 0; i < objects_count_; ++i) ::new (static_cast<void *>(ptr(i))) object_t();
 
         return true;
-    }
-
-    object_t &only() noexcept {
-        assert(objects_count_ == 1 && "Buffer must contain exactly one object to use `only()`");
-        return *ptr(0);
-    }
-    object_t const &only() const noexcept {
-        assert(objects_count_ == 1 && "Buffer must contain exactly one object to use `only()`");
-        return *ptr(0);
     }
 
     object_t &operator[](std::size_t i) noexcept { return *ptr(i); }
