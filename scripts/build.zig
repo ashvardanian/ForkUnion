@@ -53,34 +53,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run N-body benchmark");
     run_step.dependOn(&run_nbody.step);
 
-    // Triangle-counting benchmark executable
-    const triangles = b.addExecutable(.{
-        .name = "triangles",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("triangles.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    triangles.root_module.link_libc = true;
-    triangles.root_module.link_libcpp = true;
-    triangles.root_module.linkLibrary(forkunion_artifact);
-    if (target.result.os.tag == .linux) {
-        triangles.root_module.linkSystemLibrary("pthread", .{});
-        if (enable_numa) {
-            triangles.root_module.linkSystemLibrary("numa", .{});
-        }
-    }
-    triangles.root_module.addImport("forkunion", forkunion_module);
-
-    b.installArtifact(triangles);
-
-    const run_triangles = b.addRunArtifact(triangles);
-    if (b.args) |args| {
-        run_triangles.addArgs(args);
-    }
-
-    const run_triangles_step = b.step("run-triangles", "Run triangle-counting benchmark");
-    run_triangles_step.dependOn(&run_triangles.step);
+    // The Connected-Components benchmark (`propagation.zig`) follows once the upstream libxev/zig-0.15
+    // incompatibility is resolved; the generator and kernel are specified language-neutrally in `propagation.cpp`.
 }

@@ -55,8 +55,8 @@ test = false
 bench = false
 
 [[example]]
-name = "triangles"
-path = "scripts/triangles.rs"
+name = "propagation"
+path = "scripts/propagation.rs"
 test = false
 bench = false
 

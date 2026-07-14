@@ -1069,6 +1069,22 @@ class dynamic_array {
         return true;
     }
 
+    /** @brief Like `try_resize`, but skips the zero-fill so the caller controls the first touch.
+     *  @note Trivial value types only - nothing is constructed, so every element must be written
+     *        before it is read. @sa `sharded_array::try_resize_uninitialized`, the same contract. */
+    bool try_resize_uninitialized(std::size_t const new_size) noexcept {
+        static_assert(std::is_trivially_default_constructible_v<value_t> && std::is_trivially_destructible_v<value_t>,
+                      "Uninitialized storage is only safe for trivial value types");
+        reset();
+        if (new_size == 0) return true;
+        value_t *fresh = allocator_.allocate(new_size);
+        if (!fresh) return false;
+        data_ = fresh;
+        size_ = new_size;
+        capacity_ = new_size;
+        return true;
+    }
+
     /** @brief Grows capacity to at least @p new_capacity, preserving the live elements. */
     bool try_reserve(std::size_t const new_capacity) noexcept {
         static_assert(std::is_trivially_copyable_v<value_t> || std::is_nothrow_move_constructible_v<value_t>,

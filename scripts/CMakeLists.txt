@@ -198,5 +198,5 @@ endfunction ()
 
 # N-body: fast-math on - the fast reciprocal-sqrt kernel is an approximation already.
 add_forkunion_benchmark(forkunion_nbody nbody.cpp ON)
-# Triangle counting: exact integer work, so no fast-math; the CSR is replicated per memory domain.
-add_forkunion_benchmark(forkunion_triangles triangles.cpp OFF)
+# Connected components: exact integer work, so no fast-math; the CSR is replicated per memory domain.
+add_forkunion_benchmark(forkunion_propagation propagation.cpp OFF)
