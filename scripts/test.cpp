@@ -1,12 +1,105 @@
-#include <cstdio>    // `std::printf`, `std::fprintf`
-#include <cstdlib>   // `EXIT_FAILURE`, `EXIT_SUCCESS`
-#include <vector>    // `std::vector`
-#include <algorithm> // `std::sort`
+#include <cstdio>  // `std::printf`, `std::fprintf`
+#include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
+#include <cstring> // `std::strrchr`
+
+#include <vector>      // `std::vector`
+#include <algorithm>   // `std::sort`
+#include <type_traits> // `std::is_integral`, `std::is_enum`
 
 #include <forkunion.hpp>
 
 /* Namespaces, constants, and explicit type instantiations. */
 namespace fu = ashvardanian::forkunion;
+
+#undef NDEBUG // ? Keep any library asserts live in the test binary
+
+#if FU_ON_POSIX
+#include <csignal>  // `std::signal`, `std::raise`
+#include <unistd.h> // `::write`, `STDERR_FILENO`
+#if defined(__has_include) && __has_include(<execinfo.h>)
+#include <execinfo.h> // `::backtrace`, `::backtrace_symbols_fd`
+#define FU_TEST_WITH_BACKTRACE_ 1
+#endif
+#endif
+
+/** @brief Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
+template <typename value_type_>
+static void format_value_(char *buffer, std::size_t capacity, value_type_ const &value) noexcept {
+    if constexpr (std::is_same<value_type_, bool>::value)
+        std::snprintf(buffer, capacity, "%s", value ? "true" : "false");
+    else if constexpr (std::is_enum<value_type_>::value)
+        format_value_(buffer, capacity, static_cast<typename std::underlying_type<value_type_>::type>(value));
+    else if constexpr (std::is_pointer<value_type_>::value)
+        std::snprintf(buffer, capacity, "%p", static_cast<void const *>(value));
+    else if constexpr (std::is_integral<value_type_>::value && std::is_signed<value_type_>::value)
+        std::snprintf(buffer, capacity, "%lld", static_cast<long long>(value));
+    else if constexpr (std::is_integral<value_type_>::value)
+        std::snprintf(buffer, capacity, "%llu", static_cast<unsigned long long>(value));
+    else
+        std::snprintf(buffer, capacity, "?");
+}
+
+/** @brief Prints a located `FAIL` and exits; the preceding `Running ...` line already names the test. */
+[[noreturn]] static void report_failure_(char const *file, int line, char const *expr, char const *detail) noexcept {
+    fu::logging_colors_t colors;
+    char const *slash = std::strrchr(file, '/');
+    char const *base = slash ? slash + 1 : file;
+    std::printf("%sFAIL%s\n", colors.bold_red(), colors.reset());
+    std::fflush(stdout); // ? Order the `FAIL` line before the stderr detail
+    std::fprintf(stderr, "  %s:%d: %s%s\n", base, line, expr, detail);
+    std::exit(EXIT_FAILURE);
+}
+
+static void expect_(bool condition, char const *expr, char const *file, int line) noexcept {
+    if (!condition) report_failure_(file, line, expr, "");
+}
+
+/** @brief Compares two values, printing both sides on mismatch; `==` and `!=` share this path. */
+template <typename a_type_, typename b_type_>
+static void expect_cmp_(bool ok, a_type_ const &a, b_type_ const &b, char const *expr, char const *file,
+                        int line) noexcept {
+    if (ok) return;
+    char lhs[48], rhs[48], detail[112];
+    format_value_(lhs, sizeof(lhs), a);
+    format_value_(rhs, sizeof(rhs), b);
+    std::snprintf(detail, sizeof(detail), "  (%s vs %s)", lhs, rhs);
+    report_failure_(file, line, expr, detail);
+}
+
+/** @brief Notes a skipped test inline; the runner still prints `PASS` after the test returns. */
+static void skip_(char const *reason) noexcept {
+    fu::logging_colors_t colors;
+    std::printf("%s(skip: %s)%s ", colors.dim(), reason, colors.reset());
+}
+
+#define expect(cond) expect_((cond), #cond, __FILE__, __LINE__)
+#define expect_eq(a, b) expect_cmp_((a) == (b), (a), (b), #a " == " #b, __FILE__, __LINE__)
+#define expect_ne(a, b) expect_cmp_((a) != (b), (a), (b), #a " != " #b, __FILE__, __LINE__)
+#define fail(reason) report_failure_(__FILE__, __LINE__, (reason), "")
+#define skip(reason)   \
+    do {               \
+        skip_(reason); \
+        return;        \
+    } while (0)
+
+#if FU_ON_POSIX
+/** @brief Adds a backtrace to a fatal signal; the flushed `Running ...` line names the test. */
+extern "C" void on_fatal_signal_(int signal_number) noexcept {
+    ssize_t const written = ::write(STDERR_FILENO, "\nCRASH - backtrace:\n", 20);
+    (void)written; // ? Best-effort in a handler; still re-raise below
+#if FU_TEST_WITH_BACKTRACE_
+    void *frames[64];
+    ::backtrace_symbols_fd(frames, ::backtrace(frames, 64), STDERR_FILENO);
+#endif
+    std::signal(signal_number, SIG_DFL);
+    std::raise(signal_number);
+}
+static void install_crash_handlers_() noexcept {
+    for (int signal_number : {SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS}) std::signal(signal_number, on_fatal_signal_);
+}
+#else
+static void install_crash_handlers_() noexcept {}
+#endif
 
 using fu32_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
 using fu16_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
@@ -28,7 +121,7 @@ template struct fu::distributed_pool<>;
 #endif
 
 template <typename index_type_ = std::uint8_t>
-bool test_indexed_split() noexcept {
+void test_indexed_split() noexcept {
     std::size_t max_tasks = std::numeric_limits<index_type_>::max();
     std::size_t max_threads = std::numeric_limits<index_type_>::max();
     std::vector<bool> visits(max_tasks);
@@ -43,19 +136,17 @@ bool test_indexed_split() noexcept {
             for (std::size_t thread = 0; thread < threads; ++thread) {
                 auto subrange = split[static_cast<index_type_>(thread)];
                 for (std::size_t task = subrange.first; task < subrange.first + subrange.count; ++task) {
-                    if (task >= tasks) return false; // Out of bounds
-                    if (visits[task]) return false;  // Already visited
-                    visits[task] = true;             // Mark as visited
+                    expect(task < tasks);  // In bounds
+                    expect(!visits[task]); // Not already visited
+                    visits[task] = true;   // Mark as visited
                 }
             }
         }
     }
-
-    return true;
 }
 
 template <typename index_type_ = std::uint8_t>
-bool test_coprime_permutation() noexcept {
+void test_coprime_permutation() noexcept {
     constexpr std::size_t max_tasks = std::numeric_limits<index_type_>::max();
     std::vector<bool> visits(max_tasks);
 
@@ -76,19 +167,19 @@ bool test_coprime_permutation() noexcept {
                 // victim twice, overrunning its cursor. Check that each value appears exactly once.
                 std::size_t count_matches = 0;
                 for (auto value : permutation) {
-                    if (value < start || value >= end) return false; // Out of range
+                    expect(value >= start); // In range
+                    expect(value < end);
 
                     std::size_t const offset = static_cast<std::size_t>(value) - start;
-                    if (visits[offset]) return false; // ! Revisited a value, so this is not a permutation
+                    expect(!visits[offset]); // ! Revisited a value, so this is not a permutation
 
                     visits[offset] = true;
                     count_matches++;
                 }
-                if (count_matches != range_size) return false; // Not all values in the range were covered
+                expect_eq(count_matches, range_size); // Every value in the range was covered
             }
         }
     }
-    return true;
 }
 
 /**
@@ -99,20 +190,22 @@ bool test_coprime_permutation() noexcept {
  *  A host with no harvest at all reports `false` and is skipped rather than failed - the absence
  *  of a topology is not a broken topology.
  */
-static bool test_topology_invariants() noexcept {
+static void test_topology_invariants() noexcept {
     fu::machine_topology_t topology;
-    if (!topology.try_harvest()) return true; // ? No harvest on this host; nothing to check
+    if (!topology.try_harvest()) skip("no topology"); // ? No harvest on this host; nothing to check
 
     std::size_t const compute_domains = topology.compute_domains_count();
     std::size_t const memory_domains = topology.memory_domains_count();
     std::size_t const compute_levels = topology.compute_levels_count();
     std::size_t const memory_levels = topology.memory_levels_count();
-    if (compute_domains == 0 || memory_domains == 0) return false;
-    if (compute_levels == 0 || memory_levels == 0) return false;
+    expect(compute_domains != 0);
+    expect(memory_domains != 0);
+    expect(compute_levels != 0);
+    expect(memory_levels != 0);
 
     // Levels are dense ranks over domains, so they can never outnumber the domains they rank.
-    if (compute_levels > compute_domains) return false;
-    if (memory_levels > memory_domains) return false;
+    expect(compute_levels <= compute_domains);
+    expect(memory_levels <= memory_domains);
 
     // Levels are a *dense* rank, so each of [0, levels) must be claimed by at least one domain.
     // Merely staying in range is too weak - it would accept a count inflated past the distinct levels.
@@ -122,27 +215,25 @@ static bool test_topology_invariants() noexcept {
     std::size_t cores_across_domains = 0;
     for (std::size_t i = 0; i < compute_domains; ++i) {
         fu::compute_domain_t const &domain = topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(i));
-        if (domain.logical_cores_count == 0 || domain.first_core_id == nullptr) return false;
-        if (domain.compute_level >= compute_levels) return false;
-        if (domain.memory_domain_index >= memory_domains) return false;
+        expect(domain.logical_cores_count != 0);
+        expect(domain.first_core_id != nullptr);
+        expect(domain.compute_level < compute_levels);
+        expect(domain.memory_domain_index < memory_domains);
         compute_level_seen[domain.compute_level] = true;
         cores_across_domains += domain.logical_cores_count;
     }
     // Every core must belong to exactly one compute domain.
-    if (cores_across_domains != topology.logical_cores_count()) return false;
+    expect_eq(cores_across_domains, topology.logical_cores_count());
 
     for (std::size_t i = 0; i < memory_domains; ++i) {
         std::size_t const level = topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(i)).memory_level;
-        if (level >= memory_levels) return false;
+        expect(level < memory_levels);
         memory_level_seen[level] = true;
     }
 
     for (std::size_t level = 0; level < compute_levels; ++level)
-        if (!compute_level_seen[level]) return false; // ? An unclaimed rank means the count is inflated
-    for (std::size_t level = 0; level < memory_levels; ++level)
-        if (!memory_level_seen[level]) return false;
-
-    return true;
+        expect(compute_level_seen[level]); // ? An unclaimed rank means the count is inflated
+    for (std::size_t level = 0; level < memory_levels; ++level) expect(memory_level_seen[level]);
 }
 
 constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
@@ -168,60 +259,56 @@ struct make_distributed_pool_t {
 };
 #endif
 
-static bool test_try_spawn_zero() noexcept {
+static void test_try_spawn_zero() noexcept {
     fu::flat_pool_t pool;
-    return !pool.try_spawn(0u);
+    expect(!pool.try_spawn(0u));
 }
 
 template <typename make_pool_type_ = make_pool_t>
-static bool test_try_spawn_success() noexcept {
+static void test_try_spawn_success() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
-    return true;
+    expect(pool.try_spawn(maker.scope()));
 }
 
 /** @brief The pool is the single source of truth for exclusivity, even across re-spawns. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_caller_exclusivity_query() noexcept {
+static void test_caller_exclusivity_query() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
 
-    if (!pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
-    if (pool.caller_exclusivity() != fu::caller_inclusive_k) return false;
+    expect(pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
+    expect_eq(pool.caller_exclusivity(), fu::caller_inclusive_k);
 
     // Re-spawn with the opposite mode: the query must follow, not a stale cache
     pool.terminate();
-    if (!pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
-    if (pool.caller_exclusivity() != fu::caller_exclusive_k) return false;
-    return true;
+    expect(pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect_eq(pool.caller_exclusivity(), fu::caller_exclusive_k);
 }
 
 /** @brief Make sure that `for_threads` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_for_threads() noexcept {
+static void test_for_threads() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
+    expect(pool.try_spawn(maker.scope()));
 
     std::vector<std::atomic<bool>> visited(pool.threads_count());
     pool.for_threads([&](std::size_t const thread_index) noexcept { //
         visited[thread_index].store(true, std::memory_order_relaxed);
     });
 
-    for (std::size_t i = 0; i < pool.threads_count(); ++i)
-        if (!visited[i]) return false;
-    return true;
+    for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
 }
 
 /** @brief Make sure that `unsafe_for_threads` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_unsafe_for_threads() noexcept {
+static void test_unsafe_for_threads() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
+    expect(pool.try_spawn(maker.scope()));
 
     std::vector<std::atomic<bool>> visited(pool.threads_count());
     auto on_each_thread = [&](std::size_t const thread_index) noexcept {
@@ -230,14 +317,12 @@ static bool test_unsafe_for_threads() noexcept {
     pool.unsafe_for_threads(on_each_thread);
     pool.unsafe_join();
 
-    for (std::size_t i = 0; i < pool.threads_count(); ++i)
-        if (!visited[i]) return false;
-    return true;
+    for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
 }
 
 /** @brief Tests generation token polling with two caller-exclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_generation_polling() noexcept {
+static void test_generation_polling() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool_a = maker.construct();
@@ -245,8 +330,8 @@ static bool test_generation_polling() noexcept {
 
     // Polling before join is the caller-exclusive pattern: on inclusive pools the
     // caller owes a slice that only runs inside `unsafe_join`.
-    if (!pool_a.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
-    if (!pool_b.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+    expect(pool_a.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(pool_b.try_spawn(maker.scope(), fu::caller_exclusive_k));
 
     std::vector<std::atomic<bool>> visited_a(pool_a.threads_count());
     std::vector<std::atomic<bool>> visited_b(pool_b.threads_count());
@@ -261,8 +346,8 @@ static bool test_generation_polling() noexcept {
     // Drive one pool through the raw token API and the other through the RAII guard
     auto generation_a = pool_a.unsafe_for_threads(work_a);
     auto broadcast_b = pool_b.for_threads(work_b); // ? Dispatches at construction: exclusive pool
-    if ((generation_a & 1u) == 0) return false;    // ? Tokens are always odd
-    if ((broadcast_b.generation() & 1u) == 0) return false;
+    expect((generation_a & 1u) != 0);              // ? Tokens are always odd
+    expect((broadcast_b.generation() & 1u) != 0);
 
     // Poll both pools until complete
     bool a_done = false, b_done = false;
@@ -274,59 +359,55 @@ static bool test_generation_polling() noexcept {
     pool_a.unsafe_join(generation_a);
     broadcast_b.join();
 
-    for (std::size_t i = 0; i < pool_a.threads_count(); ++i)
-        if (!visited_a[i]) return false;
-    for (std::size_t i = 0; i < pool_b.threads_count(); ++i)
-        if (!visited_b[i]) return false;
-    return true;
+    for (std::size_t i = 0; i < pool_a.threads_count(); ++i) expect(visited_a[i]);
+    for (std::size_t i = 0; i < pool_b.threads_count(); ++i) expect(visited_b[i]);
 }
 
 /** @brief Verifies guard timing: dispatch at construction on exclusive pools, at join on inclusive. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_guard_lifecycle() noexcept {
+static void test_guard_lifecycle() noexcept {
 
     auto maker = make_pool_type_ {};
 
     // On exclusive pools the work starts at construction, before `join`:
     {
         auto pool = maker.construct();
-        if (!pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+        expect(pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
 
         std::atomic<std::size_t> visited_count {0};
         auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
         auto broadcast = pool.for_threads(count_visits);
-        if (broadcast.generation() == 0) return false;        // ? Must be dispatched at construction
-        if ((broadcast.generation() & 1u) == 0) return false; // ? Tokens are always odd
-        while (!broadcast.is_complete()) {}                   // ? Wait without joining
-        if (visited_count.load(std::memory_order_relaxed) != pool.threads_count()) return false;
+        expect(broadcast.generation() != 0);        // ? Must be dispatched at construction
+        expect((broadcast.generation() & 1u) != 0); // ? Tokens are always odd
+        while (!broadcast.is_complete()) {}         // ? Wait without joining
+        expect_eq(visited_count.load(std::memory_order_relaxed), pool.threads_count());
         broadcast.join();
     }
 
     // On inclusive pools no work may start before `join`:
     {
         auto pool = maker.construct();
-        if (!pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
+        expect(pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
 
         std::atomic<std::size_t> visited_count {0};
         auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
         auto broadcast = pool.for_threads(count_visits);
-        if (broadcast.generation() != 0) return false; // ? Must be deferred to join
-        if (broadcast.is_complete()) return false;
-        if (visited_count.load(std::memory_order_relaxed) != 0) return false;
+        expect(broadcast.generation() == 0); // ? Must be deferred to join
+        expect(!broadcast.is_complete());
+        expect(visited_count.load(std::memory_order_relaxed) == 0);
         broadcast.join();
-        if (!broadcast.is_complete()) return false;
-        if (visited_count.load(std::memory_order_relaxed) != pool.threads_count()) return false;
+        expect(broadcast.is_complete());
+        expect_eq(visited_count.load(std::memory_order_relaxed), pool.threads_count());
     }
-    return true;
 }
 
 /** @brief Covers the caller-as-contributor protocol on inclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_generation_inclusive() noexcept {
+static void test_generation_inclusive() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
+    expect(pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
 
     std::vector<std::atomic<bool>> visited(pool.threads_count());
     auto mark_visited = [&](std::size_t const thread_index) noexcept {
@@ -334,41 +415,39 @@ static bool test_generation_inclusive() noexcept {
     };
 
     auto generation = pool.unsafe_for_threads(mark_visited);
-    if ((generation & 1u) == 0) return false;       // ? Tokens are always odd
-    if (pool.is_complete(generation)) return false; // ? Impossible before the caller's slice
-    pool.unsafe_join(generation);                   // ? Runs the caller's slice, then waits
-    if (!pool.is_complete(generation)) return false;
-    for (std::size_t i = 0; i < pool.threads_count(); ++i)
-        if (!visited[i]) return false;
+    expect((generation & 1u) != 0);        // ? Tokens are always odd
+    expect(!pool.is_complete(generation)); // ? Impossible before the caller's slice
+    pool.unsafe_join(generation);          // ? Runs the caller's slice, then waits
+    expect(pool.is_complete(generation));
+    for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
     pool.unsafe_join(generation); // ? Idempotent: double-join must be a no-op
-    return true;
 }
 
 /** @brief Degenerate single-thread inclusive pool: the caller is the only contributor. */
-static bool test_generation_single_thread() noexcept {
+static void test_generation_single_thread() noexcept {
     fu::flat_pool_t pool;
-    if (!pool.try_spawn(1)) return false; // ? Default is caller-inclusive: zero workers
+    expect(pool.try_spawn(1)); // ? Default is caller-inclusive: zero workers
 
     std::atomic<bool> visited {false};
     auto mark_visited = [&](std::size_t) noexcept { visited.store(true, std::memory_order_relaxed); };
 
     auto generation = pool.unsafe_for_threads(mark_visited);
-    if ((generation & 1u) == 0) return false;
-    if (pool.is_complete(generation)) return false; // ? Nothing can complete before the caller's slice
-    pool.unsafe_join(generation);                   // ? The caller both runs and signals completion
-    if (!pool.is_complete(generation)) return false;
-    return visited.load(std::memory_order_relaxed);
+    expect((generation & 1u) != 0);
+    expect(!pool.is_complete(generation)); // ? Nothing can complete before the caller's slice
+    pool.unsafe_join(generation);          // ? The caller both runs and signals completion
+    expect(pool.is_complete(generation));
+    expect(visited.load(std::memory_order_relaxed));
 }
 
 /** @brief Hammers the dispatch/join race window with tight iterations on exclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_generation_stress() noexcept {
+static void test_generation_stress() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
     auto polled_pool = maker.construct();
-    if (!pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
-    if (!polled_pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+    expect(pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(polled_pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
 
     std::atomic<std::size_t> counter {0};
     auto count_up = [&](std::size_t) noexcept { counter.fetch_add(1, std::memory_order_relaxed); };
@@ -379,20 +458,20 @@ static bool test_generation_stress() noexcept {
     constexpr std::size_t iterations_k = 10000;
     for (std::size_t iteration = 0; iteration < iterations_k; ++iteration) {
         auto generation = pool.unsafe_for_threads(count_up);
-        if ((generation & 1u) == 0) return false; // ? The old dispatch/completion race made these even
+        expect((generation & 1u) != 0); // ? The old dispatch/completion race made these even
         (void)polled_pool.is_complete(polled_generation);
         pool.unsafe_join(generation);
-        if (!pool.is_complete(generation)) return false;
+        expect(pool.is_complete(generation));
     }
     polled_pool.unsafe_join(polled_generation);
 
     std::size_t const expected = pool.threads_count() * iterations_k + polled_pool.threads_count();
-    return counter.load(std::memory_order_relaxed) == expected;
+    expect_eq(counter.load(std::memory_order_relaxed), expected);
 }
 
 /** @brief Shows how to control multiple thread-pools from the same main thread. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_exclusivity() noexcept {
+static void test_exclusivity() noexcept {
 
     auto maker = make_pool_type_ {};
 
@@ -400,8 +479,8 @@ static bool test_exclusivity() noexcept {
     {
         auto first_pool = maker.construct();
         auto second_pool = maker.construct();
-        if (!first_pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
-        if (!second_pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+        expect(first_pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
+        expect(second_pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
 
         std::size_t const first_size = first_pool.threads_count();
         std::size_t const second_size = second_pool.threads_count();
@@ -423,8 +502,7 @@ static bool test_exclusivity() noexcept {
             second_pool.unsafe_join(second_generation);
 
             // Validate:
-            for (std::size_t i = 0; i < total_size; ++i)
-                if (!visited[i]) return false;
+            for (std::size_t i = 0; i < total_size; ++i) expect(visited[i]);
         }
     }
 
@@ -432,8 +510,8 @@ static bool test_exclusivity() noexcept {
     {
         auto first_pool = maker.construct();
         auto second_pool = maker.construct();
-        if (!first_pool.try_spawn(maker.scope(), fu::caller_inclusive_k)) return false;
-        if (!second_pool.try_spawn(maker.scope(), fu::caller_exclusive_k)) return false;
+        expect(first_pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
+        expect(second_pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
 
         std::size_t const first_size = first_pool.threads_count();
         std::size_t const second_size = second_pool.threads_count();
@@ -449,19 +527,17 @@ static bool test_exclusivity() noexcept {
         join_second.join();
 
         // Validate:
-        for (std::size_t i = 0; i < total_size; ++i)
-            if (!visited[i]) return false;
+        for (std::size_t i = 0; i < total_size; ++i) expect(visited[i]);
     }
-    return true;
 }
 
 /** @brief Make sure that `for_n` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_uncomfortable_input_size() noexcept {
+static void test_uncomfortable_input_size() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
+    expect(pool.try_spawn(maker.scope()));
 
     std::size_t const max_input_size = pool.threads_count() * 3; // Arbitrary size, larger than the number of threads
     for (std::size_t input_size = 0; input_size <= max_input_size; ++input_size) {
@@ -469,10 +545,8 @@ static bool test_uncomfortable_input_size() noexcept {
         pool.for_n(input_size, [&](std::size_t const task) noexcept {
             if (task >= input_size) out_of_bounds.store(true, std::memory_order_relaxed);
         });
-        if (out_of_bounds.load(std::memory_order_relaxed)) return false;
+        expect(!out_of_bounds.load(std::memory_order_relaxed));
     }
-
-    return true;
 }
 
 /** @brief Convenience structure to ensure we output match locations to independent cache lines. */
@@ -497,14 +571,14 @@ bool contains_iota(std::vector<aligned_visit_t> &visited) noexcept {
 
 /** @brief Make sure that `for_n` is called the right number of times with the right prong IDs. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_for_n() noexcept {
+static void test_for_n() noexcept {
 
     std::atomic<std::size_t> counter(0);
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
+    expect(pool.try_spawn(maker.scope()));
 
     using pool_t = decltype(pool);
     using prong_t = typename pool_t::prong_t;
@@ -516,8 +590,8 @@ static bool test_for_n() noexcept {
     });
 
     // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
-    if (counter.load() != default_parallel_tasks_k) return false;
-    if (!contains_iota(visited)) return false;
+    expect_eq(counter.load(), default_parallel_tasks_k);
+    expect(contains_iota(visited));
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
@@ -528,8 +602,8 @@ static bool test_for_n() noexcept {
     });
 
     // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
-    if (counter.load() != default_parallel_tasks_k) return false;
-    if (!contains_iota(visited)) return false;
+    expect_eq(counter.load(), default_parallel_tasks_k);
+    expect(contains_iota(visited));
 
     // Make sure `for_n` is being executed on different threads.
     std::vector<aligned_visit_t> visited_threads(pool.threads_count());
@@ -538,16 +612,16 @@ static bool test_for_n() noexcept {
     pool.for_n(default_parallel_tasks_k, // ? Could have been an arbitrary number `>= pool.threads_count()`
                [&](prong_t prong) noexcept { visited_threads[prong.thread].task = prong.thread; });
 
-    return contains_iota(visited_threads);
+    expect(contains_iota(visited_threads));
 }
 
 /** @brief Make sure that `for_n_dynamic` is called the right number of times with the right prong IDs. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_for_n_dynamic() noexcept {
+static void test_for_n_dynamic() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
+    expect(pool.try_spawn(maker.scope()));
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter(0);
@@ -558,8 +632,8 @@ static bool test_for_n_dynamic() noexcept {
     });
 
     // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
-    if (counter.load() != default_parallel_tasks_k) return false;
-    if (!contains_iota(visited)) return false;
+    expect_eq(counter.load(), default_parallel_tasks_k);
+    expect(contains_iota(visited));
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
@@ -569,7 +643,8 @@ static bool test_for_n_dynamic() noexcept {
         visited[count_populated].task = task;
     });
 
-    return counter.load() == default_parallel_tasks_k && contains_iota(visited);
+    expect_eq(counter.load(), default_parallel_tasks_k);
+    expect(contains_iota(visited));
 }
 
 /**
@@ -581,14 +656,14 @@ static bool test_for_n_dynamic() noexcept {
  *  slice held - otherwise nobody stole, and the test is silently proving nothing.
  */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_for_n_dynamic_stealing() noexcept {
+static void test_for_n_dynamic_stealing() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
+    expect(pool.try_spawn(maker.scope()));
 
     std::size_t const threads = pool.threads_count();
-    if (threads < 2) return true; // ? Nobody to steal from, and nobody to steal
+    if (threads < 2) skip("needs 2+ threads"); // ? Nobody to steal from, and nobody to steal
 
     using pool_prong_t = typename std::remove_reference<decltype(pool)>::type::prong_t;
     constexpr std::size_t tasks_k = 8192;
@@ -609,25 +684,24 @@ static bool test_for_n_dynamic_stealing() noexcept {
         total.fetch_add(1, std::memory_order_relaxed);
     });
 
-    if (total.load() != tasks_k) return false; // ! Some task ran twice, or never
-    for (std::size_t i = 0; i < tasks_k; ++i)
-        if (executions[i].load() != 1) return false; // ! Every task exactly once
+    expect_eq(total.load(), tasks_k);                                              // ! Some task ran twice, or never
+    for (std::size_t i = 0; i < tasks_k; ++i) expect_eq(executions[i].load(), 1u); // ! Every task exactly once
 
     // Thread 0's own slice - had nobody helped, it would have run all of it, plus a static prong.
     std::size_t const dynamic_tasks = tasks_k > threads ? tasks_k - threads : 0;
     fu::indexed_split<std::size_t> const split(dynamic_tasks, threads);
     std::size_t const own_slice = split[0].count;
-    return thread_0_runs.load() < own_slice; // ! Nobody stole, so this test proves nothing
+    expect(thread_0_runs.load() < own_slice); // ! Nobody stole, so this test proves nothing
 }
 
 /** @brief Stress-tests the implementation by oversubscribing the number of threads. */
 template <typename make_pool_type_ = make_pool_t>
-static bool test_oversubscribed_threads() noexcept {
+static void test_oversubscribed_threads() noexcept {
     constexpr std::size_t oversubscription = 3;
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope(oversubscription))) return false;
+    expect(pool.try_spawn(maker.scope(oversubscription)));
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter(0);
@@ -642,16 +716,17 @@ static bool test_oversubscribed_threads() noexcept {
     });
 
     // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
-    return counter.load() == default_parallel_tasks_k && contains_iota(visited);
+    expect_eq(counter.load(), default_parallel_tasks_k);
+    expect(contains_iota(visited));
 }
 
 /** @brief Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
 template <bool should_restart_, typename make_pool_type_ = make_pool_t>
-static bool test_mixed_restart() noexcept {
+static void test_mixed_restart() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    if (!pool.try_spawn(maker.scope())) return false;
+    expect(pool.try_spawn(maker.scope()));
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter(0);
@@ -661,13 +736,13 @@ static bool test_mixed_restart() noexcept {
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
-    if (counter.load() != default_parallel_tasks_k) return false;
-    if (!contains_iota(visited)) return false;
+    expect_eq(counter.load(), default_parallel_tasks_k);
+    expect(contains_iota(visited));
 
     // Make sure that the pool can be reset and reused
     if (should_restart_) {
         pool.terminate();
-        if (!pool.try_spawn(maker.scope())) return false;
+        expect(pool.try_spawn(maker.scope()));
     }
 
     // Make sure repeated calls to `for_n` work
@@ -678,21 +753,22 @@ static bool test_mixed_restart() noexcept {
         visited[count_populated].task = task;
     });
 
-    return counter.load() == default_parallel_tasks_k && contains_iota(visited);
+    expect_eq(counter.load(), default_parallel_tasks_k);
+    expect(contains_iota(visited));
 }
 
 /** @brief Hard complex example, involving launching multiple tasks, including static and dynamic ones,
  *         stopping them half-way, resetting & reinitializing, and raising exceptions.
  */
 template <typename pool_type_>
-static bool stress_test_composite(std::size_t const threads_count, std::size_t const parallel_tasks_count) noexcept {
+static void stress_test_composite(std::size_t const threads_count, std::size_t const parallel_tasks_count) noexcept {
 
     using pool_t = pool_type_;
     using index_t = typename pool_t::index_t;
     using prong_t = fu::prong<index_t>;
 
     pool_t pool;
-    if (!pool.try_spawn(static_cast<index_t>(threads_count))) return false;
+    expect(pool.try_spawn(static_cast<index_t>(threads_count)));
 
     // Make sure that no overflow happens in the static scheduling
     std::atomic<std::size_t> counter(0);
@@ -702,8 +778,8 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = prong.task;
     });
-    if (counter.load() != parallel_tasks_count) return false;
-    if (!contains_iota(visited)) return false;
+    expect_eq(counter.load(), parallel_tasks_count);
+    expect(contains_iota(visited));
 
     // Make sure that no overflow happens in the dynamic scheduling
     counter = 0;
@@ -712,50 +788,50 @@ static bool stress_test_composite(std::size_t const threads_count, std::size_t c
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = prong.task;
     });
-    if (counter.load() != parallel_tasks_count) return false;
-    if (!contains_iota(visited)) return false;
+    expect_eq(counter.load(), parallel_tasks_count);
+    expect(contains_iota(visited));
 
     // Make sure the operations can be interrupted from inside the prong
-    return true;
 }
 
 /** @brief `replicated_array` is one uninitialized per-domain buffer; the caller fills and reads its slices. */
-static bool test_replicated_array() noexcept {
+static void test_replicated_array() noexcept {
     fu::machine_topology_t topology;
-    if (!topology.try_harvest()) return true; // ? No topology here; nothing to check
+    if (!topology.try_harvest()) skip("no topology"); // ? No topology here; nothing to check
 
     std::size_t const n = 4096;
     fu::replicated_array<std::uint32_t> replicas;
-    if (!replicas.try_resize_uninitialized(topology, n)) return false;
-    if (replicas.size() != n || replicas.memory_domains_count() != topology.memory_domains_count()) return false;
+    expect(replicas.try_resize_uninitialized(topology, n));
+    expect_eq(replicas.size(), n);
+    expect_eq(replicas.memory_domains_count(), topology.memory_domains_count());
 
     // Fill every replica with a domain-dependent pattern, so replicas that aliased would be caught.
     for (std::size_t domain = 0; domain < replicas.memory_domains_count(); ++domain) {
         fu::span<std::uint32_t> const replica =
             replicas.on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
-        if (replica.size() != n) return false;
+        expect_eq(replica.size(), n);
         for (std::size_t i = 0; i < n; ++i) replica[i] = static_cast<std::uint32_t>(domain * n + i);
     }
     for (std::size_t domain = 0; domain < replicas.memory_domains_count(); ++domain)
         for (std::size_t i = 0; i < n; ++i)
-            if (replicas.at(static_cast<fu::memory_domain_index_t>(domain), i) != domain * n + i) return false;
-    return true;
+            expect_eq(replicas.at(static_cast<fu::memory_domain_index_t>(domain), i), domain * n + i);
 }
 
 /** @brief `sharded_array` stores each element once; `location_of`/`logical_index_of` round-trip the segment map. */
-static bool test_sharded_array() noexcept {
+static void test_sharded_array() noexcept {
     fu::machine_topology_t topology;
-    if (!topology.try_harvest()) return true;
+    if (!topology.try_harvest()) skip("no topology");
 
     std::size_t const n = 4096;
     fu::sharded_array<std::uint32_t> shards;
-    if (!shards.try_resize_uninitialized(topology, n)) return false;
+    expect(shards.try_resize_uninitialized(topology, n));
 
     // Each element lives exactly once: the shard lengths sum to the logical length.
     std::size_t footprint = 0;
     for (std::size_t domain = 0; domain < shards.memory_domains_count(); ++domain)
         footprint += shards.length_on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
-    if (shards.size() != n || footprint != n) return false;
+    expect_eq(shards.size(), n);
+    expect_eq(footprint, n);
 
     // Write each element to its own logical index, then read it back through `location_of`.
     for (std::size_t domain = 0; domain < shards.memory_domains_count(); ++domain) {
@@ -765,9 +841,8 @@ static bool test_sharded_array() noexcept {
     }
     for (std::size_t i = 0; i < n; ++i) {
         fu::sharded_array<std::uint32_t>::location_t const home = shards.location_of(i);
-        if (shards.at(home.memory_domain, home.local_index) != i) return false;
+        expect_eq(shards.at(home.memory_domain, home.local_index), i);
     }
-    return true;
 }
 
 /**
@@ -803,14 +878,14 @@ void log_numa_topology() noexcept {
  *  oversubscribe them, and a "restore" that widens to the machine would leave the caller running on
  *  cores this process was never granted.
  */
-static bool test_caller_affinity_preserved() noexcept {
+static void test_caller_affinity_preserved() noexcept {
     fu::core_mask_t original;
-    if (!fu::try_capture_thread_cores(original)) return true; // ? Nothing to restrict, nothing to check
-    if (original.count() < 2) return true;                    // ? Too narrow already to narrow further
+    if (!fu::try_capture_thread_cores(original)) skip("no affinity control"); // ? Nothing to restrict
+    if (original.count() < 2) skip("too few cores");                          // ? Too narrow to narrow further
 
     // Narrow the caller the way `taskset` would: keep the two lowest allowed cores.
     fu::core_mask_t narrowed;
-    if (!narrowed.try_resize()) return false;
+    expect(narrowed.try_resize());
     std::size_t kept = 0;
     for (std::size_t cpu = 0; cpu < original.capacity() && kept < 2; ++cpu)
         if (original.contains(static_cast<fu::core_id_t>(cpu))) narrowed.add(static_cast<fu::core_id_t>(cpu)), ++kept;
@@ -833,17 +908,18 @@ static bool test_caller_affinity_preserved() noexcept {
     }
 
     (void)fu::try_restore_thread_cores(original); // ? Leave the process as we found it
-    return succeeded;
+    expect(succeeded);
 }
 #endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
 
 int main(void) {
+    install_crash_handlers_();
 
     std::printf("Welcome to the ForkUnion library test suite!\n");
     log_numa_topology();
 
     std::printf("Starting unit tests...\n");
-    using test_func_t = bool() /* noexcept */;
+    using test_func_t = void() /* noexcept */;
     struct {
         char const *name;
         test_func_t *function;
@@ -915,18 +991,11 @@ int main(void) {
     };
 
     std::size_t const total_unit_tests = sizeof(unit_tests) / sizeof(unit_tests[0]);
-    std::size_t failed_unit_tests = 0;
     for (std::size_t i = 0; i < total_unit_tests; ++i) {
         std::printf("Running %s... ", unit_tests[i].name);
-        bool const ok = unit_tests[i].function();
-        if (ok) { std::printf("PASS\n"); }
-        else { std::printf("FAIL\n"); }
-        failed_unit_tests += !ok;
-    }
-
-    if (failed_unit_tests > 0) {
-        std::fprintf(stderr, "%zu/%zu unit tests failed\n", failed_unit_tests, total_unit_tests);
-        return EXIT_FAILURE;
+        std::fflush(stdout); // ? A failing check or crash follows the flushed name
+        unit_tests[i].function();
+        std::printf("PASS\n");
     }
     std::printf("All %zu unit tests passed\n", total_unit_tests);
 
@@ -939,7 +1008,7 @@ int main(void) {
     constexpr bool is_32bit = sizeof(void *) == 4;
     constexpr std::size_t max_stress_threads = is_32bit ? 23 : 255;
 
-    using stress_test_func_t = bool(std::size_t, std::size_t) /* noexcept */;
+    using stress_test_func_t = void(std::size_t, std::size_t) /* noexcept */;
     struct {
         char const *pool_name;
         stress_test_func_t *function;
@@ -960,20 +1029,13 @@ int main(void) {
     };
 
     std::size_t const total_stress_tests = sizeof(stress_tests) / sizeof(stress_tests[0]);
-    std::size_t failed_stress_tests = 0;
     for (std::size_t i = 0; i < total_stress_tests; ++i) {
         std::printf(                                          //
             "Running `%s` with %zu threads & %zu inputs... ", //
             stress_tests[i].pool_name, stress_tests[i].count_threads, stress_tests[i].count_tasks);
-        bool const ok = stress_tests[i].function(stress_tests[i].count_threads, stress_tests[i].count_tasks);
-        if (ok) { std::printf("PASS\n"); }
-        else { std::printf("FAIL\n"); }
-        failed_stress_tests += !ok;
-    }
-
-    if (failed_stress_tests > 0) {
-        std::fprintf(stderr, "%zu/%zu stress tests failed\n", failed_stress_tests, total_stress_tests);
-        return EXIT_FAILURE;
+        std::fflush(stdout); // ? A failing check or crash follows the flushed name
+        stress_tests[i].function(stress_tests[i].count_threads, stress_tests[i].count_tasks);
+        std::printf("PASS\n");
     }
     std::printf("All %zu stress tests passed\n", total_stress_tests);
 
