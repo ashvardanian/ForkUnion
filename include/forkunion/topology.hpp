@@ -32,6 +32,9 @@ FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
 #elif FU_ON_WINDOWS && FU_WITH_OS_THREADS
     // A `DWORD` that a debugger or Task Manager will show you; distinct from the `HANDLE`.
     return static_cast<std::uint64_t>(::GetCurrentThreadId());
+#elif FU_ON_FREEBSD
+    // The kernel's lwpid, which is what `rtprio_thread` addresses; distinct from the `pthread_t`.
+    return static_cast<std::uint64_t>(::pthread_getthreadid_np());
 #else
     return 0;
 #endif
@@ -1340,6 +1343,122 @@ struct machine_topology {
         return true;
     }
 
+#if FU_ON_FREEBSD
+    /**
+     *  @brief Harvests memory domains and their cores through the in-kernel `cpuset`/NUMA framework.
+     *  @sa `try_harvest` dispatches here; `try_harvest_portable` is the fallback when NUMA is absent.
+     *
+     *  FreeBSD ships no `libnuma`. `sysctl vm.ndomains` counts the NUMA memory domains, and
+     *  `cpuset_getaffinity(CPU_WHICH_DOMAIN)` reports the cores each one owns. Every domain's cores are
+     *  intersected with the set this process may actually run on, exactly as the Linux harvest does, so
+     *  a jailed or `cpuset`-narrowed process never sizes a pool from cores it will never be scheduled
+     *  on. Cores are not ranked by class here - FreeBSD publishes no per-core capacity - so each memory
+     *  domain yields exactly one compute domain.
+     */
+    bool try_harvest_freebsd() noexcept {
+        reset();
+
+        core_mask_t allowed;
+        bool const allowed_known = try_capture_thread_cores(allowed) && allowed.count() != 0;
+
+        int domain_count = 0;
+        std::size_t domain_count_size = sizeof(domain_count);
+        if (::sysctlbyname("vm.ndomains", &domain_count, &domain_count_size, nullptr, 0) != 0 || domain_count < 1)
+            return try_harvest_portable(); // ? No NUMA report - one uniform domain
+
+        // A scratch mask reused for each domain's core set. `try_capture_thread_cores` already proved a
+        // `cpuset_t`-sized buffer round-trips through the kernel; the domain query fills the same shape.
+        core_mask_t domain_mask;
+        if (!domain_mask.try_resize()) return false;
+
+        // First pass - measure. Only a domain that owns at least one runnable core becomes a memory
+        // domain; one masked away entirely offers nothing to size the pool from.
+        std::size_t fetched_memory_domains = 0, fetched_cores = 0;
+        for (int domain_id = 0; domain_id < domain_count; ++domain_id) {
+            domain_mask.clear();
+            if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_DOMAIN, static_cast<id_t>(domain_id),
+                                     domain_mask.bytes(), static_cast<cpuset_t *>(domain_mask.data())) != 0)
+                continue; // ! A domain the kernel would not describe
+            std::size_t node_cores = 0;
+            std::size_t const id_space = domain_mask.capacity();
+            for (std::size_t bit = 0; bit < id_space; ++bit) {
+                core_id_t const core = static_cast<core_id_t>(bit);
+                if (!domain_mask.contains(core)) continue;
+                if (allowed_known && !allowed.contains(core)) continue;
+                ++node_cores;
+            }
+            if (node_cores == 0) continue;
+            fetched_memory_domains += 1;
+            fetched_cores += node_cores;
+        }
+        if (fetched_memory_domains == 0) return try_harvest_portable(); // ? Every domain masked away
+
+        // Second pass - allocate. One compute domain per memory domain, since cores are unranked here.
+        dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
+        dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
+        dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
+        if (!nodes.try_resize(fetched_memory_domains)) return false;
+        if (!core_ids.try_resize(fetched_cores)) return false;
+        if (!domains.try_resize(fetched_memory_domains)) return false;
+        memory_domain_t *const nodes_ptr = nodes.data();
+        core_id_t *const core_ids_ptr = core_ids.data();
+        compute_domain_t *const domains_ptr = domains.data();
+
+        // FreeBSD publishes no stable per-domain memory size, so split the machine total evenly - a
+        // weight for domain selection, not an accounting figure.
+        std::size_t const ram_per_domain = volume_ram() / fetched_memory_domains;
+
+        std::size_t core_index = 0, node_index = 0;
+        for (int domain_id = 0; domain_id < domain_count; ++domain_id) {
+            domain_mask.clear();
+            if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_DOMAIN, static_cast<id_t>(domain_id),
+                                     domain_mask.bytes(), static_cast<cpuset_t *>(domain_mask.data())) != 0)
+                continue;
+            std::size_t const core_begin = core_index;
+            std::size_t const id_space = domain_mask.capacity();
+            for (std::size_t bit = 0; bit < id_space; ++bit) {
+                core_id_t const core = static_cast<core_id_t>(bit);
+                if (!domain_mask.contains(core)) continue;
+                if (allowed_known && !allowed.contains(core)) continue;
+                core_ids_ptr[core_index++] = core;
+            }
+            std::size_t const node_cores = core_index - core_begin;
+            if (node_cores == 0) continue;
+
+            memory_domain_t &node = nodes_ptr[node_index];
+            node.memory_domain_id = static_cast<memory_domain_id_t>(domain_id);
+            // ? No socket map through this path; leave it as elsewhere non-Linux
+            node.socket_id = -1;
+            node.volume_ram = ram_per_domain;
+            node.memory_level = 0;
+            node.first_core_id = core_ids_ptr + core_begin;
+            node.logical_cores_count = node_cores;
+            node.page_sizes.try_harvest(static_cast<memory_domain_id_t>(domain_id)); // ! Optional - not raised
+
+            compute_domain_t &domain = domains_ptr[node_index];
+            domain.memory_domain_id = static_cast<memory_domain_id_t>(domain_id);
+            domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
+            domain.compute_level = 0;
+            domain.capacity = 0;
+            domain.cache_bytes = 0;
+            domain.first_core_id = core_ids_ptr + core_begin;
+            domain.logical_cores_count = node_cores;
+            ++node_index;
+        }
+
+        // Moving an array keeps its heap pointer, so every `first_core_id` slice above stays valid.
+        memory_domains_ = std::move(nodes);
+        domain_core_ids_ = std::move(core_ids);
+        compute_domains_ = std::move(domains);
+        memory_domains_count_ = fetched_memory_domains;
+        logical_cores_count_ = fetched_cores;
+        compute_domains_count_ = fetched_memory_domains;
+        compute_levels_count_ = 1;
+        memory_levels_count_ = 1;
+        return true;
+    }
+#endif // FU_ON_FREEBSD
+
     /**
      *  @brief Harvests CPU-memory topology - Linux NUMA nodes, or Apple Silicon performance levels.
      *  @retval false if the platform lacks topology support or the harvest failed.
@@ -1535,6 +1654,8 @@ struct machine_topology {
         return try_harvest_apple();
 #elif FU_ON_WINDOWS
         return try_harvest_windows();
+#elif FU_ON_FREEBSD
+        return try_harvest_freebsd();
 #else
         return try_harvest_portable();
 #endif

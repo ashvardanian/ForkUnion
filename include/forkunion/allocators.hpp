@@ -362,6 +362,325 @@ struct linux_symmetric_allocator {
 using linux_symmetric_allocator_t = linux_symmetric_allocator<>;
 
 /**
+ *  @brief Restores the calling thread's memory-domain policy saved by `freebsd_domain_prefer`.
+ *  @note A no-op where the save failed, so a `getdomain` the kernel refused never widens the policy.
+ */
+FU_MAYBE_UNUSED_ static inline void freebsd_domain_restore(FU_MAYBE_UNUSED_ void const *saved_set,
+                                                           FU_MAYBE_UNUSED_ int saved_policy,
+                                                           FU_MAYBE_UNUSED_ bool have_saved) noexcept {
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    if (!have_saved) return;
+    ::cpuset_setdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
+                       static_cast<domainset_t const *>(saved_set), saved_policy);
+#else
+    fu_unused_(saved_set);
+    fu_unused_(saved_policy);
+    fu_unused_(have_saved);
+#endif
+}
+
+/**
+ *  @brief First-touches every page of `[ptr, ptr + size_bytes)` so a PREFER policy binds them.
+ *  @note Anonymous pages are already zero, so writing a zero changes nothing but the residency.
+ */
+FU_MAYBE_UNUSED_ static inline void freebsd_first_touch(FU_MAYBE_UNUSED_ void *ptr,
+                                                        FU_MAYBE_UNUSED_ std::size_t size_bytes) noexcept {
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    std::size_t const stride = static_cast<std::size_t>(ram_page_size());
+    if (stride == 0) return;
+    for (std::size_t offset = 0; offset < size_bytes; offset += stride) static_cast<volatile char *>(ptr)[offset] = 0;
+#else
+    fu_unused_(ptr);
+    fu_unused_(size_bytes);
+#endif
+}
+
+/**
+ *  @brief Points the calling thread's `domainset` at @p memory_domain_id with a PREFER policy.
+ *  @retval true when the prior domainset was captured into @p saved_set / @p saved_policy for restore.
+ *
+ *  FreeBSD 12 removed `numa_setaffinity`, so there is no per-allocation `numa_alloc_onnode`: the memory
+ *  domain is a @b thread policy. The caller sets it, first-touches the region so its pages fault on the
+ *  preferred domain, then restores the saved policy - the domainset analogue of Linux's per-mapping `mbind`.
+ */
+FU_MAYBE_UNUSED_ static inline bool freebsd_domain_prefer(FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id,
+                                                          FU_MAYBE_UNUSED_ void *saved_set,
+                                                          FU_MAYBE_UNUSED_ int *saved_policy) noexcept {
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    bool const have_saved = ::cpuset_getdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
+                                               static_cast<domainset_t *>(saved_set), saved_policy) == 0;
+    domainset_t target;
+    DOMAINSET_ZERO(&target);
+    DOMAINSET_SET(static_cast<int>(memory_domain_id), &target);
+    ::cpuset_setdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(target), &target, DOMAINSET_POLICY_PREFER);
+    return have_saved;
+#else
+    fu_unused_(memory_domain_id);
+    fu_unused_(saved_set);
+    fu_unused_(saved_policy);
+    return false;
+#endif
+}
+
+/**
+ *  @brief Tries allocating uninitialized memory and placing it on a specific NUMA @p `memory_domain_id`.
+ *  @retval nullptr if allocation failed or the page size is unsupported.
+ *  @retval pointer to the allocated memory on success.
+ *  @sa `linux_numa_allocate` is the Linux counterpart; FreeBSD places by thread policy, not `mbind`.
+ *
+ *  Larger-than-base page sizes ask for `MAP_ALIGNED_SUPER` - an alignment hint, since FreeBSD's superpages
+ *  are transparent and have no `MAP_HUGETLB`-style pool. It is best-effort: a failed super-aligned map
+ *  retries with base pages so the allocator stays total, matching the Linux `nullptr`-on-unsupported contract.
+ */
+FU_MAYBE_UNUSED_ static inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
+                                                             memory_domain_id_t memory_domain_id) noexcept {
+    assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    if (size_bytes == 0) return nullptr;
+
+    int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    bool huge_requested = false;
+    if (page_size_bytes > static_cast<std::size_t>(ram_page_size())) {
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+        // ? Default superpage alignment; not a size-specific pool like Linux's MAP_HUGETLB
+        mmap_flags |= MAP_ALIGNED_SUPER;
+        huge_requested = true;
+#else
+        return nullptr; // ! Every page size but the base one needs the huge-page capability
+#endif
+    }
+
+    domainset_t saved;
+    int saved_policy = 0;
+    bool const have_saved = freebsd_domain_prefer(memory_domain_id, &saved, &saved_policy);
+
+    void *result_ptr = ::mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+    if (result_ptr == MAP_FAILED && huge_requested) {
+        // Superpage alignment could not be satisfied; retry with base pages so the allocator stays total.
+        mmap_flags &= ~MAP_ALIGNED_SUPER;
+        result_ptr = ::mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+    }
+    if (result_ptr != MAP_FAILED) freebsd_first_touch(result_ptr, size_bytes);
+
+    freebsd_domain_restore(&saved, saved_policy, have_saved);
+    return result_ptr == MAP_FAILED ? nullptr : result_ptr;
+#else
+    fu_unused_(size_bytes);
+    fu_unused_(page_size_bytes);
+    fu_unused_(memory_domain_id);
+    return nullptr;
+#endif
+}
+
+FU_MAYBE_UNUSED_ static inline void freebsd_domain_free(void *ptr, std::size_t size_bytes) noexcept {
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    if (ptr) ::munmap(ptr, size_bytes);
+#else
+    fu_unused_(ptr);
+    fu_unused_(size_bytes);
+#endif
+}
+
+/**
+ *  @brief STL-compatible allocator bound to a single memory domain on FreeBSD.
+ *  @sa `linux_numa_allocator` is the Linux counterpart; both satisfy the pool's allocator needs.
+ *
+ *  Mirrors `linux_numa_allocator`'s huge-page ladder, but every placement is a thread-policy PREFER plus
+ *  a first-touch rather than a per-mapping `mbind`, and larger pages are the `MAP_ALIGNED_SUPER` hint.
+ */
+template <typename value_type_ = char>
+struct freebsd_numa_allocator {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+    using propagate_on_container_move_assignment = std::true_type;
+
+  private:
+    memory_domain_id_t memory_domain_id_ {-1};
+    size_type default_page_size_ {0};
+
+  public:
+    memory_domain_id_t memory_domain_id() const noexcept { return memory_domain_id_; }
+    size_type default_page_size() const noexcept { return default_page_size_; }
+
+    constexpr freebsd_numa_allocator() noexcept = default;
+    explicit constexpr freebsd_numa_allocator(memory_domain_id_t id, size_type paging = ram_page_size()) noexcept
+        : memory_domain_id_(id), default_page_size_(paging) {}
+
+    template <typename other_type_>
+    explicit constexpr freebsd_numa_allocator(freebsd_numa_allocator<other_type_> const &o) noexcept
+        : memory_domain_id_(o.memory_domain_id()), default_page_size_(o.default_page_size()) {}
+
+    allocation_result<value_type *, size_type> allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
+        size_type const size_bytes = size * sizeof(value_type);
+        size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
+        if (aligned_size_bytes % sizeof(value_type)) return {}; // ! Not a size multiple
+        auto result_ptr = allocate(aligned_size_bytes / sizeof(value_type), page_size_bytes);
+        if (!result_ptr) return {}; // ! Allocation failed
+        size_type const pages_count = (page_size_bytes == 0) ? 0 : (aligned_size_bytes / page_size_bytes);
+        return {result_ptr, size, aligned_size_bytes, pages_count};
+    }
+
+    value_type *allocate(size_type size, size_type page_size_bytes) noexcept {
+        void *result_ptr = freebsd_domain_allocate(size * sizeof(value_type), page_size_bytes, memory_domain_id_);
+        if (!result_ptr) return {}; // ! Allocation failed
+        return static_cast<value_type *>(result_ptr);
+    }
+
+    allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
+        size_type const size_bytes = size * sizeof(value_type);
+        if (size_bytes >= (2u * page_size_1g_k))
+            if (auto result = allocate_at_least(size, page_size_1g_k); result) return result;
+        if (size_bytes >= (2u * page_size_2m_k))
+            if (auto result = allocate_at_least(size, page_size_2m_k); result) return result;
+        return allocate_at_least(size, default_page_size_);
+    }
+
+    value_type *allocate(size_type size) noexcept {
+        size_type const size_bytes = size * sizeof(value_type);
+        // ! Like the Linux ladder, `deallocate(p, n)` only knows `n`, so exact-multiple huge pages only.
+        if (size_bytes >= (2u * page_size_1g_k) && size_bytes % page_size_1g_k == 0)
+            if (auto result = allocate(size, page_size_1g_k); result) return result;
+        if (size_bytes >= (2u * page_size_2m_k) && size_bytes % page_size_2m_k == 0)
+            if (auto result = allocate(size, page_size_2m_k); result) return result;
+        return allocate(size, default_page_size_);
+    }
+
+    void deallocate(value_type *p, size_type n) noexcept { freebsd_domain_free(p, n * sizeof(value_type)); }
+
+    template <typename other_type_>
+    bool operator==(freebsd_numa_allocator<other_type_> const &o) const noexcept {
+        return memory_domain_id_ == o.memory_domain_id() && default_page_size_ == o.default_page_size();
+    }
+    template <typename other_type_>
+    bool operator!=(freebsd_numa_allocator<other_type_> const &o) const noexcept {
+        return !(*this == o);
+    }
+};
+
+using freebsd_numa_allocator_t = freebsd_numa_allocator<>;
+
+/**
+ *  @brief Maps one range of `domains * stride_bytes` and PREFER-touches slice @p d on `domain_ids[d]`.
+ *  @retval nullptr if the mapping failed or the page size is unsupported.
+ *  @sa `linux_symmetric_allocate` is the Linux counterpart; FreeBSD places each slice by thread policy.
+ */
+FU_MAYBE_UNUSED_ static inline void *freebsd_symmetric_allocate(machine_topology_t const &topology,
+                                                                std::size_t stride_bytes,
+                                                                std::size_t page_size_bytes) noexcept {
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    std::size_t const domains = topology.memory_domains_count();
+    if (domains == 0 || stride_bytes == 0) return nullptr;
+    std::size_t const total_bytes = domains * stride_bytes;
+
+    int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    bool huge_requested = false;
+    if (page_size_bytes > static_cast<std::size_t>(ram_page_size())) {
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+        mmap_flags |= MAP_ALIGNED_SUPER;
+        huge_requested = true;
+#else
+        return nullptr; // ! Every page size but the base one needs the huge-page capability
+#endif
+    }
+
+    void *base = ::mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+    if (base == MAP_FAILED && huge_requested) {
+        mmap_flags &= ~MAP_ALIGNED_SUPER;
+        base = ::mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+    }
+    if (base == MAP_FAILED) return nullptr; // ! Mapping failed
+
+    // A single memory domain needs no placement - the one slice is the whole mapping on the only node.
+    if (domains > 1) {
+        domainset_t saved;
+        int saved_policy = 0;
+        bool const have_saved =
+            ::cpuset_getdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(saved), &saved, &saved_policy) == 0;
+        for (std::size_t domain = 0; domain != domains; ++domain) {
+            memory_domain_id_t const memory_domain_id =
+                topology.memory_domain_at(static_cast<memory_domain_index_t>(domain)).memory_domain_id;
+            domainset_t target;
+            DOMAINSET_ZERO(&target);
+            DOMAINSET_SET(static_cast<int>(memory_domain_id), &target);
+            ::cpuset_setdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(target), &target, DOMAINSET_POLICY_PREFER);
+            freebsd_first_touch(static_cast<char *>(base) + domain * stride_bytes, stride_bytes);
+        }
+        freebsd_domain_restore(&saved, saved_policy, have_saved);
+    }
+    return base;
+#else
+    fu_unused_(topology);
+    fu_unused_(stride_bytes);
+    fu_unused_(page_size_bytes);
+    return nullptr;
+#endif
+}
+
+FU_MAYBE_UNUSED_ static inline void freebsd_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    if (ptr) ::munmap(ptr, total_bytes);
+#else
+    fu_unused_(ptr);
+    fu_unused_(total_bytes);
+#endif
+}
+
+/**
+ *  @brief Allocator for a @b symmetric mapping on FreeBSD - one range striped across every memory domain.
+ *  @sa `linux_symmetric_allocator` is the Linux counterpart; borrows the @ref machine_topology it stripes.
+ */
+template <typename value_type_ = char>
+struct freebsd_symmetric_allocator {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+    using allocation_type = symmetric_allocation_result<value_type, size_type>;
+
+  private:
+    machine_topology_t const *topology_ {nullptr};
+    size_type default_page_size_ {0};
+
+  public:
+    machine_topology_t const *topology() const noexcept { return topology_; }
+    size_type default_page_size() const noexcept { return default_page_size_; }
+
+    constexpr freebsd_symmetric_allocator() noexcept = default;
+    explicit freebsd_symmetric_allocator(machine_topology_t const &topology,
+                                         size_type paging = ram_page_size()) noexcept
+        : topology_(&topology), default_page_size_(paging) {}
+
+    template <typename other_type_>
+    explicit constexpr freebsd_symmetric_allocator(freebsd_symmetric_allocator<other_type_> const &o) noexcept
+        : topology_(o.topology()), default_page_size_(o.default_page_size()) {}
+
+    allocation_type allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
+        if (!topology_) return {}; // ! No topology to stripe across
+        size_type const stride_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        void *base = freebsd_symmetric_allocate(*topology_, stride_bytes, page_size_bytes);
+        if (!base) return {}; // ! Allocation failed
+        size_type const domains = topology_->memory_domains_count();
+        size_type const total_bytes = domains * stride_bytes;
+        size_type const pages = (page_size_bytes == 0) ? 0 : (total_bytes / page_size_bytes);
+        return {static_cast<value_type *>(base), size, stride_bytes, domains, total_bytes, pages};
+    }
+
+    allocation_type allocate_at_least(size_type size) noexcept {
+        if (!topology_) return {};
+        size_type const size_bytes = size * sizeof(value_type);
+        if (size_bytes >= (2u * page_size_1g_k))
+            if (auto result = allocate_at_least(size, page_size_1g_k); result) return result;
+        if (size_bytes >= (2u * page_size_2m_k))
+            if (auto result = allocate_at_least(size, page_size_2m_k); result) return result;
+        return allocate_at_least(size, default_page_size_);
+    }
+
+    void deallocate(allocation_type const &allocation) noexcept {
+        freebsd_symmetric_free(allocation.ptr, allocation.bytes);
+    }
+};
+
+using freebsd_symmetric_allocator_t = freebsd_symmetric_allocator<>;
+
+/**
  *  @brief Enables `SeLockMemoryPrivilege` for the current process, needed before large-page allocation.
  *  @retval true if the privilege is now held by the process token.
  *  @note This only @b enables a privilege the account already holds; the account must first be granted
@@ -710,6 +1029,8 @@ using portable_symmetric_allocator_t = portable_symmetric_allocator<>;
 using domain_allocator_t = linux_numa_allocator_t;
 #elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
 using domain_allocator_t = windows_numa_allocator_t;
+#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+using domain_allocator_t = freebsd_numa_allocator_t;
 #else
 using domain_allocator_t = portable_aligned_allocator_t;
 #endif
@@ -722,6 +1043,8 @@ using domain_allocator_t = portable_aligned_allocator_t;
 using symmetric_memory_allocator_t = linux_symmetric_allocator_t;
 #elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
 using symmetric_memory_allocator_t = windows_symmetric_allocator_t;
+#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+using symmetric_memory_allocator_t = freebsd_symmetric_allocator_t;
 #else
 using symmetric_memory_allocator_t = portable_symmetric_allocator_t;
 #endif

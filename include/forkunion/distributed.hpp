@@ -556,10 +556,16 @@ struct colocated_pool {
         for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
             std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
             if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
+#if FU_ON_FREEBSD
+            // FreeBSD rejects `SCHED_IDLE`; its idle class is reached through `rtprio` instead.
+            ::rtprio rtp {RTP_PRIO_IDLE, RTP_PRIO_MAX}; // ? Lowest priority within the idle class
+            ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
+#else
             sched_param param {};
             ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_IDLE, &param);
+#endif
         }
-#endif // ? No idle scheduling class on Darwin, Windows, or FreeBSD
+#endif // ? No idle scheduling class on Darwin or Windows
     }
 
     /** @brief Helper function to create a spin mutex with same yield characteristics. */
@@ -664,12 +670,18 @@ struct colocated_pool {
                 if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
                 // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
                 // for another thread; its QoS class is fixed at creation.
+#if FU_ON_FREEBSD
+                // Restore the timesharing class - "make runnable", not "boost to realtime".
+                ::rtprio rtp {RTP_PRIO_NORMAL, 0};
+                ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
+#else
                 sched_param param {};
                 ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_FIFO | SCHED_RR, &param);
+#endif
             }
         }
 #else
-        fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin, Windows, or FreeBSD
+        fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin or Windows
 #endif
         return generation;
     }

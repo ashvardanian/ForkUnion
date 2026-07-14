@@ -145,7 +145,9 @@
 #if !defined(FU_WITH_TOPOLOGY)
 /*  Windows needs no separate library for this: `GetLogicalProcessorInformationEx` ships with the
  *  kernel since Vista and reports NUMA nodes, cores, processor groups, and caches in one call. */
-#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || (FU_ON_LINUX && FU_DETECT_LIBNUMA_))
+/*  FreeBSD needs no separate library either: the in-kernel `cpuset`/NUMA framework enumerates memory
+ *  domains through `sysctl vm.ndomains` and `cpuset_getaffinity(CPU_WHICH_DOMAIN)`. */
+#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || FU_ON_FREEBSD || (FU_ON_LINUX && FU_DETECT_LIBNUMA_))
 #endif
 
 /**
@@ -166,24 +168,26 @@
 #endif
 
 /** @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply?
- *  @note Keyed on `SCHED_IDLE`, which FreeBSD does not provide - its idle priority is `idprio`, a
- *        different call this path does not make. */
+ *  @note Linux spells it `sched_setscheduler(SCHED_IDLE)`; FreeBSD rejects `SCHED_IDLE` but reaches the
+ *        same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`. */
 #if !defined(FU_WITH_RESCHEDULE_THREADS_BY_CLASS)
-#define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX)
+#define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
 #endif
 
 /** @brief Can we place pages on a chosen memory domain? */
 #if !defined(FU_WITH_PLACE_MEMORY_ON_DOMAIN)
-/*  Linux places with `mbind`; Windows with `VirtualAllocExNuma`. Same capability, named for the
- *  facility, not the library - so both kernels answer it without a second macro. */
-#define FU_WITH_PLACE_MEMORY_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_TOPOLOGY)
+/*  Linux places with `mbind`; Windows with `VirtualAllocExNuma`; FreeBSD sets the calling thread's
+ *  `domainset` to a PREFER policy and first-touches. Same capability, named for the facility. */
+#define FU_WITH_PLACE_MEMORY_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_TOPOLOGY)
 #endif
 
 /** @brief Can we request pages larger than the base page? */
 #if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
 /*  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
- *  gated behind the `SeLockMemoryPrivilege` the caller must already hold. */
-#define FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
+ *  gated behind the `SeLockMemoryPrivilege` the caller must already hold; FreeBSD hints the alignment
+ *  with `MAP_ALIGNED_SUPER` and lets its transparent superpages promote. */
+#define FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN \
+    ((FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
 #endif
 
 /*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
@@ -254,12 +258,6 @@
 #include <sched.h> // `cpu_set_t`, `sched_getaffinity`, `pthread_setaffinity_np`
 #endif
 
-#if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_FREEBSD
-#include <pthread_np.h> // `pthread_setaffinity_np` taking a `cpuset_t`
-#include <sys/cpuset.h> // `cpuset_t`, `cpuset_getaffinity`, `CPU_LEVEL_WHICH`, `CPU_WHICH_TID`
-#include <sys/param.h>  // ! Must precede `<sys/cpuset.h>`
-#endif
-
 #if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
 #include <sys/qos.h> // `qos_class_t`, `pthread_attr_set_qos_class_np`
 #endif
@@ -270,6 +268,19 @@
 
 #if FU_ON_APPLE
 #include <sys/sysctl.h> // `sysctl`
+#endif
+
+/*  FreeBSD's placement facilities are all base-system, so - like `<windows.h>` on Windows and
+ *  `<sys/sysctl.h>` on Apple - one identity-gated block pulls them once, rather than a per-capability
+ *  block re-`#include`-ing `<sys/cpuset.h>` for pinning, topology, and memory placement in turn. */
+#if FU_ON_FREEBSD
+#include <sys/param.h>     // ! Must precede `<sys/cpuset.h>`
+#include <sys/cpuset.h>    // `cpuset_t`, `cpuset_getaffinity`, `cpuset_setdomain`, `CPU_WHICH_DOMAIN`
+#include <pthread_np.h>    // `pthread_setaffinity_np`, `pthread_getthreadid_np` for the rtprio lwpid
+#include <sys/domainset.h> // `domainset_t`, `DOMAINSET_SET`, `DOMAINSET_POLICY_PREFER` for memory placement
+#include <sys/rtprio.h>    // `rtprio_thread`, `RTP_SET`, `RTP_PRIO_IDLE`, `RTP_PRIO_NORMAL` for reschedule
+#include <sys/sysctl.h>    // `sysctlbyname` for `vm.ndomains`
+#include <sys/mman.h>      // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`, `MAP_ALIGNED_SUPER`
 #endif
 
 #if FU_ON_WINDOWS
