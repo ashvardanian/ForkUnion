@@ -736,6 +736,16 @@ struct compute_domain_t {
     memory_domain_index_t memory_domain_index {};
     /** @brief QoS ordinal, sorted least-to-most performant. */
     std::size_t compute_level {0};
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+    /**
+     *  @brief Apple's absolute class for these cores, from `hw.perflevelN.name`; -1 when unnamed.
+     *  @sa `colocated_pool`'s `_qos_for_domain`, for why the relative rank above cannot replace it.
+     *
+     *  Spawn-path plumbing, not a second caller-facing rank: like `first_core_id`, it is the raw
+     *  material the platform's placement call consumes - an affinity mask there, a QoS class here.
+     */
+    core_quality_t apple_core_quality {-1};
+#endif
     /**
      *  @brief Relative throughput of @b one core here; 0 when the platform exposes no rating.
      *  @sa `compute_level` is a dense ordinal for grouping - never divide by it.
@@ -1038,7 +1048,61 @@ FU_MAYBE_UNUSED_ static inline std::size_t apple_sysctl_uint(char const *name) n
     if (::sysctlbyname(name, &value, &length, nullptr, 0) != 0) return 0;
     return static_cast<std::size_t>(value);
 }
-#endif
+#endif // FU_ON_APPLE
+
+/*  The core-quality kit exists for one consumer - the QoS class a `colocated_pool` assigns at spawn -
+ *  so it is gated on that capability: turning it off erases producer, field, and consumer together. */
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+/** @brief Reads a string `sysctl` by name into @p out (always NUL-terminated), returning success. */
+FU_MAYBE_UNUSED_ static inline bool apple_sysctl_string(char const *name, char *out, std::size_t cap) noexcept {
+    if (cap == 0) return false;
+    std::size_t length = cap;
+    if (::sysctlbyname(name, out, &length, nullptr, 0) != 0) {
+        out[0] = '\0';
+        return false;
+    }
+    // ? A value that exactly filled the buffer arrives unterminated
+    out[cap - 1] = '\0';
+    return true;
+}
+
+/**
+ *  @brief Apple's `hw.perflevelN.name` vocabulary as an @b absolute ladder; higher is more performant.
+ *  @note Absolute, unlike `compute_level`: "Performance" is the same class on an M1 (its top tier)
+ *        and an M5 Pro (its bottom). Apple has shipped exactly these three names.
+ */
+enum apple_core_quality_t : core_quality_t {
+    apple_efficiency_k = 0,  // "Efficiency" - the only tier that is physically E-cores
+    apple_performance_k = 1, // "Performance"
+    apple_super_k = 2,       // "Super" - the M5-era top tier, still a big core
+};
+
+/**
+ *  @brief The name Apple gives an absolute core class, or `nullptr` for an unknown one.
+ *  @note The one source of truth for the names; `apple_core_quality_from_name` inverts it.
+ */
+FU_MAYBE_UNUSED_ static inline char const *apple_core_quality_name(core_quality_t const quality) noexcept {
+    switch (quality) {
+    case apple_efficiency_k: return "Efficiency";
+    case apple_performance_k: return "Performance";
+    case apple_super_k: return "Super";
+    default: return nullptr;
+    }
+}
+
+/**
+ *  @brief Maps a `hw.perflevelN.name` to its absolute class; inverts `apple_core_quality_name`.
+ *  @retval apple_performance_k for a null or unrecognised name, so `UTILITY` is never guessed.
+ */
+FU_MAYBE_UNUSED_ static inline core_quality_t apple_core_quality_from_name(char const *name) noexcept {
+    if (name == nullptr) return apple_performance_k;
+    for (core_quality_t quality = apple_efficiency_k; quality <= apple_super_k; ++quality) {
+        char const *const candidate = apple_core_quality_name(quality);
+        if (candidate != nullptr && std::strcmp(candidate, name) == 0) return quality;
+    }
+    return apple_performance_k;
+}
+#endif // FU_WITH_PLACE_THREADS_BY_CORE_CLASS
 
 /**
  *  @brief NUMA topology descriptor: describing memory pools and core counts next to them.
@@ -1548,6 +1612,15 @@ struct machine_topology {
             // ? A level with no `cpusperl2` is one undivided cluster, not zero-sized ones.
             if (cores_per_cluster == 0 || cores_per_cluster > level_cores) cores_per_cluster = level_cores;
 
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+            // The absolute class the QoS choice keys on; a hidden name (a locked-down sandbox)
+            // parses to a big tier, never to efficiency cores.
+            std::snprintf(name, sizeof(name), "hw.perflevel%zu.name", level);
+            char level_name[32];
+            apple_sysctl_string(name, level_name, sizeof(level_name));
+            core_quality_t const level_quality = apple_core_quality_from_name(level_name);
+#endif
+
             std::size_t const level_rank = nonempty_levels - 1 - levels_written;
             for (std::size_t cut = 0; cut < level_cores; cut += cores_per_cluster) {
                 std::size_t const cluster_cores = (level_cores - cut) < cores_per_cluster //
@@ -1557,6 +1630,9 @@ struct machine_topology {
                 domain.memory_domain_id = 0;
                 domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
                 domain.compute_level = level_rank; // ? Sibling clusters share their level's rank
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+                domain.apple_core_quality = level_quality;
+#endif
                 domain.capacity = 0;
                 domain.cache_bytes = level_cache_bytes; // ? L2 is private to the cluster, shared within it
                 domain.first_core_id = core_ids_ptr + core_offset + cut;

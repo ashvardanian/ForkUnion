@@ -75,8 +75,11 @@ struct alignas(default_alignment_k) pinned_thread_t {
     core_id_t core_id {-1};
     /** @brief Thread name, written by the spawner and applied by the worker to itself. */
     char name[16] {};
-    /** @brief QoS class of this worker's core. @todo Populate from VFS, if available. */
-    core_quality_t core_quality {-1};
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+    /** @brief Apple's absolute class for this worker's domain, or -1 when unnamed.
+     *  @sa `compute_domain_t::apple_core_quality`, copied here at spawn. */
+    core_quality_t apple_core_quality {-1};
+#endif
     /**
      *  @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`.
      *  @note Lives here, rather than in a second array, so the pool allocates once and the cursor
@@ -365,6 +368,9 @@ struct colocated_pool {
             pthreads_[0].handle.store(::pthread_self(), std::memory_order_release);
 #endif
             pthreads_[0].id.store(current_thread_id(), std::memory_order_release);
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+            pthreads_[0].apple_core_quality = domain.apple_core_quality;
+#endif
         }
 
         // The startup sequence for the POSIX threads differs from the `flat_pool`,
@@ -396,7 +402,7 @@ struct colocated_pool {
             // Apple offers no pinning; a Quality-of-Service class is the whole placement story, and
             // it must be chosen before the thread exists. On a chip with efficiency cores, `UTILITY`
             // is what confines a thread to them; on an all-performance chip the class is inert.
-            ::pthread_attr_set_qos_class_np(&attributes, _qos_for_level(domain.compute_level, compute_levels), 0);
+            ::pthread_attr_set_qos_class_np(&attributes, _qos_for_domain(domain, compute_levels), 0);
 #endif
             created = ::pthread_create(&new_pthread_handle, &attributes, &_posix_worker_loop, this) == 0;
             ::pthread_attr_destroy(&attributes);
@@ -404,6 +410,9 @@ struct colocated_pool {
             pthreads_[i].id.store(0, std::memory_order_relaxed); // ? 0 means "not published yet"
 #endif
             pthreads_[i].core_id = -1; // ? Not pinned yet
+#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+            pthreads_[i].apple_core_quality = domain.apple_core_quality;
+#endif
 
             if (!created) {
                 mood_.store(mood_t::die_k, std::memory_order_release);
@@ -876,24 +885,22 @@ struct colocated_pool {
 
 #if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
     /**
-     *  @brief Maps a compute level onto the only placement control Darwin offers.
-     *  @param[in] level The domain's `compute_level`, where higher is more performant.
+     *  @brief Maps a compute domain onto the only placement control Darwin offers: a QoS class.
      *  @param[in] levels Distinct levels the machine reports; 1 means every core is interchangeable.
      *
-     *  The top tier asks for `USER_INITIATED`, not `USER_INTERACTIVE`: the latter is reserved for work
-     *  a person is waiting on, and a compute pool is not that. Everything below it takes `DEFAULT`.
-     *
-     *  @note It is tempting to give the bottom tier `QOS_CLASS_UTILITY`, which is what confines a
-     *        thread to efficiency cores. That is wrong here. `compute_level` is a dense rank over
-     *        `hw.perflevelN`, and the bottom rank is only an @b efficiency tier on the chips that have
-     *        one. An M5 Pro reports two levels named "Super" and "Performance", both big cores - and
-     *        `UTILITY` would deprioritize two thirds of the machine. Telling the two cases apart needs
-     *        `hw.perflevelN.name`, which the harvest does not yet keep.
+     *  The fastest tier present runs the hot path at `USER_INITIATED` - not `USER_INTERACTIVE`, which
+     *  is reserved for work a person is waiting on. Below it, only a tier the OS names "Efficiency"
+     *  takes `UTILITY`, the class that confines threads to E-cores. The rank alone cannot decide that:
+     *  the bottom rank is E-cores on an A18 but big cores on an M5 Pro, where `UTILITY` would banish
+     *  two thirds of the machine. Checking rank first keeps an all-efficiency chip honest - its E-cores
+     *  are the fastest thing present. A hidden or unknown name parses to `apple_performance_k`, so the
+     *  fallback is rank-only and `UTILITY` is never guessed.
      */
-    static qos_class_t _qos_for_level(std::size_t const level, std::size_t const levels) noexcept {
-        if (levels <= 1) return QOS_CLASS_USER_INITIATED;
-        if (level + 1 == levels) return QOS_CLASS_USER_INITIATED; // ? The fastest tier this chip has
-        return QOS_CLASS_DEFAULT;
+    static qos_class_t _qos_for_domain(compute_domain_t const &domain, std::size_t const levels) noexcept {
+        if (domain.compute_level + 1 >= levels) return QOS_CLASS_USER_INITIATED; // ? The fastest tier present
+        if (domain.apple_core_quality == apple_efficiency_k)
+            return QOS_CLASS_UTILITY; // ? Genuine E-cores - confine here
+        return QOS_CLASS_DEFAULT;     // ? A slower big tier stays big
     }
 #endif
 

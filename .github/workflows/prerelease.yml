@@ -644,26 +644,39 @@ jobs:
       - name: Test Zig (portable)
         run: zig build test -Dportable=true
 
-  # iOS shares Darwin's `pthread_attr_set_qos_class_np` and `hw.perflevel*`, and shares its refusal
-  # to pin. Compiling for the device and for the simulator is enough to keep those paths honest;
-  # running is not, because a simulator binary reads the *host* Mac's topology, not a phone's.
+  # iOS shares Darwin's QoS scheduling and `hw.perflevel*` topology, and shares its refusal to pin.
+  # The device SDK is compile-only - a phone can't run on the CI host - but the simulator binary is
+  # linked and run on a booted simulator. A simulator reads the *host* Mac's topology, so this proves
+  # the Apple path under the iOS ABI, not any particular phone's layout.
   build_ios:
-    name: iOS (Compile Only)
+    name: iOS (${{ matrix.sdk }}, ${{ matrix.std }})
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         sdk: [iphoneos, iphonesimulator]
+        std: [c++17, c++20]
+        include:
+          - { sdk: iphoneos, triple: arm64-apple-ios17.0 }
+          - { sdk: iphonesimulator, triple: arm64-apple-ios17.0-simulator }
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Build C++ for ${{ matrix.sdk }}
+      - name: Compile the C++ test and the C shim
         run: |
           SYSROOT=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
-          if [ "${{ matrix.sdk }}" = "iphoneos" ]; then TARGET=arm64-apple-ios17.0; \
-          else TARGET=arm64-apple-ios17.0-simulator; fi
-          clang++ -std=c++20 -O2 -Wall -Wextra -Werror -target $TARGET -isysroot "$SYSROOT" \
-            -Iinclude -c scripts/test.cpp -o test_ios.o
-          clang++ -std=c++17 -O2 -Wall -Wextra -Werror -target $TARGET -isysroot "$SYSROOT" \
-            -Iinclude -c c/forkunion.cpp -o forkunion_ios.o
+          clang++ -std=${{ matrix.std }} -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
+            -isysroot "$SYSROOT" -Iinclude scripts/test.cpp -o forkunion_test_ios
+          clang++ -std=${{ matrix.std }} -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
+            -isysroot "$SYSROOT" -Iinclude -c c/forkunion.cpp -o forkunion_ios.o
+
+      # GitHub's macOS images pre-create simulators for their Xcode; boot the first iPhone, don't mint one.
+      - name: Run the C++ test on the iOS Simulator
+        if: matrix.sdk == 'iphonesimulator'
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available iPhone \
+            | grep -oE "[0-9A-F-]{36}" | head -1)
+          test -n "$DEVICE_ID"
+          xcrun simctl boot "$DEVICE_ID"
+          xcrun simctl spawn "$DEVICE_ID" "$PWD/forkunion_test_ios"
