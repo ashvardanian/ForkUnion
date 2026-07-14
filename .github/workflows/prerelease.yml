@@ -513,7 +513,8 @@ jobs:
         with:
           release: "14.2"
           usesh: true
-          prepare: pkg install -y cmake
+          # `git` is needed for the Taskflow benchmark baseline that `FetchContent` clones at configure time.
+          prepare: pkg install -y cmake git
           run: |
             cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo
             cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
