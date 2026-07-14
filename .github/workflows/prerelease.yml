@@ -439,7 +439,9 @@ jobs:
 
       - name: Configure, build, and test
         run: |
-          cmake -B build -D CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          # Static-link so the qemu-run binaries need no shared libatomic/libstdc++ at run time.
+          cmake -B build -D CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+            -D CMAKE_EXE_LINKER_FLAGS="-static"
           cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
           ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
 
