@@ -840,7 +840,7 @@ struct local_thread {
     inline operator thread_index_t() const noexcept { return thread; }
 };
 
-using local_thread_t = local_thread<>; // ? Default prong type with `std::size_t` indices
+using local_thread_t = local_thread<>; // ? Default thread-locator type with `std::size_t` indices
 
 /**
  *  @brief Back-ports the C++ 23 `std::allocation_result`. Unlike STL, also contains the page size.

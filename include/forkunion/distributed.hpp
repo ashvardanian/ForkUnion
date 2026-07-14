@@ -29,7 +29,7 @@ FU_MAYBE_UNUSED_ static inline void sleep_for_micros(FU_MAYBE_UNUSED_ std::size_
     // Reached only after the pool is told to `sleep` to save power, where the docs promise latency is
     // irrelevant - so a millisecond-granular `Sleep` (rounded up) is enough, and spares us the per-nap
     // timer object a sub-millisecond wait would cost.
-    ::Sleep(static_cast<DWORD>((micros + 999) / 1000));
+    ::Sleep(static_cast<DWORD>(div_ceil(micros, 1000)));
 #elif FU_ON_LINUX
     struct timespec ts {0, static_cast<long>(micros * 1000)};
     ::clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr); // ? A named clock; Darwin has only `nanosleep`
@@ -130,10 +130,9 @@ struct colocated_pool {
     using cache_hints_t = cache_hints_type_;
     static constexpr pool_kind_t kind_k = pool_kind_t::colocated_k;
     static constexpr std::size_t alignment_k = alignment_;
-    static_assert(alignment_k > 0 && (alignment_k & (alignment_k - 1)) == 0, "Alignment must be a power of 2");
+    static_assert(is_power_of_two(alignment_k), "Alignment must be a power of 2");
 
-    using index_t = std::size_t;
-    static_assert(std::is_unsigned<index_t>::value, "Index type must be an unsigned integer");
+    using index_t = std::size_t;        // ? Not templated like `flat_pool`; narrow-index debug configs live there
     using epoch_index_t = index_t;      // ? A.k.a. number of previous API calls in [0, UINT_MAX)
     using generation_t = epoch_index_t; // ? A.k.a. token returned from `unsafe_for_threads`
     using thread_index_t = index_t;     // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
@@ -552,18 +551,15 @@ struct colocated_pool {
 
         // On Linux we can update the thread's scheduling class to IDLE,
         // which will reduce the power consumption:
-        caller_exclusivity_t const exclusivity = caller_exclusivity();
-        bool const use_caller_thread = exclusivity == caller_inclusive_k;
+#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
+        bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
         for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
             std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
             if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
-#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
             sched_param param {};
             ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_IDLE, &param);
-#else
-            fu_unused_(pthread_id); // ? No idle scheduling class on Darwin
-#endif
         }
+#endif // ? No idle scheduling class on Darwin, Windows, or FreeBSD
     }
 
     /** @brief Helper function to create a spin mutex with same yield characteristics. */
@@ -634,8 +630,6 @@ struct colocated_pool {
 
         thread_index_t const threads = threads_count();
         assert(threads != 0 && "Thread pool not initialized");
-        caller_exclusivity_t const exclusivity = caller_exclusivity();
-        bool const use_caller_thread = exclusivity == caller_inclusive_k;
 
         // Only one dispatch can be in flight, and it must be fully joined - the caller's
         // slice included - before the next one starts.
@@ -662,20 +656,21 @@ struct colocated_pool {
         generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
 
         // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
+#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
         if (was_chilling) {
+            bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
             for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
                 std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
                 if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
-#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
                 // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
                 // for another thread; its QoS class is fixed at creation.
                 sched_param param {};
                 ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_FIFO | SCHED_RR, &param);
-#else
-                fu_unused_(pthread_id);
-#endif
             }
         }
+#else
+        fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin, Windows, or FreeBSD
+#endif
         return generation;
     }
 
@@ -738,8 +733,11 @@ struct colocated_pool {
     /**
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
      *  @retval Same value as `threads_count()`, as we only support one compute_domain.
+     *  @note Shape parity with `distributed_pool`: generic callers - the C ABI's `visit` and the
+     *        distributed invokers - call `pool.threads_count(domain)` on every pool kind.
      */
     thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+        assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return threads_count();
     }
 
@@ -749,6 +747,7 @@ struct colocated_pool {
      */
     constexpr thread_index_t thread_local_index(thread_index_t global_thread_index,
                                                 FU_MAYBE_UNUSED_ index_t compute_domain_index = 0) const noexcept {
+        assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return global_thread_index;
     }
 
@@ -770,7 +769,7 @@ struct colocated_pool {
     /**
      *  @brief A trampoline function that is used to call the user-defined lambda.
      *  @param[in] punned_lambda_pointer The pointer to the user-defined lambda.
-     *  @param[in] prong The index of the thread & task index packed together.
+     *  @param[in] local_thread The thread index paired with this pool's compute domain.
      */
     template <typename fork_type_>
     static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, local_thread_t local_thread) noexcept {

@@ -543,6 +543,8 @@ class flat_pool {
     /**
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
      *  @return Same value as `threads_count()`, as we only support one compute_domain.
+     *  @note Shape parity with `distributed_pool`: generic callers - the C ABI's `visit` and the
+     *        distributed invokers - call `pool.threads_count(domain)` on every pool kind.
      */
     thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
@@ -571,7 +573,7 @@ class flat_pool {
     /**
      *  @brief A trampoline function that is used to call the user-defined lambda.
      *  @param[in] punned_lambda_pointer The pointer to the user-defined lambda.
-     *  @param[in] prong The index of the thread & task index packed together.
+     *  @param[in] thread_index The thread whose slice of the broadcast this call runs.
      */
     template <typename fork_type_>
     static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, thread_index_t thread_index) noexcept {
