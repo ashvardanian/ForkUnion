@@ -25,6 +25,7 @@ static fu_pool_t spawn_default_pool(char const *name, fu_capabilities_t mask, fu
     return NULL;
 }
 
+/** @brief Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
 static bool test_try_spawn_zero(fu_capabilities_t mask) {
     fu_pool_t pool = fu_pool_new("test_zero", mask);
     bool result = !fu_pool_spawn(machine_topology, pool, 0u, fu_caller_inclusive_k);
@@ -32,6 +33,7 @@ static bool test_try_spawn_zero(fu_capabilities_t mask) {
     return result;
 }
 
+/** @brief The default spawn - one thread per logical core - must succeed and tear down cleanly. */
 static bool test_try_spawn_success(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_spawn", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -44,12 +46,14 @@ struct for_threads_context_t {
     atomic_bool *visited;
 };
 
+/** @brief Marks the calling worker's slot in the shared `visited` array. */
 static void for_threads_callback(void *context_punned, size_t thread, size_t compute_domain) {
     (void)compute_domain;
     struct for_threads_context_t *context = (struct for_threads_context_t *)context_punned;
     atomic_store(&context->visited[thread], true);
 }
 
+/** @brief One `for_threads` broadcast must visit every worker exactly once, none skipped. */
 static bool test_for_threads(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_threads", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -73,6 +77,12 @@ static bool test_for_threads(fu_capabilities_t mask) {
     return result;
 }
 
+/**
+ *  @brief The pool reports the exclusivity it was spawned with, even across a terminate-and-respawn.
+ *
+ *  Callers branch on `fu_pool_caller_exclusivity` to decide who owes a slice of every dispatch, so
+ *  a stale answer after a mode change would deadlock a join or double-run a slice.
+ */
 static bool test_caller_exclusivity_query(fu_capabilities_t mask) {
     fu_pool_t pool = fu_pool_new("test_exclusivity", mask);
     if (!pool) return false;
@@ -80,7 +90,7 @@ static bool test_caller_exclusivity_query(fu_capabilities_t mask) {
     size_t threads = fu_logical_cores_count(machine_topology);
     if (threads == 0) threads = 4;
 
-    /* The pool is the single source of truth, even after a re-spawn with a different mode. */
+    // The pool is the single source of truth, even after a re-spawn with a different mode.
     bool result = true;
     if (!fu_pool_spawn(machine_topology, pool, threads, fu_caller_inclusive_k)) result = false;
     else if (fu_pool_caller_exclusivity(pool) != fu_caller_inclusive_k)
@@ -96,11 +106,17 @@ static bool test_caller_exclusivity_query(fu_capabilities_t mask) {
     return result;
 }
 
+/**
+ *  @brief `fu_pool_spawn_on` pins a pool to each compute domain in turn, sized to that domain.
+ *
+ *  Every real domain must accept a pool of its own core count, and an out-of-range domain index
+ *  must fail the spawn instead of crashing.
+ */
 static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
     size_t compute_domains = fu_compute_domains_count(machine_topology);
     if (compute_domains == 0) return false;
 
-    /* Spawn one pool per compute domain, sized to that domain's core count. */
+    // Spawn one pool per compute domain, sized to that domain's core count.
     bool result = true;
     for (size_t compute_domain = 0; compute_domain < compute_domains && result; ++compute_domain) {
         size_t cores = fu_logical_cores_count_in(machine_topology, compute_domain);
@@ -117,7 +133,7 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
         fu_pool_delete(pool);
     }
 
-    /* Out-of-range compute domain must fail cleanly, not crash. */
+    // Out-of-range compute domain must fail cleanly, not crash.
     fu_pool_t out_of_range = fu_pool_new("bad", mask);
     if (out_of_range &&
         fu_pool_spawn_on(machine_topology, out_of_range, compute_domains + 100, 2, fu_caller_exclusive_k))
@@ -126,8 +142,14 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
     return result;
 }
 
+/**
+ *  @brief The poll-then-join pattern on a caller-exclusive pool: dispatch, overlap, poll, join.
+ *
+ *  Generation tokens are always odd, `fu_pool_is_complete` must eventually turn true without the
+ *  caller contributing work, and the join must observe every worker's visit.
+ */
 static bool test_generation_polling(fu_capabilities_t mask) {
-    /* Polling before join is the caller-exclusive pattern: no caller slice is owed. */
+    // Polling before join is the caller-exclusive pattern: no caller slice is owed.
     fu_pool_t pool = spawn_default_pool("test_generation", mask, fu_caller_exclusive_k);
     if (!pool) return false;
 
@@ -161,6 +183,7 @@ struct uncomfortable_context_t {
     atomic_bool out_of_bounds;
 };
 
+/** @brief Raises the shared flag on any task index at or past the requested bound. */
 static void uncomfortable_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
@@ -168,6 +191,12 @@ static void uncomfortable_callback(void *context_punned, size_t task, size_t thr
     if (task >= context->input_size) atomic_store(&context->out_of_bounds, true);
 }
 
+/**
+ *  @brief Sweeps every task count from 0 to 3x the thread count through `for_n`.
+ *
+ *  The uncomfortable sizes - fewer tasks than threads, one extra, one short - are where a splitter
+ *  hands out phantom indices; the callback records any task id at or past the requested bound.
+ */
 static bool test_uncomfortable_input_size(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_uncomfortable", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -195,7 +224,7 @@ struct aligned_visit_t {
     _Alignas(64) size_t task;
 };
 
-/* Comparator for qsort */
+/** @brief `qsort` comparator ordering visit records by task index, so a sorted pass can assert iota coverage. */
 static int compare_visits(const void *a, const void *b) {
     const struct aligned_visit_t *va = (const struct aligned_visit_t *)a;
     const struct aligned_visit_t *vb = (const struct aligned_visit_t *)b;
@@ -204,6 +233,7 @@ static int compare_visits(const void *a, const void *b) {
     return 0;
 }
 
+/** @brief Sorts the visit records in place and checks they cover [0, @p size) exactly once. */
 static bool contains_iota(struct aligned_visit_t *visited, size_t size) {
     qsort(visited, size, sizeof(struct aligned_visit_t), compare_visits);
 
@@ -218,6 +248,7 @@ struct for_n_context_t {
     struct aligned_visit_t *visited;
 };
 
+/** @brief Appends the task index to the shared visit log at the next free slot. */
 static void for_n_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
@@ -227,6 +258,7 @@ static void for_n_callback(void *context_punned, size_t task, size_t thread, siz
     context->visited[count_populated].task = task;
 }
 
+/** @brief `for_n` must execute each of N tasks exactly once - and again on a repeated dispatch. */
 static bool test_for_n(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_n", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -253,6 +285,7 @@ static bool test_for_n(fu_capabilities_t mask) {
     return result;
 }
 
+/** @brief `for_n_dynamic` work-stealing must still cover each task exactly once, dispatch after dispatch. */
 static bool test_for_n_dynamic(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_n_dynamic", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -279,6 +312,7 @@ static bool test_for_n_dynamic(fu_capabilities_t mask) {
     return result;
 }
 
+/** @brief Like `for_n_callback`, but burns a task-dependent amount of work to skew the timing. */
 static void oversubscribed_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
@@ -292,6 +326,12 @@ static void oversubscribed_callback(void *context_punned, size_t task, size_t th
     context->visited[count_populated].task = task;
 }
 
+/**
+ *  @brief Spawns 3x more workers than cores and drives an uneven dynamic workload through them.
+ *
+ *  Oversubscription forces preemption mid-claim, so this is the test that catches lost or
+ *  double-claimed tasks in the dynamic scheduler's cursor arithmetic.
+ */
 static bool test_oversubscribed_threads(fu_capabilities_t mask) {
     const size_t oversubscription = 3;
 
@@ -327,6 +367,7 @@ struct for_slices_context_t {
     atomic_bool empty_slice;
 };
 
+/** @brief Bumps a per-index execution counter for the slice, flagging empty or out-of-bounds ones. */
 static void for_slices_callback(void *context_punned, size_t first, size_t count, size_t thread,
                                 size_t compute_domain) {
     (void)thread;
@@ -340,6 +381,7 @@ static void for_slices_callback(void *context_punned, size_t first, size_t count
     for (size_t i = 0; i != count; ++i) atomic_fetch_add(&context->executions[first + i], 1);
 }
 
+/** @brief `for_slices` must partition [0, N) into non-empty, in-bounds slices covering each index once. */
 static bool test_for_slices(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_slices", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -358,6 +400,12 @@ static bool test_for_slices(fu_capabilities_t mask) {
     return result;
 }
 
+/**
+ *  @brief A sleeping pool must wake on the next dispatch with no tasks lost.
+ *
+ *  `fu_pool_sleep` parks the workers on a periodic timer; the following `for_n` is itself the
+ *  wake-up call, and every task must still run exactly once, twice in a row.
+ */
 static bool test_sleep_wake(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_sleep", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -365,7 +413,7 @@ static bool test_sleep_wake(fu_capabilities_t mask) {
     struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
     struct for_n_context_t context = {.counter = 0, .visited = visited};
 
-    /* Each batch naps the workers, then the dispatch itself must wake them - exactly once per task. */
+    // Each batch naps the workers, then the dispatch itself must wake them - exactly once per task.
     bool result = true;
     for (size_t batch = 0; batch != 2 && result; ++batch) {
         fu_pool_sleep(pool, 100);
@@ -380,17 +428,20 @@ static bool test_sleep_wake(fu_capabilities_t mask) {
     return result;
 }
 
-/* The C mirror of the C++ topology invariants: counts agree, cores partition, levels stay in range. */
-static bool test_topology_introspection(fu_capabilities_t mask) {
+/**
+ *  @brief Topology counts must be non-zero, levels dense, and cores partitioned exactly once.
+ *
+ *  A compute level ordinal at or past the level count means the dense ranking leaked, and a core
+ *  counted zero or twice across domains means the pools would over- or under-subscribe it.
+ */
+static bool test_topology_counts(fu_capabilities_t mask) {
     (void)mask;
     size_t const cores = fu_logical_cores_count(machine_topology);
-    size_t const memory_domains = fu_memory_domains_count(machine_topology);
     size_t const compute_domains = fu_compute_domains_count(machine_topology);
     size_t const compute_levels = fu_compute_levels_count(machine_topology);
-    if (cores == 0 || memory_domains == 0 || compute_domains == 0 || compute_levels == 0) return false;
+    if (cores == 0 || compute_domains == 0 || compute_levels == 0) return false;
     if (compute_levels > compute_domains) return false;
 
-    /* Every core belongs to exactly one compute domain, and every level ordinal stays in range. */
     size_t cores_across_domains = 0;
     for (size_t i = 0; i < compute_domains; ++i) {
         size_t const domain_cores = fu_logical_cores_count_in(machine_topology, i);
@@ -398,9 +449,15 @@ static bool test_topology_introspection(fu_capabilities_t mask) {
         if (fu_compute_level_in(machine_topology, i) >= compute_levels) return false;
         cores_across_domains += domain_cores;
     }
-    if (cores_across_domains != cores) return false;
+    return cores_across_domains == cores;
+}
 
-    /* Per-domain RAM never exceeds the machine, and the ids handed out are valid allocator inputs. */
+/** @brief Every memory domain id must be a valid allocator input, its RAM within the machine total. */
+static bool test_topology_memory_bounds(fu_capabilities_t mask) {
+    (void)mask;
+    size_t const memory_domains = fu_memory_domains_count(machine_topology);
+    if (memory_domains == 0) return false;
+
     size_t const total_ram = fu_volume_ram(machine_topology);
     for (size_t i = 0; i < memory_domains; ++i) {
         if (fu_memory_domain_id_at_index(machine_topology, i) < 0) return false;
@@ -409,7 +466,44 @@ static bool test_topology_introspection(fu_capabilities_t mask) {
     return true;
 }
 
-/* Per-domain worker counts must sum to the pool total, and global ids must localize contiguously. */
+/** @brief Per the SLIT convention no row's entry may undercut its own local domain; 0 means unreported. */
+static bool test_topology_slit_rows(fu_capabilities_t mask) {
+    (void)mask;
+    size_t const memory_domains = fu_memory_domains_count(machine_topology);
+    size_t const compute_domains = fu_compute_domains_count(machine_topology);
+
+    for (size_t c = 0; c < compute_domains; ++c) {
+        size_t const local = fu_local_memory_of(machine_topology, c);
+        if (local >= memory_domains) return false;
+        size_t const local_distance = fu_memory_distance(machine_topology, c, local);
+        for (size_t m = 0; m < memory_domains && local_distance != 0; ++m)
+            if (fu_memory_distance(machine_topology, c, m) < local_distance) return false;
+    }
+    return true;
+}
+
+/**
+ *  @brief A pool's effective capability mask is the request narrowed by the machine.
+ *
+ *  `fu_pool_new` may drop bits the hardware lacks, but must never invent one that neither the
+ *  caller requested nor the runtime reported - otherwise a pool could claim a waiter it cannot run.
+ */
+static bool test_pool_capabilities_narrowing(fu_capabilities_t mask) {
+    fu_pool_t pool = fu_pool_new("test_narrowing", mask);
+    if (!pool) return false;
+    fu_capabilities_t const effective = fu_pool_capabilities(pool);
+    bool const result = (effective & ~(mask & fu_runtime_capabilities())) == 0;
+    fu_pool_delete(pool);
+    return result;
+}
+
+/**
+ *  @brief Per-domain worker counts must sum to the pool total, with contiguous global numbering.
+ *
+ *  `fu_pool_locate_thread_in` maps a global thread id to its offset within a compute domain; the
+ *  first id of each domain must localize to 0 and the last to `count - 1`, or the distributed
+ *  dispatch would address the wrong worker cells.
+ */
 static bool test_pool_domain_accounting(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_accounting", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -426,7 +520,7 @@ static bool test_pool_domain_accounting(fu_capabilities_t mask) {
             result = false;
             break;
         }
-        /* Workers are numbered contiguously per domain, so the prefix boundaries must localize to 0. */
+        // Workers are numbered contiguously per domain, so the prefix boundaries must localize to 0.
         if (fu_pool_locate_thread_in(pool, prefix, domain) != 0) result = false;
         if (fu_pool_locate_thread_in(pool, prefix + local_threads - 1, domain) != local_threads - 1) result = false;
         prefix += local_threads;
@@ -437,13 +531,9 @@ static bool test_pool_domain_accounting(fu_capabilities_t mask) {
     return result;
 }
 
-/* The allocators fall back to the heap where no placement exists, so the round-trip must succeed everywhere. */
-static bool test_allocations_on_domains(fu_capabilities_t mask) {
-    (void)mask;
+/** @brief Round-trips both allocation shapes of @p bytes on every memory domain in turn. */
+static bool test_allocations_on_domains_of_size(size_t bytes) {
     size_t const domains = fu_memory_domains_count(machine_topology);
-    if (domains == 0) return false;
-
-    size_t const bytes = 1u << 20;
     for (size_t index = 0; index < domains; ++index) {
         fu_memory_domain_id_t const domain_id = fu_memory_domain_id_at_index(machine_topology, index);
 
@@ -462,6 +552,38 @@ static bool test_allocations_on_domains(fu_capabilities_t mask) {
         fu_free_on_domain_id(domain_id, sized, allocated);
         if (!sized_ok) return false;
     }
+    return true;
+}
+
+/**
+ *  @brief Every domain allocator must round-trip on every machine, placement or not.
+ *
+ *  Where NUMA placement exists the pages land on the requested domain; where it does not, the
+ *  allocators fall back to the heap - so allocate, touch, and free must succeed everywhere, for
+ *  both exact-size and at-least-size shapes.
+ */
+static bool test_allocations_on_domains(fu_capabilities_t mask) {
+    (void)mask;
+    if (fu_memory_domains_count(machine_topology) == 0) return false;
+
+    // 8 MB crosses the 2 MB huge-page ladder threshold, so the second size exercises the
+    // MAP_HUGETLB / MAP_ALIGNED_SUPER attempts and their base-page fallbacks.
+    size_t const sizes[] = {1u << 20, 8u << 20};
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(*sizes); ++s)
+        if (!test_allocations_on_domains_of_size(sizes[s])) return false;
+    return true;
+}
+
+/**
+ *  @brief One symmetric mapping must stripe every memory domain at a uniform stride.
+ *
+ *  Each slice must be independently writable, and the reported stride, domain count, and total
+ *  must agree - a mismatch means slices alias or the mapping under-covers the topology.
+ */
+static bool test_allocation_symmetric(fu_capabilities_t mask) {
+    (void)mask;
+    size_t const domains = fu_memory_domains_count(machine_topology);
+    if (domains == 0) return false;
 
     size_t stride = 0, mapped_domains = 0, total = 0, page = 0;
     unsigned char *base = fu_allocate_symmetric(machine_topology, 4096, &stride, &mapped_domains, &total, &page);
@@ -476,9 +598,10 @@ static bool test_allocations_on_domains(fu_capabilities_t mask) {
     return result;
 }
 
-/* GCC nested functions extension test */
+// GCC nested functions extension test
 #if defined(__GNUC__) && !defined(__clang__)
 
+/** @brief The C ABI accepts a GCC nested function as the callback, trampoline and all. */
 static bool test_gcc_nested_functions(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_gcc_nested", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -486,7 +609,7 @@ static bool test_gcc_nested_functions(fu_capabilities_t mask) {
     atomic_size_t counter = 0;
     size_t num_tasks = 100;
 
-    /* GCC nested function - captures local variables */
+    // GCC nested function - captures local variables
     void nested_callback(void *context, size_t task, size_t thread, size_t compute_domain) {
         (void)context;
         (void)thread;
@@ -515,11 +638,13 @@ struct block_wrapper {
     task_block_t block;
 };
 
+/** @brief Unwraps the heap-copied block from the context pointer and invokes it. */
 static void block_callback_wrapper(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     struct block_wrapper *wrapper = (struct block_wrapper *)context_punned;
     wrapper->block(NULL, task, thread, compute_domain);
 }
 
+/** @brief The C ABI accepts a heap-copied Clang block through a small wrapper callback. */
 static bool test_clang_blocks(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_clang_blocks", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -527,7 +652,7 @@ static bool test_clang_blocks(fu_capabilities_t mask) {
     __block atomic_size_t counter = 0;
     size_t num_tasks = 100;
 
-    /* Clang block - captures local variables with __block */
+    // Clang block - captures local variables with __block
     task_block_t my_block = ^(void *ctx, size_t task, size_t thread, size_t compute_domain) {
       (void)ctx;
       (void)thread;
@@ -568,9 +693,13 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
         {"`for_n_dynamic` dynamic scheduling", test_for_n_dynamic},
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads},
         {"`sleep` and wake exactly-once", test_sleep_wake},
-        {"topology introspection invariants", test_topology_introspection},
+        {"topology counts and core partition", test_topology_counts},
+        {"topology memory-domain bounds", test_topology_memory_bounds},
+        {"topology SLIT rows", test_topology_slit_rows},
+        {"`fu_pool_capabilities` narrowing", test_pool_capabilities_narrowing},
         {"per-compute-domain pool accounting", test_pool_domain_accounting},
         {"allocations on every memory domain", test_allocations_on_domains},
+        {"symmetric allocation stripes all domains", test_allocation_symmetric},
 #if defined(__GNUC__) && !defined(__clang__)
         {"GCC nested functions extension", test_gcc_nested_functions},
 #endif
@@ -615,10 +744,18 @@ int main(void) {
     printf("Memory domains:     %zu\n", fu_memory_domains_count(machine_topology));
     printf("Compute domains:    %zu\n", fu_compute_domains_count(machine_topology));
 
+    // One entry per silicon-real cell of the shim's `select_pool` cascade, hints included, so every
+    // curated pool variant a machine can offer is constructed and dispatched at least once.
     fu_capabilities_t const yield_variants[] = {
-        fu_capabilities_unknown_k,   fu_capability_x86_pause_k,  fu_capability_x86_tpause_k,
-        fu_capability_arm64_yield_k, fu_capability_arm64_wfet_k, fu_capability_risc5_pause_k,
+        fu_capabilities_unknown_k,
+        fu_capability_x86_pause_k,
+        fu_capability_x86_tpause_k,
+        fu_capability_x86_tpause_k | fu_capability_x86_cldemote_k, /* Tremont, SPR, GNR */
+        fu_capability_arm64_yield_k,
+        fu_capability_arm64_wfet_k,
+        fu_capability_risc5_pause_k,
         fu_capability_risc5_wrs_k,
+        fu_capability_risc5_wrs_k | fu_capability_risc5_zicbom_k, /* RVA23 mandates them together */
     };
 
     fu_capabilities_t const topology_variants[] = {
@@ -631,9 +768,9 @@ int main(void) {
     for (size_t i = 0; i < sizeof(yield_variants) / sizeof(*yield_variants); ++i) {
         fu_capabilities_t yield_variant = yield_variants[i];
 
-        /* A yield the machine lacks would be silently narrowed by `fu_pool_new`, so the battery
-         * would mislabel which variant it exercised. Facility bits only need to be compiled in -
-         * the runtime mask never carries them, and the library narrows the rest per pool. */
+        // A yield the machine lacks would be silently narrowed by `fu_pool_new`, so the battery
+        // would mislabel which variant it exercised. Facility bits only need to be compiled in -
+        // the runtime mask never carries them, and the library narrows the rest per pool.
         if ((yield_variant & runtime_mask) != yield_variant) continue;
         for (size_t j = 0; j < sizeof(topology_variants) / sizeof(*topology_variants); ++j) {
             fu_capabilities_t topology_variant = topology_variants[j];
