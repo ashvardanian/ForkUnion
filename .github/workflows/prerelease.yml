@@ -92,7 +92,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Test Zig
         run: zig build test
 
@@ -240,7 +240,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Test Zig
         run: zig build test -Dplace-memory-on-domain=true
 
@@ -290,7 +290,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Test Zig
         run: zig build test
 
@@ -384,7 +384,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Test Zig
         run: zig build test
 
@@ -638,7 +638,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.1
+          version: 0.16.0
 
       - name: Test Zig (auto)
         run: zig build test

@@ -2,9 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    // Matches `minimum_zig_version` in `build.zig.zon`; the build script uses no API newer than 0.15.
-    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 15) {
-        @panic("ForkUnion requires Zig 0.15.0 or later. Please upgrade your Zig toolchain.");
+    // Matches `minimum_zig_version` in `build.zig.zon`; 0.15 still builds this script, but it cannot
+    // link against the macOS 26 SDK, so CI validates 0.16 only and the floor follows it.
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+        @panic("ForkUnion requires Zig 0.16.0 or later. Please upgrade your Zig toolchain.");
     }
 
     const target = b.standardTargetOptions(.{});
