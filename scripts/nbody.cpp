@@ -45,10 +45,10 @@
  *    NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
  *  @endcode
  */
+#include <cmath>   // `std::floor`
 #include <cstring> // `std::memcpy`
 
 #include <chrono>   // `std::chrono::steady_clock`
-#include <random>   // `std::uniform_real_distribution`, `std::mt19937`
 #include <optional> // `std::optional` - the executor, spawned only when chosen
 
 // Clang generally defines `_OPENMP` when OpenMP, but compiling it is
@@ -113,6 +113,36 @@ inline vector3_t gravitational_force(body_t const &bi, body_t const &bj) noexcep
     return {mag * dx, mag * dy, mag * dz};
 }
 
+/**
+ *  @brief How many independent accumulator chains the force sweep keeps.
+ *
+ *  Reassociating a float reduction is exactly what `-ffast-math` permits and strict IEEE forbids -
+ *  so the reassociation is written out by hand instead: the same eight lanes in the C++, Rust, and
+ *  Zig kernels, reduced in the same fixed order. Every compiler then faces the same strict-IEEE
+ *  optimization problem with the same freedom, and the language columns compare schedulers rather
+ *  than compiler flag sets.
+ */
+constexpr std::size_t force_lanes_k = 8;
+
+/** @brief Net gravitational force on @p bi over @p n @p bodies, in eight explicit lanes. */
+inline vector3_t net_force(body_t const &bi, body_t const *bodies, std::size_t n) noexcept {
+    float fx[force_lanes_k] = {}, fy[force_lanes_k] = {}, fz[force_lanes_k] = {};
+    std::size_t const blocked = n - n % force_lanes_k;
+    for (std::size_t j = 0; j < blocked; j += force_lanes_k)
+        for (std::size_t lane = 0; lane < force_lanes_k; ++lane) {
+            vector3_t const f = gravitational_force(bi, bodies[j + lane]);
+            fx[lane] += f.x, fy[lane] += f.y, fz[lane] += f.z;
+        }
+    for (std::size_t j = blocked; j < n; ++j) {
+        vector3_t const f = gravitational_force(bi, bodies[j]);
+        fx[j - blocked] += f.x, fy[j - blocked] += f.y, fz[j - blocked] += f.z;
+    }
+    // The one reduction shape every language shares; changing it changes the bits.
+    return {((fx[0] + fx[1]) + (fx[2] + fx[3])) + ((fx[4] + fx[5]) + (fx[6] + fx[7])),
+            ((fy[0] + fy[1]) + (fy[2] + fy[3])) + ((fy[4] + fy[5]) + (fy[6] + fy[7])),
+            ((fz[0] + fz[1]) + (fz[2] + fz[3])) + ((fz[4] + fz[5]) + (fz[6] + fz[7]))};
+}
+
 inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
     bi.velocity.x += f.x / bi.mass * dt_const;
     bi.velocity.y += f.y / bi.mass * dt_const;
@@ -120,21 +150,54 @@ inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
     bi.position.x += bi.velocity.x * dt_const;
     bi.position.y += bi.velocity.y * dt_const;
     bi.position.z += bi.velocity.z * dt_const;
+    // ? Wrap into the unit box to keep every distance - and so every force - inside the normal
+    // ? `f32` range forever: no overflows into NaN, and no denormals for x86 to stall on.
+    bi.position.x -= std::floor(bi.position.x);
+    bi.position.y -= std::floor(bi.position.y);
+    bi.position.z -= std::floor(bi.position.z);
+}
+
+/**
+ *  @brief The SplitMix64 avalanche behind every random draw - a pure function of the @p counter.
+ *
+ *  Deliberately not `std::mt19937` with `std::uniform_real_distribution`: the standard generators
+ *  differ across languages - and the C++ distributions even across standard libraries - so no two
+ *  harnesses would simulate the same system. Each draw is a pure function of its counter instead,
+ *  and the bodies are bit-identical across the C++, Rust, and Zig ports of this hash.
+ */
+static inline std::uint64_t split_mix(std::uint64_t const counter) noexcept {
+    std::uint64_t x = (counter + 1) * 0x9E37'79B9'7F4A'7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58'476D'1CE4'E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D0'49BB'1331'11EBull;
+    return x ^ (x >> 31);
+}
+
+/** @brief One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`. */
+static inline float random_unit(std::uint64_t const counter) noexcept {
+    return static_cast<float>(split_mix(counter) >> 40) * (1.0f / 16777216.0f);
 }
 
 #pragma endregion Shared Logic
 
 #pragma region Backends
 
-/*  The distributed pool exists wherever we can harvest a topology and spawn POSIX threads onto it -
- *  Linux and Apple both. Only the @b memory placement is NUMA-specific, and `replicated_array` already
- *  falls back to a heap-backed replica where no NUMA API exists, so a machine with one memory domain sees
- *  the per-node replicas collapse to one. One pool serves every ForkUnion backend.  */
+/**
+ *  @brief The one pool type behind every ForkUnion backend.
+ *
+ *  The distributed pool exists wherever we can harvest a topology and spawn POSIX threads onto it -
+ *  Linux and Apple both. Only the @b memory placement is NUMA-specific, and `replicated_array`
+ *  already falls back to a heap-backed replica where no NUMA API exists, so a machine with one
+ *  memory domain sees the per-node replicas collapse to one.
+ */
 using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t, fu::preferred_cache_hints_t>;
 
-/*  Copies canonical `bodies` into every per-domain replica, each written by the cores local to its node so
- *  the pages first-touch there. Every compute domain sharing a memory domain cooperates on that node's one
- *  replica, partitioned across all its threads so no element is copied twice.  */
+/**
+ *  @brief Copies canonical @p bodies into every per-domain replica.
+ *
+ *  Each replica is written by the cores local to its node so the pages first-touch there. Every
+ *  compute domain sharing a memory domain cooperates on that node's one replica, partitioned
+ *  across all its threads so no element is copied twice.
+ */
 void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t &pool,
                       fu::replicated_array<body_t> &replicas, fu::span<body_t const> bodies) noexcept {
     std::size_t const n = bodies.size();
@@ -209,11 +272,9 @@ static void run(nbody_context_t &c) noexcept {
             auto const local = c.replicas.on_memory_domain(
                 c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(prong.compute_domain)));
             body_t const body_i = local[prong.task];
-            for (std::size_t j = 0; j < n; ++j) f += gravitational_force(body_i, local[j]);
+            f = net_force(body_i, local.data(), n);
         }
-        else {
-            for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[prong.task], bodies[j]);
-        }
+        else { f = net_force(bodies[prong.task], bodies.data(), n); }
         forces[prong.task] = f;
     };
     // Apply pass: integrate the canonical body by its force - identical for both placements.
@@ -230,11 +291,7 @@ static void run_openmp_static(nbody_context_t &c) noexcept {
     fu::span<body_t> const bodies = c.bodies;
     fu::span<vector3_t> const forces = c.forces;
 #pragma omp parallel for schedule(static)
-    for (std::size_t i = 0; i < n; ++i) {
-        vector3_t f {0.0, 0.0, 0.0};
-        for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
-        forces[i] = f;
-    }
+    for (std::size_t i = 0; i < n; ++i) { forces[i] = net_force(bodies[i], bodies.data(), n); }
 #pragma omp parallel for schedule(static)
     for (std::size_t i = 0; i < n; ++i) apply_force(bodies[i], forces[i]);
 }
@@ -243,21 +300,21 @@ static void run_openmp_dynamic(nbody_context_t &c) noexcept {
     fu::span<body_t> const bodies = c.bodies;
     fu::span<vector3_t> const forces = c.forces;
 #pragma omp parallel for schedule(dynamic, 1)
-    for (std::size_t i = 0; i < n; ++i) {
-        vector3_t f {0.0, 0.0, 0.0};
-        for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
-        forces[i] = f;
-    }
+    for (std::size_t i = 0; i < n; ++i) { forces[i] = net_force(bodies[i], bodies.data(), n); }
 #pragma omp parallel for schedule(dynamic, 1)
     for (std::size_t i = 0; i < n; ++i) apply_force(bodies[i], forces[i]);
 }
 #endif
 
-/*  The Taskflow baselines - the same all-to-all sweep under `tf::for_each_index`. The executor is spawned
- *  once by `main`, and the two task graphs are built once on the first step and re-run thereafter - exactly
- *  how Taskflow is meant to be used. Rebuilding a `tf::Taskflow` every step, or spawning a fresh
- *  `tf::Executor` per dispatch, would measure graph construction, not the dispatch this benchmark isolates.
- *  The graphs capture the `bodies`/`forces` spans, whose pointers never move, so one build stays valid. */
+/**
+ *  @brief The Taskflow baselines - the same all-to-all sweep under `tf::for_each_index`.
+ *
+ *  The executor is spawned once by `main`, and the two task graphs are built once on the first step
+ *  and re-run thereafter - exactly how Taskflow is meant to be used. Rebuilding a `tf::Taskflow`
+ *  every step, or spawning a fresh `tf::Executor` per dispatch, would measure graph construction,
+ *  not the dispatch this benchmark isolates. The graphs capture the `bodies`/`forces` spans, whose
+ *  pointers never move, so one build stays valid.
+ */
 template <typename partitioner_>
 static void run_taskflow(nbody_context_t &c, partitioner_ partitioner) noexcept {
     tf::Executor &executor = *c.taskflow;
@@ -268,12 +325,7 @@ static void run_taskflow(nbody_context_t &c, partitioner_ partitioner) noexcept 
         c.force_pass.emplace();
         c.force_pass->for_each_index(
             std::size_t(0), n, std::size_t(1),
-            [=](std::size_t i) noexcept {
-                vector3_t f {0.0, 0.0, 0.0};
-                for (std::size_t j = 0; j < n; ++j) f += gravitational_force(bodies[i], bodies[j]);
-                forces[i] = f;
-            },
-            partitioner);
+            [=](std::size_t i) noexcept { forces[i] = net_force(bodies[i], bodies.data(), n); }, partitioner);
         c.apply_pass.emplace();
         c.apply_pass->for_each_index(
             std::size_t(0), n, std::size_t(1), [=](std::size_t i) noexcept { apply_force(bodies[i], forces[i]); },
@@ -358,19 +410,17 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // A fixed seed - the benchmark only needs a spread of positions, not entropy, and every backend must
-    // start from the same bodies to be comparable.
-    std::uniform_real_distribution<float> coordinate_distribution(0.f, 1.f);
-    std::uniform_real_distribution<float> mass_distribution(1e20f, 1e25f);
-    std::mt19937 random_gen(0x1234'5678u);
+    // Seven counter-based draws per body: three position coordinates, three velocity components, and
+    // one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
     for (std::size_t i = 0; i < n; ++i) {
-        bodies[i].position.x = coordinate_distribution(random_gen);
-        bodies[i].position.y = coordinate_distribution(random_gen);
-        bodies[i].position.z = coordinate_distribution(random_gen);
-        bodies[i].velocity.x = coordinate_distribution(random_gen);
-        bodies[i].velocity.y = coordinate_distribution(random_gen);
-        bodies[i].velocity.z = coordinate_distribution(random_gen);
-        bodies[i].mass = mass_distribution(random_gen);
+        std::uint64_t const counter = static_cast<std::uint64_t>(i) * 7;
+        bodies[i].position.x = random_unit(counter + 0);
+        bodies[i].position.y = random_unit(counter + 1);
+        bodies[i].position.z = random_unit(counter + 2);
+        bodies[i].velocity.x = random_unit(counter + 3);
+        bodies[i].velocity.y = random_unit(counter + 4);
+        bodies[i].velocity.z = random_unit(counter + 5);
+        bodies[i].mass = 1e10f + random_unit(counter + 6) * (1e15f - 1e10f);
     }
 
     fu::span<body_t> const bodies_view {bodies.data(), n};

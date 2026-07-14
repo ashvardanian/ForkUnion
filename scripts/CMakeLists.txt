@@ -58,9 +58,8 @@ foreach (STD IN LISTS CXX_STANDARDS)
     add_test(NAME ${TGT} COMMAND ${TGT})
     set_target_properties_for_forkunion_script(${TGT})
 
-    # Link against `libatomic` for Linux and Android toolchains that might need it.
-    # ! Not `UNIX AND NOT APPLE`: FreeBSD matches that too, and its atomics live in
-    # ! compiler-rt - there is no separate `libatomic` for the linker to find.
+    # Link against `libatomic` for Linux and Android toolchains that might need it. ! Not `UNIX AND NOT APPLE`: FreeBSD
+    # matches that too, and its atomics live in ! compiler-rt - there is no separate `libatomic` for the linker to find.
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
             target_link_libraries(${TGT} PRIVATE -latomic)
@@ -136,8 +135,8 @@ FetchContent_MakeAvailable(taskflow)
 
 # Both demo benchmarks share identical wiring - C++ for clear state ownership, but linking the pre-compiled C ABI so the
 # runtime busy-wait waiter resolves at runtime - the whole point, since AArch64 `WFET` is unreachable through the
-# compile-time C++ `preferred_yield_t`. The only per-target difference is `-ffast-math`, passed as @p fast_math.
-function (add_forkunion_benchmark target source fast_math)
+# compile-time C++ `preferred_yield_t`.
+function (add_forkunion_benchmark target source)
     add_executable(${target} ${source})
     # C++20 for the benchmark harness (the library itself stays C++17); Taskflow v4 requires C++20 concepts.
     set_target_properties(
@@ -161,9 +160,11 @@ function (add_forkunion_benchmark target source fast_math)
             ${target} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
         )
     endif ()
-    if (fast_math)
-        target_compile_options(${target} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffast-math>)
-    endif ()
+
+    # Strict IEEE math, deliberately: the N-body kernel hand-reassociates its reduction into the same eight lanes as the
+    # Rust and Zig kernels, so no `-ffast-math` is wanted - and Clang's default `-ffp-contract=on` would fuse
+    # multiply-adds Rust and Zig keep separate, diverging the bits.
+    target_compile_options(${target} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
 
     # OpenMP: native on GCC, Homebrew `libomp` on Apple/Clang.
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -196,7 +197,6 @@ function (add_forkunion_benchmark target source fast_math)
     target_link_libraries(${target} PRIVATE Taskflow::Taskflow Threads::Threads)
 endfunction ()
 
-# N-body: fast-math on - the fast reciprocal-sqrt kernel is an approximation already.
-add_forkunion_benchmark(forkunion_nbody nbody.cpp ON)
-# Connected components: exact integer work, so no fast-math; the CSR is replicated per memory domain.
-add_forkunion_benchmark(forkunion_propagation propagation.cpp OFF)
+add_forkunion_benchmark(forkunion_nbody nbody.cpp)
+# Connected components: exact integer work; the CSR is replicated per memory domain.
+add_forkunion_benchmark(forkunion_propagation propagation.cpp)

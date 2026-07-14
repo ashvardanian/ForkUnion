@@ -32,7 +32,6 @@
 //! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
 //! NBODY_COUNT=512 NBODY_BACKEND=tokio target/release/forkunion_nbody
 //! ```
-use rand::{Rng, SeedableRng};
 use std::env;
 use std::error::Error;
 use std::time::Instant;
@@ -72,6 +71,26 @@ struct Body {
     mass: f32,
 }
 
+/// The SplitMix64 avalanche behind every random draw - a pure function of the `counter`.
+///
+/// Deliberately not `StdRng`: the standard generators differ across languages - and the C++
+/// distributions even across standard libraries - so no two harnesses would simulate the same
+/// system. Each draw is a pure function of its counter instead, and the bodies are bit-identical
+/// across the C++, Rust, and Zig ports of this hash.
+#[inline]
+fn split_mix(counter: u64) -> u64 {
+    let mut x = counter.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+/// One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`.
+#[inline]
+fn random_unit(counter: u64) -> f32 {
+    (split_mix(counter) >> 40) as f32 * (1.0 / 16777216.0)
+}
+
 /// Fast reciprocal square-root (one Newton step of the classic Quake hack).
 #[inline]
 fn fast_rsqrt(x: f32) -> f32 {
@@ -98,6 +117,42 @@ fn gravitational_force(bi: &Body, bj: &Body) -> Vector3 {
     }
 }
 
+/// How many independent accumulator chains the force sweep keeps. Reassociating a float reduction
+/// is exactly what `-ffast-math` permits and strict IEEE forbids - so the reassociation is written
+/// out by hand instead: the same eight lanes in the C++, Rust, and Zig kernels, reduced in the same
+/// fixed order. Every compiler then faces the same strict-IEEE optimization problem with the same
+/// freedom, and the language columns compare schedulers rather than compiler flag sets.
+const FORCE_LANES: usize = 8;
+
+/// Net gravitational force on `bi` over `bodies`, in eight explicit lanes.
+#[inline]
+fn net_force(bi: &Body, bodies: &[Body]) -> Vector3 {
+    let mut fx = [0.0f32; FORCE_LANES];
+    let mut fy = [0.0f32; FORCE_LANES];
+    let mut fz = [0.0f32; FORCE_LANES];
+    let mut chunks = bodies.chunks_exact(FORCE_LANES);
+    for chunk in &mut chunks {
+        for (lane, bj) in chunk.iter().enumerate() {
+            let f = gravitational_force(bi, bj);
+            fx[lane] += f.x;
+            fy[lane] += f.y;
+            fz[lane] += f.z;
+        }
+    }
+    for (lane, bj) in chunks.remainder().iter().enumerate() {
+        let f = gravitational_force(bi, bj);
+        fx[lane] += f.x;
+        fy[lane] += f.y;
+        fz[lane] += f.z;
+    }
+    // The one reduction shape every language shares; changing it changes the bits.
+    Vector3 {
+        x: ((fx[0] + fx[1]) + (fx[2] + fx[3])) + ((fx[4] + fx[5]) + (fx[6] + fx[7])),
+        y: ((fy[0] + fy[1]) + (fy[2] + fy[3])) + ((fy[4] + fy[5]) + (fy[6] + fy[7])),
+        z: ((fz[0] + fz[1]) + (fz[2] + fz[3])) + ((fz[4] + fz[5]) + (fz[6] + fz[7])),
+    }
+}
+
 #[inline]
 fn apply_force(b: &mut Body, f: &Vector3) {
     b.velocity.x += f.x / b.mass * DT_CONST;
@@ -107,6 +162,11 @@ fn apply_force(b: &mut Body, f: &Vector3) {
     b.position.x += b.velocity.x * DT_CONST;
     b.position.y += b.velocity.y * DT_CONST;
     b.position.z += b.velocity.z * DT_CONST;
+    // ? Wrap into the unit box to keep every distance - and so every force - inside the normal
+    // ? `f32` range forever: no overflows into NaN, and no denormals for x86 to stall on.
+    b.position.x -= b.position.x.floor();
+    b.position.y -= b.position.y.floor();
+    b.position.z -= b.position.z.floor();
 }
 
 /// Return the number of logical CPUs visible to this process.
@@ -195,11 +255,7 @@ fn iteration_fu_iter_static(
             .with_pool(pool)
             .for_each_with_prong(|force, prong| {
                 let bi = &bodies_ref[prong.task_index];
-                let mut accumulator = Vector3::default();
-                for bj in bodies_ref.iter().take(n) {
-                    accumulator += gravitational_force(bi, bj);
-                }
-                *force = accumulator;
+                *force = net_force(bi, &bodies_ref[..n]);
             });
     }
     {
@@ -225,11 +281,7 @@ fn iteration_fu_iter_dynamic(
             .with_schedule(pool, fu::DynamicScheduler)
             .for_each_with_prong(|force, prong| {
                 let bi = &bodies_ref[prong.task_index];
-                let mut accumulator = Vector3::default();
-                for bj in bodies_ref.iter().take(n) {
-                    accumulator += gravitational_force(bi, bj);
-                }
-                *force = accumulator;
+                *force = net_force(bi, &bodies_ref[..n]);
             });
     }
     {
@@ -328,11 +380,7 @@ fn bodies_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> &'a 
 fn force_kernel<P: Placement>(work: WorkCtx, prong: fu::Prong) -> Vector3 {
     let local = bodies_at::<P>(work, prong.compute_domain_index);
     let bi = &local[prong.task_index];
-    let mut accumulator = Vector3::default();
-    for bj in local {
-        accumulator += gravitational_force(bi, bj);
-    }
-    accumulator
+    net_force(bi, local)
 }
 
 /// Integrates one canonical body by the force computed for it - identical for both placements.
@@ -406,12 +454,7 @@ fn iteration_rayon_static(pool: &RayonPool, bodies: &mut [Body], forces: &mut [V
                 let start = chunk_index * stride;
                 for (local, force) in force_chunk.iter_mut().enumerate() {
                     let bi = &bodies[start + local];
-                    let mut accumulator = Vector3::default();
-                    // Iterator form elides the per-element bounds check, like the ForkUnion backends above.
-                    for bj in bodies.iter().take(n) {
-                        accumulator += gravitational_force(bi, bj);
-                    }
-                    *force = accumulator;
+                    *force = net_force(bi, &bodies[..n]);
                 }
             });
     });
@@ -439,12 +482,7 @@ fn iteration_rayon_dynamic(pool: &RayonPool, bodies: &mut [Body], forces: &mut [
             .enumerate()
             .for_each(|(i, force)| {
                 let bi = &bodies[i];
-                let mut accumulator = Vector3::default();
-                // Iterator form elides the per-element bounds check, like the ForkUnion backends above.
-                for bj in bodies.iter().take(n) {
-                    accumulator += gravitational_force(bi, bj);
-                }
-                *force = accumulator;
+                *force = net_force(bi, &bodies[..n]);
             });
     });
 
@@ -471,11 +509,8 @@ async fn iteration_tokio_blocking(
         let ptr = bodies_ptr;
         set.spawn_blocking(move || unsafe {
             let bi = ptr.get(i);
-            let mut accumulator = Vector3::default();
-            for j in 0..n {
-                accumulator += gravitational_force(bi, ptr.get(j));
-            }
-            (i, accumulator)
+            let all = core::slice::from_raw_parts(ptr.get(0) as *const Body, n);
+            (i, net_force(bi, all))
         });
     }
 
@@ -614,21 +649,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     ];
     let mut forces = vec![Vector3::default(); bodies_n];
 
-    // A fixed seed - the benchmark only needs a spread of positions, not entropy, and every backend
-    // must start from the same bodies to be comparable.
-    let mut generator = rand::rngs::StdRng::seed_from_u64(0x1234_5678_9abc_def0);
-    bodies.iter_mut().for_each(|b| {
+    // Seven counter-based draws per body: three position coordinates, three velocity components, and
+    // one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    bodies.iter_mut().enumerate().for_each(|(i, b)| {
+        let counter = i as u64 * 7;
         b.position = Vector3 {
-            x: generator.random(),
-            y: generator.random(),
-            z: generator.random(),
+            x: random_unit(counter),
+            y: random_unit(counter + 1),
+            z: random_unit(counter + 2),
         };
         b.velocity = Vector3 {
-            x: generator.random(),
-            y: generator.random(),
-            z: generator.random(),
+            x: random_unit(counter + 3),
+            y: random_unit(counter + 4),
+            z: random_unit(counter + 5),
         };
-        b.mass = generator.random_range(1.0e20..1.0e25);
+        b.mass = 1.0e10 + random_unit(counter + 6) * (1.0e15 - 1.0e10);
     });
 
     let selected = match BACKENDS.iter().find(|b| b.name == backend) {

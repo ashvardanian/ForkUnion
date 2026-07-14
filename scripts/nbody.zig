@@ -93,6 +93,24 @@ const Body = struct {
     mass: f32 = 0,
 };
 
+/// The SplitMix64 avalanche behind every random draw - a pure function of the `counter`.
+///
+/// Deliberately not `std.Random.DefaultPrng`: the standard generators differ across languages - and
+/// the C++ distributions even across standard libraries - so no two harnesses would simulate the
+/// same system. Each draw is a pure function of its counter instead, and the bodies are
+/// bit-identical across the C++, Rust, and Zig ports of this hash.
+inline fn splitMix(counter: u64) u64 {
+    var x = (counter +% 1) *% 0x9E37_79B9_7F4A_7C15;
+    x = (x ^ (x >> 30)) *% 0xBF58_476D_1CE4_E5B9;
+    x = (x ^ (x >> 27)) *% 0x94D0_49BB_1331_11EB;
+    return x ^ (x >> 31);
+}
+
+/// One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`.
+inline fn randomUnit(counter: u64) f32 {
+    return @as(f32, @floatFromInt(splitMix(counter) >> 40)) * (1.0 / 16777216.0);
+}
+
 /// Fast reciprocal square root (Quake-style with one Newton iteration)
 inline fn fastRsqrt(x: f32) f32 {
     const i = 0x5f3759df -% (@as(u32, @bitCast(x)) >> 1);
@@ -117,6 +135,42 @@ inline fn gravitationalForce(bi: *const Body, bj: *const Body) Vector3 {
     };
 }
 
+/// How many independent accumulator chains the force sweep keeps. Reassociating a float reduction
+/// is exactly what fast-math permits and strict IEEE forbids - so the reassociation is written out
+/// by hand instead: the same eight lanes in the C++, Rust, and Zig kernels, reduced in the same
+/// fixed order. Every compiler then faces the same strict-IEEE optimization problem with the same
+/// freedom, and the language columns compare schedulers rather than compiler flag sets.
+const force_lanes = 8;
+
+/// Net gravitational force on `bi` over `bodies`, in eight explicit lanes.
+inline fn netForce(bi: *const Body, bodies: []const Body) Vector3 {
+    var fx = [_]f32{0} ** force_lanes;
+    var fy = [_]f32{0} ** force_lanes;
+    var fz = [_]f32{0} ** force_lanes;
+    const blocked = bodies.len - bodies.len % force_lanes;
+    var j: usize = 0;
+    while (j < blocked) : (j += force_lanes) {
+        for (0..force_lanes) |lane| {
+            const f = gravitationalForce(bi, &bodies[j + lane]);
+            fx[lane] += f.x;
+            fy[lane] += f.y;
+            fz[lane] += f.z;
+        }
+    }
+    for (blocked..bodies.len) |tail| {
+        const f = gravitationalForce(bi, &bodies[tail]);
+        fx[tail - blocked] += f.x;
+        fy[tail - blocked] += f.y;
+        fz[tail - blocked] += f.z;
+    }
+    // The one reduction shape every language shares; changing it changes the bits.
+    return .{
+        .x = ((fx[0] + fx[1]) + (fx[2] + fx[3])) + ((fx[4] + fx[5]) + (fx[6] + fx[7])),
+        .y = ((fy[0] + fy[1]) + (fy[2] + fy[3])) + ((fy[4] + fy[5]) + (fy[6] + fy[7])),
+        .z = ((fz[0] + fz[1]) + (fz[2] + fz[3])) + ((fz[4] + fz[5]) + (fz[6] + fz[7])),
+    };
+}
+
 inline fn applyForce(b: *Body, f: *const Vector3) void {
     b.velocity.x += f.x / b.mass * DT;
     b.velocity.y += f.y / b.mass * DT;
@@ -125,6 +179,11 @@ inline fn applyForce(b: *Body, f: *const Vector3) void {
     b.position.x += b.velocity.x * DT;
     b.position.y += b.velocity.y * DT;
     b.position.z += b.velocity.z * DT;
+    // ? Wrap into the unit box to keep every distance - and so every force - inside the normal
+    // ? `f32` range forever: no overflows into NaN, and no denormals for x86 to stall on.
+    b.position.x -= @floor(b.position.x);
+    b.position.y -= @floor(b.position.y);
+    b.position.z -= @floor(b.position.z);
 }
 
 // Compile-time axes - Zig takes real enums as comptime parameters. nbody is all-to-all, so there is
@@ -147,16 +206,13 @@ const WorkContext = struct {
 fn forceKernel(comptime placement: Placement) fn (fu.Prong, WorkContext) void {
     return struct {
         fn calc(prong: fu.Prong, work: WorkContext) void {
-            var acc = Vector3{};
             if (placement == .replicated) {
                 const local = work.replicas.?.onMemoryDomain(work.topology.localMemoryOf(prong.compute_domain_index));
-                const bi = &local[prong.task_index];
-                for (0..work.n) |j| acc.addAssign(gravitationalForce(bi, &local[j]));
+                work.forces_ptr[prong.task_index] = netForce(&local[prong.task_index], local[0..work.n]);
             } else {
                 const bi = &work.bodies_ptr[prong.task_index];
-                for (0..work.n) |j| acc.addAssign(gravitationalForce(bi, &work.bodies_ptr[j]));
+                work.forces_ptr[prong.task_index] = netForce(bi, work.bodies_ptr[0..work.n]);
             }
-            work.forces_ptr[prong.task_index] = acc;
         }
     }.calc;
 }
@@ -258,10 +314,7 @@ fn iterationStdThreads(allocator: std.mem.Allocator, bodies: []Body, forces: []V
             threads[spawned] = try std.Thread.spawn(.{}, struct {
                 fn calc(bodies_slice: []const Body, forces_slice: []Vector3, range_start: usize, range_end: usize) void {
                     for (range_start..range_end) |i| {
-                        const bi = &bodies_slice[i];
-                        var acc = Vector3{};
-                        for (bodies_slice) |*bj| acc.addAssign(gravitationalForce(bi, bj));
-                        forces_slice[i] = acc;
+                        forces_slice[i] = netForce(&bodies_slice[i], bodies_slice);
                     }
                 }
             }.calc, .{ bodies, forces, start, end });
@@ -437,13 +490,16 @@ pub fn main() !void {
     const forces = try allocator.alloc(Vector3, n_bodies);
     defer allocator.free(forces);
 
-    // Initialize bodies from a fixed seed - the benchmark only needs a spread of positions, not entropy.
-    var generator = std.Random.DefaultPrng.init(0x1234_5678_9abc_def0);
-    const random = generator.random();
-    for (bodies) |*body| {
-        body.position = .{ .x = random.float(f32), .y = random.float(f32), .z = random.float(f32) };
-        body.velocity = .{ .x = random.float(f32), .y = random.float(f32), .z = random.float(f32) };
-        body.mass = random.float(f32) * 9.0e24 + 1.0e20; // [1e20, 1e25)
+    // Seven counter-based draws per body: three position coordinates, three velocity components, and
+    // one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    for (bodies, 0..) |*body, i| {
+        const counter = @as(u64, i) * 7;
+        body.position = .{ .x = randomUnit(counter), .y = randomUnit(counter + 1), .z = randomUnit(counter + 2) };
+        body.velocity = .{ .x = randomUnit(counter + 3), .y = randomUnit(counter + 4), .z = randomUnit(counter + 5) };
+        // ? Round each literal to `f32` before subtracting: Zig's comptime floats are exact, and the
+        // ? folded span would otherwise differ from the C++ and Rust builds by an ULP.
+        const mass_span: f32 = @as(f32, 1.0e15) - @as(f32, 1.0e10);
+        body.mass = @as(f32, 1.0e10) + randomUnit(counter + 6) * mass_span;
     }
 
     const selected = blk: {
