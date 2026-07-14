@@ -251,8 +251,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: arm64, runner: macos-14 }
-          - { arch: x86_64, runner: macos-13 }
+          # ! macos-13 retired in late 2025 and macos-14 follows in 2026; macos-26 keeps the arm64 row
+          # ! off the chopping block and adds Xcode 26 coverage the macos-15 jobs below don't have.
+          - { arch: arm64, runner: macos-26 }
+          - { arch: x86_64, runner: macos-15-intel }
     steps:
       - name: Checkout
         uses: actions/checkout@v5

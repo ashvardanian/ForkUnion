@@ -58,9 +58,11 @@ foreach (STD IN LISTS CXX_STANDARDS)
     add_test(NAME ${TGT} COMMAND ${TGT})
     set_target_properties_for_forkunion_script(${TGT})
 
-    # Link against `libatomic` for Linux toolchains that might need it
+    # Link against `libatomic` for Linux and Android toolchains that might need it.
+    # ! Not `UNIX AND NOT APPLE`: FreeBSD matches that too, and its atomics live in
+    # ! compiler-rt - there is no separate `libatomic` for the linker to find.
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        if (UNIX AND NOT APPLE)
+        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
             target_link_libraries(${TGT} PRIVATE -latomic)
         endif ()
     endif ()
@@ -81,7 +83,7 @@ function (add_forkunion_c_test target extensions)
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${target} PRIVATE forkunion_static)
-    if (UNIX AND NOT APPLE)
+    if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
         target_link_libraries(${target} PRIVATE -latomic)
     endif ()
     add_test(NAME ${target} COMMAND ${target})
@@ -122,9 +124,9 @@ function (add_forkunion_benchmark target source fast_math)
     )
     target_link_libraries(${target} PRIVATE forkunion_static)
 
-    # Link against `libatomic` for Linux toolchains that might need it
+    # Link against `libatomic` for Linux and Android toolchains that might need it
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        if (UNIX AND NOT APPLE)
+        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
             target_link_libraries(${target} PRIVATE -latomic)
         endif ()
     endif ()

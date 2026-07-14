@@ -51,7 +51,7 @@ jobs:
   rebase:
     name: Rebase Dev. Branch
     needs: versioning
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout the latest code
         uses: actions/checkout@v5
