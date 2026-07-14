@@ -39,6 +39,8 @@ jobs:
             README.md:^\s*GIT_TAG v(\d+\.\d+\.\d+)
             README.md:^\s*forkunion\s*=\s*"(\d+\.\d+\.\d+)"
             README.md:^\s*forkunion\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
+            README.md:archive/refs/tags/v(\d+\.\d+\.\d+)\.tar\.gz
+            build.zig.zon:^\s*\.version = "(\d+\.\d+\.\d+)"
           update-major-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
           update-minor-version-in: |
@@ -75,7 +77,7 @@ jobs:
 
       - name: Build C/C++
         run: |
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential libomp-dev libnuma-dev
@@ -126,7 +128,10 @@ jobs:
           - { cc: gcc, cxx: g++, packages: build-essential }
           - { cc: clang, cxx: clang++, packages: clang libclang-rt-18-dev }
           - { sanitizer: TSan, flags: thread }
-          - { sanitizer: ASan+UBSan, flags: "address,undefined -fno-sanitize-recover=all" }
+          - {
+              sanitizer: ASan+UBSan,
+              flags: "address,undefined -fno-sanitize-recover=all",
+            }
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
@@ -137,7 +142,7 @@ jobs:
 
       - name: Install toolchain
         run: |
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y ${{ matrix.packages }}
@@ -167,7 +172,7 @@ jobs:
 
       - name: Build C/C++
         run: |
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential clang libclang-rt-18-dev libblocksruntime-dev
@@ -210,7 +215,7 @@ jobs:
 
       - name: Build C/C++
         run: |
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential libomp-dev libnuma-dev
@@ -300,7 +305,7 @@ jobs:
 
       - name: Build C/C++
         run: |
-          cmake -S . -B build_artifacts -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D CMAKE_CXX_COMPILER=$(brew --prefix llvm@${{ matrix.llvm }})/bin/clang++
+          cmake -S . -B build_artifacts -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D CMAKE_CXX_COMPILER="$(brew --prefix llvm@${{ matrix.llvm }})/bin/clang++"
           cmake --build build_artifacts --config ${{ matrix.config }} --parallel
 
       - name: Test C & C++
@@ -399,6 +404,9 @@ jobs:
           - { name: s390x, image: dockcross/linux-s390x }
           - { name: riscv64, image: dockcross/linux-riscv64 }
           - { name: ppc64le, image: dockcross/linux-ppc64le }
+          - { name: ppc, image: dockcross/linux-ppc }
+          - { name: riscv32, image: dockcross/linux-riscv32 }
+          - { name: loong64, image: dockcross/linux-loongarch64 }
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -525,7 +533,7 @@ jobs:
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y qemu-system-x86 cloud-image-utils genisoimage
@@ -539,8 +547,9 @@ jobs:
       # The sources travel on a second ISO, so the guest needs no network beyond `apt`.
       - name: Pack the sources onto an ISO
         run: |
-          tar czf repo.tgz --exclude=.git --exclude='build*' --exclude=target --exclude='*.qcow2' .
-          mkdir repoiso && mv repo.tgz repoiso/
+          # The tarball must land OUTSIDE the tree being read, or tar meets its own output mid-scan.
+          tar czf /tmp/repo.tgz --exclude=.git --exclude='build*' --exclude=target --exclude='*.qcow2' .
+          mkdir repoiso && mv /tmp/repo.tgz repoiso/repo.tgz
           genisoimage -quiet -o repo.iso -volid FUREPO -joliet -rock repoiso
 
       # The node-count check guards the harness itself: a typo in the `-numa` arguments would
@@ -613,7 +622,7 @@ jobs:
 
       - name: Install toolchain
         run: |
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential
@@ -622,9 +631,9 @@ jobs:
       - name: Build & test C++ and the C shim (${{ matrix.name }})
         run: |
           set -euxo pipefail
-          LIBS="-latomic"
-          if [ "${{ matrix.libnuma }}" = "true" ]; then LIBS="-lnuma $LIBS"; fi
-          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude scripts/test.cpp -o test_cpp $LIBS
+          LIBS=(-latomic)
+          if [ "${{ matrix.libnuma }}" = "true" ]; then LIBS=(-lnuma "${LIBS[@]}"); fi
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude scripts/test.cpp -o test_cpp "${LIBS[@]}"
           ./test_cpp
           g++ -std=c++17 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
 
@@ -646,7 +655,7 @@ jobs:
 
       - name: Install toolchain
         run: |
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libnuma-dev
@@ -681,7 +690,7 @@ jobs:
 
       - name: Install toolchain
         run: |
-          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libnuma-dev

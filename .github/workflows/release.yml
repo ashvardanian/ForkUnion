@@ -37,6 +37,8 @@ jobs:
             README.md:^\s*GIT_TAG v(\d+\.\d+\.\d+)
             README.md:^\s*forkunion\s*=\s*"(\d+\.\d+\.\d+)"
             README.md:^\s*forkunion\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
+            README.md:archive/refs/tags/v(\d+\.\d+\.\d+)\.tar\.gz
+            build.zig.zon:^\s*\.version = "(\d+\.\d+\.\d+)"
           update-major-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
           update-minor-version-in: |
