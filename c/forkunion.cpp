@@ -17,20 +17,21 @@ namespace fu = ashvardanian::forkunion;
 
 using thread_allocator_t = std::allocator<std::thread>;
 
-/** @brief The concrete pool type for a shape and a yield type - the reverse map from a pool's `kind_k`. */
-template <fu::pool_kind_t kind_, typename yield_type_>
+/** @brief The concrete pool type for a shape, a waiter, and a cache-hints policy - the reverse map
+ *         from a pool's `kind_k` and its stored capability bits. */
+template <fu::pool_kind_t kind_, typename yield_type_, typename cache_hints_type_>
 struct pool_for;
-template <typename yield_type_>
-struct pool_for<fu::pool_kind_t::flat_k, yield_type_> {
-    using type = fu::flat_pool<thread_allocator_t, yield_type_>;
+template <typename yield_type_, typename cache_hints_type_>
+struct pool_for<fu::pool_kind_t::flat_k, yield_type_, cache_hints_type_> {
+    using type = fu::flat_pool<thread_allocator_t, yield_type_, cache_hints_type_>;
 };
-template <typename yield_type_>
-struct pool_for<fu::pool_kind_t::colocated_k, yield_type_> {
-    using type = fu::colocated_pool<yield_type_>;
+template <typename yield_type_, typename cache_hints_type_>
+struct pool_for<fu::pool_kind_t::colocated_k, yield_type_, cache_hints_type_> {
+    using type = fu::colocated_pool<yield_type_, cache_hints_type_>;
 };
-template <typename yield_type_>
-struct pool_for<fu::pool_kind_t::distributed_k, yield_type_> {
-    using type = fu::distributed_pool<yield_type_>;
+template <typename yield_type_, typename cache_hints_type_>
+struct pool_for<fu::pool_kind_t::distributed_k, yield_type_, cache_hints_type_> {
+    using type = fu::distributed_pool<yield_type_, cache_hints_type_>;
 };
 
 /**
@@ -49,42 +50,51 @@ struct pool_variants_t {
         static constexpr std::size_t alignment_k = std::max({alignof(types_)...});
     };
 
+    /*  Every (waiter, cache-hints) pair the `select_pool` cascade below may instantiate, spelled
+     *  out explicitly per shape. A missed entry cannot silently under-size the storage: `construct`
+     *  static-asserts every pool it places against these bounds, so drift fails the build.  */
     using pool_traits_t = max_size_align< //
 #if FU_DETECT_ARCH_X86_64_
-        fu::flat_pool<thread_allocator_t, fu::x86_pause_t>,  //
-        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t>, //
+        fu::flat_pool<thread_allocator_t, fu::x86_pause_t, fu::standard_cache_hints_t>,  //
+        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::standard_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::x86_cache_hints_t>,      //
 #elif FU_DETECT_ARCH_ARM64_
-        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t>, //
+        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
 #if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
-        fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t>, //
+        fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
 #endif
 #elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
-        fu::flat_pool<thread_allocator_t, fu::risc5_pause_t>, //
-        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t>,   //
+        fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
+        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cache_hints_t>,     //
+        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
 #endif
 
-        fu::colocated_pool<fu::standard_yield_t>,   // ? Single-compute-domain pools
-        fu::distributed_pool<fu::standard_yield_t>, // ? Whole-machine pools
+        fu::colocated_pool<fu::standard_yield_t, fu::standard_cache_hints_t>,   // ? Single-compute-domain pools
+        fu::distributed_pool<fu::standard_yield_t, fu::standard_cache_hints_t>, // ? Whole-machine pools
 #if FU_DETECT_ARCH_X86_64_
-        fu::colocated_pool<fu::x86_pause_t>,    //
-        fu::colocated_pool<fu::x86_tpause_t>,   //
-        fu::distributed_pool<fu::x86_pause_t>,  //
-        fu::distributed_pool<fu::x86_tpause_t>, //
+        fu::colocated_pool<fu::x86_pause_t, fu::standard_cache_hints_t>,    //
+        fu::colocated_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>,   //
+        fu::colocated_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>,        //
+        fu::distributed_pool<fu::x86_pause_t, fu::standard_cache_hints_t>,  //
+        fu::distributed_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>, //
+        fu::distributed_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>,      //
 #elif FU_DETECT_ARCH_ARM64_
-        fu::colocated_pool<fu::arm64_yield_t>,   //
-        fu::distributed_pool<fu::arm64_yield_t>, //
+        fu::colocated_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>,   //
+        fu::distributed_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
 #if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
-        fu::colocated_pool<fu::arm64_wfet_t>,   //
-        fu::distributed_pool<fu::arm64_wfet_t>, //
+        fu::colocated_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>,   //
+        fu::distributed_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
 #endif
 #elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
-        fu::colocated_pool<fu::risc5_pause_t>,   //
-        fu::colocated_pool<fu::risc5_wrs_t>,     //
-        fu::distributed_pool<fu::risc5_pause_t>, //
-        fu::distributed_pool<fu::risc5_wrs_t>,   //
+        fu::colocated_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,     //
+        fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,       //
+        fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>,   //
+        fu::distributed_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
+        fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,     //
+        fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
 #endif
 
-        fu::flat_pool<thread_allocator_t, fu::standard_yield_t> //
+        fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
         >;
 
     /** @brief Raw aligned storage holding the one live pool, reinterpreted per `kind_` and `capabilities_`. */
@@ -104,38 +114,91 @@ struct pool_variants_t {
 
     template <typename pool_type_, typename... args_types_>
     void construct(args_types_ &&...args) noexcept {
+        // The drift guard: a pool type missing from `pool_traits_t`'s explicit list fails here at
+        // compile time, instead of silently under-sizing the storage.
+        static_assert(sizeof(pool_type_) <= pool_traits_t::size_k, "Add this pool to `pool_traits_t`");
+        static_assert(alignof(pool_type_) <= pool_traits_t::alignment_k, "Add this pool to `pool_traits_t`");
         new (storage_) pool_type_(std::forward<args_types_>(args)...);
         kind_ = pool_type_::kind_k;
-        capabilities_ = pool_type_::micro_yield_t::capability_k;
+        // The waiter and the hints declare distinct bits, so their union names the combination
+        // unambiguously, and `select_pool` decodes the exact type back - a deterministic round-trip.
+        capabilities_ = static_cast<fu::capabilities_t>(pool_type_::micro_yield_t::capability_k |
+                                                        pool_type_::cache_hints_t::capability_k);
     }
 };
 
+/** @brief Carries a concrete pool type into a generic action through overload resolution. */
+template <typename pool_type_>
+struct pool_type_tag_t {
+    using type = pool_type_;
+};
+
+/** @brief Whether every capability bit the @p yield_type_ and @p hints_type_ declare is in @p bits. */
+template <typename yield_type_, typename hints_type_>
+static bool selects(fu::capabilities_t const bits) noexcept {
+    auto const required = yield_type_::capability_k | hints_type_::capability_k;
+    return (bits & required) == static_cast<fu::capabilities_t>(required);
+}
+
 /**
- *  @brief Dispatches to the stored pool of a known @p kind_, decoding only the single waiter bit.
- *  @sa `visit`, which selects the kind first. There is no bitmask overlap: the shape is the tag, the
- *       waiter is one bit, and `pool_for` turns the pair back into the concrete type.
+ *  @brief The one capability→type cascade: walks the silicon-real (waiter, cache-hints) pairs, most
+ *         capable first, and invokes @p action with the tag of the first pair whose every declared
+ *         bit is in @p bits; anything unexpected degrades to the nearest pair that only drops
+ *         capabilities, down to the portable `(standard_yield_t, standard_cache_hints_t)` fallback.
+ *
+ *  Serves both directions - `construct_pool` passes the probed machine capabilities, `visit_kind`
+ *  passes the bits stored at construction - so selection and decoding can never disagree.
+ */
+template <fu::pool_kind_t kind_, typename action_type_>
+static auto select_pool(FU_MAYBE_UNUSED_ fu::capabilities_t const bits, action_type_ &&action) {
+#if FU_DETECT_ARCH_X86_64_
+    // WAITPKG ships in Tremont, Alder Lake, and Sapphire Rapids onward; CLDEMOTE only ever shipped
+    // alongside it (Tremont, SPR, GNR - fused off on Alder/Raptor/Meteor client parts), so the
+    // (pause + cldemote) cell has no silicon and is deliberately not offered.
+    if (selects<fu::x86_tpause_t, fu::x86_cache_hints_t>(bits))
+        return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_tpause_t, fu::x86_cache_hints_t>::type> {});
+    if (selects<fu::x86_tpause_t, fu::standard_cache_hints_t>(bits))
+        return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_tpause_t, fu::standard_cache_hints_t>::type> {});
+    if (selects<fu::x86_pause_t, fu::standard_cache_hints_t>(bits))
+        return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_pause_t, fu::standard_cache_hints_t>::type> {});
+#elif FU_DETECT_ARCH_ARM64_
+    // `DC CVAC` legality is an OS property (`SCTLR_EL1.UCI`), so the hints half is decided at
+    // compile time by `preferred_cache_hints_t` - the clean on Linux, a no-op elsewhere - and the
+    // runtime axis stays the waiter alone.
+#if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
+    if (selects<fu::arm64_wfet_t, fu::preferred_cache_hints_t>(bits))
+        return action(
+            pool_type_tag_t<typename pool_for<kind_, fu::arm64_wfet_t, fu::preferred_cache_hints_t>::type> {});
+#endif
+    if (selects<fu::arm64_yield_t, fu::preferred_cache_hints_t>(bits))
+        return action(
+            pool_type_tag_t<typename pool_for<kind_, fu::arm64_yield_t, fu::preferred_cache_hints_t>::type> {});
+#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
+    // RVA23 mandates Zawrs and Zicbom together, so the monitored waiter travels with the
+    // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space
+    // `prefetch.w` promotion that can never fault.
+    if (selects<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>(bits))
+        return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
+    if (selects<fu::risc5_wrs_t, fu::risc5_cache_hints_t>(bits))
+        return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cache_hints_t>::type> {});
+    if (selects<fu::risc5_pause_t, fu::risc5_cache_hints_t>(bits))
+        return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_pause_t, fu::risc5_cache_hints_t>::type> {});
+#endif
+    return action(pool_type_tag_t<typename pool_for<kind_, fu::standard_yield_t, fu::standard_cache_hints_t>::type> {});
+}
+
+/**
+ *  @brief Dispatches to the stored pool of a known @p kind_, decoding the stored capability bits
+ *         through the same `select_pool` cascade that chose them at construction.
+ *  @sa `visit`, which selects the kind first. There is no bitmask overlap: the shape is the tag,
+ *       and the waiter and hints bits together name the concrete type.
  */
 template <fu::pool_kind_t kind_, typename visitor_type_>
 auto visit_kind(visitor_type_ &&visitor, pool_variants_t &variants) {
-#if FU_DETECT_ARCH_X86_64_
-    if (variants.capabilities_ & fu::capability_x86_tpause_k)
-        return visitor(*reinterpret_cast<typename pool_for<kind_, fu::x86_tpause_t>::type *>(variants.storage_));
-    if (variants.capabilities_ & fu::capability_x86_pause_k)
-        return visitor(*reinterpret_cast<typename pool_for<kind_, fu::x86_pause_t>::type *>(variants.storage_));
-#elif FU_DETECT_ARCH_ARM64_
-#if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
-    if (variants.capabilities_ & fu::capability_arm64_wfet_k)
-        return visitor(*reinterpret_cast<typename pool_for<kind_, fu::arm64_wfet_t>::type *>(variants.storage_));
-#endif
-    if (variants.capabilities_ & fu::capability_arm64_yield_k)
-        return visitor(*reinterpret_cast<typename pool_for<kind_, fu::arm64_yield_t>::type *>(variants.storage_));
-#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
-    if (variants.capabilities_ & fu::capability_risc5_wrs_k)
-        return visitor(*reinterpret_cast<typename pool_for<kind_, fu::risc5_wrs_t>::type *>(variants.storage_));
-    if (variants.capabilities_ & fu::capability_risc5_pause_k)
-        return visitor(*reinterpret_cast<typename pool_for<kind_, fu::risc5_pause_t>::type *>(variants.storage_));
-#endif
-    return visitor(*reinterpret_cast<typename pool_for<kind_, fu::standard_yield_t>::type *>(variants.storage_));
+    return select_pool<kind_>(variants.capabilities_, [&](auto tag) {
+        using pool_t = typename decltype(tag)::type;
+        return visitor(*reinterpret_cast<pool_t *>(variants.storage_));
+    });
 }
 
 /** @brief Runs @p visitor on the live pool and returns its result, or @p empty on empty storage. */
@@ -162,41 +225,19 @@ void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
 }
 
 /**
- *  @brief Constructs into @p variants the pool of the requested @p kind_k, picking the best waiter
- *         the @p effective capabilities allow and forwarding @p args to that pool's constructor.
+ *  @brief Constructs into @p variants the pool of the requested @p kind_k, picking the best
+ *         (waiter, cache-hints) pair the @p effective capabilities allow and forwarding @p args to
+ *         that pool's constructor.
  *
- *  One waiter cascade for every pool shape - the sole place the C ABI turns a capability mask into a
- *  concrete `flat_pool` / `colocated_pool` / `distributed_pool` instantiation.
+ *  One cascade for every pool shape - `select_pool` is the sole place the C ABI turns a capability
+ *  mask into a concrete `flat_pool` / `colocated_pool` / `distributed_pool` instantiation.
  */
 template <fu::pool_kind_t pool_kind_, typename... args_types_>
-static void construct_pool(pool_variants_t &variants, FU_MAYBE_UNUSED_ fu::capabilities_t effective,
-                           args_types_ &&...args) noexcept {
-#if FU_DETECT_ARCH_X86_64_
-    if (effective & fu::capability_x86_tpause_k)
-        return variants.construct<typename pool_for<pool_kind_, fu::x86_tpause_t>::type>(
-            std::forward<args_types_>(args)...);
-    if (effective & fu::capability_x86_pause_k)
-        return variants.construct<typename pool_for<pool_kind_, fu::x86_pause_t>::type>(
-            std::forward<args_types_>(args)...);
-#elif FU_DETECT_ARCH_ARM64_
-#if FU_DETECT_INLINE_ASM_SUPPORT_ // ? `WFET` is inline-assembly only
-    if (effective & fu::capability_arm64_wfet_k)
-        return variants.construct<typename pool_for<pool_kind_, fu::arm64_wfet_t>::type>(
-            std::forward<args_types_>(args)...);
-#endif
-    if (effective & fu::capability_arm64_yield_k)
-        return variants.construct<typename pool_for<pool_kind_, fu::arm64_yield_t>::type>(
-            std::forward<args_types_>(args)...);
-#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
-    if (effective & fu::capability_risc5_wrs_k)
-        return variants.construct<typename pool_for<pool_kind_, fu::risc5_wrs_t>::type>(
-            std::forward<args_types_>(args)...);
-    if (effective & fu::capability_risc5_pause_k)
-        return variants.construct<typename pool_for<pool_kind_, fu::risc5_pause_t>::type>(
-            std::forward<args_types_>(args)...);
-#endif
-    return variants.construct<typename pool_for<pool_kind_, fu::standard_yield_t>::type>(
-        std::forward<args_types_>(args)...);
+static void construct_pool(pool_variants_t &variants, fu::capabilities_t effective, args_types_ &&...args) noexcept {
+    select_pool<pool_kind_>(effective, [&](auto tag) {
+        using pool_t = typename decltype(tag)::type;
+        variants.construct<pool_t>(std::forward<args_types_>(args)...);
+    });
 }
 
 /**
