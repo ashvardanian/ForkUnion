@@ -752,6 +752,17 @@ inline capabilities_t ram_capabilities() noexcept {
         }
     }
 
+#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+    // The domainset syscalls always ship with the kernel; `vm.ndomains` answers whether it reports
+    // any memory domains to place on. Superpages ride along: `MAP_ALIGNED_SUPER` is an alignment
+    // hint with a base-page fallback, so claiming it can never promise more than the kernel honours.
+    {
+        int domains = 0;
+        std::size_t domains_size = sizeof(domains);
+        if (::sysctlbyname("vm.ndomains", &domains, &domains_size, nullptr, 0) == 0 && domains >= 1)
+            caps |= capability_place_memory_on_domain_k | capability_place_huge_pages_on_domain_k;
+    }
+
 #endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
 
     return caps;
