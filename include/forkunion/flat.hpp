@@ -102,12 +102,14 @@ namespace forkunion {
  *
  *  @tparam allocator_type_ The type of the allocator to be used for the thread pool.
  *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
+ *  @tparam cache_hints_type_ The cache-line demote/promote policy for the dynamic claim cursors.
  *  @tparam index_type_ Use `std::size_t`, but or a smaller type for debugging.
  *  @tparam alignment_ The alignment of the thread pool. Defaults to `default_alignment_k`.
  */
 template <                                                  //
     typename allocator_type_ = std::allocator<std::thread>, //
     typename micro_yield_type_ = standard_yield_t,          //
+    typename cache_hints_type_ = standard_cache_hints_t,    //
     typename index_type_ = std::size_t,                     //
     std::size_t alignment_ = default_alignment_k            //
     >
@@ -116,6 +118,7 @@ class flat_pool {
   public:
     using allocator_t = allocator_type_;
     using micro_yield_t = micro_yield_type_;
+    using cache_hints_t = cache_hints_type_;
     static constexpr pool_kind_t kind_k = pool_kind_t::flat_k;
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(is_power_of_two(alignment_k), "Alignment must be a power of 2");
@@ -164,6 +167,8 @@ class flat_pool {
 
     static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
                   "Yield must be callable as `yield(watched_atomic, observed_value, thread_index)`");
+    static_assert(is_cache_hints_functor<cache_hints_t>::value,
+                  "Cache hints must be callable as `hints(address, demote_line_k)` and `(address, promote_line_k)`");
 
   private:
     // Thread-pool-specific variables:

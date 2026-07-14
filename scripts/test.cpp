@@ -102,9 +102,12 @@ static void install_crash_handlers_() noexcept {
 static void install_crash_handlers_() noexcept {}
 #endif
 
-using fu32_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
-using fu16_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
-using fu8_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
+using fu32_t =
+    fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t, std::uint32_t>;
+using fu16_t =
+    fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t, std::uint16_t>;
+using fu8_t =
+    fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t, std::uint8_t>;
 
 /*
  *  Explicitly instantiate the thread-pools to cover all of their logic, but avoid the
@@ -112,9 +115,12 @@ using fu8_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, s
  *
  *  template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::size_t>
  */
-template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint32_t>;
-template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint16_t>;
-template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::uint8_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
+                             std::uint32_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
+                             std::uint16_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
+                             std::uint8_t>;
 
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 template struct fu::colocated_pool<>;

@@ -116,7 +116,8 @@ struct alignas(default_alignment_k) pinned_thread_t {
  *  The synchronization protocol - epochs, generations, contributor counting, and the memory
  *  ordering rules - is identical to `flat_pool`; @sa @ref pool_concurrency_model.
  */
-template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ = default_alignment_k>
+template <typename micro_yield_type_ = standard_yield_t, typename cache_hints_type_ = standard_cache_hints_t,
+          std::size_t alignment_ = default_alignment_k>
 struct colocated_pool {
 
   public:
@@ -126,6 +127,7 @@ struct colocated_pool {
     using allocator_t = std::allocator<char>; // ? One memory domain; there is nothing to place
 #endif
     using micro_yield_t = micro_yield_type_;
+    using cache_hints_t = cache_hints_type_;
     static constexpr pool_kind_t kind_k = pool_kind_t::colocated_k;
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(alignment_k > 0 && (alignment_k & (alignment_k - 1)) == 0, "Alignment must be a power of 2");
@@ -143,6 +145,8 @@ struct colocated_pool {
 
     static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
                   "Yield must be callable as `yield(watched_atomic, observed_value, thread_index)`");
+    static_assert(is_cache_hints_functor<cache_hints_t>::value,
+                  "Cache hints must be callable as `hints(address, demote_line_k)` and `(address, promote_line_k)`");
 
   private:
     using allocator_traits_t = std::allocator_traits<allocator_t>;
@@ -1086,10 +1090,11 @@ class invoke_distributed_for_n_dynamic {
  *  This thread-pool doesn't (yet) provide "reductions" or other reach operations, but uses a
  *  small pool of NUMA-local memory to dampen the cost of `for_n_dynamic` scheduling.
  */
-template <typename micro_yield_type_ = standard_yield_t, std::size_t alignment_ = default_alignment_k>
+template <typename micro_yield_type_ = standard_yield_t, typename cache_hints_type_ = standard_cache_hints_t,
+          std::size_t alignment_ = default_alignment_k>
 struct distributed_pool {
 
-    using colocated_pool_t = colocated_pool<micro_yield_type_, alignment_>;
+    using colocated_pool_t = colocated_pool<micro_yield_type_, cache_hints_type_, alignment_>;
     using machine_topology_t = machine_topology<>;
     static constexpr pool_kind_t kind_k = pool_kind_t::distributed_k;
 
@@ -1100,6 +1105,7 @@ struct distributed_pool {
 #endif
 
     using micro_yield_t = typename colocated_pool_t::micro_yield_t;
+    using cache_hints_t = typename colocated_pool_t::cache_hints_t;
     using index_t = typename colocated_pool_t::index_t;
     using epoch_index_t = typename colocated_pool_t::epoch_index_t;
     using generation_t = epoch_index_t;
