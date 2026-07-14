@@ -685,6 +685,21 @@ inline scalar_type_ add_sat(scalar_type_ a, scalar_type_ b) noexcept {
 #endif
 }
 
+/**
+ *  @brief Byte-wise `memcpy` of @p from into @p to, written as an explicit loop.
+ *
+ *  Not `std::memcpy`: the wait monitors that call this (`arm64_wfet_t`, `risc5_wrs_t`) are pinned to a
+ *  narrower `target(...)` than `-march=native`, where the fortified `always_inline` `memcpy` cannot inline
+ *  ("target specific option mismatch"). Reading and writing through `unsigned char` keeps it well-defined.
+ */
+template <typename value_type_>
+inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
+    unsigned char const *from_bytes = reinterpret_cast<unsigned char const *>(from);
+    unsigned char *to_bytes = reinterpret_cast<unsigned char *>(to);
+    for (std::size_t byte_index = 0; byte_index < sizeof(value_type_); ++byte_index)
+        to_bytes[byte_index] = from_bytes[byte_index];
+}
+
 /** @brief Checks if the @p x is a power of two. */
 constexpr bool is_power_of_two(std::size_t x) noexcept { return x && ((x & (x - 1)) == 0); }
 

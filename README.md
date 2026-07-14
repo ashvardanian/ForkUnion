@@ -1,6 +1,6 @@
 # ForkUnion
 
-[![`forkunion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
+[![`ForkUnion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
 
 __ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, and Zig — built for tight `#pragma omp parallel for`-style loops, not task queues. 🍴
 
@@ -763,28 +763,31 @@ Implementations live in `scripts/nbody.{cpp,rs,zig}` and `scripts/propagation.{c
 Microseconds per iteration at `N=512` bodies on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
 Lower is better; this is where fork-join runtimes genuinely differ.
 
-| Machine                    | ForkUnion, C++ | ForkUnion, Rust |  OpenMP, C++ |  Rayon, Rust | Taskflow, C++ |
-| :------------------------- | -------------: | --------------: | -----------: | -----------: | ------------: |
-| 18× Apple M5 Pro, macOS    | __24 / 26 µs__ |      28 / 32 µs | 115 / 137 µs | 222 / 339 µs |    83 / 94 µs |
-| 128× Intel SPR, Linux      | __40 / 67 µs__ |      54 / 86 µs | 115 / 226 µs | 483 / 739 µs |  666 / 694 µs |
-| 192× AWS Graviton 5, Linux |              — |               — |            — |            — |             — |
+| Machine                    |  ForkUnion, C++ | ForkUnion, Rust |  OpenMP, C++ |  Rayon, Rust | Taskflow, C++ |
+| :------------------------- | --------------: | --------------: | -----------: | -----------: | ------------: |
+| 18× Apple M5 Pro, macOS    |  __24 / 26__ µs |      28 / 32 µs | 115 / 137 µs | 222 / 339 µs |    83 / 94 µs |
+| 24× Intel Core i9, Windows |    148 / 143 µs | __112 / 91__ µs | 360 / 627 µs | 151 / 151 µs | 812 / 1026 µs |
+| 128× Intel SPR, Linux      |      54 / 86 µs |  __40 / 67__ µs | 115 / 226 µs | 483 / 739 µs |  666 / 694 µs |
+| 192× AWS Graviton 5, Linux | 47 / __136__ µs | __42__ / 137 µs | 266 / 216 µs | 490 / 580 µs |  602 / 639 µs |
 
 ### Connected Components — Fork-Join Frequency
 
 Traversed edges per second on a ~27M-edge "necklace" of R-MAT communities, on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
 Higher is better; every pass converges in exactly 84 rounds - 84 fork-join dispatches - bit-identical in every cell and language.
 
-| Machine                    |        ForkUnion, C++ |   ForkUnion, Rust |       OpenMP, C++ |       Rayon, Rust |    Taskflow, C++ |
-| :------------------------- | --------------------: | ----------------: | ----------------: | ----------------: | ---------------: |
-| 18× Apple M5 Pro, macOS    | __24.7 / 20.5 GTEPS__ | 19.4 / 20.2 GTEPS | 23.0 / 18.3 GTEPS | 23.8 / 14.6 GTEPS | 21.4 / 1.3 GTEPS |
-| 128× Intel SPR, Linux      | __65.2 / 31.4 GTEPS__ | 46.5 / 20.9 GTEPS |  28.2 / 0.4 GTEPS |   8.5 / 6.5 GTEPS | 25.1 / 0.5 GTEPS |
-| 192× AWS Graviton 5, Linux |                     — |                 — |                 — |                 — |                — |
+| Machine                    |        ForkUnion, C++ |        ForkUnion, Rust |          OpenMP, C++ |       Rayon, Rust |    Taskflow, C++ |
+| :------------------------- | --------------------: | ---------------------: | -------------------: | ----------------: | ---------------: |
+| 18× Apple M5 Pro, macOS    | __24.7 / 20.5__ GTEPS |      19.4 / 20.2 GTEPS |    23.0 / 18.3 GTEPS | 23.8 / 14.6 GTEPS | 21.4 / 1.3 GTEPS |
+| 24× Intel Core i9, Windows |  10.0 / __7.2__ GTEPS |        5.2 / 5.5 GTEPS | __11.4__ / 0.1 GTEPS |   9.4 / 5.2 GTEPS |  6.6 / 0.7 GTEPS |
+| 128× Intel SPR, Linux      |     46.5 / 20.9 GTEPS |  __65.2 / 31.4__ GTEPS |     28.2 / 0.4 GTEPS |   8.5 / 6.5 GTEPS | 25.1 / 0.5 GTEPS |
+| 192× AWS Graviton 5, Linux |    192.6 / 77.6 GTEPS | __258.7 / 87.3__ GTEPS |     53.9 / 0.4 GTEPS |   8.4 / 6.2 GTEPS | 53.0 / 0.4 GTEPS |
 
 What the spread means - all on the 128× SPR, same binaries, same graph:
 
 - __The static column is the fork-join tax, compounded 84 times per pass__: every runtime sweeps the identical bandwidth-bound round, so the entire spread is scheduling - dispatch latency, barrier cost, and thread placement - never arithmetic.
 - __The dynamic column is the claim architecture, ~88M one-vertex claims per pass__: ForkUnion claims from private `fetch_add` cursors, Rayon steals halves through its CAS deques, and OpenMP's and Taskflow's shared queues collapse - a 128-thread contention effect for OpenMP, whose queue survives the M5 Pro's 18 threads, while Taskflow's collapse reproduces even there.
 - __The two ForkUnion columns are the same pool underneath__: the scheduler, the graph, and the labels are bit-identical, so the gap between them - Rust ahead on SPR, behind on the M5 Pro - is compiler codegen of the compute loops, not the claims.
+- __Which of those two columns leads is a toolchain detail__: the compilers vectorize the identical kernel slightly differently - on the 24× i9, LLVM widens the fast-inverse-square-root to 256-bit lanes where MinGW-GCC keeps its integer lanes at 128-bit, so Rust pulls ahead - and Rust can, in rare cases, reach more of a host's instruction set through runtime dispatch.
 
 > ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, one warmup pass, and the same one-vertex dynamic grain in every runtime.
 > The finer per-benchmark protocol - scheduling equivalents, page-placement controls, and what each knob defaults to - lives in the `scripts/nbody.*` and `scripts/propagation.*` headers.

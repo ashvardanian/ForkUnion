@@ -315,9 +315,9 @@ struct arm64_wfet_t {
         static_assert(sizeof(value_type_) <= 8, "The exclusive monitor watches at most a 64-bit word");
         void const *const watched_address = &watched;
 
-        // Compare bit patterns, so an enum like `mood_t`, or any trivially-copyable word, works unchanged.
+        // Compare bit patterns, so an enum or any trivially-copyable word works unchanged.
         std::uint64_t observed_bits = 0;
-        std::memcpy(&observed_bits, &observed, sizeof(value_type_));
+        copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
 
         // Arm the monitor with a single-copy-atomic exclusive load of the matching width. A store from
         // any core clears the monitor, and that is what releases the wait below without a timeout. The
@@ -424,9 +424,9 @@ struct risc5_wrs_t {
     static inline bool arm_reservation_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
         void const *const watched_address = &watched;
 
-        // Compare bit patterns, so an enum like `mood_t`, or any trivially-copyable word, works unchanged.
+        // Compare bit patterns, so an enum or any trivially-copyable word works unchanged.
         std::uint64_t observed_bits = 0;
-        std::memcpy(&observed_bits, &observed, sizeof(value_type_));
+        copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
 
         if constexpr (sizeof(value_type_) == 8) {
             // Arm the reservation and read the double-word.
