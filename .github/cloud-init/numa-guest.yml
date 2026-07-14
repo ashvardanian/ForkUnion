@@ -1,0 +1,30 @@
+#cloud-config
+# First-boot script for the `test_numa_shapes` VMs in `prerelease.yml`: find the ISO carrying the
+# packed checkout, extract it, then build and test it, narrating to the serial console. The host
+# reads two sentinels back - `FU_VM_NODES=N nodes` proves QEMU produced the requested shape, and
+# `FU_VM_DONE rc=0` is the verdict - so this file stays static and needs no per-matrix templating.
+runcmd:
+  - |
+    exec > /dev/console 2>&1
+    set -x
+
+    mkdir -p /mnt/repo
+    for device in /dev/vdb /dev/vdc; do
+      mount -o ro "$device" /mnt/repo 2>/dev/null && [ -f /mnt/repo/repo.tgz ] && break
+      umount /mnt/repo 2>/dev/null || true
+    done
+    tar xzf /mnt/repo/repo.tgz -C /root
+
+    export DEBIAN_FRONTEND=noninteractive
+    echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/99-retries
+    apt-get update -q && apt-get install -yq cmake git g++ libnuma-dev numactl
+
+    echo "FU_VM_NODES=$(ls -d /sys/devices/system/node/node* | wc -l) nodes"
+    numactl -H
+
+    cd /root
+    cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo
+    cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+    ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
+    echo "FU_VM_DONE rc=$?"
+    poweroff

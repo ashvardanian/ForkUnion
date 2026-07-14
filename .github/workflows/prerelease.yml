@@ -6,8 +6,10 @@ on:
   pull_request:
     branches: ["main-dev"]
 
-env:
-  GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+# A superseded push needs no verdict; cancel its jobs and spend the runners on the new head.
+concurrency:
+  group: pre-release-${{ github.ref }}
+  cancel-in-progress: true
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
@@ -17,6 +19,9 @@ jobs:
   versioning:
     name: Update Version
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }} # ? Scoped here; no other job may see it
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -42,9 +47,24 @@ jobs:
             include/forkunion.hpp:^#define FORKUNION_VERSION_PATCH (\d+)
           dry-run: "true"
 
+  # CI for the CI: `actionlint` catches expression typos, bad shell quoting, and matrix drift in
+  # these workflows before a broken job silently stops guarding anything.
+  lint_workflows:
+    name: Lint Workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Run actionlint
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
   test_ubuntu_gcc:
     name: Ubuntu (GCC)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       CC: gcc
       CXX: g++
@@ -55,22 +75,17 @@ jobs:
 
       - name: Build C/C++
         run: |
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential libomp-dev libnuma-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
-      - name: Test C++
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_cpp17
-          build_artifacts/forkunion_test_cpp20
-          build_artifacts/forkunion_test_cpp23
 
-      - name: Test C
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_c11
-          build_artifacts/forkunion_test_c_gcc_nested
+      # CMake registers every test it builds - compiler-extension ones included - so `ctest` is the
+      # single source of truth and a new test target joins CI without a workflow edit.
+      - name: Test C & C++
+        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
 
       - name: Set up Rust
         run: |
@@ -96,35 +111,52 @@ jobs:
       - name: Test Zig
         run: zig build test
 
-      # Sanitizers reuse this job's compiler; restricted to the NUMA-free
-      # basic_pool, whose pinned NUMA path stalls under ThreadSanitizer.
-      - name: Build & Test under ThreadSanitizer
-        env:
-          TSAN_OPTIONS: halt_on_error=1
+  # Sanitizers get their own rows so the platform jobs stay on the critical path with one build
+  # each. Restricted to the NUMA-free basic_pool, whose pinned NUMA path stalls under TSan.
+  test_ubuntu_sanitizers:
+    name: Ubuntu (${{ matrix.cc }}, ${{ matrix.sanitizer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        sanitizer: [TSan, ASan+UBSan]
+        include:
+          - { cc: gcc, cxx: g++, packages: build-essential }
+          - { cc: clang, cxx: clang++, packages: clang libclang-rt-18-dev }
+          - { sanitizer: TSan, flags: thread }
+          - { sanitizer: ASan+UBSan, flags: "address,undefined -fno-sanitize-recover=all" }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      TSAN_OPTIONS: halt_on_error=1 # ? Ignored by the ASan rows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
         run: |
-          set -euxo pipefail
-          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
-            -D CMAKE_C_FLAGS="-fsanitize=thread -g" -D CMAKE_CXX_FLAGS="-fsanitize=thread -g" \
-            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
-          cmake --build build_tsan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
-          build_tsan/forkunion_test_cpp17
-          build_tsan/forkunion_test_cpp20
-          build_tsan/forkunion_test_cpp23
-      - name: Build & Test under Address+UB Sanitizer
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
+          sudo apt update
+          sudo apt install -y ${{ matrix.packages }}
+
+      - name: Build under the sanitizer
         run: |
-          set -euxo pipefail
-          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
-            -D CMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
-            -D CMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
-            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-          cmake --build build_asan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
-          build_asan/forkunion_test_cpp17
-          build_asan/forkunion_test_cpp20
-          build_asan/forkunion_test_cpp23
+          cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
+            -D CMAKE_C_FLAGS="-fsanitize=${{ matrix.flags }} -g" \
+            -D CMAKE_CXX_FLAGS="-fsanitize=${{ matrix.flags }} -g" \
+            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.flags }}"
+          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
+
+      - name: Test under the sanitizer
+        run: ctest --test-dir build -R '^forkunion_test_cpp' --output-on-failure
 
   test_ubuntu_clang:
     name: Ubuntu (Clang)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       CC: clang
       CXX: clang++
@@ -133,25 +165,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-        # C/C++
       - name: Build C/C++
         run: |
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential clang libclang-rt-18-dev libblocksruntime-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
-      - name: Test C++
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_cpp17
-          build_artifacts/forkunion_test_cpp20
-          build_artifacts/forkunion_test_cpp23
 
-      - name: Test C
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_c11
-          build_artifacts/forkunion_test_c_clang_blocks
+      - name: Test C & C++
+        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
 
       - name: Set up Rust
         run: |
@@ -170,37 +194,12 @@ jobs:
           cargo +nightly miri setup
           cargo +nightly miri test --lib
 
-      # Sanitizers reuse this job's compiler; restricted to the NUMA-free
-      # basic_pool, whose pinned NUMA path stalls under ThreadSanitizer.
-      - name: Build & Test under ThreadSanitizer
-        env:
-          TSAN_OPTIONS: halt_on_error=1
-        run: |
-          set -euxo pipefail
-          cmake -B build_tsan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
-            -D CMAKE_C_FLAGS="-fsanitize=thread -g" -D CMAKE_CXX_FLAGS="-fsanitize=thread -g" \
-            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
-          cmake --build build_tsan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
-          build_tsan/forkunion_test_cpp17
-          build_tsan/forkunion_test_cpp20
-          build_tsan/forkunion_test_cpp23
-      - name: Build & Test under Address+UB Sanitizer
-        run: |
-          set -euxo pipefail
-          cmake -B build_asan -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
-            -D CMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
-            -D CMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g" \
-            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-          cmake --build build_asan --config RelWithDebInfo --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
-          build_asan/forkunion_test_cpp17
-          build_asan/forkunion_test_cpp20
-          build_asan/forkunion_test_cpp23
-
   test_ubuntu_arm:
     name: Ubuntu (Arm64, NUMA)
     # Native Arm64 is the only faithful test of the weak memory model the
     # library targets - qemu-user does not reproduce guest memory ordering.
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     env:
       CC: gcc
       CXX: g++
@@ -211,21 +210,15 @@ jobs:
 
       - name: Build C/C++
         run: |
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential libomp-dev libnuma-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON
           cmake --build build_artifacts --config RelWithDebInfo
-      - name: Test C++
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_cpp17
-          build_artifacts/forkunion_test_cpp20
-          build_artifacts/forkunion_test_cpp23
-      - name: Test C
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_c11
-          build_artifacts/forkunion_test_c_gcc_nested
+
+      - name: Test C & C++
+        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
 
       - name: Set up Rust
         run: |
@@ -255,27 +248,19 @@ jobs:
           # ! off the chopping block and adds Xcode 26 coverage the macos-15 jobs below don't have.
           - { arch: arm64, runner: macos-26 }
           - { arch: x86_64, runner: macos-15-intel }
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # ? The runner image preships CMake; reinstalling it added minutes of flaky network for nothing.
       - name: Build C/C++
         run: |
-          brew update
-          brew reinstall cmake
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
-      - name: Test C++
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_cpp17
-          build_artifacts/forkunion_test_cpp20
-          build_artifacts/forkunion_test_cpp23
 
-      - name: Test C
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_c11
+      - name: Test C & C++
+        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
 
       - name: Set up Rust
         run: |
@@ -302,53 +287,42 @@ jobs:
       matrix:
         llvm: [17, 18, 19, 20, 21]
         config: [Debug, Release]
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # ? `brew update` stays: the image's formula index may predate the newest llvm@N bottles.
       - name: Install LLVM ${{ matrix.llvm }}
         run: |
           brew update
-          brew reinstall cmake llvm@${{ matrix.llvm }}
+          brew install llvm@${{ matrix.llvm }}
 
       - name: Build C/C++
         run: |
           cmake -S . -B build_artifacts -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D CMAKE_CXX_COMPILER=$(brew --prefix llvm@${{ matrix.llvm }})/bin/clang++
           cmake --build build_artifacts --config ${{ matrix.config }} --parallel
 
-      - name: Test C++
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_cpp17
-          build_artifacts/forkunion_test_cpp20
-          build_artifacts/forkunion_test_cpp23
-
-      - name: Test C
-        run: |
-          set -euxo pipefail
-          build_artifacts/forkunion_test_c11
-          build_artifacts/forkunion_test_c_clang_blocks
+      - name: Test C & C++
+        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
 
   test_windows:
     name: Windows
     runs-on: windows-2025
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
       - name: Build C/C++
         run: |
-          choco install cmake
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
       - name: List build artifacts
         run: Get-ChildItem -Recurse .\build_artifacts
       - name: Test C++
-        run: |
-          $ErrorActionPreference = "Stop"
-          .\build_artifacts\forkunion_test_cpp17.exe
-          .\build_artifacts\forkunion_test_cpp20.exe
-          .\build_artifacts\forkunion_test_cpp23.exe
+        run: ctest --test-dir build_artifacts -C RelWithDebInfo -R '^forkunion_test_' --output-on-failure
 
       # Guard the Windows port's headline capability: with topology/NUMA forced ON, a regression that
       # silently drops Windows out of FU_WITH_TOPOLOGY fails to compile here instead of quietly
@@ -358,7 +332,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           cmake -B build_topo -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON
           cmake --build build_topo --config RelWithDebInfo
-          .\build_topo\forkunion_test_cpp20.exe
+          ctest --test-dir build_topo -C RelWithDebInfo -R '^forkunion_test_cpp20$' --output-on-failure
 
       # Windows ARM64 cross-compiles on the x64 host; the binary can't run here, so it is compile-only.
       - name: Build C++ for ARM64 (compile-only)
@@ -366,10 +340,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           cmake -B build_arm64 -A ARM64
           cmake --build build_arm64 --config RelWithDebInfo
-
-      - name: Test C
-        run: |
-          Write-Host "MSVC still lacks <stdatomic.h>; skipping C test binary"
 
       - name: Set up Rust
         run: |
@@ -393,6 +363,7 @@ jobs:
     # Pinned to windows-2022: this matrix exists to prove the v142 (VS 2019)
     # toolset still compiles, and that toolset isn't guaranteed on windows-2025.
     runs-on: windows-2022
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -402,29 +373,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
       - name: Build C/C++ with MSVC ${{ matrix.toolset }} (${{ matrix.config }})
         run: |
-          choco install cmake
           cmake -B build_artifacts -G "Visual Studio 17 2022" -T ${{ matrix.toolset }} -A x64
           cmake --build build_artifacts --config ${{ matrix.config }}
       - name: List build artifacts
         run: Get-ChildItem -Recurse .\build_artifacts
       - name: Test C++
-        run: |
-          $ErrorActionPreference = "Stop"
-          .\build_artifacts\forkunion_test_cpp17.exe
-          .\build_artifacts\forkunion_test_cpp20.exe
-          .\build_artifacts\forkunion_test_cpp23.exe
-
-      - name: Test C
-        run: |
-          Write-Host "MSVC still lacks <stdatomic.h>; skipping C test binary"
+        run: ctest --test-dir build_artifacts -C ${{ matrix.config }} -R '^forkunion_test_' --output-on-failure
 
   # Each row is a prebuilt `dockcross` image carrying the toolchain, qemu, and a CMake toolchain file;
   # `ctest` runs the binaries through its `CMAKE_CROSSCOMPILING_EMULATOR`. s390x is the big-endian guard.
   test_cross:
     name: Cross-compile (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
@@ -452,6 +416,7 @@ jobs:
   test_containers:
     name: Container (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
@@ -484,6 +449,7 @@ jobs:
   test_android:
     name: Android (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
@@ -504,6 +470,7 @@ jobs:
   test_freebsd:
     name: FreeBSD (x86_64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -520,11 +487,104 @@ jobs:
             cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
             ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
 
+  # QEMU's `-numa node`/`-numa dist` flags are the one tool that makes a guest kernel genuinely
+  # believe in memory domains the host lacks - including cpuless HBM/CXL-style nodes - so the
+  # topology harvest, domain allocators, and distributed pools run against shapes no runner offers.
+  # GitHub's x64 Linux runners expose /dev/kvm, so the guest boots hardware-accelerated.
+  test_numa_shapes:
+    name: Linux NUMA (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 2 symmetric domains
+            expect: 2
+            numa: >-
+              -object memory-backend-ram,size=2G,id=m0 -object memory-backend-ram,size=2G,id=m1
+              -numa node,nodeid=0,cpus=0-1,memdev=m0 -numa node,nodeid=1,cpus=2-3,memdev=m1
+              -numa dist,src=0,dst=1,val=20
+          - name: cpuless memory domain
+            expect: 2
+            numa: >-
+              -object memory-backend-ram,size=3G,id=m0 -object memory-backend-ram,size=1G,id=m1
+              -numa node,nodeid=0,cpus=0-3,memdev=m0 -numa node,nodeid=1,memdev=m1
+          - name: 4 skewed domains
+            expect: 4
+            numa: >-
+              -object memory-backend-ram,size=1G,id=m0 -object memory-backend-ram,size=1G,id=m1
+              -object memory-backend-ram,size=1G,id=m2 -object memory-backend-ram,size=1G,id=m3
+              -numa node,nodeid=0,cpus=0,memdev=m0 -numa node,nodeid=1,cpus=1,memdev=m1
+              -numa node,nodeid=2,cpus=2-3,memdev=m2 -numa node,nodeid=3,memdev=m3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install QEMU and enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
+          sudo apt update
+          sudo apt install -y qemu-system-x86 cloud-image-utils genisoimage
+
+      - name: Fetch the cloud image
+        run: |
+          curl -sSLo image.qcow2 \
+            https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+          qemu-img resize image.qcow2 16G
+
+      # The sources travel on a second ISO, so the guest needs no network beyond `apt`.
+      - name: Pack the sources onto an ISO
+        run: |
+          tar czf repo.tgz --exclude=.git --exclude='build*' --exclude=target --exclude='*.qcow2' .
+          mkdir repoiso && mv repo.tgz repoiso/
+          genisoimage -quiet -o repo.iso -volid FUREPO -joliet -rock repoiso
+
+      # The node-count check guards the harness itself: a typo in the `-numa` arguments would
+      # otherwise degrade every multi-domain test into a silent skip.
+      # The guest side is the version-controlled `.github/cloud-init/numa-guest.yml`, not a heredoc.
+      # Nothing is templated - the host asserts the node count back from the serial log.
+      - name: Write the cloud-init seed
+        run: |
+          echo "instance-id: fu-numa-${{ github.run_id }}" > meta-data
+          cloud-localds seed.iso .github/cloud-init/numa-guest.yml meta-data
+
+      - name: Boot the shaped VM
+        run: |
+          qemu-system-x86_64 -machine q35,accel=kvm:tcg -cpu max -smp 4 -m 4096 \
+            -drive if=virtio,format=qcow2,file=image.qcow2 \
+            -drive if=virtio,format=raw,file=seed.iso \
+            -drive if=virtio,format=raw,file=repo.iso \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            ${{ matrix.numa }} \
+            -nographic -serial file:serial.log -monitor none &
+
+      # The node-count check guards the harness itself: a typo in the `-numa` arguments would
+      # otherwise degrade every multi-domain test into a silent skip.
+      - name: Await the verdict
+        run: |
+          timeout 1800 sh -c 'until grep -q FU_VM_DONE serial.log 2>/dev/null; do sleep 10; done' || true
+          echo "=== guest serial tail ==="
+          tail -n 100 serial.log || true
+          grep -q "FU_VM_NODES=${{ matrix.expect }} nodes" serial.log
+          grep -q "FU_VM_DONE rc=0" serial.log
+
+      - name: Upload the guest serial log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: numa-serial-${{ strategy.job-index }}
+          path: serial.log
+
   # Each `FU_WITH_*` capability is a switch a downstream build may flip; the combinations do not
   # collapse - a Linux box without `libnuma` can still pin threads. Each row builds under `-Werror`.
   test_ubuntu_capabilities:
     name: Ubuntu (Capability Matrix)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -553,6 +613,8 @@ jobs:
 
       - name: Install toolchain
         run: |
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential
           if [ "${{ matrix.libnuma }}" = "true" ]; then sudo apt install -y libnuma-dev; fi
@@ -569,30 +631,35 @@ jobs:
   # A capability nobody can turn off by hand is not a capability. These must be rejected at the
   # `#include`, by an `#error` naming the contradiction - never at link time, with missing symbols.
   test_ubuntu_bad_capabilities:
-    name: Ubuntu (Impossible Capabilities)
+    name: Ubuntu (Impossible Capabilities, ${{ strategy.job-index }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        contradiction:
+          - "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_PLACE_MEMORY_ON_DOMAIN=1"
+          - "-DFU_WITH_PLACE_MEMORY_ON_DOMAIN=0 -DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=1"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libnuma-dev
 
-      - name: Every contradiction must fail to compile
+      - name: The contradiction must fail to compile
         run: |
-          set -e
-          for flags in \
-            "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_PLACE_MEMORY_ON_DOMAIN=1" \
-            "-DFU_WITH_PLACE_MEMORY_ON_DOMAIN=0 -DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=1"; do
-            if g++ -std=c++20 $flags -Iinclude -fsyntax-only scripts/test.cpp 2>/dev/null; then
-              echo "::error::'$flags' compiled, but describes a build that cannot exist"
-              exit 1
-            fi
-            echo "rejected, as it should be: $flags"
-          done
+          if g++ -std=c++20 ${{ matrix.contradiction }} -Iinclude -fsyntax-only scripts/test.cpp 2>/dev/null; then
+            echo "::error::'${{ matrix.contradiction }}' compiled, but describes a build that cannot exist"
+            exit 1
+          fi
+          echo "rejected, as it should be: ${{ matrix.contradiction }}"
 
+      # ? Cheap enough to repeat per row; splitting it out would cost a whole job's runner spin-up
       - name: A typo in a CMake tri-state must fail to configure
         run: |
           if cmake -B build_typo -D FORKUNION_WITH_TOPOLOGY=YES >/dev/null 2>&1; then
@@ -607,12 +674,15 @@ jobs:
   test_bindings_capabilities:
     name: Bindings (Capability Overrides)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
+          sudo rm -f /etc/apt/sources.list.d/* # Preinstalled third-party mirrors flake; only Ubuntu's is needed
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libnuma-dev
 
@@ -654,6 +724,7 @@ jobs:
   build_ios:
     name: iOS (${{ matrix.sdk }}, ${{ matrix.std }})
     runs-on: macos-15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
