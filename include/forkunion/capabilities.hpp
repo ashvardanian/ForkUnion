@@ -514,7 +514,7 @@ inline capabilities_t cpu_capabilities() noexcept {
     caps |= capability_arm64_yield_k;
 
     // Use sysctl to check for WFET support on Apple platforms
-#if defined(__APPLE__)
+#if FU_ON_APPLE
     int wfet_support = 0;
     size_t size = sizeof(wfet_support);
     if (sysctlbyname("hw.optional.arm.FEAT_WFxT", &wfet_support, &size, NULL, 0) == 0 && wfet_support)

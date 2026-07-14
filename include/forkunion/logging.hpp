@@ -18,13 +18,13 @@ struct logging_colors_t {
     explicit logging_colors_t(bool use_colors) noexcept : use_colors_(use_colors) {}
 
     explicit logging_colors_t() noexcept {
-#if defined(_WIN32)
+#if FU_ON_WINDOWS
         if (!::_isatty(_fileno(stdout))) return;
 #endif
-#if defined(__unix__) || defined(__APPLE__)
+#if FU_ON_POSIX
         if (!::isatty(STDOUT_FILENO)) return;
 #endif
-#if defined(_WIN32)
+#if FU_ON_WINDOWS
         // On Windows, assume color support is available
         use_colors_ = true;
 #else

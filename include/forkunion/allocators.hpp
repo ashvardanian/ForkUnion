@@ -919,7 +919,7 @@ struct sharded_array {
         std::size_t const domains = topology.memory_domains_count();
         if (domains == 0) return false;
         symmetric_allocator_type allocator(topology);
-        allocation_ = allocator.allocate_at_least(divide_round_up(n, domains));
+        allocation_ = allocator.allocate_at_least(div_ceil(n, domains));
         if (!allocation_) return false; // ! Allocation failed
         size_ = n;
         return true;

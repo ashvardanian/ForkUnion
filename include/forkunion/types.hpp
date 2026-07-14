@@ -40,12 +40,14 @@
 #define FORKUNION_VERSION_MINOR 3
 #define FORKUNION_VERSION_PATCH 1
 
-#if !defined(FU_ALLOW_UNSAFE)
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-#define FU_ALLOW_UNSAFE 1
+#define FU_DETECT_EXCEPTIONS_ 1
 #else
-#define FU_ALLOW_UNSAFE 0
+#define FU_DETECT_EXCEPTIONS_ 0
 #endif
+
+#if !defined(FU_ALLOW_UNSAFE)
+#define FU_ALLOW_UNSAFE FU_DETECT_EXCEPTIONS_
 #endif
 
 /*  Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to derive
@@ -106,6 +108,14 @@
 #define FU_GLIBC_PREREQ_(major, minor) __GLIBC_PREREQ(major, minor)
 #else
 #define FU_GLIBC_PREREQ_(major, minor) 0
+#endif
+
+/*  Is-glibc, for facilities glibc provides that Bionic and musl do not - `backtrace`, say. Stays 0 on
+ *  Apple and FreeBSD, whose libc is not glibc. `FU_GLIBC_PREREQ_` above gates on a specific version.  */
+#if defined(__GLIBC__)
+#define FU_ON_GLIBC 1
+#else
+#define FU_ON_GLIBC 0
 #endif
 
 #if FU_ON_LINUX && FU_GLIBC_PREREQ_(2, 30) && __has_include(<numa.h>)
@@ -254,7 +264,7 @@
 #include <sys/qos.h> // `qos_class_t`, `pthread_attr_set_qos_class_np`
 #endif
 
-#if defined(__unix__) || defined(__unix) || defined(unix) || FU_ON_APPLE
+#if FU_ON_POSIX
 #include <unistd.h> // `gettid`, `sysconf`
 #endif
 
@@ -304,6 +314,21 @@
 #define FU_DETECT_ARCH_RISC5_ 1
 #else
 #define FU_DETECT_ARCH_RISC5_ 0
+#endif
+#if defined(__s390x__)
+#define FU_DETECT_ARCH_S390X_ 1
+#else
+#define FU_DETECT_ARCH_S390X_ 0
+#endif
+#if defined(__powerpc64__) || defined(__ppc64__)
+#define FU_DETECT_ARCH_PPC64_ 1
+#else
+#define FU_DETECT_ARCH_PPC64_ 0
+#endif
+#if defined(__i386__) || defined(_M_IX86)
+#define FU_DETECT_ARCH_X86_32_ 1
+#else
+#define FU_DETECT_ARCH_X86_32_ 0
 #endif
 
 #if FU_DETECT_CPP_17_
@@ -614,7 +639,7 @@ constexpr int popcount(scalar_type_ value) noexcept {
  *  @brief Ceiling of @p value divided by @p divisor - how many buckets of that size a value needs.
  *  @note @p divisor must be non-zero; overflow of @p value near the type maximum is not guarded.
  */
-constexpr std::size_t divide_round_up(std::size_t value, std::size_t divisor) noexcept {
+constexpr std::size_t div_ceil(std::size_t value, std::size_t divisor) noexcept {
     return (value + divisor - 1) / divisor;
 }
 
@@ -623,7 +648,7 @@ constexpr std::size_t divide_round_up(std::size_t value, std::size_t divisor) no
  *  @note @p multiple must be non-zero; overflow of @p value near the type maximum is not guarded.
  */
 constexpr std::size_t round_up_to_multiple(std::size_t value, std::size_t multiple) noexcept {
-    return divide_round_up(value, multiple) * multiple;
+    return div_ceil(value, multiple) * multiple;
 }
 
 template <typename value_type_, typename comparator_type_ = std::less<value_type_>>

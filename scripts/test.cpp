@@ -13,10 +13,11 @@ namespace fu = ashvardanian::forkunion;
 
 #undef NDEBUG // ? Keep any library asserts live in the test binary
 
+/*  `backtrace` is a glibc/Apple facility; Bionic, FreeBSD, and musl ship `<execinfo.h>` without it. */
 #if FU_ON_POSIX
 #include <csignal>  // `std::signal`, `std::raise`
 #include <unistd.h> // `::write`, `STDERR_FILENO`
-#if defined(__has_include) && __has_include(<execinfo.h>)
+#if (FU_ON_GLIBC || FU_ON_APPLE) && __has_include(<execinfo.h>)
 #include <execinfo.h> // `::backtrace`, `::backtrace_symbols_fd`
 #define FU_TEST_WITH_BACKTRACE_ 1
 #endif

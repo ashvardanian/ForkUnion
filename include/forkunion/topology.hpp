@@ -173,7 +173,7 @@ class core_mask {
 
     /** @retval false on allocation failure, leaving the mask unusable rather than half-sized. */
     bool try_resize_for(std::size_t const cores) noexcept {
-        return words_.try_resize(divide_round_up(cores, bits_per_word_k));
+        return words_.try_resize(div_ceil(cores, bits_per_word_k));
     }
 
     /** @brief Sizes the mask to hold every id this machine can produce. @sa `id_space`. */
@@ -401,7 +401,7 @@ static constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull
 FU_MAYBE_UNUSED_ static inline std::size_t ram_page_size() noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     return static_cast<std::size_t>(::numa_pagesize()); // ! `numa_pagesize` is libnuma, Linux-only
-#elif defined(__unix__) || defined(__unix) || defined(unix) || FU_ON_APPLE
+#elif FU_ON_POSIX
     return static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
 #elif FU_ON_WINDOWS
     SYSTEM_INFO system_info;
@@ -448,7 +448,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t volume_ram() noexcept {
     mem_status.dwLength = sizeof(mem_status);
     if (::GlobalMemoryStatusEx(&mem_status)) return static_cast<std::size_t>(mem_status.ullTotalPhys);
     return 0;
-#elif defined(__unix__) || defined(__unix) || defined(unix)
+#elif FU_ON_POSIX
     // On other Unix systems, try sysconf
     long pages = ::sysconf(_SC_PHYS_PAGES);
     long page_size = ::sysconf(_SC_PAGE_SIZE);

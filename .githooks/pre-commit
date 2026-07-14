@@ -96,6 +96,26 @@ while IFS= read -r file; do
     fi
 done < <(git diff --cached --name-only --diff-filter=ACM)
 
+# Hand-rolled ceiling division - `(n + d - 1) / d` - reimplements a helper the codebase already names:
+# `fu::div_ceil` in C++, `.div_ceil()` in Rust, `std.math.divCeil` in Zig. The expression itself is
+# harmless; it fires as a SYMPTOM that whoever wrote it has not absorbed the local vocabulary, so the
+# rest of that change deserves a second read for other reinvented helpers (see `types.hpp`).
+while IFS= read -r file; do
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.rs | *.zig) ;;
+    *) continue ;;
+    esac
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    hand_ceils=$(printf '%s\n' "$added" | grep -E '\+[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*-[[:space:]]*1\)[[:space:]]*/' || true)
+    if [ -n "$hand_ceils" ]; then
+        echo "pre-commit: $file hand-rolls ceiling division - use fu::div_ceil (C++), .div_ceil() (Rust), or"
+        echo "            std.math.divCeil (Zig). Not a bug, a symptom: the author didn't know the house"
+        echo "            vocabulary, so re-validate the rest of this change against types.hpp helpers too:"
+        printf '%s\n' "$hand_ceils" | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
 # A `#pragma region` label must carry no dash. clang-format mis-tokenises `#pragma region - Name`
 # (it reflows around the `-`), so the region markers drift out of place on the next format run. Keep
 # the label a plain phrase: `#pragma region Name`.
@@ -109,6 +129,26 @@ while IFS= read -r file; do
     if [ -n "$dashed_regions" ]; then
         echo "pre-commit: $file has a dash in a #pragma region label - clang-format mishandles it, drop the dash:"
         printf '%s\n' "$dashed_regions" | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# Platform identity belongs to the FU_* vocabulary: types.hpp resolves the raw OS/libc/arch predefines
+# once - see its Layer 1 - into FU_ON_* / FU_GLIBC_PREREQ_ / FU_DETECT_ARCH_*, and nothing else may ask
+# `__linux__` again. A genuine exception carries an inline `// FU-ALLOW: <reason>`.
+while IFS= read -r file; do
+    case "$file" in
+    include/forkunion/types.hpp) continue ;;
+    *.c | *.h | *.hpp | *.cpp | *.cc) ;;
+    *) continue ;;
+    esac
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    raw_macros=$(printf '%s\n' "$added" | grep -vE 'FU-ALLOW' |
+        grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b' || true)
+    if [ -n "$raw_macros" ]; then
+        echo "pre-commit: $file asks a raw platform macro - use the FU_* vocabulary types.hpp derives"
+        echo "            (FU_ON_*, FU_GLIBC_PREREQ_, FU_DETECT_ARCH_*), or mark a real exception // FU-ALLOW:"
+        printf '%s\n' "$raw_macros" | sort -u | head -5
         failed=1
     fi
 done < <(git diff --cached --name-only --diff-filter=ACM)
