@@ -11,22 +11,69 @@ if (POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW) # MSVC runtime library flags are selected by an abstraction
 endif ()
 
+# Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
+# execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
+# Skipped when there is no `.git` (tarball / export builds).
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND git config core.hooksPath .githooks
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE _fu_hooks_status
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if (_fu_hooks_status EQUAL 0)
+        message(STATUS "forkunion: Git hooks enabled (core.hooksPath -> .githooks)")
+    endif ()
+endif ()
+
 project(
-    fork_union
+    forkunion
     VERSION 2.3.1
     DESCRIPTION "Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library"
     LANGUAGES CXX
 )
 
 # Control strict interface warnings for consumers
-option(FORK_UNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
+option(FORKUNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
+option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL pool" OFF)
 
-# Control NUMA enablement: AUTO, ON, OFF
-set(FORK_UNION_ENABLE_NUMA
+# Each kernel facility the library can use is a tri-state: AUTO, ON, or OFF.
+#
+# AUTO is the default and defines *nothing*. The header derives it, from the platform and from whether <numa.h> is there
+# to include. That keeps the derivation rules in exactly one place, instead of spread across CMakeLists.txt, build.rs,
+# and build.zig, where they would drift.
+#
+# ON and OFF pass `-DFU_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say - is
+# rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
+# realistically toggles, each a tri-state cache entry. The finer ones - cache sharing, thread QoS, scheduling class -
+# are AUTO-only: the header derives them, and only `FORKUNION_PORTABLE` forces them off. Rust and Zig expose this same
+# set.
+set(FORKUNION_WITH_TOPOLOGY
     "AUTO"
-    CACHE STRING "NUMA support mode: AUTO, ON, or OFF"
+    CACHE STRING "Enumerate cores and domains: AUTO, ON, or OFF"
 )
-set_property(CACHE FORK_UNION_ENABLE_NUMA PROPERTY STRINGS "AUTO;ON;OFF")
+set(FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
+    "AUTO"
+    CACHE STRING "Place pages on a memory domain: AUTO, ON, or OFF"
+)
+set(FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+    "AUTO"
+    CACHE STRING "Request larger pages: AUTO, ON, or OFF"
+)
+set(FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
+    "AUTO"
+    CACHE STRING "Bind threads to cores: AUTO, ON, or OFF"
+)
+set_property(CACHE FORKUNION_WITH_TOPOLOGY PROPERTY STRINGS "AUTO;ON;OFF")
+set_property(CACHE FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN PROPERTY STRINGS "AUTO;ON;OFF")
+set_property(CACHE FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN PROPERTY STRINGS "AUTO;ON;OFF")
+set_property(CACHE FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY PROPERTY STRINGS "AUTO;ON;OFF")
+
+# Every optional capability macro, coarse and fine - the set `FORKUNION_PORTABLE` zeroes.
+set(FORKUNION_OPTIONAL_MACROS
+    FU_WITH_TOPOLOGY FU_WITH_PLACE_THREADS_BY_AFFINITY FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+    FU_WITH_RESCHEDULE_THREADS_BY_CLASS FU_WITH_PLACE_MEMORY_ON_DOMAIN FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+)
 
 # Enforce C++17 as the minimum standard for the project.
 set(PROJECT_CXX_STANDARD 17)
@@ -34,24 +81,24 @@ set(PROJECT_CXX_EXTENSIONS OFF)
 set(PROJECT_CXX_STANDARD_REQUIRED ON)
 
 # Header-only interface library
-add_library(fork_union INTERFACE)
+add_library(forkunion INTERFACE)
 target_include_directories(
-    fork_union INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
+    forkunion INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 
 # Set C++17 requirement and features properly for library consumers
-target_compile_features(fork_union INTERFACE cxx_std_17)
+target_compile_features(forkunion INTERFACE cxx_std_17)
 set_target_properties(
-    fork_union
+    forkunion
     PROPERTIES CXX_STANDARD 17
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
 )
 
 # Strictest possible compilation flags with fatal warnings
-if (FORK_UNION_STRICT)
+if (FORKUNION_STRICT)
     target_compile_options(
-        fork_union
+        forkunion
         INTERFACE # GCC/Clang: Maximum warnings + treat warnings as errors + security hardening
                   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall
                   -Wextra
@@ -111,21 +158,21 @@ if (FORK_UNION_STRICT)
     )
 endif ()
 
-# Pre-compiled libraries built from `c/lib.cpp`
-add_library(fork_union_dynamic SHARED c/lib.cpp)
-add_library(fork_union_static STATIC c/lib.cpp)
+# Pre-compiled libraries built from `c/forkunion.cpp`
+add_library(forkunion_dynamic SHARED c/forkunion.cpp)
+add_library(forkunion_static STATIC c/forkunion.cpp)
 
 # Prefer C++20 for library builds
 set_target_properties(
-    fork_union_dynamic fork_union_static
+    forkunion_dynamic forkunion_static
     PROPERTIES CXX_STANDARD 20
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
 )
 
 # Re-use the public interface of the header-only target
-target_link_libraries(fork_union_dynamic PUBLIC fork_union)
-target_link_libraries(fork_union_static PUBLIC fork_union)
+target_link_libraries(forkunion_dynamic PUBLIC forkunion)
+target_link_libraries(forkunion_static PUBLIC forkunion)
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
@@ -134,7 +181,7 @@ check_cxx_compiler_flag("-fcf-protection=full" HAS_CFP)
 
 # Security hardening flags for compiled libraries
 target_compile_options(
-    fork_union_dynamic
+    forkunion_dynamic
     PRIVATE # Stack protection and buffer overflow detection
             $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong
             -D_FORTIFY_SOURCE=2>
@@ -147,7 +194,7 @@ target_compile_options(
             /guard:cf>
 )
 target_compile_options(
-    fork_union_static
+    forkunion_static
     PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong
             -D_FORTIFY_SOURCE=2>
             $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
@@ -159,7 +206,7 @@ target_compile_options(
 
 # Hardened linking flags
 target_link_options(
-    fork_union_dynamic
+    forkunion_dynamic
     PRIVATE
     # Enable RELRO, stack canaries, and NX bit
     $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
@@ -169,7 +216,7 @@ target_link_options(
     /guard:cf>
 )
 target_link_options(
-    fork_union_static PRIVATE $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
+    forkunion_static PRIVATE $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
     $<$<CXX_COMPILER_ID:MSVC>:/guard:cf>
 )
 
@@ -204,8 +251,7 @@ if (CPPCHECK_EXECUTABLE)
             --suppress=missingIncludeSystem --suppress=unusedFunction --suppress=unmatchedSuppression
             --suppress=ConfigurationNotChecked --suppress=knownConditionTrueFalse --suppress=shadowFunction
             --suppress=shadowVariable --suppress=useStlAlgorithm --suppress=noExplicitConstructor
-            -I${CMAKE_CURRENT_SOURCE_DIR}/include -DFU_ENABLE_NUMA=1 ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/c
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/c
         COMMENT "Running cppcheck static analysis"
     )
 endif ()
@@ -225,9 +271,9 @@ endif ()
 # Tests & benchmarking scripts
 include(CTest)
 
-option(FORK_UNION_BUILD_TESTS "Build fork_union tests" ON)
+option(FORKUNION_BUILD_TESTS "Build forkunion tests" ON)
 
-if (BUILD_TESTING AND FORK_UNION_BUILD_TESTS)
+if (BUILD_TESTING AND FORKUNION_BUILD_TESTS)
     enable_testing()
     add_subdirectory(scripts)
 endif ()
@@ -237,14 +283,14 @@ include(GNUInstallDirs)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(
-    TARGETS fork_union
-    EXPORT fork_unionTargets
+    TARGETS forkunion
+    EXPORT forkunionTargets
     INCLUDES
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 install(
-    TARGETS fork_union_dynamic fork_union_static
-    EXPORT fork_unionTargets # same export set
+    TARGETS forkunion_dynamic forkunion_static
+    EXPORT forkunionTargets # same export set
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} # .so / .dylib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} # .a
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} # .dll on Windows
@@ -253,58 +299,94 @@ install(
 # Export config files for find_package
 include(CMakePackageConfigHelpers)
 write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfigVersion.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfigVersion.cmake"
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY AnyNewerVersion
 )
 
 configure_package_config_file(
-    cmake/fork_unionConfig.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfig.cmake"
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fork_union
+    cmake/forkunionConfig.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfig.cmake"
-              "${CMAKE_CURRENT_BINARY_DIR}/fork_unionConfigVersion.cmake"
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fork_union
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfig.cmake"
+              "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfigVersion.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
 install(
-    EXPORT fork_unionTargets
-    NAMESPACE fork_union::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/fork_union
+    EXPORT forkunionTargets
+    NAMESPACE forkunion::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
-# NUMA selection logic controlled by FORK_UNION_ENABLE_NUMA
-if (UNIX AND NOT APPLE) # Linux
-    # Find POSIX threads library
-    find_package(Threads)
-    # Find libNUMA
+# Turn the tri-states into compile definitions, and link whatever they imply.
+#
+# Note the asymmetry: we pass definitions only for the capabilities a caller pinned, but we link libnuma whenever it is
+# present. Over-linking a library the code never calls costs a DT_NEEDED entry that `--as-needed` drops; under-linking
+# one the header decided to `#include` costs a link error the caller cannot diagnose.
+find_package(Threads)
+if (Threads_FOUND)
+    target_link_libraries(forkunion INTERFACE Threads::Threads)
+endif ()
+
+set(NUMA_FOUND FALSE)
+if (UNIX AND NOT APPLE)
     find_library(NUMA_LIBRARY NAMES numa)
-    set(NUMA_FOUND FALSE)
-    if (NUMA_LIBRARY)
+    find_path(NUMA_INCLUDE_DIR NAMES numa.h)
+    if (NUMA_LIBRARY AND NUMA_INCLUDE_DIR)
         set(NUMA_FOUND TRUE)
+        target_link_libraries(forkunion INTERFACE ${NUMA_LIBRARY})
         message(STATUS "libNUMA found: ${NUMA_LIBRARY}")
     else ()
-        message(STATUS "libNUMA not found - NUMA-dependent features unavailable")
+        message(STATUS "libNUMA not found - the header will lower the capabilities that need it")
+    endif ()
+endif ()
+
+# Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
+# 0. Knows nothing of the environment - the libnuma check is its own concern, below.
+function (forkunion_apply mode macro)
+    if (mode STREQUAL "ON")
+        target_compile_definitions(forkunion INTERFACE ${macro}=1)
+    elseif (mode STREQUAL "OFF")
+        target_compile_definitions(forkunion INTERFACE ${macro}=0)
+    elseif (NOT mode STREQUAL "AUTO")
+        message(FATAL_ERROR "${macro} tri-state must be AUTO, ON, or OFF - got '${mode}'")
+    endif ()
+endfunction ()
+
+# `FORKUNION_PORTABLE` is the umbrella off-switch: it zeroes every optional capability and so cannot coexist with a
+# forced-on one. Prerequisites between capabilities (huge pages need NUMA, which needs topology) are the header's
+# business, enforced by its `#error`s - never re-encoded here.
+if (FORKUNION_PORTABLE)
+    if (FORKUNION_WITH_TOPOLOGY STREQUAL "ON"
+        OR FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN STREQUAL "ON"
+        OR FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN STREQUAL "ON"
+        OR FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY STREQUAL "ON"
+    )
+        message(FATAL_ERROR "FORKUNION_PORTABLE is ON, but a FORKUNION_WITH_* capability is forced ON")
+    endif ()
+    foreach (macro IN LISTS FORKUNION_OPTIONAL_MACROS)
+        target_compile_definitions(forkunion INTERFACE ${macro}=0)
+    endforeach ()
+else ()
+    # Forcing a libnuma-backed capability on without libnuma fails here, with a sentence, rather than at link time with
+    # a list of missing symbols. AUTO is fine - the header derives it off when libnuma is absent.
+    if (UNIX
+        AND NOT APPLE
+        AND NOT NUMA_FOUND
+        AND (FORKUNION_WITH_TOPOLOGY STREQUAL "ON"
+             OR FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN STREQUAL "ON"
+             OR FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN STREQUAL "ON")
+    )
+        message(
+            FATAL_ERROR
+                "topology/place-memory-on-domain/place-huge-pages-on-domain forced ON, but libnuma was not found"
+        )
     endif ()
 
-    if (FORK_UNION_ENABLE_NUMA STREQUAL "ON")
-        if (Threads_FOUND AND NUMA_FOUND)
-            target_link_libraries(fork_union INTERFACE ${NUMA_LIBRARY} Threads::Threads)
-            target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=1)
-        else ()
-            message(FATAL_ERROR "FORK_UNION_ENABLE_NUMA=ON, but Threads or libnuma not found")
-        endif ()
-    elseif (FORK_UNION_ENABLE_NUMA STREQUAL "AUTO")
-        if (Threads_FOUND AND NUMA_FOUND)
-            target_link_libraries(fork_union INTERFACE ${NUMA_LIBRARY} Threads::Threads)
-            target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=1)
-        else ()
-            target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=0)
-        endif ()
-    else () # OFF
-        target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=0)
-    endif ()
-else () # Non-Linux platforms
-    target_compile_definitions(fork_union INTERFACE FU_ENABLE_NUMA=0)
+    forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FU_WITH_TOPOLOGY)
+    forkunion_apply("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FU_WITH_PLACE_MEMORY_ON_DOMAIN)
+    forkunion_apply("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
+    forkunion_apply("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FU_WITH_PLACE_THREADS_BY_AFFINITY)
 endif ()

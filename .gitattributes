@@ -1,0 +1,10 @@
+# The hooks execute under bash; a CRLF checkout on Windows breaks their shebang line.
+.githooks/* text eol=lf
+
+# Formatters emit canonical LF (.dprint.json for JSON/YAML, .taplo.toml for TOML); pin the checkout
+# so their --check passes identically on Windows and Linux instead of tripping over an autocrlf
+# CRLF working tree.
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf

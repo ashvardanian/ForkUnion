@@ -1,0 +1,16 @@
+.{
+    .name = .forkunion,
+    .version = "2.3.1",
+    .fingerprint = 0x3cdd441be686cfc7,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "zig/",
+        "include/",
+        "c/",
+        "scripts/",
+        "README.md",
+        "LICENSE",
+    },
+}

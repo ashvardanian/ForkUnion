@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+#
+# ForkUnion pre-commit: enforce the house style on staged changes before they land.
+#
+# Each check inspects only the ADDED lines of a staged file, so legacy code migrates on its own
+# schedule while no new violation sneaks in, and each prints the specific reason when it fires.
+# The dispatch loop at the bottom diffs every staged file exactly once and hands the added lines
+# to each check through the `file` / `added` globals - the checks themselves are grep one-liners.
+# Configuring the CMake build arms these hooks; see the `core.hooksPath` block in CMakeLists.txt.
+#
+# Bypass knowingly (you almost never should) with: git commit --no-verify
+
+set -u
+LC_ALL=C # ? Byte-wise regexes, immune to the committer's locale
+
+failed=0
+
+# Prints the reason and the first offending lines, and marks the commit rejected.
+fail() { # fail <matches> <message-line>...
+    local matches=$1
+    shift
+    local line
+    for line in "$@"; do echo "pre-commit: $line"; done
+    printf '%s\n' "$matches" | head -5
+    failed=1
+}
+
+# Decorative comment separators - runs of three or more `-` or `=` used purely as visual dividers
+# inside a comment. Sections are named by `#pragma region`, and a paragraph that needs a heading gets
+# a sentence. A ruler carries no information that the sentence beneath it does not already carry.
+check_rulers() {
+    local rulers
+    rulers=$(printf '%s\n' "$added" | grep -E '^\+(.*(//|/\*)|[[:space:]]*\*).*[-=]{3,}' || true)
+    [ -z "$rulers" ] || fail "$rulers" \
+        "$file adds a decorative comment separator (--- / ===) - name the section with" \
+        "            a #pragma region, or write a plain sentence:"
+}
+
+# Documentation is Doxygen, and Doxygen only reads `/** */`. A `//`, `///`, or `///<` comment trailing
+# a member or an enumerator is either invisible (`//`) or attached to the WRONG entity (`///` documents
+# what follows, so every doc slides down one member and the last is silently lost). Declarations get a
+# hovering `/** @brief ... */`; `//` stays for implementation notes inside function bodies.
+check_trailing_docs() {
+    # A declaration line: indented, opens with an identifier, carries no call parentheses, and closes
+    # with `,` or `;` before the comment. Statement keywords are excluded so a `// ?` note beside a
+    # `return` inside an inline body stays legal.
+    local trailing own_line
+    trailing=$(printf '%s\n' "$added" |
+        grep -vE '^\+[[:space:]]*(return|break|continue|else|do|goto|case|default|assert|throw|delete|using)\b' |
+        grep -E '^\+[[:space:]]+[A-Za-z_][^()]*[,;][[:space:]]*(///|//[[:space:]]*\?)' || true)
+    [ -z "$trailing" ] || fail "$trailing" \
+        "$file documents a declaration with a trailing comment - Doxygen either ignores" \
+        "            it (//) or attaches it to the next entity (///). Hover a /** @brief ... */ above:"
+
+    own_line=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*///' || true)
+    [ -z "$own_line" ] || fail "$own_line" \
+        "$file uses a /// doc-comment - this codebase documents with /** ... */ blocks:"
+}
+
+# `@sa` cross-references an identifier, `@see` cross-references a URL. Both tags mean the same thing to
+# Doxygen, so nothing but this check keeps the distinction alive - and it is the distinction that makes
+# either one scannable.
+check_cross_refs() {
+    local mixed
+    mixed=$(printf '%s\n' "$added" | grep -E '@sa[[:space:]].*https?://|@see[[:space:]]' |
+        grep -vE '@see[[:space:]].*https?://' || true)
+    [ -z "$mixed" ] || fail "$mixed" \
+        "$file mixes the cross-reference tags - @sa names an identifier, @see names a URL:"
+}
+
+# Nothing is deprecated: a symbol either exists or it was removed. Carrying a shim past a breaking
+# release means every consumer keeps two spellings alive, and neither ever wins.
+check_deprecations() {
+    local deprecations
+    deprecations=$(printf '%s\n' "$added" | grep -iE '@deprecated|#\[deprecated' || true)
+    [ -z "$deprecations" ] || fail "$deprecations" \
+        "$file adds a deprecation - remove the symbol instead, and say so in the commit:"
+}
+
+# Hand-rolled ceiling division - `(n + d - 1) / d` - reimplements a helper the codebase already names:
+# `fu::div_ceil` in C++, `.div_ceil()` in Rust, `std.math.divCeil` in Zig. The expression itself is
+# harmless; it fires as a SYMPTOM that whoever wrote it has not absorbed the local vocabulary, so the
+# rest of that change deserves a second read for other reinvented helpers (see `types.hpp`).
+check_hand_ceils() {
+    local hand_ceils
+    hand_ceils=$(printf '%s\n' "$added" |
+        grep -E '\+[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*-[[:space:]]*1\)[[:space:]]*/' || true)
+    [ -z "$hand_ceils" ] || fail "$hand_ceils" \
+        "$file hand-rolls ceiling division - use fu::div_ceil (C++), .div_ceil() (Rust), or" \
+        "            std.math.divCeil (Zig). Not a bug, a symptom: the author didn't know the house" \
+        "            vocabulary, so re-validate the rest of this change against types.hpp helpers too:"
+}
+
+# A `#pragma region` label must carry no dash. clang-format mis-tokenises `#pragma region - Name`
+# (it reflows around the `-`), so the region markers drift out of place on the next format run. Keep
+# the label a plain phrase: `#pragma region Name`.
+check_region_dashes() {
+    local dashed
+    dashed=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*#pragma[[:space:]]+(end)?region\b[^-]*-' || true)
+    [ -z "$dashed" ] || fail "$dashed" \
+        "$file has a dash in a #pragma region label - clang-format mishandles it, drop the dash:"
+}
+
+# Platform identity belongs to the FU_* vocabulary: types.hpp resolves the raw OS/libc/arch predefines
+# once - see its Layer 1 - into FU_ON_* / FU_GLIBC_PREREQ_ / FU_DETECT_ARCH_*, and nothing else may ask
+# `__linux__` again. A genuine exception carries an inline `// FU-ALLOW: <reason>`.
+check_raw_macros() {
+    [ "$file" != include/forkunion/types.hpp ] || return 0 # ? The one file that derives them
+    local raw
+    raw=$(printf '%s\n' "$added" | grep -vE 'FU-ALLOW' |
+        grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b' |
+        sort -u || true)
+    [ -z "$raw" ] || fail "$raw" \
+        "$file asks a raw platform macro - use the FU_* vocabulary types.hpp derives" \
+        "            (FU_ON_*, FU_GLIBC_PREREQ_, FU_DETECT_ARCH_*), or mark a real exception // FU-ALLOW:"
+}
+
+# CI workflows - every job and every step carries a `name:`. An unnamed step renders as its raw
+# command in the Actions UI, and job names are what branch protection's required checks reference,
+# so an anonymous one can't be pinned. Names are structure, not lines, so unlike the checks above
+# this validates the whole staged file - the workflows are small and already conform.
+check_workflow_names() {
+    local nameless
+    nameless=$(
+        git show ":$file" | awk '
+            # Jobs: two-space keys under the top-level `jobs:` section, named by a four-space `name:`.
+            /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+            in_jobs && /^[^ #]/ { in_jobs = 0 }
+            in_jobs && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ {
+                if (job != "" && !job_named) printf "line %d: job `%s` has no name\n", job_line, job
+                job = substr($1, 1, length($1) - 1); job_line = NR; job_named = 0
+            }
+            in_jobs && /^    name:/ { job_named = 1 }
+            # Steps: list items two deeper than their `steps:`, named inline or by a key two deeper.
+            /^[[:space:]]*steps:[[:space:]]*$/ { steps_at = index($0, "steps:") - 1; item_at = steps_at + 2; pending = 0; next }
+            steps_at {
+                indent = match($0, /[^ ]/) - 1
+                if ($0 ~ /^[[:space:]]*(#|$)/) next
+                if (indent <= steps_at) { if (pending) printf "line %d: unnamed step\n", pending; steps_at = 0; next }
+                if (indent == item_at && substr($0, item_at + 1, 2) == "- ") {
+                    if (pending) printf "line %d: unnamed step\n", pending
+                    pending = ($0 ~ /^[[:space:]]*- name:/) ? 0 : NR
+                } else if (pending && indent == item_at + 2 && $0 ~ /^[[:space:]]*name:/) pending = 0
+            }
+            END {
+                if (job != "" && !job_named) printf "line %d: job `%s` has no name\n", job_line, job
+                if (pending) printf "line %d: unnamed step\n", pending
+            }
+        '
+    )
+    [ -z "$nameless" ] || fail "$nameless" \
+        "$file has CI jobs or steps without a name - the Actions UI and required" \
+        "            checks reference them by it, so every job and step must carry one:"
+}
+
+# One pass: enumerate the staged files once, diff each once, and dispatch by extension. The list is
+# NUL-delimited so a filename with spaces can never split.
+while IFS= read -r -d '' file; do
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++' || true)
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.inl)
+        check_rulers
+        check_cross_refs
+        check_deprecations
+        check_hand_ceils
+        check_region_dashes
+        check_raw_macros
+        ;;
+    *.rs | *.zig)
+        check_deprecations
+        check_hand_ceils
+        ;;
+    .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
+    esac
+    case "$file" in
+    *.h | *.hpp) check_trailing_docs ;;
+    esac
+done < <(git diff --cached --name-only -z --diff-filter=ACM)
+
+# C/C++ - changed lines must satisfy .clang-format. `git clang-format --staged --diff` restricts to the
+# staged hunks, so legacy formatting is left untouched.
+if command -v git-clang-format > /dev/null 2>&1 && command -v clang-format > /dev/null 2>&1; then
+    cpp_staged=()
+    while IFS= read -r -d '' file; do cpp_staged+=("$file"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.c' '*.h' '*.cc' '*.cpp' '*.hpp')
+    if [ ${#cpp_staged[@]} -gt 0 ]; then
+        clang_diff=$(git clang-format --staged --diff -- "${cpp_staged[@]}" 2> /dev/null)
+        case "$clang_diff" in
+        "" | "no modified files to format" | "clang-format did not modify any files"*) ;;
+        *)
+            echo "pre-commit: staged C/C++ changes are not clang-format clean on their changed lines - restage after:"
+            echo "            git clang-format --staged   (or clang-format -i <file> for the whole file)"
+            failed=1
+            ;;
+        esac
+    fi
+fi
+
+# Rust - the crate must stay rustfmt-clean (respects rustfmt.toml). Skips without cargo.
+if command -v cargo > /dev/null 2>&1; then
+    if git diff --cached --name-only --diff-filter=ACM -- '*.rs' | grep -q .; then
+        if ! cargo fmt --check > /dev/null 2>&1; then
+            echo "pre-commit: staged Rust changes are not rustfmt clean - run: cargo fmt"
+            failed=1
+        fi
+    fi
+fi
+
+# Zig - `zig fmt` is the law, and it is not configurable. Skips without zig.
+if command -v zig > /dev/null 2>&1; then
+    zig_staged=()
+    while IFS= read -r -d '' file; do zig_staged+=("$file"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.zig')
+    if [ ${#zig_staged[@]} -gt 0 ]; then
+        if ! zig fmt --check "${zig_staged[@]}" > /dev/null 2>&1; then
+            echo "pre-commit: staged Zig changes are not zig-fmt clean - run: zig fmt ${zig_staged[*]}"
+            failed=1
+        fi
+    fi
+fi
+
+# CMake - CMakeLists.txt / *.cmake must satisfy the checked-in .cmake-format.py profile.
+if command -v cmake-format > /dev/null 2>&1; then
+    while IFS= read -r -d '' file; do
+        case "$file" in
+        CMakeLists.txt | *.cmake) ;;
+        *) continue ;;
+        esac
+        if ! cmake-format --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not cmake-format clean - run: cmake-format -i $file"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only -z --diff-filter=ACM)
+fi
+
+# YAML/JSON - must satisfy the checked-in .dprint.json (json + pretty_yaml plugins). TOML is handled
+# separately by taplo below, because dprint's TOML pass reorders keys and collapses aligned comment
+# columns. Skips without dprint (cargo install dprint).
+if command -v dprint > /dev/null 2>&1; then
+    dprint_staged=()
+    while IFS= read -r -d '' file; do dprint_staged+=("$file"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.json' '*.yml' '*.yaml')
+    if [ ${#dprint_staged[@]} -gt 0 ]; then
+        if ! dprint check "${dprint_staged[@]}" > /dev/null 2>&1; then
+            echo "pre-commit: staged YAML/JSON is not dprint clean - run: dprint fmt"
+            failed=1
+        fi
+    fi
+fi
+
+# TOML - must satisfy the checked-in .taplo.toml: aligned trailing comments, preserved key order, no
+# array reshaping. taplo (not dprint) because it aligns comments without reordering. Skips without
+# taplo (cargo install taplo-cli).
+if command -v taplo > /dev/null 2>&1; then
+    toml_staged=()
+    while IFS= read -r -d '' file; do toml_staged+=("$file"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.toml')
+    if [ ${#toml_staged[@]} -gt 0 ]; then
+        if ! taplo fmt --check "${toml_staged[@]}" > /dev/null 2>&1; then
+            echo "pre-commit: staged TOML is not taplo clean - run: taplo fmt"
+            failed=1
+        fi
+    fi
+fi
+
+if [ "$failed" -ne 0 ]; then
+    echo ""
+    echo "Staged changes violate the house style (see the reasons above). Fix and re-stage, or bypass"
+    echo "knowingly with: git commit --no-verify"
+    exit 1
+fi
+exit 0

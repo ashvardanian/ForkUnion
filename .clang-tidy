@@ -17,5 +17,5 @@ CheckOptions:
   - key: performance-unnecessary-value-param.AllowedTypes
     value: 'std::shared_ptr;std::unique_ptr'
 
-HeaderFilterRegex: '.*'
+HeaderFilterRegex: '.*\.hpp$'
 FormatStyle: file

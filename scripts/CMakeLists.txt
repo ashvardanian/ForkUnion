@@ -1,6 +1,6 @@
 # Shared logic for setting target properties for tests and examples
-function (set_target_properties_for_fork_union_script target_name)
-    target_link_libraries(${target_name} PRIVATE fork_union)
+function (set_target_properties_for_forkunion_script target_name)
+    target_link_libraries(${target_name} PRIVATE forkunion)
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # This warning annoys us by reminding, that before GCC 4.6 the ABI for passing objects aligned to ≥32-bytes was
@@ -12,9 +12,8 @@ function (set_target_properties_for_fork_union_script target_name)
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         message(STATUS "Enabling optimizations for ${target_name}")
         target_compile_options(
-            ${target_name}
-            PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
-                    $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
+            ${target_name} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+                                   $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
         )
     endif ()
 
@@ -43,7 +42,7 @@ set(TEST_SOURCES test.cpp)
 set(CXX_STANDARDS 17 20 23)
 foreach (STD IN LISTS CXX_STANDARDS)
     # Derive a unique target name
-    set(TGT fork_union_test_cpp${STD})
+    set(TGT forkunion_test_cpp${STD})
 
     # Create the executable
     add_executable(${TGT} ${TEST_SOURCES})
@@ -57,50 +56,147 @@ foreach (STD IN LISTS CXX_STANDARDS)
 
     # register it as a CTest test
     add_test(NAME ${TGT} COMMAND ${TGT})
-    set_target_properties_for_fork_union_script(${TGT})
+    set_target_properties_for_forkunion_script(${TGT})
 
-    # Link against `libatomic` for Linux toolchains that might need it
+    # Link against `libatomic` for Linux and Android toolchains that might need it. ! Not `UNIX AND NOT APPLE`: FreeBSD
+    # matches that too, and its atomics live in ! compiler-rt - there is no separate `libatomic` for the linker to find.
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        if (UNIX AND NOT APPLE)
+        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
             target_link_libraries(${TGT} PRIVATE -latomic)
         endif ()
     endif ()
 
 endforeach ()
 
-# Include the N-body benchmark
-add_executable(fork_union_nbody nbody.cpp)
-target_link_libraries(fork_union_nbody PRIVATE fork_union)
-set_target_properties(
-    fork_union_nbody
-    PROPERTIES CXX_STANDARD 20
-               CXX_STANDARD_REQUIRED ON
-               CXX_EXTENSIONS OFF
-)
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(STATUS "Enabling OpenMP for fork_union_nbody on GCC")
-    target_compile_options(fork_union_nbody PRIVATE -fopenmp -flto -ffast-math)
-    target_link_options(fork_union_nbody PRIVATE -fopenmp)
-elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    find_program(BREW_EXECUTABLE brew)
-    if (BREW_EXECUTABLE)
-        execute_process(
-            COMMAND ${BREW_EXECUTABLE} --prefix libomp
-            OUTPUT_VARIABLE LIBOMP_PREFIX
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-        )
-        if (LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}/include/omp.h")
-            message(STATUS "Enabling OpenMP for fork_union_nbody on Clang with Homebrew libomp")
-            target_include_directories(fork_union_nbody PRIVATE ${LIBOMP_PREFIX}/include)
-            target_link_directories(fork_union_nbody PRIVATE ${LIBOMP_PREFIX}/lib)
-            target_compile_options(fork_union_nbody PRIVATE -Xclang -fopenmp)
-            target_link_libraries(fork_union_nbody PRIVATE omp)
-        else ()
-            message(STATUS "Homebrew libomp not found - OpenMP disabled for fork_union_nbody")
-        endif ()
-    else ()
-        message(STATUS "Homebrew not found - OpenMP disabled for fork_union_nbody")
+enable_language(C)
+
+# Builds one `test.c` C-API test target, sharing the C11 / output-dir / libatomic wiring. Callers add the one flag that
+# distinguishes their variant (GNU nested functions, Clang blocks).
+function (add_forkunion_c_test target extensions)
+    add_executable(${target} test.c)
+    set_target_properties(
+        ${target}
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   C_EXTENSIONS ${extensions}
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(${target} PRIVATE forkunion_static)
+    if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+        target_link_libraries(${target} PRIVATE -latomic)
+    endif ()
+    add_test(NAME ${target} COMMAND ${target})
+endfunction ()
+
+if (CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    message(STATUS "Skipping C11 C API tests on MSVC due to missing <stdatomic.h> support")
+else ()
+    add_forkunion_c_test(forkunion_test_c11 OFF)
+endif ()
+
+# GCC nested functions extension test
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_forkunion_c_test(forkunion_test_c_gcc_nested ON)
+endif ()
+
+# Clang blocks extension test
+if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+    add_forkunion_c_test(forkunion_test_c_clang_blocks ON)
+    target_compile_options(forkunion_test_c_clang_blocks PRIVATE -fblocks)
+    # Apple's `libSystem` ships the Blocks runtime; other UNIX needs it linked explicitly.
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE -lBlocksRuntime)
     endif ()
 endif ()
-set_target_properties_for_fork_union_script(fork_union_nbody)
+
+# Taskflow: a third comparison backend for the C++ benchmarks, fetched into the build tree so no submodule is vendored.
+# `FIND_PACKAGE_ARGS` lets a system install satisfy configure without a clone.
+find_package(Threads REQUIRED)
+include(FetchContent)
+set(TF_BUILD_TESTS
+    OFF
+    CACHE BOOL "" FORCE
+)
+set(TF_BUILD_EXAMPLES
+    OFF
+    CACHE BOOL "" FORCE
+)
+set(TF_BUILD_PROFILER
+    OFF
+    CACHE BOOL "" FORCE
+)
+FetchContent_Declare(
+    taskflow
+    GIT_REPOSITORY https://github.com/taskflow/taskflow.git
+    GIT_TAG v4.1.0
+    FIND_PACKAGE_ARGS NAMES Taskflow
+)
+FetchContent_MakeAvailable(taskflow)
+
+# Both demo benchmarks share identical wiring - C++ for clear state ownership, but linking the pre-compiled C ABI so the
+# runtime busy-wait waiter resolves at runtime - the whole point, since AArch64 `WFET` is unreachable through the
+# compile-time C++ `preferred_yield_t`.
+function (add_forkunion_benchmark target source)
+    add_executable(${target} ${source})
+    # C++20 for the benchmark harness (the library itself stays C++17); Taskflow v4 requires C++20 concepts.
+    set_target_properties(
+        ${target}
+        PROPERTIES CXX_STANDARD 20
+                   CXX_STANDARD_REQUIRED ON
+                   CXX_EXTENSIONS OFF
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(${target} PRIVATE forkunion_static)
+
+    # Link against `libatomic` for Linux and Android toolchains that might need it
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+            target_link_libraries(${target} PRIVATE -latomic)
+        endif ()
+    endif ()
+
+    if (CMAKE_BUILD_TYPE STREQUAL "Release")
+        target_compile_options(
+            ${target} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+        )
+    endif ()
+
+    # Strict IEEE math, deliberately: the N-body kernel hand-reassociates its reduction into the same eight lanes as the
+    # Rust and Zig kernels, so no `-ffast-math` is wanted - and Clang's default `-ffp-contract=on` would fuse
+    # multiply-adds Rust and Zig keep separate, diverging the bits.
+    target_compile_options(${target} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
+
+    # OpenMP: native on GCC, Homebrew `libomp` on Apple/Clang.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        message(STATUS "Enabling OpenMP for ${target} on GCC")
+        target_compile_options(${target} PRIVATE -fopenmp)
+        target_link_options(${target} PRIVATE -fopenmp)
+    elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        find_program(BREW_EXECUTABLE brew)
+        if (BREW_EXECUTABLE)
+            execute_process(
+                COMMAND ${BREW_EXECUTABLE} --prefix libomp
+                OUTPUT_VARIABLE LIBOMP_PREFIX
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+            )
+            if (LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}/include/omp.h")
+                message(STATUS "Enabling OpenMP for ${target} on Clang with Homebrew libomp")
+                target_include_directories(${target} PRIVATE ${LIBOMP_PREFIX}/include)
+                target_link_directories(${target} PRIVATE ${LIBOMP_PREFIX}/lib)
+                target_compile_options(${target} PRIVATE -Xclang -fopenmp)
+                target_link_libraries(${target} PRIVATE omp)
+            else ()
+                message(STATUS "Homebrew libomp not found - OpenMP disabled for ${target}")
+            endif ()
+        else ()
+            message(STATUS "Homebrew not found - OpenMP disabled for ${target}")
+        endif ()
+    endif ()
+
+    # Taskflow: header-only, so linking the interface target only adds the include path and a threads dependency.
+    target_link_libraries(${target} PRIVATE Taskflow::Taskflow Threads::Threads)
+endfunction ()
+
+add_forkunion_benchmark(forkunion_nbody nbody.cpp)
+# Connected components: exact integer work; the CSR is replicated per memory domain.
+add_forkunion_benchmark(forkunion_propagation propagation.cpp)

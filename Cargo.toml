@@ -1,15 +1,15 @@
 [package]
-name = "fork_union"
+name = "forkunion"
 description = "Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library"
 version = "2.3.1"
 edition = "2021"
 authors = ["Ash Vardanian"]
 license = "Apache-2.0"
-repository = "https://github.com/ashvardanian/fork_union"
+repository = "https://github.com/ashvardanian/ForkUnion"
 rust-version = "1.64" # Introduced Core C FFI in stable Rust
 readme = "README.md"
-documentation = "https://docs.rs/fork_union"
-homepage = "https://github.com/ashvardanian/fork_union"
+documentation = "https://docs.rs/forkunion"
+homepage = "https://github.com/ashvardanian/ForkUnion"
 keywords = ["numa", "parallel", "thread-pool", "allocator", "no-std"]
 categories = ["concurrency", "os::linux-apis", "external-ffi-bindings"]
 include = [
@@ -21,11 +21,11 @@ include = [
     "include/**",
     "c/**",
 ]
-links = "fork_union"
+links = "forkunion"
 
 [lib]
-name = "fork_union"
-path = "rust/lib.rs"
+name = "forkunion"
+path = "rust/forkunion.rs"
 
 [build-dependencies]
 cc = "1.2.40"
@@ -33,28 +33,40 @@ cc = "1.2.40"
 [features]
 default = ["std"]
 std = []
-numa = []
+benchmarks = ["dep:rayon", "dep:rand", "dep:tokio"] # ? The demo binaries and their baseline runtimes
+
+# Kernel facilities. Left alone, each is decided by `include/forkunion/types.hpp` from the platform
+# and from whether `<numa.h>` is present; these only override that. See `build.rs`.
+topology = []                   # ? Force compute/memory-domain enumeration on
+place-memory-on-domain = []     # ? Force page placement on a memory domain (implies topology)
+place-huge-pages-on-domain = [] # ? Force pages larger than the base page (implies place-memory-on-domain)
+place-threads-by-affinity = []  # ? Force binding worker threads to cores
+portable = []                   # ? Force every optional capability off, leaving the STL pool
 
 [profile.release]
-opt-level = 2     # Corresponds to -O2
-lto = true        # Enables Link Time Optimization for further optimizations
+opt-level = 3     # Corresponds to -O3, matching the C++ benchmarks it is compared against
+lto = false       # No LTO, matching the C++ and Zig benchmarks; fat LTO could not cross into the C core anyway
 codegen-units = 1 # May increase compilation time but optimizes further
 rpath = false     # On some systems, setting this to false can help with optimizations
 
-[[example]]
-name = "nbody"
+# Proper `[[bin]]` targets rather than examples, so the binaries land in `target/release/` directly,
+# mirroring CMake's `build_release/` and Zig's `zig-out/bin/`. The `benchmarks` feature gates them and
+# their baseline runtimes, so library consumers never pull Rayon or Tokio.
+[[bin]]
+name = "forkunion_nbody"
 path = "scripts/nbody.rs"
 test = false
 bench = false
+required-features = ["benchmarks"]
 
-[[example]]
-name = "search"
-path = "scripts/search.rs"
+[[bin]]
+name = "forkunion_propagation"
+path = "scripts/propagation.rs"
 test = false
 bench = false
+required-features = ["benchmarks"]
 
-[dev-dependencies]
-rayon = "1.11"
-rand = "0.9"
-tokio = { version = "1.46.1", features = ["rt-multi-thread", "sync"] }
-simsimd = "6.5.3"
+[dependencies]
+rayon = { version = "1.11", optional = true }
+rand = { version = "0.9", optional = true }
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "sync"], optional = true }

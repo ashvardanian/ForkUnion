@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/forkunionTargets.cmake")
+
+# Provide an un-namespaced alias so downstream consumers can do both:
+# ~~~
+# target_link_libraries(my_executable PRIVATE forkunion)
+# target_link_libraries(my_executable PRIVATE forkunion::forkunion)
+# ~~~
+if (NOT TARGET forkunion::forkunion)
+    add_library(forkunion::forkunion ALIAS forkunion)
+endif ()
+set(forkunion_VERSION @PACKAGE_VERSION@)

@@ -1,0 +1,20 @@
+{
+    "indentWidth": 2,
+    "lineWidth": 120,
+    "newLineKind": "lf",
+    "json": {
+        "indentWidth": 4
+    },
+    "includes": ["**/*.{json,jsonc,yaml,yml}"],
+    "excludes": [
+        "**/target/",
+        "**/build*/",
+        "**/zig-out/",
+        "**/.zig-cache/",
+        "**/.git/"
+    ],
+    "plugins": [
+        "https://plugins.dprint.dev/json-0.23.0.wasm",
+        "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm"
+    ]
+}
