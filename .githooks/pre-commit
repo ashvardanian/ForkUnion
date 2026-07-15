@@ -233,6 +233,36 @@ if command -v cmake-format > /dev/null 2>&1; then
     done < <(git diff --cached --name-only -z --diff-filter=ACM)
 fi
 
+# YAML/JSON - must satisfy the checked-in .dprint.json (json + pretty_yaml plugins). TOML is handled
+# separately by taplo below, because dprint's TOML pass reorders keys and collapses aligned comment
+# columns. Skips without dprint (cargo install dprint).
+if command -v dprint > /dev/null 2>&1; then
+    dprint_staged=()
+    while IFS= read -r -d '' file; do dprint_staged+=("$file"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.json' '*.yml' '*.yaml')
+    if [ ${#dprint_staged[@]} -gt 0 ]; then
+        if ! dprint check "${dprint_staged[@]}" > /dev/null 2>&1; then
+            echo "pre-commit: staged YAML/JSON is not dprint clean - run: dprint fmt"
+            failed=1
+        fi
+    fi
+fi
+
+# TOML - must satisfy the checked-in .taplo.toml: aligned trailing comments, preserved key order, no
+# array reshaping. taplo (not dprint) because it aligns comments without reordering. Skips without
+# taplo (cargo install taplo-cli).
+if command -v taplo > /dev/null 2>&1; then
+    toml_staged=()
+    while IFS= read -r -d '' file; do toml_staged+=("$file"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.toml')
+    if [ ${#toml_staged[@]} -gt 0 ]; then
+        if ! taplo fmt --check "${toml_staged[@]}" > /dev/null 2>&1; then
+            echo "pre-commit: staged TOML is not taplo clean - run: taplo fmt"
+            failed=1
+        fi
+    fi
+fi
+
 if [ "$failed" -ne 0 ]; then
     echo ""
     echo "Staged changes violate the house style (see the reasons above). Fix and re-stage, or bypass"

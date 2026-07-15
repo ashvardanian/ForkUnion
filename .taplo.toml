@@ -1,0 +1,13 @@
+# TOML formatting for Cargo.toml / rust-toolchain.toml, enforced by .githooks/pre-commit.
+#
+# The point is to keep trailing comments column-aligned (like the C++ AlignTrailingComments house
+# style) without dprint's TOML pass reordering keys or exploding `[]` onto two lines. taplo aligns
+# comments and preserves key order; the array knobs are off so hand-laid arrays keep their shape.
+[formatting]
+align_comments = true       # ? Column-align trailing `#` comments within each block
+align_entries = false       # ? Do not align the `=` signs - only the comments
+reorder_keys = false        # ? Preserve authored key order
+array_auto_expand = false   # ? Never explode an inline array / `[]` across lines
+array_auto_collapse = false # ? Never collapse a hand-expanded array (e.g. `include`)
+column_width = 200          # ? High enough that a long comment never triggers array expansion
+indent_string = "    "      # ? Four spaces, matching the existing `include` array
