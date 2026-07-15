@@ -68,6 +68,7 @@ pub const ShardedArray = allocators.ShardedArray;
 
 // scheduling
 pub const Pool = scheduling.Pool;
+pub const Fabric = scheduling.Fabric;
 
 test { // pull each module's tests into `zig build test`
     _ = @import("forkunion/topology.zig");

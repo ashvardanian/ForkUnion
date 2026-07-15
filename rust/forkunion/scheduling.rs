@@ -1,15 +1,16 @@
-//! The thread pool and its dispatch primitives - spawn, scoped joins, and parallel loops.
+//! The thread pool and its dispatch primitives - spawn, scoped joins, parallel loops - and the
+//! measured memory fabric those pools can harvest.
 //!
-//! Owns the `fu_pool_*` FFI; mirrors the C++ `flat`/scheduling layer.
+//! Owns the `fu_pool_*` and `fu_fabric_*` FFI; mirrors the C++ `flat`/`distributed` scheduling layer.
 
 use crate::parallel::{ParallelIterator, ParallelSchedule};
-use crate::topology::{CallerExclusivity, Capabilities, Error, Topology};
+use crate::topology::{
+    CallerExclusivity, Capabilities, ComputeDomain, Error, MemoryDomain, Topology,
+};
 use crate::types::{IndexedSplit, Prong, SafePtr, SyncMutPtr};
 use core::ffi::{c_char, c_int, c_void};
 
-// C FFI declarations
 extern "C" {
-    // Pool lifecycle & introspection
     fn fu_pool_new(name: *const c_char, allowed: u32) -> *mut c_void;
     fn fu_pool_delete(pool: *mut c_void);
     fn fu_pool_spawn(
@@ -37,7 +38,6 @@ extern "C" {
     fn fu_pool_sleep(pool: *mut c_void, micros: usize);
     fn fu_pool_terminate(pool: *mut c_void);
 
-    // Parallel dispatch
     #[allow(dead_code)]
     fn fu_pool_for_threads(
         pool: *mut c_void,
@@ -63,7 +63,6 @@ extern "C" {
         context: *mut c_void,
     );
 
-    // Generation tokens
     fn fu_pool_unsafe_for_threads(
         pool: *mut c_void,
         callback: extern "C" fn(*mut c_void, usize, usize),
@@ -72,6 +71,27 @@ extern "C" {
     fn fu_pool_is_complete(pool: *mut c_void, generation: usize) -> c_int;
     fn fu_pool_unsafe_join(pool: *mut c_void, generation: usize);
     fn fu_pool_capabilities(pool: *mut c_void) -> u32;
+
+    fn fu_fabric_new() -> *mut c_void;
+    fn fu_fabric_delete(fabric: *mut c_void);
+    fn fu_fabric_harvest(topology: *mut c_void, pool: *mut c_void, fabric: *mut c_void) -> c_int;
+    fn fu_fabric_memory_latency(
+        fabric: *mut c_void,
+        compute_domain_index: usize,
+        memory_domain_index: usize,
+    ) -> usize;
+    fn fu_fabric_memory_bandwidth(
+        fabric: *mut c_void,
+        compute_domain_index: usize,
+        memory_domain_index: usize,
+    ) -> usize;
+    fn fu_fabric_memory_distance(
+        fabric: *mut c_void,
+        compute_domain_index: usize,
+        memory_domain_index: usize,
+    ) -> usize;
+    fn fu_fabric_memory_level_in(fabric: *mut c_void, memory_domain_index: usize) -> usize;
+    fn fu_fabric_memory_levels_count(fabric: *mut c_void) -> usize;
 }
 
 /// Minimalistic, fixed-size thread-pool for blocking scoped parallelism.
@@ -743,6 +763,108 @@ impl Drop for ThreadPool {
             fu_pool_terminate(self.inner);
             fu_pool_delete(self.inner);
         }
+    }
+}
+
+/// The measured memory fabric - what this process observed, as opposed to the structure a
+/// [`Topology`] declares. Two query families: edge queries `(initiator, target)` describe one
+/// interconnect link; medium queries `(target)` describe the memory pool itself, independent of
+/// any initiator.
+///
+/// Completes the `try_harvest` pipeline: a [`Topology`] is harvested first and stays immutable
+/// (and shareable), a [`ThreadPool`] spawns on it, and the fabric then harvests through that
+/// pool's pinned workers, snapshotting what it needs so the topology may be dropped after.
+/// Before a harvest every query answers 0, and
+/// [`memory_levels_count`](Self::memory_levels_count) answers 1.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use forkunion::*;
+/// let topology = Topology::new().unwrap();
+/// let mut pool = spawn(&topology, 4);
+/// let mut fabric = Fabric::new().unwrap();
+/// if fabric.try_harvest(&topology, &mut pool) {
+///     let local = topology.local_memory_of(ComputeDomain(0));
+///     assert!(fabric.memory_latency(ComputeDomain(0), local) > 0);
+/// }
+/// ```
+pub struct Fabric {
+    inner: *mut c_void,
+}
+
+unsafe impl Send for Fabric {}
+unsafe impl Sync for Fabric {}
+
+impl Fabric {
+    /// Creates an empty, unharvested fabric.
+    pub fn new() -> Result<Fabric, Error> {
+        let inner = unsafe { fu_fabric_new() };
+        if inner.is_null() {
+            return Err(Error::CreationFailed);
+        }
+        Ok(Fabric { inner })
+    }
+
+    /// Measures the memory fabric through the pool's pinned workers, replacing any previous
+    /// harvest; the `topology` is only read.
+    ///
+    /// Returns `false` on allocation failure, or for a pool whose workers are not pinned per
+    /// domain - one restricted below [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] or pinned via
+    /// [`ThreadPool::try_spawn_on`]; the fabric is then left empty, never half-written. Not
+    /// thread-safe: it dispatches on the pool and rebuilds `self`, so call it between task
+    /// batches. Expect seconds of runtime on large fabrics.
+    pub fn try_harvest(&mut self, topology: &Topology, pool: &mut ThreadPool) -> bool {
+        unsafe { fu_fabric_harvest(topology.raw(), pool.inner, self.inner) != 0 }
+    }
+
+    /// Returns the measured dependent-load latency (nanoseconds) on an edge - the best recording;
+    /// 0 before a harvest, for an edge no worker could reach, or an out-of-range index.
+    pub fn memory_latency(
+        &self,
+        compute_domain: ComputeDomain,
+        memory_domain: MemoryDomain,
+    ) -> usize {
+        unsafe { fu_fabric_memory_latency(self.inner, compute_domain.get(), memory_domain.get()) }
+    }
+
+    /// Returns the measured saturated read bandwidth (MB/s) on an edge, streamed by all the
+    /// initiator domain's workers at once - the best recording; 0 if unreached or out of range.
+    pub fn memory_bandwidth(
+        &self,
+        compute_domain: ComputeDomain,
+        memory_domain: MemoryDomain,
+    ) -> usize {
+        unsafe { fu_fabric_memory_bandwidth(self.inner, compute_domain.get(), memory_domain.get()) }
+    }
+
+    /// Returns the relative access distance on an edge (10 = local, per the SLIT convention):
+    /// the measured latency ratio to the initiator's local domain, clamped so local carries the
+    /// row's minimum; unwalked edges fall back to 10-local / 20-remote.
+    pub fn memory_distance(
+        &self,
+        compute_domain: ComputeDomain,
+        memory_domain: MemoryDomain,
+    ) -> usize {
+        unsafe { fu_fabric_memory_distance(self.inner, compute_domain.get(), memory_domain.get()) }
+    }
+
+    /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL),
+    /// keyed by the best bandwidth any initiator sustains to it, ties split by the best latency.
+    pub fn memory_level_in(&self, memory_domain: MemoryDomain) -> usize {
+        unsafe { fu_fabric_memory_level_in(self.inner, memory_domain.get()) }
+    }
+
+    /// Returns the number of distinct derived memory tiers, the memory-axis twin of
+    /// [`Topology::compute_levels_count`]; 1 on single-tier systems and before a harvest.
+    pub fn memory_levels_count(&self) -> usize {
+        unsafe { fu_fabric_memory_levels_count(self.inner) }
+    }
+}
+
+impl Drop for Fabric {
+    fn drop(&mut self) {
+        unsafe { fu_fabric_delete(self.inner) };
     }
 }
 
@@ -1420,6 +1542,29 @@ mod tests {
                 "Thread {i} in pool_b not visited"
             );
         }
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn fabric_harvest_fills_edges() {
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
+        let mut fabric = Fabric::new().unwrap();
+
+        // An unharvested fabric answers zeros and a single tier.
+        assert_eq!(fabric.memory_latency(ComputeDomain(0), MemoryDomain(0)), 0);
+        assert_eq!(fabric.memory_levels_count(), 1);
+
+        if !fabric.try_harvest(&topology, &mut pool) {
+            return; // ? A flat pool without domain placement has no fabric to walk
+        }
+        // Every reachable edge must carry sane observations; emulated-NUMA guests may
+        // measure equal local and remote costs, so nothing stronger is asserted.
+        let local = topology.local_memory_of(ComputeDomain(0));
+        assert!(fabric.memory_latency(ComputeDomain(0), local) > 0);
+        assert!(fabric.memory_bandwidth(ComputeDomain(0), local) > 0);
+        assert_eq!(fabric.memory_distance(ComputeDomain(0), local), 10);
+        assert!(fabric.memory_levels_count() >= 1);
     }
 
     #[cfg_attr(miri, ignore)]

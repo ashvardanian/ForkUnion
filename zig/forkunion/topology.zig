@@ -6,7 +6,6 @@
 
 const std = @import("std");
 
-// Library metadata
 extern fn fu_version_major() c_int;
 extern fn fu_version_minor() c_int;
 extern fn fu_version_patch() c_int;
@@ -14,11 +13,9 @@ extern fn fu_comptime_capabilities() u32;
 extern fn fu_runtime_capabilities() u32;
 extern fn fu_name_capabilities(caps: u32, buf: [*]u8, len: usize) usize;
 
-// Topology lifecycle
 extern fn fu_topology_new() ?*anyopaque;
 extern fn fu_topology_delete(topology: *anyopaque) void;
 
-// Compute topology
 extern fn fu_logical_cores_count(topology: *anyopaque) usize;
 extern fn fu_compute_domains_count(topology: *anyopaque) usize;
 extern fn fu_compute_levels_count(topology: *anyopaque) usize;
@@ -27,24 +24,14 @@ extern fn fu_compute_level_in(topology: *anyopaque, compute_domain_index: usize)
 extern fn fu_compute_capacity_in(topology: *anyopaque, compute_domain_index: usize) usize;
 extern fn fu_compute_cache_bytes_in(topology: *anyopaque, compute_domain_index: usize) usize;
 
-// Memory topology
 extern fn fu_memory_domains_count(topology: *anyopaque) usize;
-extern fn fu_memory_levels_count(topology: *anyopaque) usize;
-extern fn fu_memory_level_in(topology: *anyopaque, memory_domain_index: usize) usize;
 extern fn fu_volume_ram(topology: *anyopaque) usize;
 extern fn fu_volume_ram_in(topology: *anyopaque, memory_domain_index: usize) usize;
 extern fn fu_volume_huge_pages(topology: *anyopaque) usize;
 extern fn fu_volume_huge_pages_in(topology: *anyopaque, memory_domain_index: usize) usize;
 extern fn fu_huge_pages_count(topology: *anyopaque) usize;
 extern fn fu_huge_pages_count_in(topology: *anyopaque, memory_domain_index: usize) usize;
-
-// Affinity
 extern fn fu_local_memory_of(topology: *anyopaque, compute_domain_index: usize) usize;
-extern fn fu_memory_distance(topology: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
-extern fn fu_memory_bandwidth(topology: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
-extern fn fu_memory_latency(topology: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
-
-// Allocation
 extern fn fu_memory_domain_id_at_index(topology: *anyopaque, memory_domain_index: usize) i32;
 
 /// Errors that can occur during thread pool operations
@@ -200,29 +187,12 @@ pub const Topology = struct {
         return fu_compute_level_in(self.handle, compute_domain_index);
     }
 
-    /// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
-    pub fn memoryLevelIn(self: Topology, memory_domain_index: usize) usize {
-        return fu_memory_level_in(self.handle, memory_domain_index);
-    }
-
     /// Returns the memory domain nearest a given compute domain (its local allocation target).
+    ///
+    /// Performance - tiers, latencies, bandwidths, distances - is not the topology's to declare:
+    /// harvest a `Fabric` to measure it in-process.
     pub fn localMemoryOf(self: Topology, compute_domain_index: usize) usize {
         return fu_local_memory_of(self.handle, compute_domain_index);
-    }
-
-    /// Returns the relative access distance from a compute domain to a memory domain (10 = local).
-    pub fn memoryDistance(self: Topology, compute_domain_index: usize, memory_domain_index: usize) usize {
-        return fu_memory_distance(self.handle, compute_domain_index, memory_domain_index);
-    }
-
-    /// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
-    pub fn memoryBandwidth(self: Topology, compute_domain_index: usize, memory_domain_index: usize) usize {
-        return fu_memory_bandwidth(self.handle, compute_domain_index, memory_domain_index);
-    }
-
-    /// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
-    pub fn memoryLatency(self: Topology, compute_domain_index: usize, memory_domain_index: usize) usize {
-        return fu_memory_latency(self.handle, compute_domain_index, memory_domain_index);
     }
 
     /// Returns the number of distinct Quality-of-Service levels.
@@ -231,11 +201,6 @@ pub const Topology = struct {
     /// cores may still be split across cache clusters, or across NUMA nodes.
     pub fn countComputeLevels(self: Topology) usize {
         return fu_compute_levels_count(self.handle);
-    }
-
-    /// Returns the number of distinct memory tiers, the memory-axis twin of `countComputeLevels`.
-    pub fn countMemoryLevels(self: Topology) usize {
-        return fu_memory_levels_count(self.handle);
     }
 
     /// Returns the relative throughput of one core in a compute domain (0 if unknown).
@@ -316,8 +281,7 @@ test "system capabilities" {
     // Without the pools, the library can still see exactly one domain, and never more.
     if (!comptime_caps.colocate_pools_on_domain) try std.testing.expectEqual(@as(usize, 1), topo.countComputeDomains());
 
-    // One facility, two questions of the same bit: a machine can only _offer_ page placement if this
-    // build compiled the path that asks for it.
+    // A machine can only _offer_ page placement if this build compiled the path that asks for it.
     if (runtime_caps.place_memory_on_domain) try std.testing.expect(comptime_caps.place_memory_on_domain);
 }
 

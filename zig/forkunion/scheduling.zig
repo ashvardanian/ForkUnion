@@ -11,7 +11,6 @@ const CallerExclusivity = topology.CallerExclusivity;
 const Capabilities = topology.Capabilities;
 const Prong = @import("types.zig").Prong;
 
-// Pool lifecycle & introspection
 extern fn fu_pool_new(name: ?[*:0]const u8, allowed: u32) ?*anyopaque;
 extern fn fu_pool_delete(pool: *anyopaque) void;
 extern fn fu_pool_spawn(topology: *anyopaque, pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
@@ -25,7 +24,6 @@ extern fn fu_pool_compute_domains_count(pool: *anyopaque) usize;
 extern fn fu_pool_threads_count_in(pool: *anyopaque, compute_domain_index: usize) usize;
 extern fn fu_pool_locate_thread_in(pool: *anyopaque, global_thread_index: usize, compute_domain_index: usize) usize;
 
-// Parallel dispatch
 extern fn fu_pool_for_threads(
     pool: *anyopaque,
     callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
@@ -50,7 +48,6 @@ extern fn fu_pool_for_slices(
     context: ?*anyopaque,
 ) void;
 
-// Generation tokens
 extern fn fu_pool_unsafe_for_threads(
     pool: *anyopaque,
     callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
@@ -58,6 +55,15 @@ extern fn fu_pool_unsafe_for_threads(
 ) usize;
 extern fn fu_pool_is_complete(pool: *anyopaque, generation: usize) c_int;
 extern fn fu_pool_unsafe_join(pool: *anyopaque, generation: usize) void;
+
+extern fn fu_fabric_new() ?*anyopaque;
+extern fn fu_fabric_delete(fabric: *anyopaque) void;
+extern fn fu_fabric_harvest(topology: *anyopaque, pool: *anyopaque, fabric: *anyopaque) c_int;
+extern fn fu_fabric_memory_latency(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
+extern fn fu_fabric_memory_bandwidth(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
+extern fn fu_fabric_memory_distance(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
+extern fn fu_fabric_memory_level_in(fabric: *anyopaque, memory_domain_index: usize) usize;
+extern fn fu_fabric_memory_levels_count(fabric: *anyopaque) usize;
 
 /// Thread pool for fork-join parallelism
 pub const Pool = struct {
@@ -87,8 +93,7 @@ pub const Pool = struct {
         exclusivity: CallerExclusivity,
         allowed: Capabilities,
     ) Error!Pool {
-        // Convert name to null-terminated string if provided
-        // SAFETY: C library copies name into internal buffer immediately
+        // SAFETY: the C library copies the name into an internal buffer immediately
         var name_buf: [16:0]u8 = undefined;
         const name_z: ?[*:0]const u8 = if (name) |n|
             std.fmt.bufPrintZ(&name_buf, "{s}", .{n[0..@min(n.len, 15)]}) catch unreachable
@@ -98,7 +103,6 @@ pub const Pool = struct {
         const handle = fu_pool_new(name_z, @bitCast(allowed)) orelse return Error.CreationFailed;
         errdefer fu_pool_delete(handle);
 
-        // C++ validates threads > 0 and returns false if invalid
         const success = fu_pool_spawn(topo.handle, handle, thread_count, @intFromEnum(exclusivity));
         if (success == 0) return Error.SpawnFailed;
 
@@ -193,7 +197,6 @@ pub const Pool = struct {
     ) void {
         const Context = @TypeOf(context);
 
-        // Validate function signature at compile time
         const expected_type = if (Context == void)
             fn (usize, usize) void
         else
@@ -213,6 +216,7 @@ pub const Pool = struct {
         } else {
             const Wrapper = struct {
                 fn callback(ctx: ?*anyopaque, thread_idx: usize, compute_domain_idx: usize) callconv(.c) void {
+                    // SAFETY: the context pointer stays valid for the whole blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
                     func(thread_idx, compute_domain_idx, typed_ctx.*);
                 }
@@ -234,7 +238,6 @@ pub const Pool = struct {
     ) void {
         const Context = @TypeOf(context);
 
-        // Validate function signature at compile time
         const expected_type = if (Context == void)
             fn (Prong) void
         else
@@ -245,7 +248,6 @@ pub const Pool = struct {
         }
 
         if (Context == void) {
-            // Stateless path - no context
             const Wrapper = struct {
                 fn callback(
                     _: ?*anyopaque,
@@ -263,7 +265,6 @@ pub const Pool = struct {
             };
             fu_pool_for_n(self.handle, n, Wrapper.callback, null);
         } else {
-            // Stateful path - pass context
             const Wrapper = struct {
                 fn callback(
                     ctx: ?*anyopaque,
@@ -276,7 +277,7 @@ pub const Pool = struct {
                         .thread_index = thread_idx,
                         .compute_domain_index = compute_domain_idx,
                     };
-                    // SAFETY: Context pointer valid for duration of blocking call
+                    // SAFETY: the context pointer stays valid for the whole blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
                     func(prong, typed_ctx.*);
                 }
@@ -298,7 +299,6 @@ pub const Pool = struct {
     ) void {
         const Context = @TypeOf(context);
 
-        // Validate function signature at compile time
         const expected_type = if (Context == void)
             fn (Prong) void
         else
@@ -309,7 +309,6 @@ pub const Pool = struct {
         }
 
         if (Context == void) {
-            // Stateless path - no context
             const Wrapper = struct {
                 fn callback(
                     _: ?*anyopaque,
@@ -327,7 +326,6 @@ pub const Pool = struct {
             };
             fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, null);
         } else {
-            // Stateful path - pass context
             const Wrapper = struct {
                 fn callback(
                     ctx: ?*anyopaque,
@@ -340,7 +338,7 @@ pub const Pool = struct {
                         .thread_index = thread_idx,
                         .compute_domain_index = compute_domain_idx,
                     };
-                    // SAFETY: Context pointer valid for duration of blocking call
+                    // SAFETY: the context pointer stays valid for the whole blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
                     func(prong, typed_ctx.*);
                 }
@@ -364,7 +362,6 @@ pub const Pool = struct {
     ) void {
         const Context = @TypeOf(context);
 
-        // Validate function signature at compile time
         const expected_type = if (Context == void)
             fn (Prong, usize) void
         else
@@ -375,7 +372,6 @@ pub const Pool = struct {
         }
 
         if (Context == void) {
-            // Stateless path - no context
             const Wrapper = struct {
                 fn callback(
                     _: ?*anyopaque,
@@ -394,7 +390,6 @@ pub const Pool = struct {
             };
             fu_pool_for_slices(self.handle, n, Wrapper.callback, null);
         } else {
-            // Stateful path - pass context
             const Wrapper = struct {
                 fn callback(
                     ctx: ?*anyopaque,
@@ -408,7 +403,7 @@ pub const Pool = struct {
                         .thread_index = thread_idx,
                         .compute_domain_index = compute_domain_idx,
                     };
-                    // SAFETY: Context pointer valid for duration of blocking call
+                    // SAFETY: the context pointer stays valid for the whole blocking call
                     const typed_ctx: *const Context = @ptrCast(@alignCast(ctx));
                     func(prong, count, typed_ctx.*);
                 }
@@ -436,7 +431,6 @@ pub const Pool = struct {
         const Context = @TypeOf(context);
 
         if (Context == void) {
-            // Validate function signature at compile time
             const expected_type = fn (usize, usize) void;
             if (@TypeOf(func) != expected_type) {
                 @compileError("Function signature must be: " ++ @typeName(expected_type));
@@ -454,7 +448,6 @@ pub const Pool = struct {
                 @compileError("Non-blocking dispatch requires a pointer context (like `&my_context`) " ++
                     "whose pointee outlives `unsafeJoin`; got: " ++ @typeName(Context));
 
-            // Validate function signature at compile time
             const expected_type = fn (usize, usize, Context) void;
             if (@TypeOf(func) != expected_type) {
                 @compileError("Function signature must be: " ++ @typeName(expected_type));
@@ -486,6 +479,72 @@ pub const Pool = struct {
     }
 };
 
+/// The measured memory fabric - what this process observed, as opposed to the structure a
+/// `Topology` declares. Two query families: edge queries `(initiator, target)` describe one
+/// interconnect link; medium queries `(target)` describe the memory pool itself, independent of
+/// any initiator.
+///
+/// Completes the `tryHarvest` pipeline: a `Topology` is harvested first and stays immutable, a
+/// `Pool` spawns on it, and the fabric then harvests through that pool's pinned workers,
+/// snapshotting what it needs so the topology may be freed after. Before a harvest every query
+/// answers 0, and `countMemoryLevels` answers 1.
+pub const Fabric = struct {
+    handle: *anyopaque,
+
+    /// Creates an empty, unharvested fabric.
+    pub fn init() Error!Fabric {
+        const handle = fu_fabric_new() orelse return Error.CreationFailed;
+        return .{ .handle = handle };
+    }
+
+    /// Destroys the fabric and frees its observations.
+    pub fn deinit(self: Fabric) void {
+        fu_fabric_delete(self.handle);
+    }
+
+    /// Measures the memory fabric through the pool's pinned workers, replacing any previous
+    /// harvest; the `topo` is only read.
+    ///
+    /// Returns `false` on allocation failure, or for a pool whose workers are not pinned per
+    /// domain - flat pools and those pinned to one compute domain have no fabric to walk; it is left
+    /// empty, never half-written. Not thread-safe: it dispatches on the pool and rebuilds the
+    /// fabric, so call it between task batches. Expect seconds of runtime on large fabrics.
+    pub fn tryHarvest(self: *Fabric, topo: Topology, pool: Pool) bool {
+        return fu_fabric_harvest(topo.handle, pool.handle, self.handle) != 0;
+    }
+
+    /// Returns the measured dependent-load latency (nanoseconds) on an edge - the best recording;
+    /// 0 before a harvest, for an edge no worker could reach, or an out-of-range index.
+    pub fn memoryLatency(self: Fabric, compute_domain_index: usize, memory_domain_index: usize) usize {
+        return fu_fabric_memory_latency(self.handle, compute_domain_index, memory_domain_index);
+    }
+
+    /// Returns the measured saturated read bandwidth (MB/s) on an edge, streamed by all the
+    /// initiator domain's workers at once - the best recording; 0 if unreached or out of range.
+    pub fn memoryBandwidth(self: Fabric, compute_domain_index: usize, memory_domain_index: usize) usize {
+        return fu_fabric_memory_bandwidth(self.handle, compute_domain_index, memory_domain_index);
+    }
+
+    /// Returns the relative access distance on an edge (10 = local, per the SLIT convention):
+    /// the measured latency ratio to the initiator's local domain, clamped so local carries the
+    /// row's minimum; unwalked edges fall back to 10-local / 20-remote.
+    pub fn memoryDistance(self: Fabric, compute_domain_index: usize, memory_domain_index: usize) usize {
+        return fu_fabric_memory_distance(self.handle, compute_domain_index, memory_domain_index);
+    }
+
+    /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL),
+    /// keyed by the best bandwidth any initiator sustains to it, ties split by the best latency.
+    pub fn memoryLevelIn(self: Fabric, memory_domain_index: usize) usize {
+        return fu_fabric_memory_level_in(self.handle, memory_domain_index);
+    }
+
+    /// Returns the number of distinct derived memory tiers, the memory-axis twin of
+    /// `Topology.countComputeLevels`; 1 on single-tier systems and before a harvest.
+    pub fn countMemoryLevels(self: Fabric) usize {
+        return fu_fabric_memory_levels_count(self.handle);
+    }
+};
+
 test "pool creation and destruction" {
     const topo = try Topology.init();
     defer topo.deinit();
@@ -511,13 +570,12 @@ test "caller exclusivity query" {
 test "pool capabilities reflect the build" {
     const topo = try Topology.init();
     defer topo.deinit();
-    // A pool reports the effective capabilities it spawned with; the allow-mask is a hard ceiling.
     var pool = try Pool.init(topo, 2, .inclusive);
     defer pool.deinit();
     const full: u32 = @bitCast(pool.capabilities());
 
-    // Clearing a bit in the allow-mask must clear it in the effective set - the mask can only
-    // subtract. Forcing off `place_memory_on_domain` demotes a NUMA pool to the flat pool.
+    // Clearing a bit in the allow-mask must clear it in the effective set - the mask can
+    // only subtract: forcing off `place_memory_on_domain` demotes a NUMA pool to the flat pool.
     var flat_mask = Capabilities.all();
     flat_mask.place_memory_on_domain = false;
     var flat_pool = try Pool.initNamedWithCapabilities(topo, null, 2, .inclusive, flat_mask);
@@ -535,7 +593,6 @@ test "per-compute_domain pool" {
     const compute_domains = topo.countComputeDomains();
     try std.testing.expect(compute_domains >= 1);
 
-    // A pool pinned to compute_domain 0, sized to that compute_domain's core count.
     const cores = @max(topo.countLogicalCoresIn(0), 1);
     var pool = try Pool.spawnOn(topo, 0, cores, .exclusive);
     defer pool.deinit();
@@ -551,6 +608,30 @@ test "per-compute_domain pool" {
     }.worker, &context);
     pool.unsafeJoin(generation);
     try std.testing.expectEqual(pool.threads(), counter.load(.acquire));
+}
+
+test "fabric harvest fills edges" {
+    const topo = try Topology.init();
+    defer topo.deinit();
+    var pool = try Pool.init(topo, 4, .inclusive);
+    defer pool.deinit();
+    var fabric = try Fabric.init();
+    defer fabric.deinit();
+
+    // An unharvested fabric answers zeros and a single tier.
+    try std.testing.expectEqual(0, fabric.memoryLatency(0, 0));
+    try std.testing.expectEqual(1, fabric.countMemoryLevels());
+
+    // A flat pool without domain placement has no fabric to walk - nothing to assert then.
+    if (!fabric.tryHarvest(topo, pool)) return;
+
+    // Every reachable edge must carry sane observations; emulated-NUMA guests may measure
+    // equal local and remote costs, so nothing stronger is asserted.
+    const local = topo.localMemoryOf(0);
+    try std.testing.expect(fabric.memoryLatency(0, local) > 0);
+    try std.testing.expect(fabric.memoryBandwidth(0, local) > 0);
+    try std.testing.expectEqual(10, fabric.memoryDistance(0, local));
+    try std.testing.expect(fabric.countMemoryLevels() >= 1);
 }
 
 test "named pool creation" {
@@ -583,7 +664,6 @@ test "for_threads execution" {
         }
     }.worker, Context{ .visited_ptr = &visited });
 
-    // Verify all threads executed
     for (0..4) |i| {
         try std.testing.expect(visited[i].load(.acquire));
     }
@@ -607,7 +687,6 @@ test "for_n static scheduling" {
         }
     }.worker, Context{ .visited_ptr = &visited });
 
-    // Verify all tasks executed
     for (0..100) |i| {
         try std.testing.expect(visited[i].load(.acquire));
     }
@@ -661,7 +740,6 @@ test "for_slices execution" {
         }
     }.worker, Context{ .data_ptr = &data, .total_ptr = &total });
 
-    // Verify all elements were processed
     try std.testing.expectEqual(1000, total.load(.acquire));
     for (0..1000) |i| {
         try std.testing.expectEqual(@as(i32, @intCast(i)), data[i]);
@@ -676,7 +754,7 @@ test "for_n void context" {
 
     var counter = std.atomic.Value(usize).init(0);
 
-    // Use a wrapper struct to capture the pointer via comptime closure
+    // A wrapper struct captures the pointer via a comptime closure.
     const S = struct {
         var counter_ptr: *std.atomic.Value(usize) = undefined;
         fn worker(prong: Prong) void {
@@ -703,8 +781,8 @@ test "unsafe_for_threads and join" {
         counter_ptr: *std.atomic.Value(usize),
     };
 
-    // The context must be a caller-owned pointer: the dispatch returns while
-    // worker threads are still reading through it, until `unsafeJoin` completes.
+    // The context must be a caller-owned pointer: the dispatch returns while worker
+    // threads still read through it, until `unsafeJoin` completes.
     const context = Context{ .counter_ptr = &counter };
     const generation = pool.unsafeForThreads(struct {
         fn worker(thread_index: usize, compute_domain_index: usize, worker_context: *const Context) void {
@@ -714,14 +792,11 @@ test "unsafe_for_threads and join" {
         }
     }.worker, &context);
 
-    // Generation tokens are always odd
     try std.testing.expect(generation & 1 == 1);
     pool.unsafeJoin(generation);
 
-    // After join, isComplete must be true
     try std.testing.expect(pool.isComplete(generation));
 
-    // All 4 threads should have executed, the caller included
     try std.testing.expectEqual(4, counter.load(.acquire));
 }
 
@@ -737,6 +812,8 @@ test "generation polling on exclusive pool" {
         counter_ptr: *std.atomic.Value(usize),
     };
 
+    // The context must be a caller-owned pointer: the dispatch returns while worker
+    // threads still read through it, until `unsafeJoin` completes.
     const context = Context{ .counter_ptr = &counter };
     const generation = pool.unsafeForThreads(struct {
         fn worker(thread_index: usize, compute_domain_index: usize, worker_context: *const Context) void {
@@ -746,11 +823,9 @@ test "generation polling on exclusive pool" {
         }
     }.worker, &context);
 
-    // Join blocks on the workers; the completion query is only meaningful after it.
     try std.testing.expect(generation & 1 == 1);
     pool.unsafeJoin(generation);
     try std.testing.expect(pool.isComplete(generation));
 
-    // All 4 worker threads should have executed
     try std.testing.expectEqual(4, counter.load(.acquire));
 }

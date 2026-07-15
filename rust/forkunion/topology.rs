@@ -4,9 +4,7 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-// C FFI declarations
 extern "C" {
-    // Library metadata
     fn fu_version_major() -> c_int;
     fn fu_version_minor() -> c_int;
     fn fu_version_patch() -> c_int;
@@ -14,11 +12,9 @@ extern "C" {
     fn fu_runtime_capabilities() -> u32;
     fn fu_name_capabilities(caps: u32, buf: *mut c_char, len: usize) -> usize;
 
-    // Topology handle lifecycle
     fn fu_topology_new() -> *mut c_void;
     fn fu_topology_delete(topology: *mut c_void);
 
-    // Compute topology
     fn fu_logical_cores_count_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
     fn fu_logical_cores_count(topology: *mut c_void) -> usize;
     fn fu_compute_domains_count(topology: *mut c_void) -> usize;
@@ -27,37 +23,14 @@ extern "C" {
     fn fu_compute_capacity_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
     fn fu_compute_cache_bytes_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
 
-    // Memory topology
     fn fu_memory_domains_count(topology: *mut c_void) -> usize;
-    fn fu_memory_level_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
-    fn fu_memory_levels_count(topology: *mut c_void) -> usize;
-
-    // Affinity
     fn fu_local_memory_of(topology: *mut c_void, compute_domain_index: usize) -> usize;
-    fn fu_memory_distance(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        memory_domain_index: usize,
-    ) -> usize;
-    fn fu_memory_bandwidth(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        memory_domain_index: usize,
-    ) -> usize;
-    fn fu_memory_latency(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        memory_domain_index: usize,
-    ) -> usize;
-
     fn fu_volume_ram_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
     fn fu_volume_ram(topology: *mut c_void) -> usize;
     fn fu_volume_huge_pages_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
     fn fu_volume_huge_pages(topology: *mut c_void) -> usize;
     fn fu_huge_pages_count_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
     fn fu_huge_pages_count(topology: *mut c_void) -> usize;
-
-    // Allocation
     fn fu_memory_domain_id_at_index(topology: *mut c_void, memory_domain_index: usize) -> i32;
 }
 
@@ -396,49 +369,12 @@ impl Topology {
         MemoryDomainId(unsafe { fu_memory_domain_id_at_index(self.inner, memory_domain.get()) })
     }
 
-    /// Returns the performance level of a memory domain (lower = faster: HBM < DDR < CXL).
-    pub fn memory_level_in(&self, memory_domain: MemoryDomain) -> usize {
-        unsafe { fu_memory_level_in(self.inner, memory_domain.get()) }
-    }
-
-    /// Returns the number of distinct memory tiers, the memory-axis twin of
-    /// [`compute_levels_count`](Self::compute_levels_count).
-    ///
-    /// Reports 1 on single-tier systems, and 2+ where HBM, DDR, and CXL are mixed.
-    pub fn memory_levels_count(&self) -> usize {
-        unsafe { fu_memory_levels_count(self.inner) }
-    }
-
     /// Returns the memory domain nearest a given compute domain (its local allocation target).
+    ///
+    /// Performance - tiers, latencies, bandwidths, distances - is not the topology's to declare:
+    /// harvest a [`Fabric`](crate::Fabric) to measure it in-process.
     pub fn local_memory_of(&self, compute_domain: ComputeDomain) -> MemoryDomain {
         MemoryDomain(unsafe { fu_local_memory_of(self.inner, compute_domain.get()) })
-    }
-
-    /// Returns the relative access distance from a compute domain to a memory domain (10 = local).
-    pub fn memory_distance(
-        &self,
-        compute_domain: ComputeDomain,
-        memory_domain: MemoryDomain,
-    ) -> usize {
-        unsafe { fu_memory_distance(self.inner, compute_domain.get(), memory_domain.get()) }
-    }
-
-    /// Returns the HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown.
-    pub fn memory_bandwidth(
-        &self,
-        compute_domain: ComputeDomain,
-        memory_domain: MemoryDomain,
-    ) -> usize {
-        unsafe { fu_memory_bandwidth(self.inner, compute_domain.get(), memory_domain.get()) }
-    }
-
-    /// Returns the HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown.
-    pub fn memory_latency(
-        &self,
-        compute_domain: ComputeDomain,
-        memory_domain: MemoryDomain,
-    ) -> usize {
-        unsafe { fu_memory_latency(self.inner, compute_domain.get(), memory_domain.get()) }
     }
 
     /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
@@ -559,12 +495,10 @@ pub(crate) mod tests {
         let compute_domains = topology.compute_domains_count();
         let compute_levels = topology.compute_levels_count();
         let memory_domains = topology.memory_domains_count();
-        let memory_levels = topology.memory_levels_count();
         assert!(compute_domains > 0 && memory_domains > 0);
 
         // Levels are dense ranks over domains, so they can never outnumber them.
         assert!(compute_levels <= compute_domains);
-        assert!(memory_levels <= memory_domains);
 
         for domain in (0..compute_domains).map(ComputeDomain) {
             assert!(topology.compute_level_in(domain) < compute_levels.max(1));
@@ -572,9 +506,6 @@ pub(crate) mod tests {
             // Capacity and cache are magnitudes, unknown as 0 - never negative, never asserted nonzero.
             let _capacity = topology.compute_capacity_in(domain);
             let _cache_bytes = topology.compute_cache_bytes_in(domain);
-        }
-        for domain in (0..memory_domains).map(MemoryDomain) {
-            assert!(topology.memory_level_in(domain) < memory_levels.max(1));
         }
 
         // Out-of-range indices must saturate to 0 rather than trap or read past the topology.
