@@ -1,6 +1,6 @@
 .{
     .name = .forkunion,
-    .version = "2.3.1",
+    .version = "3.0.0",
     .fingerprint = 0x3cdd441be686cfc7,
     .minimum_zig_version = "0.16.0",
     .paths = .{

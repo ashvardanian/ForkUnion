@@ -36,9 +36,9 @@
 #include <cstdlib> // `std::strtoull`
 #include <cstring> // `std::strlen`
 
-#define FORKUNION_VERSION_MAJOR 2
-#define FORKUNION_VERSION_MINOR 3
-#define FORKUNION_VERSION_PATCH 1
+#define FORKUNION_VERSION_MAJOR 3
+#define FORKUNION_VERSION_MINOR 0
+#define FORKUNION_VERSION_PATCH 0
 
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
 #define FU_DETECT_EXCEPTIONS_ 1
