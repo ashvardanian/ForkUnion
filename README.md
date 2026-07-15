@@ -520,8 +520,10 @@ A __memory domain__ is a bank of memory with its own capacity and access cost �
 The axes stay separate because they don't line up: performance and efficiency cores often share one memory controller, and equally-fast cores are often split across cache clusters or sockets.
 
 Each axis carries a __level__, a dense ordinal grouping domains of like performance.
-Levels can be fewer than domains, since several domains may share one, and the two axes count in opposite directions — each following the convention of the hardware source it reads.
-Compute levels grow with performance, as the scheduler ranks big cores above little ones; memory levels grow with _distance_, as the kernel's memory tiering places HBM below DDR and CXL above.
+Levels can be fewer than domains, since several domains may share one, and the two axes count in opposite directions: compute levels grow with performance, memory levels grow with _distance_, placing HBM below DDR and CXL above.
+Two objects split the answers by provenance, not by axis: a `Topology` holds what the platform __declares__ — domains, cores, QoS classes, volumes, on both axes — while a `Fabric` holds what ForkUnion __observes__: per-edge latencies, bandwidths, and distances, and the per-medium tiers derived from them.
+The pipeline is `try_harvest` all the way down: a `Topology` harvests the declared structure from the OS and stays immutable, a pool spawns on it, and a `Fabric` then harvests the observed performance from the silicon through that pool's pinned workers, pointer-chasing and streaming every reachable edge.
+A memory level is a property of the medium, independent of the querying core: it keys on the best bandwidth any initiator sustains to the pool, ties split by the best latency, so a 3 TB/s HBM pool outranks DDR even at equal latency.
 
 |                   | Compute axis            | Memory axis            |
 | ----------------- | ----------------------- | ---------------------- |
@@ -531,18 +533,19 @@ Compute levels grow with performance, as the scheduler ranks big cores above lit
 | Faster means      | __higher__              | __lower__              |
 
 Names are spelled here as in Rust; C prefixes them with `fu_`, and Zig spells them in camelCase.
+Domain counts and compute levels answer from the `Topology`; memory levels and the per-edge magnitudes answer from a harvested `Fabric`, which C prefixes with `fu_fabric_`.
 
 Beyond the level ordinals, two magnitudes describe a compute domain, both best-effort.
 `compute_capacity_in` forwards the kernel's own rating of a core, read from `/sys/devices/system/cpu/cpuN/cpu_capacity`, normalized so the fastest core on the machine reads 1024.
 That file is published by the kernel's `arch_topology` driver, so it is dependable on `arm64` and absent elsewhere — expect 0 on x86, on Windows, and on Apple.
-`compute_cache_bytes_in` reports the deepest cache private to a domain's cores, and is likewise unavailable on most hosts today.
+`compute_cache_bytes_in` reports the deepest cache private to a domain's cores, enumerated exactly rather than measured — from the per-core cache hierarchy in `sysfs` on Linux, CPUID leaves elsewhere on x86, `sysctl` on Apple, and the cache relationships on Windows.
 Domains of identical throughput can sit behind very differently sized caches, so neither value follows from the other.
 Treat both as hints, present only where the hardware volunteers them, and never as a number a program requires.
 
-The memory axis carries its own magnitudes, read from the firmware's HMAT and SLIT tables.
-`memory_distance` gives the relative cost of reaching a memory domain from a compute domain - 10 for local, higher for remote - while `memory_bandwidth` and `memory_latency` give the peak read bandwidth and read latency where the platform publishes them.
-`volume_ram` and `volume_ram_in` report installed RAM, total or per domain, while `huge_pages_count` and `volume_huge_pages` report the free huge pages a domain can still back an allocation with, as a count or in bytes.
-Like the compute magnitudes, these are best-effort and read 0 where the hardware stays silent.
+The memory axis carries its own magnitudes, all answered by the harvested `Fabric`.
+`memory_distance` gives the relative cost of reaching a memory domain from a compute domain — 10 for local, higher for remote, on ACPI SLIT's scale but from measured ratios — while `memory_bandwidth` and `memory_latency` give the observed saturated read bandwidth and dependent-load latency per edge.
+Back on the `Topology`, `volume_ram` and `volume_ram_in` report installed RAM, total or per domain, while `huge_pages_count` and `volume_huge_pages` report the free huge pages a domain can still back an allocation with, as a count or in bytes.
+Like the compute magnitudes, these are best-effort: fabric queries read 0 before a harvest or on edges no pinned worker could reach.
 
 Finally, `local_memory_of` bridges the axes, naming the memory domain a given compute domain should allocate from.
 Where no topology is harvested, every query degrades to a single compute domain and a single memory domain rather than failing, so these loops need no conditional compilation.
