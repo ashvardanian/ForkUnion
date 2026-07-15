@@ -2,19 +2,21 @@
 
 [![`ForkUnion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
 
-__ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, and Zig — built for tight `#pragma omp parallel for`-style loops, not task queues. 🍴
+__ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, and Zig — built for the tightest `#pragma omp parallel for`-style loops, not task queues. 🍴
+It already powers NUMA-sharded vector search with [USearch](https://github.com/unum-cloud/usearch), LLM KV-cache and attention kernels with [NumKong](https://github.com/ashvardanian/NumKong), and unbalanced bioinformatics workloads — thousands of combinatorial tasks per core — with [StringZilla](https://github.com/ashvardanian/StringZilla).
 
 On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks-and-mutexes), __zero__ [CAS operations](#atomics-and-cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
 So dispatch latency stays flat into the hundreds of cores, precisely where task-queue runtimes like Rayon collapse and even OpenMP begins to slip.
-It is also unique in parking idle workers on hardware timed-wait instructions — x86 `TPAUSE`, Arm `WFET`, RISC-V `Zawrs` — instead of spinning hot or trapping into the kernel.
+It is also unique in parking idle workers on a __hardware address monitor__ — x86 `UMONITOR`/`UMWAIT`, Arm `WFET`, RISC-V `Zawrs` — so a worker light-sleeps on the exact cache-line it is waiting for and the silicon wakes it the instant another core writes there, with no hot spinning and no kernel futex.
+That bet compounds as sockets multiply: Intel Xeon Platinum and NVIDIA Vera pack up to 8 sockets per node, where shared CAS thrashes the interconnect and private `fetch_add` cursors keep synchronization off it.
 
-> __128-thread Intel Xeon 8468 in NVIDIA DGX-H100 · running low-latency N-body simulation:__ Taskflow `666 µs` · Rayon `483 µs` · OpenMP `115 µs` → __ForkUnion `40 µs`__ per parallel-for.
+> __One parallel-for dispatch:__ ForkUnion is often __~3–6× faster than OpenMP__ and __~12–16× faster than Rayon and Taskflow__ — the fork-join tax, paid once per loop, cut by an order of magnitude.
 > [Full tables ↓](#performance)
 
-It already powers NUMA-aware vector search in [USearch](https://github.com/unum-cloud/usearch) and [NumKong](https://github.com/ashvardanian/NumKong), and is exhaustively tested for boundary-conditions scheduling with miniaturized `uint8_t` indices, is compatible with your big-endian 32-bit IBM mainframe, and ships with `no_std` and Miri coverage.
+It is exhaustively tested for boundary-condition scheduling with miniaturized `uint8_t` indices, even runs on your big-endian 32-bit IBM mainframe, and ships with `no_std` and Miri coverage.
 The core is a C++ 17 library; the C 99, Rust, and Zig APIs bind it, and all four can pin threads to [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual cores and allocate node-local memory.
-Despite being much more deeply tied to hardware and OS than alternatives, ForkUnion supports Linux, FreeBSD, Windows, macOS, Android, and iOS, including asymmetric compute and memory topologies.
-Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux and Windows, and elsewhere allocation falls back to a single memory domain.
+Despite being far more deeply tied to hardware and the OS than most alternatives, ForkUnion runs on __six operating systems__ — Linux, FreeBSD, Windows, macOS, Android, and iOS — including asymmetric compute and memory topologies.
+Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux, FreeBSD, and Windows, and elsewhere allocation falls back to a single memory domain.
 
 ## Basic Usage
 
@@ -200,9 +202,8 @@ int main() {
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
 Every kernel and ISA facility the library uses is detected by default.
 CMake pins each with an `AUTO`/`ON`/`OFF` tri-state like `-D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON` or `-D FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=OFF`.
-Finer preprocessor gates - like the cache-line hints `FU_WITH_DEMOTE_CACHE_LINES` and `FU_WITH_PROMOTE_CACHE_LINES` - accept the same overrides as compile definitions.
-Call `fu_comptime_capabilities()` to see what survived the build, `fu_runtime_capabilities()` to see what the machine underneath actually offers, and `fu_name_capabilities()` to render either mask as text.
-
+Finer preprocessor gates - like the cache-line hints `FU_WITH_DEMOTE_CACHE_LINES` and `FU_WITH_PROMOTE_CACHE_LINES`, which push a just-written line toward the shared last-level cache via x86 `CLDEMOTE`, Arm `DC CVAC`, or RISC-V `Zicbom` so a consumer core finds it faster - accept the same overrides as compile definitions.
+Call `fu_comptime_capabilities()` to see what survived the build, `fu_runtime_capabilities()` to see what the machine underneath actually offers, and `fu_name_capabilities()` to render either mask as text - every binding exposes the same trio, Rust spelling it `runtime_capabilities()` and Zig `runtimeCapabilities`, alongside a version accessor: `fu_version_major`/`_minor`/`_patch` in C, `version()` in Rust and Zig, and the `FORKUNION_VERSION_*` macros in C++.
 
 ### Intro in Zig
 
@@ -289,12 +290,15 @@ void hello_callback(void *context, size_t thread, size_t compute_domain) {
 }
 
 int main(void) {
-    fu_pool_t *pool = fu_pool_new("my_pool");
-    if (!pool || !fu_pool_spawn(pool, fu_logical_cores_count(), fu_caller_inclusive_k))
+    fu_topology_t topology = fu_topology_new();
+    fu_pool_t pool = fu_pool_new("my_pool", fu_capabilities_all_k);
+    if (!topology || !pool ||
+        !fu_pool_spawn(topology, pool, fu_logical_cores_count(topology), fu_caller_inclusive_k))
         return 1;
 
     fu_pool_for_threads(pool, hello_callback, NULL);
     fu_pool_delete(pool);
+    fu_topology_delete(topology);
     return 0;
 }
 ```
@@ -302,11 +306,13 @@ int main(void) {
 The `fu_`-prefixed functions report the [hardware topology](#hardware-topology), to size and place work:
 
 ```c
-for (size_t domain = 0; domain < fu_compute_domains_count(); ++domain) {
+fu_topology_t topology = fu_topology_new();
+for (size_t domain = 0; domain < fu_compute_domains_count(topology); ++domain) {
     printf("domain %zu: %zu cores, level %zu, allocate on memory domain %zu\n",
-           domain, fu_logical_cores_count_in(domain), fu_compute_level_in(domain),
-           fu_local_memory_of(domain));
+           domain, fu_logical_cores_count_in(topology, domain), fu_compute_level_in(topology, domain),
+           fu_local_memory_of(topology, domain));
 }
+fu_topology_delete(topology);
 ```
 
 For parallel tasks with context:
@@ -324,8 +330,9 @@ void process_task(void *ctx, size_t task, size_t thread, size_t compute_domain) 
 }
 
 int main(void) {
-    fu_pool_t *pool = fu_pool_new("tasks");
-    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+    fu_topology_t topology = fu_topology_new();
+    fu_pool_t pool = fu_pool_new("tasks", fu_capabilities_all_k);
+    fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k);
 
     int data[100] = {0};
     struct task_context ctx = { .data = data, .size = 100 };
@@ -333,6 +340,7 @@ int main(void) {
     fu_pool_for_n_dynamic(pool, 100, process_task, &ctx); // dynamic scheduling
 
     fu_pool_delete(pool);
+    fu_topology_delete(topology);
     return 0;
 }
 ```
@@ -347,8 +355,9 @@ GCC supports [nested functions](https://gcc.gnu.org/onlinedocs/gcc/Nested-Functi
 #include <forkunion.h>
 
 int main(void) {
-    fu_pool_t *pool = fu_pool_new("gcc_nested");
-    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+    fu_topology_t topology = fu_topology_new();
+    fu_pool_t pool = fu_pool_new("gcc_nested", fu_capabilities_all_k);
+    fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k);
 
     atomic_size_t counter = 0;
 
@@ -362,6 +371,7 @@ int main(void) {
     printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
 
     fu_pool_delete(pool);
+    fu_topology_delete(topology);
     return 0;
 }
 ```
@@ -387,8 +397,9 @@ void block_wrapper_fn(void *ctx, size_t task, size_t thread, size_t compute_doma
 }
 
 int main(void) {
-    fu_pool_t *pool = fu_pool_new("clang_blocks");
-    fu_pool_spawn(pool, 4, fu_caller_inclusive_k);
+    fu_topology_t topology = fu_topology_new();
+    fu_pool_t pool = fu_pool_new("clang_blocks", fu_capabilities_all_k);
+    fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k);
 
     __block atomic_size_t counter = 0;
 
@@ -406,6 +417,7 @@ int main(void) {
     printf("Completed %zu tasks\n", (size_t)atomic_load(&counter));
 
     fu_pool_delete(pool);
+    fu_topology_delete(topology);
     return 0;
 }
 ```
@@ -476,7 +488,7 @@ Hardware implements it differently:
 - Arm, on the other hand, has a "weak" memory model and provides a set of atomic instructions that are not fences, that match the C++ concurrency model, offering `acquire`, `release`, and `acq_rel` variants of each atomic instruction—such as `LDADD`, `STADD`, and `CAS` - which allow precise control over visibility and order, especially with the introduction of "Large System Extension" (LSE) instructions in Armv8.1.
 
 In practice, a locked atomic on x86 requires the cache line in the Exclusive state in the requester's L1 cache.
-This would incur a coherence transaction (Read-for-Ownership) if some other core had the line.
+This would incur a Read-for-Ownership coherence transaction if some other core had the line.
 Both Intel and AMD handle this similarly.
 
 It makes [Arm and Power much more suitable for lock-free programming](https://arangodb.com/2021/02/cpp-memory-model-migrating-from-x86-to-arm/) and concurrent data structures, but some observations hold for both platforms.
@@ -496,7 +508,7 @@ This is a common problem, and the C++ standard recommends addressing it with `al
 There are, however, caveats.
 The `std::hardware_destructive_interference_size` is [generally 64 bytes on x86](https://stackoverflow.com/a/39887282), matching the size of a single cache line.
 But in reality, on most x86 machines, [depending on the BIOS "spatial prefetcher" settings](https://www.techarp.com/bios-guide/cpu-adjacent-sector-prefetch/), will [fetch 2 cache lines at a time starting with Sandy Bridge](https://stackoverflow.com/a/72127222).
-Because of these rules, padding hot variables to 128 bytes is a conservative but often sensible defensive measure adopted by Folly's `cacheline_align` and Java's `jdk.internal.vm.annotation.Contended`. ￼
+Because of these rules, padding hot variables to 128 bytes is a conservative but often sensible defensive measure adopted by Folly's `cacheline_align` and Java's `jdk.internal.vm.annotation.Contended`.
 
 ## Pro Tips
 
@@ -527,13 +539,18 @@ That file is published by the kernel's `arch_topology` driver, so it is dependab
 Domains of identical throughput can sit behind very differently sized caches, so neither value follows from the other.
 Treat both as hints, present only where the hardware volunteers them, and never as a number a program requires.
 
+The memory axis carries its own magnitudes, read from the firmware's HMAT and SLIT tables.
+`memory_distance` gives the relative cost of reaching a memory domain from a compute domain - 10 for local, higher for remote - while `memory_bandwidth` and `memory_latency` give the peak read bandwidth and read latency where the platform publishes them.
+`volume_ram` and `volume_ram_in` report installed RAM, total or per domain, while `huge_pages_count` and `volume_huge_pages` report the free huge pages a domain can still back an allocation with, as a count or in bytes.
+Like the compute magnitudes, these are best-effort and read 0 where the hardware stays silent.
+
 Finally, `local_memory_of` bridges the axes, naming the memory domain a given compute domain should allocate from.
 Where no topology is harvested, every query degrades to a single compute domain and a single memory domain rather than failing, so these loops need no conditional compilation.
 
 ### Non-Uniform Memory Access (NUMA)
 
-Handling NUMA isn't trivial and is only supported on Linux with the help of the [`libnuma` library](https://github.com/numactl/numactl).
-It provides the `mbind` interface to pin specific memory regions to particular memory domains, as well as helper functions to query the system topology, which are exposed via the `forkunion::machine_topology` template.
+Placing memory on a chosen domain is implemented on Linux via [`libnuma`](https://github.com/numactl/numactl)'s `mbind`, on FreeBSD via `domainset` policies, and on Windows via `VirtualAllocExNuma`, and degrades to a single domain elsewhere.
+The portable `domain_allocator_t` alias picks the right backend per platform - `linux_numa_allocator_t`, `freebsd_numa_allocator_t`, `windows_numa_allocator_t`, or a plain aligned fallback - each an STL-compatible allocator that reads the machine through the `forkunion::machine_topology` template.
 
 Let's say you are working on a Big Data application, like brute-forcing Vector Search using the [NumKong](https://github.com/ashvardanian/NumKong) library on a 2 dual-socket CPU system, similar to [USearch](https://github.com/unum-cloud/usearch/pulls).
 The first part of that program may be responsible for sharding the incoming stream of data between distinct memory regions.
@@ -628,8 +645,11 @@ search_result_t search(std::span<float, dimensions> query) {
 ```
 
 In a dream world, we would call `distributed_pool.for_n`, but there is no clean way to make the scheduling processes aware of the data distribution in an arbitrary application, so that's left to the user.
-The `for_slices` helper provides compute_domain metadata (`fu::local_prong`) that lets you pick the right shard of data based on the compute domain, while keeping scheduling inside the distributed pool.
+The `for_slices` helper provides `fu::local_prong` compute-domain metadata that lets you pick the right shard of data based on the compute domain, while keeping scheduling inside the distributed pool.
 For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns an always-odd generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
+
+The manual two-vector sharding above is what the __symmetric allocators__ automate: `symmetric_memory_allocator_t` - `fu_allocate_symmetric` in C - maps one virtual range striped a slice per memory domain, and Rust and Zig wrap it as `ShardedArray<T>`, one shard per domain, and `ReplicatedArray<T>`, a full copy per domain for read-mostly data.
+To place and coordinate pools by hand, `try_spawn_on` - `fu_pool_spawn_on` in C - pins a pool to a single compute domain, while `locate_thread_in` and `threads_count_in` map a global thread index to its domain and count the workers living there.
 
 ### Efficient Busy Waiting
 
@@ -659,6 +679,7 @@ Works in tight loops.
 
 The `TPAUSE`, `WFET`, and `WRS.NTO` wrappers go a step further than a spin hint: they are _timed_ light-sleep waits, so the pool parks a worker in a low-power state with a per-loop upper bound rather than burning the core.
 The waiter is also thread-aware — `micro_yield(thread_id)` lets each worker back off on its own schedule.
+These same wrappers back `spin_mutex_t`, or `SpinMutex` in Rust, a syscall-free `std::mutex` alternative that spins on a yield hint instead of trapping into a futex - it is the lock used in the NUMA example above.
 
 ### Rayon-style Parallel Iterators
 
@@ -670,7 +691,8 @@ For statically shaped workloads, the default static scheduling is more efficient
 use forkunion as fu;
 use forkunion::prelude::*;
 
-let mut pool = fu::spawn(4);
+let topology = fu::Topology::new().expect("Failed to detect hardware topology");
+let mut pool = fu::spawn(&topology, 4);
 let mut data: Vec<usize> = (0..1000).collect();
 
 (&data[..])
@@ -739,7 +761,7 @@ For manual control over scratch allocation, use `reduce_with_scratch`:
 ```rust
 // Cache-line aligned wrapper to prevent false sharing
 let mut scratch: Vec<CacheAligned<u64>> =
-    (0..pool.threads()).map(|_| CacheAligned(0)).collect();
+    (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 
 let total = (&data[..])
     .into_par_iter()
@@ -751,6 +773,10 @@ let total = (&data[..])
     );
 ```
 
+Beyond reductions, the iterators offer short-circuiting searches - `find_first` and `find_last` for the deterministic lowest- or highest-index match, `find_any` for the first match with cooperative cancellation, and `any` / `all` for boolean predicates that stop the moment the answer is known.
+Fallible bodies get `try_for_each` and `try_fold_with_scratch`, which propagate the first error and signal the other workers to stop.
+This Rayon-style layer is __Rust-only__; C, C++, and Zig expose the pool primitives `for_threads`, `for_n`, `for_n_dynamic`, and `for_slices` directly.
+
 ## Performance
 
 Two benchmarks measure two different things, each against the same runtimes — __ForkUnion__, [__OpenMP__](https://www.openmp.org), [__Rayon__](https://github.com/rayon-rs/rayon), and [__Taskflow__](https://github.com/taskflow/taskflow) — on deliberately equal footing ¹.
@@ -760,27 +786,27 @@ Implementations live in `scripts/nbody.{cpp,rs,zig}` and `scripts/propagation.{c
 
 ### N-Body — Dispatch Latency
 
-Microseconds per iteration at `N=512` bodies on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
-Lower is better; this is where fork-join runtimes genuinely differ.
+Microseconds per iteration — µs ↓, lower is better — at `N=512` bodies on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
+This is where fork-join runtimes genuinely differ; ➕ marks C++, 🦀 marks Rust.
 
-| Machine                    |  ForkUnion, C++ | ForkUnion, Rust |  OpenMP, C++ |  Rayon, Rust | Taskflow, C++ |
-| :------------------------- | --------------: | --------------: | -----------: | -----------: | ------------: |
-| 18× Apple M5 Pro, macOS    |  __24 / 26__ µs |      28 / 32 µs | 115 / 137 µs | 222 / 339 µs |    83 / 94 µs |
-| 24× Intel Core i9, Windows |    148 / 143 µs | __112 / 91__ µs | 360 / 627 µs | 151 / 151 µs | 812 / 1026 µs |
-| 128× Intel SPR, Linux      |      54 / 86 µs |  __40 / 67__ µs | 115 / 226 µs | 483 / 739 µs |  666 / 694 µs |
-| 192× AWS Graviton 5, Linux | 47 / __136__ µs | __42__ / 137 µs | 266 / 216 µs | 490 / 580 µs |  602 / 639 µs |
+| Machine                    |  ➕ ForkUnion |  🦀 ForkUnion |  ➕ OpenMP |   🦀 Rayon | ➕ Taskflow |
+| :------------------------- | -----------: | -----------: | --------: | --------: | ---------: |
+| 18× Apple M5 Pro, macOS    |  __24 / 26__ |      28 / 32 | 115 / 137 | 222 / 339 |    83 / 94 |
+| 24× Intel RPL, Windows     |    148 / 143 | __112 / 91__ | 360 / 627 | 151 / 151 | 812 / 1026 |
+| 128× Intel SPR, Linux      |      54 / 86 |  __40 / 67__ | 115 / 226 | 483 / 739 |  666 / 694 |
+| 192× AWS Graviton 5, Linux | 47 / __136__ | __42__ / 137 | 266 / 216 | 490 / 580 |  602 / 639 |
 
 ### Connected Components — Fork-Join Frequency
 
-Traversed edges per second on a ~27M-edge "necklace" of R-MAT communities, on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
-Higher is better; every pass converges in exactly 84 rounds - 84 fork-join dispatches - bit-identical in every cell and language.
+Billions of traversed edges per second — GTEPS ↑, higher is better — on a ~27M-edge "necklace" of R-MAT communities, on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
+Every pass converges in exactly 84 rounds - 84 fork-join dispatches - bit-identical in every cell and language; ➕ marks C++, 🦀 marks Rust.
 
-| Machine                    |        ForkUnion, C++ |        ForkUnion, Rust |          OpenMP, C++ |       Rayon, Rust |    Taskflow, C++ |
-| :------------------------- | --------------------: | ---------------------: | -------------------: | ----------------: | ---------------: |
-| 18× Apple M5 Pro, macOS    | __24.7 / 20.5__ GTEPS |      19.4 / 20.2 GTEPS |    23.0 / 18.3 GTEPS | 23.8 / 14.6 GTEPS | 21.4 / 1.3 GTEPS |
-| 24× Intel Core i9, Windows |  10.0 / __7.2__ GTEPS |        5.2 / 5.5 GTEPS | __11.4__ / 0.1 GTEPS |   9.4 / 5.2 GTEPS |  6.6 / 0.7 GTEPS |
-| 128× Intel SPR, Linux      |     46.5 / 20.9 GTEPS |  __65.2 / 31.4__ GTEPS |     28.2 / 0.4 GTEPS |   8.5 / 6.5 GTEPS | 25.1 / 0.5 GTEPS |
-| 192× AWS Graviton 5, Linux |    192.6 / 77.6 GTEPS | __258.7 / 87.3__ GTEPS |     53.9 / 0.4 GTEPS |   8.4 / 6.2 GTEPS | 53.0 / 0.4 GTEPS |
+| Machine                    |     ➕ ForkUnion |      🦀 ForkUnion |       ➕ OpenMP |     🦀 Rayon | ➕ Taskflow |
+| :------------------------- | --------------: | ---------------: | -------------: | ----------: | ---------: |
+| 18× Apple M5 Pro, macOS    | __24.7 / 20.5__ |      19.4 / 20.2 |    23.0 / 18.3 | 23.8 / 14.6 | 21.4 / 1.3 |
+| 24× Intel RPL, Windows     |  10.0 / __7.2__ |        5.2 / 5.5 | __11.4__ / 0.1 |   9.4 / 5.2 |  6.6 / 0.7 |
+| 128× Intel SPR, Linux      |     46.5 / 20.9 |  __65.2 / 31.4__ |     28.2 / 0.4 |   8.5 / 6.5 | 25.1 / 0.5 |
+| 192× AWS Graviton 5, Linux |    192.6 / 77.6 | __258.7 / 87.3__ |     53.9 / 0.4 |   8.4 / 6.2 | 53.0 / 0.4 |
 
 What the spread means - all on the 128× SPR, same binaries, same graph:
 
