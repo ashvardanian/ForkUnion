@@ -379,7 +379,10 @@ else ()
              OR FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN STREQUAL "ON"
              OR FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN STREQUAL "ON")
     )
-        message(FATAL_ERROR "topology/numa-memory/huge-pages forced ON, but libnuma was not found")
+        message(
+            FATAL_ERROR
+                "topology/place-memory-on-domain/place-huge-pages-on-domain forced ON, but libnuma was not found"
+        )
     endif ()
 
     forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FU_WITH_TOPOLOGY)

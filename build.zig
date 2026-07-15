@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     //
     // The derivation rules live in `include/forkunion/types.hpp`, not here. Left alone, each option
     // is `null` and we pass no `-DFU_WITH_*` at all, so the header decides from the platform and
-    // from whether `<numa.h>` is there to include. `-Dnuma-memory=true` and friends only override
+    // from whether `<numa.h>` is there to include. `-Dplace-memory-on-domain=true` and friends only override
     // that; an override the platform cannot honour stops at an `#error`, not at link time.
     const with_topology = b.option(bool, "topology", "Enumerate compute and memory domains");
     const with_place_memory_on_domain = b.option(bool, "place-memory-on-domain", "Place pages on a chosen memory domain");

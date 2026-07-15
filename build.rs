@@ -7,9 +7,10 @@
 //! Features are additive, which is an awkward fit for a switch that wants three positions, so:
 //!
 //! - default: AUTO. The header decides, and this script says nothing.
-//! - `topology`, `numa-memory`, `huge-pages`, `thread-pinning`: force the capability on. A build
-//!   that cannot honour it - or a prerequisite it needs, like huge pages needing numa-memory - stops
-//!   at the `#error` in `types.hpp`, with a sentence, rather than at link time with missing symbols.
+//! - `topology`, `place-memory-on-domain`, `place-huge-pages-on-domain`, `place-threads-by-affinity`:
+//!   force the capability on. A build that cannot honour it - or a prerequisite it needs, like huge
+//!   pages needing on-domain placement - stops at the `#error` in `types.hpp`, with a sentence,
+//!   rather than at link time with missing symbols.
 //! - `portable`: force every optional capability off, leaving the STL thread pool. Useful under
 //!   musl, inside containers, and for seeing what a caller on an unsupported platform will see.
 
@@ -110,7 +111,7 @@ fn main() -> Result<(), cc::Error> {
         } else if force_topology || force_place_memory_on_domain || force_place_huge_pages_on_domain
         {
             panic!(
-                "`topology`/`numa-memory`/`huge-pages` were requested, but `numa.h` was not found"
+                "`topology`/`place-memory-on-domain`/`place-huge-pages-on-domain` were requested, but `numa.h` was not found"
             );
         }
     }
