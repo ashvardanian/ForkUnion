@@ -48,6 +48,28 @@ struct x86_pause_t {
     }
 };
 
+/** @brief All four registers of one `CPUID` invocation. @sa `cpuid`, the one home of both toolchain idioms. */
+struct cpuid_registers_t {
+    std::uint32_t eax, ebx, ecx, edx;
+};
+
+/**
+ *  @brief Issues one `CPUID` for @p leaf and @p subleaf, via inline assembly or MSVC's `__cpuidex`.
+ *  @note Reports for the @b executing core; on hybrid parts, pin before asking per-core questions.
+ */
+inline cpuid_registers_t cpuid(std::uint32_t const leaf, std::uint32_t const subleaf) noexcept {
+    cpuid_registers_t r;
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+    __asm__ __volatile__("cpuid" : "=a"(r.eax), "=b"(r.ebx), "=c"(r.ecx), "=d"(r.edx) : "a"(leaf), "c"(subleaf));
+#else
+    int regs[4];
+    __cpuidex(regs, static_cast<int>(leaf), static_cast<int>(subleaf));
+    r = {static_cast<std::uint32_t>(regs[0]), static_cast<std::uint32_t>(regs[1]), static_cast<std::uint32_t>(regs[2]),
+         static_cast<std::uint32_t>(regs[3])};
+#endif
+    return r;
+}
+
 #if defined(__clang__)
 #pragma clang attribute push(__attribute__((target("waitpkg"))), apply_to = function)
 #elif defined(__GNUC__)
@@ -64,22 +86,11 @@ struct x86_pause_t {
  *  crystal field zero, so we then time a short `RDTSC` span against the steady clock.
  */
 inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
-    // Ask leaf 0x15 for the TSC-to-crystal ratio. Inline assembly issues CPUID directly to avoid an
-    // include; MSVC has none and calls `<intrin.h>`'s `__cpuidex`, the cousin of libc's
+    // Ask leaf 0x15 for the TSC-to-crystal ratio: EAX holds the denominator, EBX the numerator,
+    // and ECX the crystal frequency in Hz - the exact fields of libc's
     // `__get_cpuid(0x15, &denominator, &numerator, &crystal_hz, &unused)`.
-    std::uint32_t denominator, numerator, crystal_hz;
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-    std::uint32_t unused;
-    __asm__ __volatile__("cpuid"
-                         : "=a"(denominator), "=b"(numerator), "=c"(crystal_hz), "=d"(unused)
-                         : "a"(0x15u), "c"(0u));
-#else
-    int leaf15[4];
-    __cpuidex(leaf15, 0x15, 0);
-    denominator = static_cast<std::uint32_t>(leaf15[0]);
-    numerator = static_cast<std::uint32_t>(leaf15[1]);
-    crystal_hz = static_cast<std::uint32_t>(leaf15[2]);
-#endif
+    cpuid_registers_t const leaf15 = cpuid(0x15u, 0);
+    std::uint32_t const denominator = leaf15.eax, numerator = leaf15.ebx, crystal_hz = leaf15.ecx;
     if (denominator != 0 && numerator != 0 && crystal_hz != 0) {
         std::uint64_t const tsc_hz = static_cast<std::uint64_t>(crystal_hz) * numerator / denominator;
         std::uint64_t const cycles_per_us = tsc_hz / 1'000'000ull;
@@ -619,19 +630,9 @@ inline capabilities_t cpu_capabilities() noexcept {
     // CPUID leaf 7, sub-leaf 0, ECX: WAITPKG (backing UMWAIT/TPAUSE) is bit 5; CLDEMOTE is bit 25.
     // The CLDEMOTE bit reports whether the hint bites - Sapphire-Rapids-class parts - it never
     // gates emission, which the compile-time `preferred_cache_hints_t` decides.
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-    std::uint32_t eax = 7, ebx, ecx, edx;
-    __asm__ __volatile__("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax), "c"(0u) : "memory");
-    if (ecx & (1u << 5)) caps |= capability_x86_tpause_k;
-    if (ecx & (1u << 25)) caps |= capability_x86_cldemote_k;
-    fu_unused_(ebx);
-    fu_unused_(edx);
-#else
-    int leaf7[4];
-    __cpuidex(leaf7, 7, 0);
-    if (static_cast<std::uint32_t>(leaf7[2]) & (1u << 5)) caps |= capability_x86_tpause_k;
-    if (static_cast<std::uint32_t>(leaf7[2]) & (1u << 25)) caps |= capability_x86_cldemote_k;
-#endif
+    cpuid_registers_t const leaf7 = cpuid(7u, 0);
+    if (leaf7.ecx & (1u << 5)) caps |= capability_x86_tpause_k;
+    if (leaf7.ecx & (1u << 25)) caps |= capability_x86_cldemote_k;
 
 #elif FU_DETECT_ARCH_ARM64_
 

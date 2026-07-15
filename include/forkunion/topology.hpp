@@ -861,6 +861,129 @@ FU_MAYBE_UNUSED_ static inline std::size_t capacity_of_core(FU_MAYBE_UNUSED_ cor
 }
 
 /**
+ *  @brief Whether every core in a Linux cpulist line - "0", "0-3", or "0,2-4" - belongs to @p cores.
+ *  @note Pass only complete lines: a truncated tail could name cores the verdict never saw.
+ */
+FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t const *cores,
+                                                    std::size_t const cores_count) noexcept {
+    for (char const *cursor = line; *cursor;) {
+        char *next = nullptr;
+        long const low = ::strtol(cursor, &next, 10);
+        if (next == cursor) break; // ? No number left to parse
+        long high = low;
+        cursor = next;
+        if (*cursor == '-') high = ::strtol(cursor + 1, &next, 10), cursor = next;
+        for (long listed = low; listed <= high; ++listed) {
+            bool found = false;
+            for (std::size_t i = 0; i != cores_count && !found; ++i) found = cores[i] == static_cast<core_id_t>(listed);
+            if (!found) return false;
+        }
+        while (*cursor == ',' || *cursor == ' ' || *cursor == '\n') ++cursor;
+    }
+    return true;
+}
+
+/**
+ *  @brief Bytes of the deepest data or unified cache serving @p core_id, confined to @p domain_cores.
+ *  @retval The cache size in bytes, or 0 when no platform source can name it.
+ *
+ *  Two exact sources, no measurement: Linux publishes each core's cache hierarchy under
+ *  `/sys/devices/system/cpu/cpuN/cache/indexM`, where `shared_cpu_list` tells whether a level stays
+ *  within the domain's cores - a socket-wide L3 counts for a whole-socket domain but not for one
+ *  QoS class sharing it with another; elsewhere, x86 CPUID leaf 0x4 (Intel) or 0x8000001D (AMD)
+ *  enumerates the same geometry, though for the core executing the query rather than @p core_id,
+ *  with each level's sharing width standing in for the cpulist containment. Arm exposes no
+ *  userspace cache-geometry registers - `CCSIDR_EL1` is EL1-only and `CTR_EL0` names only line
+ *  sizes - so Linux's sysfs is the only Arm source, and other Arm hosts honestly report 0.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
+    FU_MAYBE_UNUSED_ core_id_t core_id, FU_MAYBE_UNUSED_ core_id_t const *domain_cores,
+    FU_MAYBE_UNUSED_ std::size_t domain_cores_count) noexcept {
+#if FU_ON_LINUX
+    std::size_t deepest_bytes = 0;
+    for (int index = 0; index < 16; ++index) {
+        char path[256];
+        int written = std::snprintf(path, sizeof(path), //
+                                    "/sys/devices/system/cpu/cpu%d/cache/index%d/type", core_id, index);
+        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(path)) break; // ? Path too long
+
+        FILE *type_file = ::fopen(path, "r");
+        if (!type_file) break; // ? Indices are contiguous, the first gap ends the hierarchy
+        char type_name[16] = {0};
+        bool const parsed_type = ::fscanf(type_file, "%15s", type_name) == 1;
+        ::fclose(type_file);
+        if (!parsed_type || type_name[0] == 'I') continue; // ? Instruction caches hold no chase list
+
+        // A level only counts if every core it serves belongs to this domain - a cache shared with
+        // a sibling QoS class is not the domain's to size chunks by.
+        std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index%d/shared_cpu_list", core_id,
+                      index);
+        FILE *shared_file = ::fopen(path, "r");
+        if (!shared_file) continue;
+        char line[256] = {0};
+        bool complete = ::fgets(line, sizeof(line), shared_file) != nullptr;
+        ::fclose(shared_file);
+        // ? A list that filled the buffer without its newline was truncated - the dropped tail
+        // ? could name cores outside the domain, so the honest verdict is "not contained"
+        complete = complete && !(std::strlen(line) == sizeof(line) - 1 && line[sizeof(line) - 2] != '\n');
+        if (!complete || !cpu_list_within(line, domain_cores, domain_cores_count)) continue;
+
+        std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index%d/size", core_id, index);
+        FILE *size_file = ::fopen(path, "r");
+        if (!size_file) continue;
+        unsigned long long parsed = 0;
+        char suffix = 0;
+        int const fields = ::fscanf(size_file, "%llu%c", &parsed, &suffix);
+        ::fclose(size_file);
+        if (fields < 1) continue;
+        std::size_t bytes = static_cast<std::size_t>(parsed);
+        if (fields == 2 && (suffix == 'K' || suffix == 'k')) bytes <<= 10;
+        if (fields == 2 && (suffix == 'M' || suffix == 'm')) bytes <<= 20;
+        if (fields == 2 && (suffix == 'G' || suffix == 'g')) bytes <<= 30;
+        if (bytes > deepest_bytes) deepest_bytes = bytes;
+    }
+    if (deepest_bytes) return deepest_bytes;
+#endif
+
+#if FU_DETECT_ARCH_X86_64_
+    // CPUID reports the executing core's caches: exact on homogeneous parts, and only a fallback
+    // where the per-core sysfs above is absent, so hybrid mislabeling never reaches Linux.
+    // ? AMD mirrors Intel's deterministic leaf 0x4 at 0x8000001D
+    std::uint32_t const deterministic_leaf = 0x8000'001Du;
+    std::uint32_t const max_extended = cpuid(0x8000'0000u, 0).eax;
+    if (max_extended < deterministic_leaf && cpuid(0, 0).eax < 0x4u) {
+        // ? A pre-leaf-4 part answers an unsupported leaf with its highest leaf's data - never
+        // ? decode that. Old AMD still names its L2 in KB through the legacy leaf 0x80000006.
+        if (max_extended < 0x8000'0006u) return 0;
+        return static_cast<std::size_t>(cpuid(0x8000'0006u, 0).ecx >> 16) << 10;
+    }
+    std::uint32_t const leaf = max_extended >= deterministic_leaf ? deterministic_leaf : 0x4u;
+
+    std::size_t deepest_cpuid_bytes = 0;
+    for (std::uint32_t subleaf = 0; subleaf < 16; ++subleaf) {
+        cpuid_registers_t const r = cpuid(leaf, subleaf);
+        // ? A type of 0 ends the list, and 2 is an instruction cache
+        std::uint32_t const cache_type = r.eax & 0x1Fu;
+        if (cache_type == 0) break;
+        if (cache_type == 2) continue;
+        // A level shared by more logical cores than this domain holds reaches beyond the domain -
+        // the register-only stand-in for the sysfs `shared_cpu_list` containment above.
+        std::size_t const sharing_cores = ((r.eax >> 14) & 0xFFFu) + 1;
+        if (sharing_cores > domain_cores_count) continue;
+        std::size_t const line_bytes = (r.ebx & 0xFFFu) + 1;
+        std::size_t const partitions = ((r.ebx >> 12) & 0x3FFu) + 1;
+        std::size_t const ways = ((r.ebx >> 22) & 0x3FFu) + 1;
+        std::size_t const sets = static_cast<std::size_t>(r.ecx) + 1;
+        std::size_t const bytes = line_bytes * partitions * ways * sets;
+        if (bytes > deepest_cpuid_bytes) deepest_cpuid_bytes = bytes;
+    }
+    return deepest_cpuid_bytes;
+#else
+    return 0;
+#endif
+}
+
+/**
  *  @brief Whether @p memory_domain_id appears in a Linux range-list file such as "0", "0-3", or "0,2-4".
  *  @sa Used to map a NUMA node onto its kernel memory tier.
  */
@@ -1327,7 +1450,7 @@ struct machine_topology {
         domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
         domain.compute_level = 0;
         domain.capacity = 0;
-        domain.cache_bytes = 0;
+        domain.cache_bytes = cache_bytes_of_core(core_ids_ptr[0], core_ids_ptr, cores);
         domain.first_core_id = core_ids_ptr;
         domain.logical_cores_count = cores;
 
@@ -1440,7 +1563,7 @@ struct machine_topology {
             domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
             domain.compute_level = 0;
             domain.capacity = 0;
-            domain.cache_bytes = 0;
+            domain.cache_bytes = cache_bytes_of_core(core_ids_ptr[core_begin], core_ids_ptr + core_begin, node_cores);
             domain.first_core_id = core_ids_ptr + core_begin;
             domain.logical_cores_count = node_cores;
             ++node_index;
@@ -1611,7 +1734,8 @@ struct machine_topology {
                         node_cores[run_begin])]; // ? Raw capacity, ranked below
                     // ! Keep the raw magnitude too - `compute_level` is about to collapse into an ordinal.
                     domain.capacity = core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
-                    domain.cache_bytes = 0; // ? Not yet read from `sys/devices/system/cpu/cpu*/cache`
+                    domain.cache_bytes =
+                        cache_bytes_of_core(node_cores[run_begin], node_cores + run_begin, core - run_begin);
                     domain.first_core_id = node_cores + run_begin;
                     domain.logical_cores_count = core - run_begin;
                     run_begin = core;
@@ -1764,14 +1888,15 @@ struct machine_topology {
             levels_written += 1;
         }
 
-        // Fallback: no perflevel data - one compute domain over every core.
+        // Fallback: no perflevel data - one compute domain over every core. Intel Macs land here,
+        // where the CPUID walk still names the cache the `sysctl` levels could not.
         if (domains_written == 0) {
             compute_domain_t &domain = domains_ptr[0];
             domain.memory_domain_id = 0;
             domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
             domain.compute_level = 0;
             domain.capacity = 0;
-            domain.cache_bytes = 0;
+            domain.cache_bytes = cache_bytes_of_core(core_ids_ptr[0], core_ids_ptr, total_cores);
             domain.first_core_id = core_ids_ptr;
             domain.logical_cores_count = total_cores;
             domains_written = 1;
