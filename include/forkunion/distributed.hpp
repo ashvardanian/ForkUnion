@@ -1574,6 +1574,524 @@ struct distributed_pool {
     }
 };
 
+#pragma region Measured Memory Distances
+
+/**
+ *  @brief One recorded observation of a memory-fabric edge: what @p initiator's cores see when
+ *         reaching memory resident on @p target.
+ *
+ *  The chase and the stream are separate experiments, so each record carries the metric its
+ *  experiment produced, 0 for the other; `measured_fabric` folds the log into per-metric envelopes.
+ */
+struct measured_edge_t {
+    /** @brief The compute domain whose cores issued the loads - the pool's pinning unit, never a
+     *         memory domain: sibling domains on one controller still measure apart. */
+    compute_domain_index_t initiator {};
+    /** @brief The memory domain whose DRAM answered the loads. */
+    memory_domain_index_t target {};
+    /** @brief Dependent-load latency of a lone core, in nanoseconds; 0 if unobserved. */
+    std::size_t nanoseconds {0};
+    /** @brief Saturated read bandwidth of ALL the initiator's cores at once, in MB/s; 0 if unobserved. */
+    std::size_t megabytes_per_second {0};
+};
+
+/** @brief One hop of the latency walk, padded to a cache line so consecutive slots never share one. */
+struct alignas(64) chase_slot_t {
+    /** @brief Index of the slot the walk visits next; no initializer, as `try_resize_uninitialized`
+     *         demands trivial construction and `thread_chase_list_` writes every slot anyway. */
+    std::uint32_t next_slot_index;
+};
+
+/**
+ *  @brief Threads a single Sattolo cycle through @p slots - a linked list where every load's address
+ *         depends on the previous load, so prefetchers see noise and the walk pays true latency.
+ *  @note Writing the links is also the FIRST touch of every page, which is what places the list on
+ *        the toucher's memory domain on every OS - no `mbind`, no `libnuma`, no ACPI.
+ */
+inline void thread_chase_list_(chase_slot_t *slots, std::size_t const count) noexcept {
+    for (std::size_t i = 0; i != count; ++i) slots[i].next_slot_index = static_cast<std::uint32_t>(i);
+    for (std::size_t i = count - 1; i != 0; --i) { // ? Sattolo: swap below self, never with self
+        std::size_t const j = split_mix(i) % i;
+        std::uint32_t const swapped = slots[i].next_slot_index;
+        slots[i].next_slot_index = slots[j].next_slot_index;
+        slots[j].next_slot_index = swapped;
+    }
+}
+
+/**
+ *  @brief Walks dependent loads through the list in @p segments timed stretches, returning the
+ *         @b fastest stretch's nanoseconds per hop - the least-contended glimpse of the fabric.
+ *  @note Each stretch continues where the last stopped, and the single Sattolo cycle revisits no
+ *        slot until it closes, so every stretch walks lines no stretch has cached before.
+ */
+inline std::size_t chase_ns_per_hop_(chase_slot_t const *slots, std::size_t const hops,
+                                     std::size_t const segments) noexcept {
+    std::uint32_t position = 0;
+    std::size_t best_nanoseconds = ~std::size_t(0);
+    for (std::size_t segment = 0; segment != segments; ++segment) {
+        auto const started = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i != hops; ++i) position = slots[position].next_slot_index;
+        auto const elapsed = std::chrono::steady_clock::now() - started;
+        std::size_t const nanoseconds =
+            static_cast<std::size_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+        best_nanoseconds = (std::min)(best_nanoseconds, nanoseconds);
+    }
+    return best_nanoseconds / hops + (position == ~0u); // ? The data-dependent tail defeats elision
+}
+
+/** @brief Runs @p work on the one pool worker with the given global @p thread index; the other
+ *         workers pass through the broadcast untouched. */
+template <typename pool_type_, typename work_type_>
+static void run_on_worker_(pool_type_ &pool, std::size_t const thread, work_type_ &&work) noexcept {
+    // ? A `local_thread` argument converts to its global index, so this fits every pool's callback shape
+    pool.for_threads([&](std::size_t const local_thread_index) noexcept {
+        if (local_thread_index == thread) work();
+    });
+}
+
+/** @brief Bytes a chase list needs, within what the @p target domain itself can hold.
+ *
+ *  Deliberately @b not scaled by cache size: the Sattolo cycle revisits no slot within a lap, so
+ *  no cache can shortcut the walk - while every extra page costs TLB reach and risks billing each
+ *  hop for a memory-bound page walk. 128 MiB fits three revisit-free million-hop stretches. */
+inline std::size_t chase_list_bytes_(memory_domain_t const &target) noexcept {
+    std::size_t bytes = std::size_t(128) << 20;
+    if (target.volume_ram) bytes = (std::min)(bytes, target.volume_ram / 8);
+    return bytes;
+}
+
+/** @brief Fills @p words with `split_mix` draws - the FIRST touch that places every page on the
+ *         filling worker's memory domain, and data no reduction can constant-fold away. */
+inline void fill_stream_words_(std::uint64_t *words, std::size_t const count) noexcept {
+    for (std::size_t i = 0; i != count; ++i) words[i] = split_mix(i);
+}
+
+/** @brief Sums @p count words - a plain reduction the compiler is free to vectorize, since
+ *         saturating the controller is exactly what a bandwidth probe wants. */
+inline std::uint64_t stream_words_(std::uint64_t const *words, std::size_t const count) noexcept {
+    std::uint64_t sum = 0;
+    for (std::size_t i = 0; i != count; ++i) sum += words[i];
+    return sum;
+}
+
+/** @brief Bytes a stream needs to dwarf every cache the harvest can name - its repeats re-read
+ *         the same buffer, and a cache-resident buffer would report the cache's bandwidth - and
+ *         to run long past the fork-join overhead: at least 8 MiB per worker reading it. */
+inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_domain_t const &target,
+                                 std::size_t const widest_domain_threads) noexcept {
+    std::uint64_t largest_cache = 0;
+    for (std::size_t domain = 0; domain != topology.compute_domains_count(); ++domain)
+        largest_cache =
+            (std::max)(largest_cache,
+                       static_cast<std::uint64_t>(
+                           topology.compute_domain_at(static_cast<compute_domain_index_t>(domain)).cache_bytes));
+    // ? 64-bit math: a giant L3 times 8 overflows a 32-bit `size_t` before the RAM clamp can bite
+    std::uint64_t bytes = (std::max)((std::max)(largest_cache * 8, std::uint64_t(128) << 20),
+                                     static_cast<std::uint64_t>(widest_domain_threads) * (std::uint64_t(8) << 20));
+    if (target.volume_ram) bytes = (std::min)(bytes, static_cast<std::uint64_t>(target.volume_ram) / 8);
+    return static_cast<std::size_t>((std::min)(bytes, static_cast<std::uint64_t>(~std::size_t(0)) / 2));
+}
+
+/** @brief Marks a fabric position the pool has no worker on - cpuless, or beyond a partial spawn. */
+inline constexpr std::size_t unreachable_position_k = ~static_cast<std::size_t>(0);
+
+/** @brief One pool worker per memory domain, for first-touching lists onto it - placement is a
+ *         property of the touching thread's position, so any local domain's worker serves. */
+template <typename pool_type_>
+static bool touchers_per_position_(machine_topology_t const &topology, pool_type_ &pool,
+                                   dynamic_array<std::size_t> &touchers) noexcept {
+    // ? The C ABI lets callers pair a pool with a topology it never spawned from - decline, don't trust
+    if (pool.compute_domains_count() == 0 || pool.compute_domains_count() > topology.compute_domains_count())
+        return false;
+    if (!touchers.try_resize(topology.memory_domains_count())) return false;
+    for (std::size_t position = 0; position != touchers.size(); ++position) touchers[position] = unreachable_position_k;
+    for (std::size_t domain = 0; domain != pool.compute_domains_count(); ++domain) {
+        memory_domain_index_t const position =
+            topology.compute_domain_at(static_cast<compute_domain_index_t>(domain)).memory_domain_index;
+        if (position >= touchers.size()) return false; // ? A foreign topology's indices prove the mismatch
+        if (touchers[position] == unreachable_position_k) touchers[position] = pool.first_thread(domain);
+    }
+    return true;
+}
+
+/**
+ *  @brief Measures the saturated read bandwidth from every initiator compute domain to one @p target
+ *         memory domain, appending the observations to @p edges.
+ *  @retval false when the stream cannot be allocated or an edge cannot be recorded.
+ *
+ *  One @p toucher-filled buffer serves every initiator: streams need no cold start, they evict
+ *  themselves. Each initiator's workers read disjoint stripes inside one broadcast, wall-clocked
+ *  fork to join - what a fork-join workload actually gets - best of three laps, the first doubling
+ *  as warm-up. Worker checksums land in @p checksums and fold into a data-dependent tail.
+ */
+template <typename pool_type_, typename edges_array_type_>
+static bool try_measure_bandwidth_edges_(machine_topology_t const &topology, pool_type_ &pool, std::size_t const target,
+                                         std::size_t const toucher, dynamic_array<std::uint64_t> &checksums,
+                                         edges_array_type_ &edges) noexcept {
+
+    memory_domain_t const &target_domain = topology.memory_domain_at(static_cast<memory_domain_index_t>(target));
+    std::size_t widest_domain_threads = 1;
+    for (std::size_t domain = 0; domain != pool.compute_domains_count(); ++domain)
+        widest_domain_threads = (std::max)(widest_domain_threads, static_cast<std::size_t>(pool.threads_count(domain)));
+
+    std::size_t const words =
+        (std::max)(stream_bytes_(topology, target_domain, widest_domain_threads) / sizeof(std::uint64_t),
+                   widest_domain_threads);
+    dynamic_array<std::uint64_t> stream;
+    if (!stream.try_resize_uninitialized(words)) return false;
+    run_on_worker_(pool, toucher, [&]() noexcept { fill_stream_words_(stream.data(), words); });
+
+    for (std::size_t initiator = 0; initiator != pool.compute_domains_count(); ++initiator) {
+        std::size_t const first_thread = pool.first_thread(initiator);
+        std::size_t const domain_threads = pool.threads_count(initiator);
+        indexed_split<std::size_t> const stripes(words, domain_threads);
+
+        std::size_t best_megabytes_per_second = 0;
+        for (std::size_t repeat = 0; repeat != 3; ++repeat) {
+            auto const started = std::chrono::steady_clock::now();
+            pool.for_threads([&](std::size_t const thread) noexcept {
+                if (thread - first_thread >= domain_threads) return; // ? Another domain's worker sits out
+                auto const stripe = stripes[thread - first_thread];
+                checksums[thread] = stream_words_(stream.data() + stripe.first, stripe.count);
+            });
+            auto const elapsed = std::chrono::steady_clock::now() - started;
+            std::uint64_t const nanoseconds =
+                (std::max)(static_cast<std::uint64_t>(
+                               std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+                           std::uint64_t(1));
+            std::uint64_t folded = 0;
+            for (std::size_t thread = 0; thread != domain_threads; ++thread) folded ^= checksums[first_thread + thread];
+            std::size_t const megabytes_per_second =
+                static_cast<std::size_t>(static_cast<std::uint64_t>(words) * sizeof(std::uint64_t) * 1000u /
+                                         nanoseconds) +
+                (folded == 0x5Fu); // ? The data-dependent tail defeats elision
+            best_megabytes_per_second = (std::max)(best_megabytes_per_second, megabytes_per_second);
+        }
+
+        // ? A bandwidth-only observation: the streaming experiment says nothing about latency
+        measured_edge_t const edge {static_cast<compute_domain_index_t>(initiator),
+                                    static_cast<memory_domain_index_t>(target), 0, best_megabytes_per_second};
+        if (!edges.try_push_back(edge)) return false;
+    }
+    return true;
+}
+
+/**
+ *  @brief Derives dense memory-tier ordinals from an edge log, writing one rank per memory domain
+ *         into @p levels and returning the number of distinct tiers (>= 1).
+ *  @param scratch Caller-provided workspace of `4 * memory_domains_count` entries.
+ *
+ *  A tier is a property of the MEDIUM, independent of any initiator: each target is keyed by the
+ *  best bandwidth any initiator sustained to it, ties split by the best latency - a 3 TB/s HBM
+ *  pool outranks DDR even at equal latency. Targets cluster greedily along the sorted keys: a new
+ *  tier opens where bandwidth trails its tier's anchor by over 1.25x, or, within one bandwidth
+ *  band, where latency trails by over 1.5x - each band above its probe's jitter under load, below
+ *  every real gap. Unobserved targets share one tier past the slowest observed.
+ */
+FU_MAYBE_UNUSED_ static std::size_t derive_memory_levels_(measured_edge_t const *edges, std::size_t const edges_count,
+                                                          std::size_t *levels, std::size_t const memory_domains_count,
+                                                          std::size_t *scratch) noexcept {
+    for (std::size_t i = 0; i != memory_domains_count; ++i) levels[i] = 0;
+    if (memory_domains_count == 0) return 1;
+
+    // ? Four scratch regions: the two per-target envelope keys, the sort order, the tier buckets
+    std::size_t *const bandwidths = scratch;
+    std::size_t *const latencies = scratch + memory_domains_count;
+    std::size_t *const order = scratch + memory_domains_count * 2;
+    std::size_t *const buckets = scratch + memory_domains_count * 3;
+
+    for (std::size_t i = 0; i != memory_domains_count; ++i) bandwidths[i] = 0, latencies[i] = 0, order[i] = i;
+    for (std::size_t i = 0; i != edges_count; ++i) {
+        measured_edge_t const &edge = edges[i];
+        if (edge.target >= memory_domains_count) continue;
+        if (edge.megabytes_per_second > bandwidths[edge.target]) bandwidths[edge.target] = edge.megabytes_per_second;
+        if (edge.nanoseconds && (latencies[edge.target] == 0 || edge.nanoseconds < latencies[edge.target]))
+            latencies[edge.target] = edge.nanoseconds;
+    }
+
+    bool any_observed = false;
+    for (std::size_t i = 0; i != memory_domains_count && !any_observed; ++i)
+        any_observed = bandwidths[i] != 0 || latencies[i] != 0;
+    if (!any_observed) return 1; // ? Nothing probed yet - a single tier covers every domain
+
+    bubble_sort(order, memory_domains_count,
+                [bandwidths, latencies](std::size_t const &a, std::size_t const &b) noexcept {
+                    if (bandwidths[a] != bandwidths[b]) return bandwidths[a] > bandwidths[b];
+                    std::size_t const latency_a = latencies[a] ? latencies[a] : ~std::size_t(0);
+                    std::size_t const latency_b = latencies[b] ? latencies[b] : ~std::size_t(0);
+                    return latency_a < latency_b; // ? Unobserved metrics sort as worst
+                });
+
+    std::size_t anchor_bandwidth = bandwidths[order[0]];
+    std::size_t anchor_latency = latencies[order[0]];
+    std::size_t bucket = 0;
+    for (std::size_t i = 0; i != memory_domains_count; ++i) {
+        std::size_t const bandwidth = bandwidths[order[i]];
+        std::size_t const latency = latencies[order[i]];
+        if (bandwidth == 0 && latency == 0) { // ? The unobserved tail shares one tier past the slowest
+            for (; i != memory_domains_count; ++i) buckets[order[i]] = bucket + 1;
+            break;
+        }
+        bool const bandwidth_fell = anchor_bandwidth * 4 > bandwidth * 5;
+        bool const latency_grew = anchor_latency != 0 && latency * 2 > anchor_latency * 3;
+        if (bandwidth_fell || latency_grew) bucket += 1, anchor_bandwidth = bandwidth, anchor_latency = latency;
+        if (anchor_latency == 0) anchor_latency = latency; // ? A latency-less opener adopts its tier's first
+        buckets[order[i]] = bucket;
+    }
+
+    return dense_rank(
+        memory_domains_count, [buckets](std::size_t index) noexcept { return buckets[index]; },
+        [levels](std::size_t index, std::size_t rank) noexcept { levels[index] = rank; });
+}
+
+/**
+ *  @brief The measured memory fabric - what this process @b observed, as opposed to the structure
+ *         the OS @b declared in `machine_topology`. Two query families: EDGE queries `(initiator,
+ *         target)` describe one interconnect link; MEDIUM queries `(target)` describe the memory
+ *         pool itself, independent of any initiator.
+ *
+ *  Completes the `try_harvest` pipeline: a `machine_topology` is harvested first and stays
+ *  immutable, a `distributed_pool` spawns on it, and the fabric then harvests through that pool's
+ *  pinned workers, snapshotting what it needs so the topology may be freed after. `try_harvest`
+ *  is the only mutator and replaces the whole snapshot; before it, every query answers 0 and
+ *  `memory_levels_count` answers 1.
+ */
+template <typename allocator_type_ = std::allocator<char>>
+class measured_fabric {
+
+  public:
+    using allocator_t = allocator_type_;
+    using edges_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<measured_edge_t>;
+    using indices_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::size_t>;
+
+  private:
+    /** @brief Allocator the derivation scratch rebinds from; the arrays rebind their own. */
+    allocator_t allocator_ {};
+    /** @brief The observation log: sparse, only walked edges exist, each metric enveloped on query. */
+    dynamic_array<measured_edge_t, edges_allocator_t> edges_;
+    /** @brief Snapshot of `local_memory_of` per compute domain, so `memory_distance` needs no topology. */
+    dynamic_array<std::size_t, indices_allocator_t> local_memory_;
+    /** @brief Derived memory-tier ordinal per memory domain, 0 = fastest. */
+    dynamic_array<std::size_t, indices_allocator_t> memory_levels_;
+    /** @brief Number of distinct derived tiers (>= 1). */
+    std::size_t memory_levels_count_ {1};
+    /** @brief Snapshot of the topology's compute domain count; 0 marks an unharvested fabric. */
+    std::size_t compute_domains_count_ {0};
+    /** @brief Snapshot of the topology's memory domain count; 0 marks an unharvested fabric. */
+    std::size_t memory_domains_count_ {0};
+
+  public:
+    constexpr measured_fabric() noexcept = default;
+
+    measured_fabric(measured_fabric &&o) noexcept
+        : allocator_(std::move(o.allocator_)), edges_(std::move(o.edges_)), local_memory_(std::move(o.local_memory_)),
+          memory_levels_(std::move(o.memory_levels_)), memory_levels_count_(std::exchange(o.memory_levels_count_, 1)),
+          compute_domains_count_(std::exchange(o.compute_domains_count_, 0)),
+          memory_domains_count_(std::exchange(o.memory_domains_count_, 0)) {}
+
+    measured_fabric &operator=(measured_fabric &&other) noexcept {
+        if (this != &other) {
+            allocator_ = std::move(other.allocator_);
+            edges_ = std::move(other.edges_);
+            local_memory_ = std::move(other.local_memory_);
+            memory_levels_ = std::move(other.memory_levels_);
+            memory_levels_count_ = std::exchange(other.memory_levels_count_, 1);
+            compute_domains_count_ = std::exchange(other.compute_domains_count_, 0);
+            memory_domains_count_ = std::exchange(other.memory_domains_count_, 0);
+        }
+        return *this;
+    }
+
+    measured_fabric(measured_fabric const &) = delete;
+    measured_fabric &operator=(measured_fabric const &) = delete;
+
+    ~measured_fabric() noexcept { reset(); }
+
+    void reset() noexcept {
+        edges_.reset();
+        local_memory_.reset();
+        memory_levels_.reset();
+        memory_levels_count_ = 1;
+        compute_domains_count_ = memory_domains_count_ = 0;
+    }
+
+    /** @brief Snapshot of the topology's compute domain count at harvest time; 0 before any harvest. */
+    std::size_t compute_domains_count() const noexcept { return compute_domains_count_; }
+    /** @brief Snapshot of the topology's memory domain count at harvest time; 0 before any harvest. */
+    std::size_t memory_domains_count() const noexcept { return memory_domains_count_; }
+
+    /** @brief Best observed dependent-load latency (nanoseconds) on an edge; 0 if unwalked or out of range.
+     *  @note The minimum across recordings, since interference only ever adds nanoseconds. */
+    std::size_t memory_latency(compute_domain_index_t const initiator,
+                               memory_domain_index_t const target) const noexcept {
+        if (initiator >= compute_domains_count_ || target >= memory_domains_count_) return 0;
+        std::size_t best = 0;
+        for (std::size_t i = 0; i != edges_.size(); ++i) {
+            measured_edge_t const &edge = edges_[i];
+            if (edge.initiator != initiator || edge.target != target || edge.nanoseconds == 0) continue;
+            if (best == 0 || edge.nanoseconds < best) best = edge.nanoseconds;
+        }
+        return best;
+    }
+
+    /** @brief Best observed saturated read bandwidth (MB/s) on an edge; 0 if unwalked or out of range.
+     *  @note The maximum across recordings, since interference only ever subtracts megabytes. */
+    std::size_t memory_bandwidth(compute_domain_index_t const initiator,
+                                 memory_domain_index_t const target) const noexcept {
+        if (initiator >= compute_domains_count_ || target >= memory_domains_count_) return 0;
+        std::size_t best = 0;
+        for (std::size_t i = 0; i != edges_.size(); ++i) {
+            measured_edge_t const &edge = edges_[i];
+            if (edge.initiator == initiator && edge.target == target && edge.megabytes_per_second > best)
+                best = edge.megabytes_per_second;
+        }
+        return best;
+    }
+
+    /**
+     *  @brief Relative access distance on an edge, 10 = local per the SLIT convention; 0 if out of range.
+     *
+     *  The measured latency ratio to the initiator's local domain, times 10, rounded half-up and
+     *  clamped to at least 10, so the local domain always carries the row's minimum. Unwalked
+     *  edges fall back to 10-local / 20-remote; unclamped nanoseconds live in `memory_latency`.
+     */
+    std::size_t memory_distance(compute_domain_index_t const initiator,
+                                memory_domain_index_t const target) const noexcept {
+        if (initiator >= compute_domains_count_ || target >= memory_domains_count_) return 0;
+        std::size_t const local = local_memory_[initiator];
+        std::size_t const to_target = memory_latency(initiator, target);
+        std::size_t const to_local = memory_latency(initiator, static_cast<memory_domain_index_t>(local));
+        if (to_target == 0 || to_local == 0) return local == target ? 10u : 20u;
+        return (std::max)((10 * to_target + to_local / 2) / to_local, std::size_t(10));
+    }
+
+    /** @brief The pool's derived speed class, 0 = fastest; keyed by the best bandwidth any
+     *         initiator sustains to it, ties split by the best latency. 0 if out of range.
+     *  @note Tier boundaries are measurement-derived and can shift between harvests. */
+    std::size_t memory_level_in(memory_domain_index_t const memory_domain_index) const noexcept {
+        if (memory_domain_index >= memory_domains_count_) return 0;
+        return memory_levels_[memory_domain_index];
+    }
+
+    /** @brief Number of distinct derived memory tiers (>= 1). */
+    std::size_t memory_levels_count() const noexcept { return memory_levels_count_; }
+
+    /** @brief Number of recorded observations; each carries one experiment's metrics for one edge. */
+    std::size_t edges_count() const noexcept { return edges_.size(); }
+    /** @brief The observation at @p index, in [0, `edges_count()`). */
+    measured_edge_t const &edge_at(std::size_t const index) const noexcept {
+        assert(index < edges_.size() && "Edge index is out of bounds");
+        return edges_[index];
+    }
+
+    /**
+     *  @brief Harvests every reachable edge and the tiers derived from them through @p pool's
+     *         pinned workers, replacing any previous snapshot. The @p topology is only read.
+     *  @retval false when the pool spans no memory domains or a probe buffer cannot be allocated;
+     *          the fabric is then left empty, never half-written.
+     *  @note Not thread-safe: dispatches on the pool and rebuilds this fabric, so call it between
+     *        task batches and do not query concurrently. Expect seconds of runtime on large fabrics.
+     *
+     *  Targets are the memory domains some worker can first-touch; @b cpuless domains, like CXL
+     *  expanders, stay unwalked, since portable first-touch cannot place pages there.
+     */
+    template <typename micro_yield_type_, typename cache_hints_type_, std::size_t alignment_>
+    bool try_harvest(machine_topology_t const &topology,
+                     distributed_pool<micro_yield_type_, cache_hints_type_, alignment_> &pool) noexcept {
+        reset();
+        if (try_harvest_(topology, pool)) return true;
+        reset(); // ? Bulk construction: a failed harvest leaves no partial matrix behind
+        return false;
+    }
+
+  private:
+    template <typename micro_yield_type_, typename cache_hints_type_, std::size_t alignment_>
+    bool try_harvest_(machine_topology_t const &topology,
+                      distributed_pool<micro_yield_type_, cache_hints_type_, alignment_> &pool) noexcept {
+
+        // Snapshot the coordinate system, so the topology can be freed once this call returns.
+        std::size_t const compute_domains = topology.compute_domains_count();
+        std::size_t const memory_domains = topology.memory_domains_count();
+        if (!local_memory_.try_resize(compute_domains)) return false;
+        for (std::size_t domain = 0; domain != compute_domains; ++domain)
+            local_memory_[domain] = topology.local_memory_of(static_cast<compute_domain_index_t>(domain));
+        if (!memory_levels_.try_resize(memory_domains)) return false;
+        compute_domains_count_ = compute_domains;
+        memory_domains_count_ = memory_domains;
+
+        dynamic_array<std::size_t> touchers;
+        if (!touchers_per_position_(topology, pool, touchers)) return false;
+
+        // A scratch the toucher streams through after each fill, flushing the freshly written list
+        // out of its own caches; generous, but never past what a tight cgroup can spare.
+        std::size_t evictor_bytes = std::size_t(256) << 20;
+        if (volume_ram()) evictor_bytes = (std::min)(evictor_bytes, volume_ram() / 8);
+        dynamic_array<chase_slot_t> evictor;
+        if (!evictor.try_resize((std::max)(evictor_bytes / sizeof(chase_slot_t), std::size_t(1)))) return false;
+
+        for (std::size_t target = 0; target != touchers.size(); ++target) {
+            if (touchers[target] == unreachable_position_k) continue; // ? Nothing nearby can first-touch it
+
+            // Sattolo's single cycle never revisits a slot before the walk closes, so three timed
+            // stretches fit revisit-free as long as together they stay within one lap of the cycle.
+            std::size_t const segments = 3;
+            memory_domain_t const &target_domain =
+                topology.memory_domain_at(static_cast<memory_domain_index_t>(target));
+            std::size_t const slots = (std::max)(chase_list_bytes_(target_domain) / sizeof(chase_slot_t), segments);
+            std::size_t const hops =
+                (std::min)(slots / segments, std::size_t(1) << 20); // ? At least 1, as slots >= segments
+
+            // Every compute domain chases separately: sibling domains on one memory controller
+            // still differ - efficiency cores trail performance cores to the very same DRAM.
+            for (std::size_t initiator = 0; initiator != pool.compute_domains_count(); ++initiator) {
+
+                // Every edge gets a FRESH list, first-touched by the target's worker - that write
+                // is the whole portable placement story - then evicted, since a chase must start
+                // cold or the previous walker's cached copies re-route it through the directory.
+                dynamic_array<chase_slot_t> list;
+                if (!list.try_resize_uninitialized(slots)) return false;
+                std::size_t drained = 0; // ! Escapes the broadcast and feeds the tail below, or the drain elides
+                run_on_worker_(pool, touchers[target], [&]() noexcept {
+                    thread_chase_list_(list.data(), slots);
+                    std::size_t sum = 0;
+                    for (std::size_t i = 0; i != evictor.size(); ++i) sum += evictor[i].next_slot_index;
+                    drained = sum;
+                });
+
+                std::size_t nanoseconds = 0;
+                run_on_worker_(pool, pool.first_thread(initiator),
+                               [&]() noexcept { nanoseconds = chase_ns_per_hop_(list.data(), hops, segments); });
+                nanoseconds += drained == ~std::size_t(0); // ? The data-dependent tail defeats elision
+                // ? A latency-only observation: the lone-core chase says nothing about bandwidth
+                measured_edge_t const edge {static_cast<compute_domain_index_t>(initiator),
+                                            static_cast<memory_domain_index_t>(target), nanoseconds, 0};
+                if (!edges_.try_push_back(edge)) return false;
+            }
+        }
+
+        evictor.reset(); // ? Streams evict themselves, so the scratch would only crowd them out
+
+        dynamic_array<std::uint64_t> checksums;
+        if (!checksums.try_resize(pool.threads_count())) return false;
+        for (std::size_t target = 0; target != touchers.size(); ++target) {
+            if (touchers[target] == unreachable_position_k) continue; // ? Nothing nearby can first-touch it
+            if (!try_measure_bandwidth_edges_(topology, pool, target, touchers[target], checksums, edges_))
+                return false;
+        }
+
+        // The tiers need both metrics - bandwidth ranks the medium, latency splits ties.
+        dynamic_array<std::size_t, indices_allocator_t> scratch {indices_allocator_t {allocator_}};
+        if (!scratch.try_resize(memory_domains * 4)) return false;
+        memory_levels_count_ =
+            derive_memory_levels_(edges_.data(), edges_.size(), memory_levels_.data(), memory_domains, scratch.data());
+        return true;
+    }
+};
+
+using measured_fabric_t = measured_fabric<>;
+
+#pragma endregion Measured Memory Distances
+
 using colocated_pool_t = colocated_pool<>;
 using distributed_pool_t = distributed_pool<>;
 

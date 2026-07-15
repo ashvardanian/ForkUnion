@@ -242,7 +242,7 @@
 #include <linux/mman.h> // `MAP_HUGE_2MB`, `MAP_HUGE_1GB`
 #endif
 
-/*  Both the huge-page inventory and the memory-tier probe walk sysfs directories - a Linux-only
+/*  Both the huge-page inventory and the topology harvest walk sysfs directories - a Linux-only
  *  concern. Windows has no `<dirent.h>` under MSVC, and its large pages are probed by size, not path. */
 #if (FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN || FU_WITH_TOPOLOGY) && FU_ON_LINUX
 #include <dirent.h> // `opendir`, `readdir`, `closedir`

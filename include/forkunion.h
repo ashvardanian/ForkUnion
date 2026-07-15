@@ -96,10 +96,12 @@ int fu_version_patch(void);
 
 /** @brief Boolean type: 0 for false, non-zero for true. */
 typedef int fu_bool_t;
-/** @brief Opaque, cross-platform handle for the machine topology. */
+/** @brief Opaque, cross-platform handle for the machine topology; immutable once constructed. */
 typedef void *fu_topology_t;
 /** @brief Opaque, cross-platform thread-pool handle, either flat, colocated, or distributed. */
 typedef void *fu_pool_t;
+/** @brief Opaque handle for the measured memory fabric - latencies, bandwidths, tiers, distances. */
+typedef void *fu_fabric_t;
 /** @brief Type-punned pointer to a user-defined callback context. */
 typedef void *fu_lambda_context_t;
 /** @brief An OS memory-domain id - a NUMA node - the allocators key off; -1 when there is none. */
@@ -289,8 +291,8 @@ size_t fu_compute_domains_count(fu_topology_t);
  *  if the index is out of range. Homogeneous systems report level 0 for every compute domain.
  *
  *  Distinguishes performance vs efficiency cores, as in Intel P/E or ARM big.LITTLE. @note The compute
- *  ordinal grows with performance, while the memory-domain level from @ref fu_memory_level_in grows with
- *  @b distance - both match their native hardware conventions, so they run opposite ways by design.
+ *  ordinal grows with performance, while the memory tier from @ref fu_fabric_memory_level_in grows as
+ *  media slow down - both match their native hardware conventions, so they run opposite ways by design.
  *  @sa `fu_compute_levels_count`, `fu_compute_domains_count`.
  */
 size_t fu_compute_level_in(fu_topology_t, size_t compute_domain_index);
@@ -332,34 +334,14 @@ size_t fu_compute_cache_bytes_in(fu_topology_t, size_t compute_domain_index);
  *  @brief Returns the number of memory domains - the distinct allocation targets.
  *  @retval 0 if unsupported, 1 on uniform-memory systems, 2+ on NUMA / tiered-memory systems.
  *
- *  A @b memory @b domain is a bank of memory with a capacity and a performance @b level from
- *  @ref fu_memory_level_in, lower being faster: HBM < DDR < CXL. It is the unit the allocator targets.
- *  A memory domain may be @b cpuless, as with a CXL expander or GPU-attached HBM, and may be local to
- *  @b several compute domains, as when performance and efficiency cores share one DDR controller.
- *  @sa `fu_volume_ram_in`, `fu_memory_level_in`, `fu_local_memory_of`, `fu_allocate_on_domain_id`.
+ *  A @b memory @b domain is a bank of memory with its own capacity and access cost. It is the unit
+ *  the allocator targets. A memory domain may be @b cpuless, as with a CXL expander or GPU-attached
+ *  HBM, and may be local to @b several compute domains, as when performance and efficiency cores
+ *  share one DDR controller. Its performance - tiers, latencies, bandwidths, distances - is not
+ *  the topology's to declare: a `fu_fabric_t` measures it in-process.
+ *  @sa `fu_volume_ram_in`, `fu_local_memory_of`, `fu_allocate_on_domain_id`, `fu_fabric_harvest`.
  */
 size_t fu_memory_domains_count(fu_topology_t);
-
-/**
- *  @brief Returns the performance level of a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @retval A level ordinal where @b lower @b is @b faster, 0 being the fastest such as HBM; or 0 if the index
- *  is out of range. Uniform-memory systems report level 0 for every memory domain.
- *
- *  Ranks memory by access speed independently of compute, HBM < DDR < CXL/PMEM, following the Linux
- *  memory-tiering abstract-distance convention. @note Runs opposite to `fu_compute_level_in`, where
- *  higher is faster - each direction matches its own hardware source.
- *  @sa `fu_memory_domains_count`, `fu_volume_ram_in`.
- */
-size_t fu_memory_level_in(fu_topology_t, size_t memory_domain_index);
-
-/**
- *  @brief Returns the number of distinct memory tiers across all memory domains.
- *  @retval 0 if unsupported, 1 on single-tier systems, 2+ when HBM / DDR / CXL are mixed.
- *  @note The memory-axis twin of `fu_compute_levels_count`; several memory domains may share a tier.
- *  @sa `fu_memory_level_in`, `fu_memory_domains_count`.
- */
-size_t fu_memory_levels_count(fu_topology_t);
 
 /**
  *  @brief Returns the memory domain nearest to a given compute domain.
@@ -368,41 +350,10 @@ size_t fu_memory_levels_count(fu_topology_t);
  *  the compute-domain index is out of range.
  *
  *  The convenience bridge for the common "run here, allocate near here" pattern: pass the result
- *  to `fu_allocate_on_domain_id`. For the full cost picture use `fu_memory_distance`.
- *  @sa `fu_memory_distance`, `fu_allocate_on_domain_id`.
+ *  to `fu_allocate_on_domain_id`. For the full cost picture use `fu_fabric_memory_distance`.
+ *  @sa `fu_fabric_memory_distance`, `fu_allocate_on_domain_id`.
  */
 size_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index);
-
-/**
- *  @brief Returns the relative access distance from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @retval A relative distance where @b 10 means local per the SLIT convention; larger is farther;
- *  0 means unknown or an out-of-range index.
- *
- *  A scalar summary of the initiator-to-target cost. Per-edge bandwidth and latency come from
- *  `fu_memory_bandwidth` and `fu_memory_latency`.
- *  @sa `fu_local_memory_of`, `fu_memory_bandwidth`, `fu_memory_latency`.
- */
-size_t fu_memory_distance(fu_topology_t, size_t compute_domain_index, size_t memory_domain_index);
-
-/**
- *  @brief Returns the HMAT read bandwidth from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @retval Peak read bandwidth in MB/s, or 0 when the machine exposes no ACPI HMAT table.
- *  @sa `fu_memory_latency`, `fu_memory_distance`.
- */
-size_t fu_memory_bandwidth(fu_topology_t, size_t compute_domain_index, size_t memory_domain_index);
-
-/**
- *  @brief Returns the HMAT read latency from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @retval Read latency in nanoseconds, or 0 when the machine exposes no ACPI HMAT table.
- *  @sa `fu_memory_bandwidth`, `fu_memory_distance`.
- */
-size_t fu_memory_latency(fu_topology_t, size_t compute_domain_index, size_t memory_domain_index);
 
 /**
  *  @brief Returns the RAM volume in bytes of a given memory domain.
@@ -688,6 +639,96 @@ void fu_pool_sleep(fu_pool_t pool, size_t micros);
 void fu_pool_terminate(fu_pool_t pool);
 
 #pragma endregion Lifetime
+
+#pragma region Fabric
+
+/**
+ *  @brief Creates an empty, unharvested memory-fabric handle.
+ *  @retval An opaque fabric handle, or NULL on allocation failure.
+ *
+ *  Completes the library's pipeline: build a `fu_topology_t` first, spawn a `fu_pool_t` on it,
+ *  then harvest the fabric through that pool's pinned workers with @ref fu_fabric_harvest. Before
+ *  a harvest every query on the handle answers 0, and `fu_fabric_memory_levels_count` answers 1.
+ *  @sa `fu_fabric_harvest`, `fu_fabric_delete`.
+ */
+fu_fabric_t fu_fabric_new(void);
+
+/**
+ *  @brief Destroys a fabric and frees its observations; the handle is invalid afterward.
+ *  @param[in] fabric Fabric handle, may be NULL - a no-op.
+ *  @note Must not run concurrently with other operations on @p fabric.
+ */
+void fu_fabric_delete(fu_fabric_t fabric);
+
+/**
+ *  @brief Measures the memory fabric through the pool's pinned workers, rebuilding @p fabric.
+ *  @param[in] topology Read only; may be freed once this returns - the fabric snapshots what it needs.
+ *  @param[in] pool Pool handle, must not be NULL and spawned across the machine via `fu_pool_spawn`.
+ *  @param[out] fabric Receives the observations, replacing any previous harvest; must not be NULL,
+ *              and a failed harvest leaves it empty, never half-written.
+ *  @retval 1 on success; 0 on allocation failure or a pool that spans no memory domains - flat,
+ *  pinned to a single compute domain, or terminated.
+ *  @note Not thread-safe: dispatches on the pool and rebuilds the fabric, so call it between task
+ *        batches and do not query @p fabric concurrently. Expect seconds of runtime on large fabrics.
+ *
+ *  Pointer-chases every reachable edge for latency and streams it with each initiator domain's
+ *  full worker set for bandwidth - in-process, with no ACPI tables or OS-specific interfaces.
+ *  @b Cpuless memory domains, like CXL expanders, stay unwalked: portable first-touch cannot
+ *  place pages there, so their edges answer 0 and they share one tier past the slowest observed.
+ */
+fu_bool_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_t fabric);
+
+/**
+ *  @brief Returns the measured read latency from a compute domain to a memory domain.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
+ *  @retval Dependent-load latency in nanoseconds - the best recording of the edge; 0 before a
+ *  harvest, for an edge no worker could reach, or an out-of-range index.
+ */
+size_t fu_fabric_memory_latency(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the measured read bandwidth from a compute domain to a memory domain.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
+ *  @retval Saturated read bandwidth in MB/s, streamed by all the initiator domain's workers at
+ *  once - the best recording of the edge; 0 before a harvest, for an edge no worker could reach,
+ *  or an out-of-range index.
+ */
+size_t fu_fabric_memory_bandwidth(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the relative access distance from a compute domain to a memory domain.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
+ *  @retval A relative distance where @b 10 means local per the SLIT convention; larger is farther;
+ *  0 means an out-of-range index or an unharvested fabric.
+ *
+ *  The measured latency ratio to the initiator's local domain, clamped so the local domain always
+ *  carries the row's minimum; unwalked edges fall back to the 10-local / 20-remote convention.
+ */
+size_t fu_fabric_memory_distance(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the derived speed class of a given memory domain, independent of any initiator.
+ *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
+ *  @retval A tier ordinal where @b lower @b is @b faster, 0 being the fastest such as HBM; or 0
+ *  if the index is out of range or the fabric is unharvested.
+ *
+ *  Keyed by the best bandwidth any initiator sustains to the pool, ties split by the best
+ *  latency, so HBM < DDR < CXL/PMEM; boundaries are measurement-derived and can shift between
+ *  harvests. @note Runs opposite to `fu_compute_level_in`.
+ */
+size_t fu_fabric_memory_level_in(fu_fabric_t, size_t memory_domain_index);
+
+/**
+ *  @brief Returns the number of distinct derived memory tiers across all memory domains.
+ *  @retval 1 on single-tier systems and before a harvest, 2+ when HBM / DDR / CXL are mixed.
+ *  @note The memory-axis twin of `fu_compute_levels_count`; several memory domains may share a tier.
+ */
+size_t fu_fabric_memory_levels_count(fu_fabric_t);
+
+#pragma endregion Fabric
 
 #pragma region Primary API
 

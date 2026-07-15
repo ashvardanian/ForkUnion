@@ -432,46 +432,9 @@ size_t fu_memory_domains_count(FU_MAYBE_UNUSED_ fu_topology_t topology) {
     return (*upcast_topology(topology)).memory_domains_count();
 }
 
-size_t fu_memory_level_in(FU_MAYBE_UNUSED_ fu_topology_t topology, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-    if (!topology) return 0;
-    if (memory_domain_index >= (*upcast_topology(topology)).memory_domains_count()) return 0;
-    return (*upcast_topology(topology))
-        .memory_domain_at(static_cast<fu::memory_domain_index_t>(memory_domain_index))
-        .memory_level;
-}
-
-size_t fu_memory_levels_count(FU_MAYBE_UNUSED_ fu_topology_t topology) {
-    if (!topology) return 0;
-    return (*upcast_topology(topology)).memory_levels_count();
-}
-
 size_t fu_local_memory_of(FU_MAYBE_UNUSED_ fu_topology_t topology, FU_MAYBE_UNUSED_ size_t compute_domain_index) {
     if (!topology) return 0;
     return (*upcast_topology(topology)).local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain_index));
-}
-
-size_t fu_memory_distance(FU_MAYBE_UNUSED_ fu_topology_t topology, FU_MAYBE_UNUSED_ size_t compute_domain_index,
-                          FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-    if (!topology) return 0;
-    return (*upcast_topology(topology))
-        .memory_distance(static_cast<fu::compute_domain_index_t>(compute_domain_index),
-                         static_cast<fu::memory_domain_index_t>(memory_domain_index));
-}
-
-size_t fu_memory_bandwidth(FU_MAYBE_UNUSED_ fu_topology_t topology, FU_MAYBE_UNUSED_ size_t compute_domain_index,
-                           FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-    if (!topology) return 0;
-    return (*upcast_topology(topology))
-        .memory_bandwidth(static_cast<fu::compute_domain_index_t>(compute_domain_index),
-                          static_cast<fu::memory_domain_index_t>(memory_domain_index));
-}
-
-size_t fu_memory_latency(FU_MAYBE_UNUSED_ fu_topology_t topology, FU_MAYBE_UNUSED_ size_t compute_domain_index,
-                         FU_MAYBE_UNUSED_ size_t memory_domain_index) {
-    if (!topology) return 0;
-    return (*upcast_topology(topology))
-        .memory_latency(static_cast<fu::compute_domain_index_t>(compute_domain_index),
-                        static_cast<fu::memory_domain_index_t>(memory_domain_index));
 }
 
 size_t fu_volume_ram_in(FU_MAYBE_UNUSED_ fu_topology_t topology, FU_MAYBE_UNUSED_ size_t memory_domain_index) {
@@ -674,6 +637,63 @@ fu_bool_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comput
                 exclusivity);
         },
         opaque->variants);
+}
+
+/** @brief Safely cast `fu_fabric_t` to `fu::measured_fabric_t*` avoiding alignment violation warnings. */
+inline fu::measured_fabric_t *upcast_fabric(fu_fabric_t fabric) noexcept {
+    return std::launder(reinterpret_cast<fu::measured_fabric_t *>(fabric));
+}
+
+fu_fabric_t fu_fabric_new(void) {
+    void *raw = fu_aligned_malloc(sizeof(fu::measured_fabric_t), alignof(fu::measured_fabric_t));
+    if (!raw) return nullptr;
+    return reinterpret_cast<fu_fabric_t>(new (raw) fu::measured_fabric_t());
+}
+
+void fu_fabric_delete(fu_fabric_t fabric) {
+    if (!fabric) return;
+    fu::measured_fabric_t *upcast = upcast_fabric(fabric);
+    upcast->~measured_fabric();
+    fu_aligned_free(upcast, alignof(fu::measured_fabric_t));
+}
+
+fu_bool_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_t fabric) {
+    assert(pool != nullptr && fabric != nullptr);
+    if (!topology) return 0;
+    opaque_pool_t *opaque = upcast_pool(pool);
+    // Only the distributed pool spans memory domains; a flat or colocated pool has no fabric to walk.
+    if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) return 0;
+    return visit_kind<fu::pool_kind_t::distributed_k>(
+        [&](auto &variant) { return upcast_fabric(fabric)->try_harvest(*upcast_topology(topology), variant); },
+        opaque->variants);
+}
+
+size_t fu_fabric_memory_latency(fu_fabric_t fabric, size_t compute_domain_index, size_t memory_domain_index) {
+    if (!fabric) return 0;
+    return upcast_fabric(fabric)->memory_latency(static_cast<fu::compute_domain_index_t>(compute_domain_index),
+                                                 static_cast<fu::memory_domain_index_t>(memory_domain_index));
+}
+
+size_t fu_fabric_memory_bandwidth(fu_fabric_t fabric, size_t compute_domain_index, size_t memory_domain_index) {
+    if (!fabric) return 0;
+    return upcast_fabric(fabric)->memory_bandwidth(static_cast<fu::compute_domain_index_t>(compute_domain_index),
+                                                   static_cast<fu::memory_domain_index_t>(memory_domain_index));
+}
+
+size_t fu_fabric_memory_distance(fu_fabric_t fabric, size_t compute_domain_index, size_t memory_domain_index) {
+    if (!fabric) return 0;
+    return upcast_fabric(fabric)->memory_distance(static_cast<fu::compute_domain_index_t>(compute_domain_index),
+                                                  static_cast<fu::memory_domain_index_t>(memory_domain_index));
+}
+
+size_t fu_fabric_memory_level_in(fu_fabric_t fabric, size_t memory_domain_index) {
+    if (!fabric) return 0;
+    return upcast_fabric(fabric)->memory_level_in(static_cast<fu::memory_domain_index_t>(memory_domain_index));
+}
+
+size_t fu_fabric_memory_levels_count(fu_fabric_t fabric) {
+    if (!fabric) return 0;
+    return upcast_fabric(fabric)->memory_levels_count();
 }
 
 fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t pool) {

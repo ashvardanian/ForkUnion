@@ -466,20 +466,48 @@ static bool test_topology_memory_bounds(fu_capabilities_t mask) {
     return true;
 }
 
-/** @brief Per the SLIT convention no row's entry may undercut its own local domain; 0 means unreported. */
-static bool test_topology_slit_rows(fu_capabilities_t mask) {
-    (void)mask;
-    size_t const memory_domains = fu_memory_domains_count(machine_topology);
-    size_t const compute_domains = fu_compute_domains_count(machine_topology);
-
-    for (size_t c = 0; c < compute_domains; ++c) {
-        size_t const local = fu_local_memory_of(machine_topology, c);
-        if (local >= memory_domains) return false;
-        size_t const local_distance = fu_memory_distance(machine_topology, c, local);
-        for (size_t m = 0; m < memory_domains && local_distance != 0; ++m)
-            if (fu_memory_distance(machine_topology, c, m) < local_distance) return false;
+/**
+ *  @brief `fu_fabric_harvest` must fill every reachable edge with sane numbers and keep the SLIT
+ *         convention: no row's distance may undercut its own local domain. Runs once from `main`,
+ *         not in the battery - the harvest takes seconds and is identical under every mask.
+ */
+static bool test_fabric_harvest(fu_capabilities_t mask) {
+    fu_pool_t pool = spawn_default_pool("test_fabric", mask, fu_caller_exclusive_k);
+    if (!pool) return false;
+    fu_fabric_t fabric = fu_fabric_new();
+    if (!fabric) {
+        fu_pool_delete(pool);
+        return false;
     }
-    return true;
+
+    bool result = true;
+    if (fu_fabric_memory_latency(fabric, 0, 0) != 0) result = false; // ? Unharvested: zeros everywhere
+    if (fu_fabric_memory_levels_count(fabric) != 1) result = false;  // ? ... and a single tier
+
+    if (!fu_fabric_harvest(machine_topology, pool, fabric)) {
+        // ? Only the distributed pool spans memory domains - flat pools decline, they never lie
+        result = result && (fu_pool_capabilities(pool) & fu_capability_place_memory_on_domain_k) == 0;
+    }
+    else {
+        size_t const local = fu_local_memory_of(machine_topology, 0);
+        if (fu_fabric_memory_latency(fabric, 0, local) == 0) result = false;
+        if (fu_fabric_memory_bandwidth(fabric, 0, local) == 0) result = false;
+        if (fu_fabric_memory_distance(fabric, 0, local) != 10) result = false;
+        if (fu_fabric_memory_levels_count(fabric) < 1) result = false;
+
+        // Per the SLIT convention no row's distance may undercut its own local domain.
+        size_t const memory_domains = fu_memory_domains_count(machine_topology);
+        size_t const compute_domains = fu_compute_domains_count(machine_topology);
+        for (size_t c = 0; c < compute_domains; ++c) {
+            size_t const row_local = fu_local_memory_of(machine_topology, c);
+            size_t const local_distance = fu_fabric_memory_distance(fabric, c, row_local);
+            for (size_t m = 0; m < memory_domains && local_distance != 0; ++m)
+                if (fu_fabric_memory_distance(fabric, c, m) < local_distance) result = false;
+        }
+    }
+    fu_fabric_delete(fabric);
+    fu_pool_delete(pool);
+    return result;
 }
 
 /**
@@ -695,7 +723,6 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
         {"`sleep` and wake exactly-once", test_sleep_wake},
         {"topology counts and core partition", test_topology_counts},
         {"topology memory-domain bounds", test_topology_memory_bounds},
-        {"topology SLIT rows", test_topology_slit_rows},
         {"`fu_pool_capabilities` narrowing", test_pool_capabilities_narrowing},
         {"per-compute-domain pool accounting", test_pool_domain_accounting},
         {"allocations on every memory domain", test_allocations_on_domains},
@@ -777,6 +804,16 @@ int main(void) {
             if ((topology_variant & comptime_mask) != topology_variant) continue;
             run_battery(yield_variant | topology_variant, &passes, &failures);
         }
+    }
+
+    // One-shot, outside the battery: the harvest takes seconds and is mask-independent.
+    {
+        printf("Running `fu_fabric_harvest` fabric probe... ");
+        // ? The full comptime mask: facility bits never appear in the runtime mask, and
+        // ? `fu_pool_new` narrows the yields to what the machine offers anyway.
+        bool const ok = test_fabric_harvest(comptime_mask);
+        printf(ok ? "PASS\n" : "FAIL\n");
+        passes += ok, failures += !ok;
     }
 
     fu_topology_delete(machine_topology);

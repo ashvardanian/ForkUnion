@@ -233,14 +233,6 @@ struct log_numa_topology_t {
                 colors.yellow(), /* "Memory:" */ colors.reset(),                          //
                 colors.bold_yellow(), memory_str, colors.reset());
 
-            // Memory tier, shown only when the machine actually exposes more than one
-            if (topology.memory_levels_count() > 1)
-                pos += static_cast<std::size_t>(std::snprintf(    //
-                    line_buffer + pos, sizeof(line_buffer) - pos, //
-                    " • %sTier:%s %s%zu%s",                       //
-                    colors.blue(), /* "Tier:" */ colors.reset(),  //
-                    colors.bold_blue(), node.memory_level, colors.reset()));
-
             // Add huge pages if any exist
             auto const &page_settings = node.page_sizes;
             bool first_page = true;

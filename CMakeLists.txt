@@ -45,9 +45,9 @@ option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL 
 #
 # ON and OFF pass `-DFU_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say - is
 # rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
-# realistically toggles, each a tri-state cache entry. The finer ones - cache sharing, HMAT metrics, thread QoS,
-# scheduling class - are AUTO-only: the header derives them, and only `FORKUNION_PORTABLE` forces them off. Rust and Zig
-# expose this same set.
+# realistically toggles, each a tri-state cache entry. The finer ones - cache sharing, thread QoS, scheduling class -
+# are AUTO-only: the header derives them, and only `FORKUNION_PORTABLE` forces them off. Rust and Zig expose this same
+# set.
 set(FORKUNION_WITH_TOPOLOGY
     "AUTO"
     CACHE STRING "Enumerate cores and domains: AUTO, ON, or OFF"

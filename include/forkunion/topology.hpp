@@ -711,8 +711,6 @@ struct memory_domain {
     socket_id_t socket_id {-1};
     /** @brief RAM volume in bytes. */
     std::size_t volume_ram {0};
-    /** @brief Memory tier ordinal, sorted fastest-to-slowest (0 = fastest). */
-    std::size_t memory_level {0};
     /** @brief Pointer to the first core ID in the `core_ids` array. */
     core_id_t const *first_core_id {nullptr};
     /** @brief Number of items in the `core_ids` array. */
@@ -887,14 +885,11 @@ FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t 
  *  @brief Bytes of the deepest data or unified cache serving @p core_id, confined to @p domain_cores.
  *  @retval The cache size in bytes, or 0 when no platform source can name it.
  *
- *  Two exact sources, no measurement: Linux publishes each core's cache hierarchy under
- *  `/sys/devices/system/cpu/cpuN/cache/indexM`, where `shared_cpu_list` tells whether a level stays
- *  within the domain's cores - a socket-wide L3 counts for a whole-socket domain but not for one
- *  QoS class sharing it with another; elsewhere, x86 CPUID leaf 0x4 (Intel) or 0x8000001D (AMD)
- *  enumerates the same geometry, though for the core executing the query rather than @p core_id,
- *  with each level's sharing width standing in for the cpulist containment. Arm exposes no
- *  userspace cache-geometry registers - `CCSIDR_EL1` is EL1-only and `CTR_EL0` names only line
- *  sizes - so Linux's sysfs is the only Arm source, and other Arm hosts honestly report 0.
+ *  Two exact sources, no measurement: Linux's per-core cacheinfo sysfs, counting a level only if
+ *  its `shared_cpu_list` stays within the domain - a socket-wide L3 is not one QoS class's to
+ *  claim; elsewhere x86 CPUID leaf 0x4 / 0x8000001D, with the sharing width standing in for that
+ *  containment. Arm has no userspace cache-geometry registers (`CCSIDR_EL1` is EL1-only), so
+ *  sysfs is the only Arm source and other Arm hosts honestly report 0.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
     FU_MAYBE_UNUSED_ core_id_t core_id, FU_MAYBE_UNUSED_ core_id_t const *domain_cores,
@@ -978,115 +973,6 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
         if (bytes > deepest_cpuid_bytes) deepest_cpuid_bytes = bytes;
     }
     return deepest_cpuid_bytes;
-#else
-    return 0;
-#endif
-}
-
-/**
- *  @brief Whether @p memory_domain_id appears in a Linux range-list file such as "0", "0-3", or "0,2-4".
- *  @sa Used to map a NUMA node onto its kernel memory tier.
- */
-FU_MAYBE_UNUSED_ static inline bool nodelist_contains(FU_MAYBE_UNUSED_ char const *path,
-                                                      FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id) noexcept {
-#if FU_ON_LINUX
-    FILE *file = ::fopen(path, "r");
-    if (!file) return false;
-
-    char line[256];
-    bool found = false;
-    if (::fgets(line, sizeof(line), file)) {
-        char const *cursor = line;
-        while (*cursor) {
-            char *next = nullptr;
-            long const low = ::strtol(cursor, &next, 10);
-            if (next == cursor) break; // ? No number left to parse
-            long high = low;
-            cursor = next;
-            if (*cursor == '-') high = ::strtol(cursor + 1, &next, 10), cursor = next;
-            if (memory_domain_id >= low && memory_domain_id <= high) {
-                found = true;
-                break;
-            }
-            while (*cursor == ',' || *cursor == ' ' || *cursor == '\n') ++cursor;
-        }
-    }
-    ::fclose(file);
-    return found;
-#else
-    return false;
-#endif
-}
-
-/**
- *  @brief Fetches the kernel memory-tier ordinal for a NUMA node, used to separate memory levels.
- *  @retval A tier number where smaller means faster, or `numeric_limits<size_t>::max()` if unknown.
- *
- *  Scans `/sys/devices/virtual/memory_tiering/memory_tierN/nodelist`, which the kernel populates by
- *  abstract distance - HBM below DRAM, CXL and persistent memory above it. When the sysfs is absent
- *  (older kernels, no tiering) every node reports the sentinel and collapses to a single memory level.
- */
-FU_MAYBE_UNUSED_ static inline std::size_t memory_tier_of_memory_domain(
-    FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id) noexcept {
-#if FU_WITH_TOPOLOGY && FU_ON_LINUX
-    DIR *dir = ::opendir("/sys/devices/virtual/memory_tiering");
-    if (!dir) return std::numeric_limits<std::size_t>::max();
-
-    std::size_t tier = std::numeric_limits<std::size_t>::max();
-    for (dirent *entry; (entry = ::readdir(dir)) != nullptr;) {
-        unsigned parsed = 0;
-        if (::sscanf(entry->d_name, "memory_tier%u", &parsed) != 1) continue;
-        char path[256];
-        int const written = std::snprintf(path, sizeof(path), //
-                                          "/sys/devices/virtual/memory_tiering/%s/nodelist", entry->d_name);
-        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(path)) continue; // ? Path too long
-        if (nodelist_contains(path, memory_domain_id)) {
-            tier = parsed;
-            break;
-        }
-    }
-    ::closedir(dir);
-    return tier;
-#else
-    return std::numeric_limits<std::size_t>::max();
-#endif
-}
-
-/**
- *  @brief Reads one HMAT performance metric for the initiator-to-target NUMA edge, or 0 if unknown.
- *  @param metric_name A sysfs leaf: "read_bandwidth", "write_bandwidth", "read_latency", "write_latency".
- *  @retval Bandwidth in MB/s or latency in nanoseconds, or 0 when the machine exposes no HMAT table.
- *
- *  The kernel publishes per-node HMAT numbers under `access0` (nearest initiators) and `access1` (all
- *  initiators); we take the first access class that lists @p initiator among its initiators.
- */
-FU_MAYBE_UNUSED_ static inline std::size_t hmat_metric(FU_MAYBE_UNUSED_ memory_domain_id_t initiator,
-                                                       FU_MAYBE_UNUSED_ memory_domain_id_t target,
-                                                       FU_MAYBE_UNUSED_ char const *metric_name) noexcept {
-#if FU_ON_LINUX
-    for (int access_class = 0; access_class < 2; ++access_class) {
-        char initiator_path[320];
-        int written = std::snprintf(initiator_path, sizeof(initiator_path),
-                                    "/sys/devices/system/node/node%d/access%d/initiators/node%d", target, access_class,
-                                    initiator);
-        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(initiator_path)) continue;
-        if (::access(initiator_path, F_OK) != 0) continue; // ? Initiator is not in this access class
-
-        char metric_path[320];
-        written =
-            std::snprintf(metric_path, sizeof(metric_path), "/sys/devices/system/node/node%d/access%d/initiators/%s",
-                          target, access_class, metric_name);
-        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(metric_path)) continue;
-
-        FILE *file = ::fopen(metric_path, "r");
-        if (!file) continue;
-        unsigned long long parsed = 0;
-        std::size_t value = 0;
-        if (::fscanf(file, "%llu", &parsed) == 1) value = static_cast<std::size_t>(parsed);
-        ::fclose(file);
-        if (value) return value;
-    }
-    return 0;
 #else
     return 0;
 #endif
@@ -1265,8 +1151,6 @@ struct machine_topology {
     std::size_t compute_domains_count_ {0};
     /** @brief Number of distinct QoS classes (>= 1). */
     std::size_t compute_levels_count_ {1};
-    /** @brief Number of distinct memory tiers (>= 1). */
-    std::size_t memory_levels_count_ {1};
 
   public:
     constexpr machine_topology() noexcept = default;
@@ -1279,8 +1163,7 @@ struct machine_topology {
           memory_domains_count_(std::exchange(o.memory_domains_count_, 0)),
           logical_cores_count_(std::exchange(o.logical_cores_count_, 0)),
           compute_domains_count_(std::exchange(o.compute_domains_count_, 0)),
-          compute_levels_count_(std::exchange(o.compute_levels_count_, 1)),
-          memory_levels_count_(std::exchange(o.memory_levels_count_, 1)) {}
+          compute_levels_count_(std::exchange(o.compute_levels_count_, 1)) {}
 
     machine_topology &operator=(machine_topology &&other) noexcept {
         if (this != &other) {
@@ -1292,7 +1175,6 @@ struct machine_topology {
             logical_cores_count_ = std::exchange(other.logical_cores_count_, 0);
             compute_domains_count_ = std::exchange(other.compute_domains_count_, 0);
             compute_levels_count_ = std::exchange(other.compute_levels_count_, 1);
-            memory_levels_count_ = std::exchange(other.memory_levels_count_, 1);
         }
         return *this;
     }
@@ -1308,7 +1190,6 @@ struct machine_topology {
         compute_domains_.reset();
         memory_domains_count_ = logical_cores_count_ = compute_domains_count_ = 0;
         compute_levels_count_ = 1;
-        memory_levels_count_ = 1;
     }
 
     /**
@@ -1355,14 +1236,11 @@ struct machine_topology {
         logical_cores_count_ = other.logical_cores_count_;
         compute_domains_count_ = other.compute_domains_count_;
         compute_levels_count_ = other.compute_levels_count_;
-        memory_levels_count_ = other.memory_levels_count_;
         return true;
     }
 
     /** @brief Number of memory domains, one per NUMA node. @sa `compute_domains_count`. */
     std::size_t memory_domains_count() const noexcept { return memory_domains_count_; }
-    /** @brief Number of distinct memory tiers across all memory domains (>= 1). */
-    std::size_t memory_levels_count() const noexcept { return memory_levels_count_; }
     std::size_t logical_cores_count() const noexcept { return logical_cores_count_; }
 
     /** @brief The memory domain at @p memory_domain_index, in [0, `memory_domains_count()`). */
@@ -1386,34 +1264,6 @@ struct machine_topology {
     memory_domain_index_t local_memory_of(compute_domain_index_t const compute_domain_index) const noexcept {
         if (compute_domain_index >= compute_domains_count_) return memory_domain_index_t {};
         return compute_domains_[compute_domain_index].memory_domain_index;
-    }
-
-    /** @brief Relative access distance from a compute domain to a memory domain (10 = local). */
-    std::size_t memory_distance(compute_domain_index_t const compute_domain_index,
-                                memory_domain_index_t const memory_domain_index) const noexcept {
-        if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= memory_domains_count_) return 0;
-        // TODO: replace this local-versus-remote heuristic with our own latency probe. The OS-reported
-        // SLIT distance (`numa_distance`) was dropped with the `topology_metrics` capability, because
-        // firmware often reports a uniform or fabricated matrix.
-        return compute_domains_[compute_domain_index].memory_domain_index == memory_domain_index ? 10u : 20u;
-    }
-
-    /** @brief HMAT read bandwidth (MB/s) from a compute domain to a memory domain, or 0 if unknown. */
-    std::size_t memory_bandwidth(compute_domain_index_t const compute_domain_index,
-                                 memory_domain_index_t const memory_domain_index) const noexcept {
-        if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= memory_domains_count_) return 0;
-        memory_domain_id_t const from = compute_domains_[compute_domain_index].memory_domain_id;
-        memory_domain_id_t const to = memory_domains_[memory_domain_index].memory_domain_id;
-        return hmat_metric(from, to, "read_bandwidth");
-    }
-
-    /** @brief HMAT read latency (nanoseconds) from a compute domain to a memory domain, or 0 if unknown. */
-    std::size_t memory_latency(compute_domain_index_t const compute_domain_index,
-                               memory_domain_index_t const memory_domain_index) const noexcept {
-        if (compute_domain_index >= compute_domains_count_ || memory_domain_index >= memory_domains_count_) return 0;
-        memory_domain_id_t const from = compute_domains_[compute_domain_index].memory_domain_id;
-        memory_domain_id_t const to = memory_domains_[memory_domain_index].memory_domain_id;
-        return hmat_metric(from, to, "read_latency");
     }
 
     /**
@@ -1441,7 +1291,6 @@ struct machine_topology {
         node.memory_domain_id = 0;
         node.socket_id = 0;
         node.volume_ram = volume_ram();
-        node.memory_level = 0;
         node.first_core_id = core_ids_ptr;
         node.logical_cores_count = cores;
 
@@ -1462,7 +1311,6 @@ struct machine_topology {
         logical_cores_count_ = cores;
         compute_domains_count_ = 1;
         compute_levels_count_ = 1;
-        memory_levels_count_ = 1;
         return true;
     }
 
@@ -1553,7 +1401,6 @@ struct machine_topology {
             // ? No socket map through this path; leave it as elsewhere non-Linux
             node.socket_id = -1;
             node.volume_ram = ram_per_domain;
-            node.memory_level = 0;
             node.first_core_id = core_ids_ptr + core_begin;
             node.logical_cores_count = node_cores;
             node.page_sizes.try_harvest(static_cast<memory_domain_id_t>(domain_id)); // ! Optional - not raised
@@ -1577,7 +1424,6 @@ struct machine_topology {
         logical_cores_count_ = fetched_cores;
         compute_domains_count_ = fetched_memory_domains;
         compute_levels_count_ = 1;
-        memory_levels_count_ = 1;
         return true;
     }
 #endif // FU_ON_FREEBSD
@@ -1733,6 +1579,11 @@ struct machine_topology {
                     domain.compute_level = core_capacities[static_cast<std::size_t>(
                         node_cores[run_begin])]; // ? Raw capacity, ranked below
                     // ! Keep the raw magnitude too - `compute_level` is about to collapse into an ordinal.
+                    // TODO: measure `capacity` in-house too, like the memory edges. The scheduler's
+                    // `cpu_capacity` is the platform's opinion, and most kernels report none; the
+                    // measured-distances infrastructure could rate cores by observed throughput, but
+                    // needs the same bucketing as the fabric's tier derivation, or every
+                    // domain becomes its own `compute_level` and the QoS split explodes.
                     domain.capacity = core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
                     domain.cache_bytes =
                         cache_bytes_of_core(node_cores[run_begin], node_cores + run_begin, core - run_begin);
@@ -1755,23 +1606,10 @@ struct machine_topology {
                 });
         }
 
-        // Rank memory domains into dense tier ordinals, sorted fastest-to-slowest (lower = faster). Raw
-        // tiers are snapshotted into scratch so ranking in place never corrupts a repeated tier. Absent
-        // the memory-tiering sysfs, every node collapses to a single memory level.
-        {
-            dynamic_array<std::size_t, capacities_allocator_t> raw_tiers {capacities_allocator_t {allocator_}};
-            if (raw_tiers.try_resize(memory_domains_count_)) {
-                std::size_t *const tiers = raw_tiers.data();
-                for (std::size_t i = 0; i < memory_domains_count_; ++i)
-                    tiers[i] = memory_tier_of_memory_domain(memory_domains_[i].memory_domain_id);
-                memory_levels_count_ = dense_rank(
-                    memory_domains_count_, [tiers](std::size_t index) noexcept { return tiers[index]; },
-                    [this](std::size_t index, std::size_t rank) noexcept {
-                        memory_domains_[index].memory_level = rank;
-                    });
-            }
-        }
-
+        // Memory tiers are not the harvest's to declare: the kernel's memory-tiering ranking was
+        // dropped alongside ACPI HMAT - both are the platform's opinion of the fabric - and
+        // `measured_fabric::try_harvest` in `distributed.hpp` derives real tiers from observed
+        // bandwidths, latency splitting ties.
         return true; // ? Every scratch array above frees itself here
 #endif               // FU_WITH_TOPOLOGY
 #if FU_ON_APPLE
@@ -1836,7 +1674,6 @@ struct machine_topology {
         node.memory_domain_id = 0;
         node.socket_id = 0;
         node.volume_ram = memory_size;
-        node.memory_level = 0;
         node.first_core_id = core_ids_ptr;
         node.logical_cores_count = total_cores;
 
@@ -1911,7 +1748,6 @@ struct machine_topology {
         logical_cores_count_ = total_cores;
         compute_domains_count_ = domains_written;
         compute_levels_count_ = levels_written; // ! Several clusters may share one level - not `domains_written`
-        memory_levels_count_ = 1;
         return true;
     }
 #endif // FU_ON_APPLE
@@ -2125,7 +1961,6 @@ struct machine_topology {
                                                  static_cast<socket_id_t>(memory_domain.NodeNumber));
             node.volume_ram =
                 static_cast<std::size_t>(available_bytes); // ? Available, not installed - Windows has no per-node total
-            node.memory_level = 0;
             node.first_core_id = core_ids_ptr + node_first_core;
             node.logical_cores_count = core_cursor - node_first_core;
             node.page_sizes.try_harvest(node.memory_domain_id); // ! Optional: records the large-page size if available
@@ -2158,7 +1993,6 @@ struct machine_topology {
         logical_cores_count_ = core_cursor;
         compute_domains_count_ = domain_cursor;
         compute_levels_count_ = levels;
-        memory_levels_count_ = 1; // ? Windows exposes no memory-tiering ranking
         return true;
 
     failed_harvest: // ? Only the Win32 buffers are ours to free; the arrays unwind themselves

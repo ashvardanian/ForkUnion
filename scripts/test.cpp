@@ -215,20 +215,16 @@ static void test_topology_invariants() noexcept {
     std::size_t const compute_domains = topology.compute_domains_count();
     std::size_t const memory_domains = topology.memory_domains_count();
     std::size_t const compute_levels = topology.compute_levels_count();
-    std::size_t const memory_levels = topology.memory_levels_count();
     expect(compute_domains != 0);
     expect(memory_domains != 0);
     expect(compute_levels != 0);
-    expect(memory_levels != 0);
 
     // Levels are dense ranks over domains, so they can never outnumber the domains they rank.
     expect(compute_levels <= compute_domains);
-    expect(memory_levels <= memory_domains);
 
     // Levels are a *dense* rank, so each of [0, levels) must be claimed by at least one domain.
     // Merely staying in range is too weak - it would accept a count inflated past the distinct levels.
     std::vector<bool> compute_level_seen(compute_levels, false);
-    std::vector<bool> memory_level_seen(memory_levels, false);
 
     std::size_t cores_across_domains = 0;
     for (std::size_t i = 0; i < compute_domains; ++i) {
@@ -243,15 +239,8 @@ static void test_topology_invariants() noexcept {
     // Every core must belong to exactly one compute domain.
     expect_eq(cores_across_domains, topology.logical_cores_count());
 
-    for (std::size_t i = 0; i < memory_domains; ++i) {
-        std::size_t const level = topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(i)).memory_level;
-        expect(level < memory_levels);
-        memory_level_seen[level] = true;
-    }
-
     for (std::size_t level = 0; level < compute_levels; ++level)
         expect(compute_level_seen[level]); // ? An unclaimed rank means the count is inflated
-    for (std::size_t level = 0; level < memory_levels; ++level) expect(memory_level_seen[level]);
 }
 
 constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
@@ -285,6 +274,106 @@ struct make_distributed_pool_t {
     fu::machine_topology_t const &scope(std::size_t = 0) const noexcept { return machine_topology; }
 };
 #endif
+
+#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+/**
+ *  @brief The tier derivation must rank a synthetic edge log by bandwidth first, latency second.
+ *
+ *  A tier is a property of the medium: HBM splits from DDR on bandwidth despite a worse latency,
+ *  two DDR sockets within both jitter bands share a tier, a same-bandwidth medium past the 1.5x
+ *  latency band splits, CXL trails on either key, an unobserved domain lands one tier past the
+ *  slowest, and a worse duplicate recording must not move its domain - the envelope keeps the
+ *  best per metric.
+ */
+static void test_fabric_level_derivation() noexcept {
+    fu::measured_edge_t const edges[] = {
+        {fu::compute_domain_index_t {0}, fu::memory_domain_index_t {0}, 110, 3'000'000}, // ? HBM: 3 TB/s
+        {fu::compute_domain_index_t {0}, fu::memory_domain_index_t {1}, 100, 300'000},   // ? DDR, faster latency
+        {fu::compute_domain_index_t {0}, fu::memory_domain_index_t {2}, 104, 290'000},   // ? DDR, second socket
+        {fu::compute_domain_index_t {0}, fu::memory_domain_index_t {3}, 250, 100'000},   // ? CXL expander
+        {fu::compute_domain_index_t {0}, fu::memory_domain_index_t {0}, 400, 500'000},   // ? Worse repeat, ignored
+        {fu::compute_domain_index_t {0}, fu::memory_domain_index_t {5}, 170, 285'000},   // ? DDR-wide, 1.7x latency
+        // ? Domain 4 stays unobserved - a cpuless target no worker could first-touch
+    };
+    std::size_t levels[6];
+    std::size_t scratch[24];
+    std::size_t const count = fu::derive_memory_levels_(edges, sizeof(edges) / sizeof(edges[0]), levels, 6, scratch);
+
+    expect_eq(count, std::size_t(5));     // HBM, DDR, the laggard, CXL, and the unobserved tier
+    expect_eq(levels[0], std::size_t(0)); // Bandwidth ranks HBM first despite the worse latency
+    expect_eq(levels[1], std::size_t(1)); // DDR opens the next tier
+    expect_eq(levels[2], std::size_t(1)); // The second socket sits within both jitter bands
+    expect_eq(levels[5], std::size_t(2)); // Same bandwidth band, but latency past 1.5x splits
+    expect_eq(levels[3], std::size_t(3)); // CXL trails on both keys
+    expect_eq(levels[4], std::size_t(4)); // Unobserved shares one tier past the slowest
+}
+
+/**
+ *  @brief A harvested fabric must cover every reachable edge with sane bounds and leave
+ *         unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
+ *         guests legitimately measure every edge the same.
+ */
+static void test_measured_fabric() noexcept {
+    fu::machine_topology_t const &topology = machine_topology;
+    alignas(fu::default_alignment_k) fu::distributed_pool<fu::preferred_yield_t> pool;
+    expect(pool.try_spawn(topology));
+
+    fu::measured_fabric_t fabric;
+    expect(fabric.memory_latency(fu::compute_domain_index_t {}, fu::memory_domain_index_t {}) == 0);
+    expect(fabric.memory_levels_count() == 1); // ? Unharvested: zeros everywhere, one tier
+    expect(fabric.try_harvest(topology, pool));
+    expect_eq(fabric.compute_domains_count(), topology.compute_domains_count());
+    expect_eq(fabric.memory_domains_count(), topology.memory_domains_count());
+
+    for (std::size_t domain = 0; domain != pool.compute_domains_count(); ++domain) {
+        fu::compute_domain_index_t const initiator = static_cast<fu::compute_domain_index_t>(domain);
+        fu::memory_domain_index_t const local = topology.local_memory_of(initiator);
+        expect(fabric.memory_distance(initiator, local) == 10); // The local edge anchors the SLIT scale
+
+        for (std::size_t target = 0; target != topology.memory_domains_count(); ++target) {
+            fu::memory_domain_index_t const to = static_cast<fu::memory_domain_index_t>(target);
+            std::size_t const measured = fabric.memory_latency(initiator, to);
+
+            // The harvest only walks edges some pool worker can first-touch, so a cpuless
+            // domain - a CXL expander, or a node whose cores sit outside the pool - stays at zero
+            // and answers with the unmeasured-remote fallback.
+            bool reachable = false;
+            for (std::size_t other = 0; other != pool.compute_domains_count() && !reachable; ++other)
+                reachable =
+                    topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(other)).memory_domain_index ==
+                    to;
+            if (!reachable) {
+                expect(measured == 0);
+                expect(fabric.memory_distance(initiator, to) == 20);
+                continue;
+            }
+
+            expect(measured > 0);       // Every reachable edge was walked
+            expect(measured < 100'000); // A dependent load is nanoseconds, not a tenth of a millisecond
+
+            std::size_t const streamed = fabric.memory_bandwidth(initiator, to);
+            expect(streamed > 0);           // Every reachable edge was streamed
+            expect(streamed < 100'000'000); // 100 TB/s exceeds any fabric - and catches an elided sum
+
+            expect(fabric.memory_distance(initiator, to) >= 10); // Local is the row's floor
+        }
+    }
+
+    // The derived tiers are dense ordinals: some domain is tier 0, none reaches the count.
+    bool some_domain_is_fastest = false;
+    for (std::size_t target = 0; target != topology.memory_domains_count(); ++target) {
+        std::size_t const level = fabric.memory_level_in(static_cast<fu::memory_domain_index_t>(target));
+        expect(level < fabric.memory_levels_count());
+        some_domain_is_fastest |= level == 0;
+    }
+    expect(some_domain_is_fastest);
+
+    // Bulk-snapshot semantics: a second harvest replaces the first and stays sane.
+    expect(fabric.try_harvest(topology, pool));
+    expect(fabric.memory_latency(fu::compute_domain_index_t {},
+                                 topology.local_memory_of(fu::compute_domain_index_t {})) > 0);
+}
+#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 
 /** @brief Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
 static void test_try_spawn_zero() noexcept {
@@ -1336,6 +1425,8 @@ int main(void) {
         {"NUMA `generation` stale token stays complete", test_stale_generation_completes<make_distributed_pool_t>},
         {"NUMA `sleep` and wake exactly-once", test_sleep_wake<make_distributed_pool_t>},
         {"NUMA awkward spawn shapes", test_distributed_spawn_shapes},
+        {"NUMA fabric tier derivation", test_fabric_level_derivation},
+        {"NUMA measured fabric harvest", test_measured_fabric},
         {"NUMA `terminate` avoided", test_mixed_restart<false, make_distributed_pool_t>},
         {"NUMA `terminate` and re-spawn", test_mixed_restart<true, make_distributed_pool_t>},
         {"NUMA `terminate` and re-spawn churn", test_spawn_terminate_churn<make_distributed_pool_t>},
