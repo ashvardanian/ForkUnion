@@ -161,24 +161,9 @@ inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
     bi.position.z -= std::floor(bi.position.z);
 }
 
-/**
- *  @brief The SplitMix64 avalanche behind every random draw - a pure function of the @p counter.
- *
- *  Deliberately not `std::mt19937` with `std::uniform_real_distribution`: the standard generators
- *  differ across languages - and the C++ distributions even across standard libraries - so no two
- *  harnesses would simulate the same system. Each draw is a pure function of its counter instead,
- *  and the bodies are bit-identical across the C++, Rust, and Zig ports of this hash.
- */
-static inline std::uint64_t split_mix(std::uint64_t const counter) noexcept {
-    std::uint64_t x = (counter + 1) * 0x9E37'79B9'7F4A'7C15ull;
-    x = (x ^ (x >> 30)) * 0xBF58'476D'1CE4'E5B9ull;
-    x = (x ^ (x >> 27)) * 0x94D0'49BB'1331'11EBull;
-    return x ^ (x >> 31);
-}
-
 /** @brief One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`. */
 static inline float random_unit(std::uint64_t const counter) noexcept {
-    return static_cast<float>(split_mix(counter) >> 40) * (1.0f / 16777216.0f);
+    return static_cast<float>(fu::split_mix(counter) >> 40) * (1.0f / 16777216.0f);
 }
 
 #pragma endregion Shared Logic

@@ -123,28 +123,14 @@ struct edge_t {
 /** @brief Sorts past every valid edge; marks dropped self-loops, trimmed together with `unique`'s tail. */
 static constexpr edge_t sentinel_edge_k {~vertex_t(0), ~vertex_t(0)};
 
-/**
- *  @brief The SplitMix64 avalanche behind every random draw - a pure function of the @p counter.
- *
- *  A counter-based generator instead of a stateful one: each draw is a pure function of its counter,
- *  so iterations are order-free, the fill parallelizes without sharding generator state, and the
- *  graph is bit-identical at any thread count - and across the C++, Rust, and Zig ports of this hash.
- */
-static inline std::uint64_t split_mix(std::uint64_t const counter) noexcept {
-    std::uint64_t x = (counter + 1) * 0x9E37'79B9'7F4A'7C15ull;
-    x = (x ^ (x >> 30)) * 0xBF58'476D'1CE4'E5B9ull;
-    x = (x ^ (x >> 27)) * 0x94D0'49BB'1331'11EBull;
-    return x ^ (x >> 31);
-}
-
 /** @brief One quadrant choice in `[0, 100)` - same draw and counter scheme as every sibling benchmark. */
 static inline unsigned random_percent(std::uint64_t const counter) noexcept {
-    return static_cast<unsigned>(split_mix(counter) % 100);
+    return static_cast<unsigned>(fu::split_mix(counter) % 100);
 }
 
 /** @brief One bridge endpoint in `[0, bound)`, from the same avalanche. */
 static inline vertex_t random_index(std::uint64_t const counter, vertex_t const bound) noexcept {
-    return static_cast<vertex_t>(split_mix(counter) % bound);
+    return static_cast<vertex_t>(fu::split_mix(counter) % bound);
 }
 
 /**

@@ -737,6 +737,20 @@ constexpr std::size_t round_up_to_multiple(std::size_t value, std::size_t multip
     return div_ceil(value, multiple) * multiple;
 }
 
+/**
+ *  @brief The SplitMix64 avalanche - a well-mixed pure function of the @p counter.
+ *
+ *  A counter-based generator instead of a stateful one: every draw is independent, so parallel
+ *  consumers need no shared state, and a sequence is reproducible from indices alone. The same
+ *  constants drive the benchmark generators in `scripts/`, ported bit-identically to Rust and Zig.
+ */
+constexpr std::uint64_t split_mix(std::uint64_t const counter) noexcept {
+    std::uint64_t x = (counter + 1) * 0x9E37'79B9'7F4A'7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58'476D'1CE4'E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D0'49BB'1331'11EBull;
+    return x ^ (x >> 31);
+}
+
 template <typename value_type_, typename comparator_type_ = std::less<value_type_>>
 void bubble_sort(value_type_ *array, std::size_t size, comparator_type_ comp = {}) noexcept {
     if (size < 2) return; // ? Already sorted; also guards the `size - 1` unsigned underflow
