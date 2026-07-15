@@ -41,10 +41,13 @@ jobs:
             build.zig.zon:^\s*\.version = "(\d+\.\d+\.\d+)"
           update-major-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
+            include/forkunion/types.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
           update-minor-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_MINOR (\d+)
+            include/forkunion/types.hpp:^#define FORKUNION_VERSION_MINOR (\d+)
           update-patch-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_PATCH (\d+)
+            include/forkunion/types.hpp:^#define FORKUNION_VERSION_PATCH (\d+)
           dry-run: "false"
           push: "true"
           create-release: "true"
