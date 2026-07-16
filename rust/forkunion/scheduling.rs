@@ -191,18 +191,20 @@ impl ThreadPool {
             return Err(Error::InvalidParameter);
         }
 
-        unsafe {
-            let name_ptr = if let Some(name_str) = name {
-                let mut name_buffer = [0u8; 16];
-                let name_bytes = name_str.as_bytes();
-                let copy_len = core::cmp::min(name_bytes.len(), 15); // Leave space for null terminator
-                name_buffer[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-                // name_buffer[copy_len] is already 0 from initialization
-                name_buffer.as_ptr() as *const c_char
-            } else {
-                core::ptr::null()
-            };
+        // The buffer must outlive the `fu_pool_new` call, so it is declared
+        // before taking the pointer that crosses the FFI boundary.
+        let mut name_buffer = [0u8; 16];
+        let name_ptr = if let Some(name_str) = name {
+            let name_bytes = name_str.as_bytes();
+            let copy_len = core::cmp::min(name_bytes.len(), 15); // Leave space for null terminator
+            name_buffer[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+            // name_buffer[copy_len] is already 0 from initialization
+            name_buffer.as_ptr() as *const c_char
+        } else {
+            core::ptr::null()
+        };
 
+        unsafe {
             let inner = fu_pool_new(name_ptr, allowed.0);
             if inner.is_null() {
                 return Err(Error::CreationFailed);

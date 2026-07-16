@@ -406,11 +406,13 @@ impl<T> SyncConstPtr<T> {
     /// # Returns
     ///
     /// A reference to the element at the given index.
+    #[inline]
     pub unsafe fn get(&self, index: usize) -> &T {
         &*self.ptr.add(index)
     }
 
     /// Returns the raw pointer.
+    #[inline]
     pub fn as_ptr(&self) -> *const T {
         self.ptr
     }
@@ -442,10 +444,12 @@ impl<T> SyncMutPtr<T> {
     /// - No overlapping mutable access occurs from multiple threads
     /// - Each thread accesses disjoint indices when used concurrently
     /// - The pointer remains valid for the duration of access
+    #[inline]
     pub unsafe fn get(&self, index: usize) -> *mut T {
         self.ptr.add(index)
     }
 
+    #[inline]
     pub fn as_ptr(&self) -> *mut T {
         self.ptr
     }
@@ -487,6 +491,7 @@ impl IndexedSplit {
     }
 
     /// Returns the range for a specific thread index.
+    #[inline]
     pub fn get(&self, thread_index: usize) -> core::ops::Range<usize> {
         let begin = self.quotient * thread_index + thread_index.min(self.remainder);
         let count = self.quotient + if thread_index < self.remainder { 1 } else { 0 };
