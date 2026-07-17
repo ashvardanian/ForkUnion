@@ -1,6 +1,6 @@
 # Shared logic for setting target properties for tests and examples
 function (set_target_properties_for_forkunion_script target_name)
-    target_link_libraries(${target_name} PRIVATE forkunion)
+    target_link_libraries(${target_name} PRIVATE forkunion_header)
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # This warning annoys us by reminding, that before GCC 4.6 the ABI for passing objects aligned to ≥32-bytes was
@@ -125,13 +125,27 @@ set(TF_BUILD_PROFILER
     OFF
     CACHE BOOL "" FORCE
 )
-FetchContent_Declare(
-    taskflow
-    GIT_REPOSITORY https://github.com/taskflow/taskflow.git
-    GIT_TAG v4.1.0
-    FIND_PACKAGE_ARGS NAMES Taskflow
-)
-FetchContent_MakeAvailable(taskflow)
+# Taskflow is header-only, so configuring it buys nothing but its `install()` rules - which are not ours to run: they
+# shipped 71 of its headers and a `taskflow.pc` into ForkUnion's own prefix, so a package built from a top-level
+# checkout carried Taskflow's headers under ForkUnion's name. `EXCLUDE_FROM_ALL` does not help - it excludes targets
+# from `ALL`, not `install()`.
+#
+# So: find a system copy first, and otherwise populate the source without ever configuring it. The sentinel
+# `SOURCE_SUBDIR` names a directory holding no `CMakeLists.txt`, which is what makes `MakeAvailable` skip the
+# `add_subdirectory` - and it replaces the deprecated single-argument `FetchContent_Populate`. Either way the benchmarks
+# below just link `Taskflow::Taskflow`.
+find_package(Taskflow QUIET)
+if (NOT TARGET Taskflow::Taskflow)
+    FetchContent_Declare(
+        taskflow
+        GIT_REPOSITORY https://github.com/taskflow/taskflow.git
+        GIT_TAG v4.1.0
+        SOURCE_SUBDIR forkunion-populate-only
+    )
+    FetchContent_MakeAvailable(taskflow)
+    add_library(Taskflow::Taskflow INTERFACE IMPORTED)
+    target_include_directories(Taskflow::Taskflow SYSTEM INTERFACE ${taskflow_SOURCE_DIR})
+endif ()
 
 # Both demo benchmarks share identical wiring - C++ for clear state ownership, but linking the pre-compiled C ABI so the
 # runtime busy-wait waiter resolves at runtime - the whole point, since AArch64 `WFET` is unreachable through the

@@ -14,9 +14,9 @@ pub fn build(b: *std.Build) void {
     // Which kernel facilities the C++ core may use.
     //
     // The derivation rules live in `include/forkunion/types.hpp`, not here. Left alone, each option
-    // is `null` and we pass no `-DFU_WITH_*` at all, so the header decides from the platform and
-    // from whether `<numa.h>` is there to include. `-Dplace-memory-on-domain=true` and friends only override
-    // that; an override the platform cannot honour stops at an `#error`, not at link time.
+    // is `null` and we pass no `-DFU_WITH_*` at all, so the header decides from the platform.
+    // `-Dplace-memory-on-domain=true` and friends only override that; an override the platform
+    // cannot honour stops at an `#error`, not at link time.
     const with_topology = b.option(bool, "topology", "Enumerate compute and memory domains");
     const with_place_memory_on_domain = b.option(bool, "place-memory-on-domain", "Place pages on a chosen memory domain");
     const with_place_huge_pages_on_domain = b.option(bool, "place-huge-pages-on-domain", "Request pages larger than the base page");
@@ -57,11 +57,6 @@ pub fn build(b: *std.Build) void {
         if (with_place_threads_by_affinity) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_PLACE_THREADS_BY_AFFINITY={d}", .{@intFromBool(on)})) catch @panic("OOM");
     }
 
-    // We link `libnuma` whenever the target could want it, and let the header decide whether to call
-    // it. Over-linking costs a `DT_NEEDED` entry that `--as-needed` drops; under-linking costs a
-    // wall of undefined symbols the caller cannot trace back to a missing package.
-    const link_numa = target.result.os.tag == .linux and !portable and numa_memory != false;
-
     lib.root_module.addCSourceFile(.{
         .file = b.path("c/forkunion.cpp"),
         .flags = cpp_flags.items,
@@ -72,11 +67,15 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(lib);
 
-    // Create forkunion module for use as a dependency
-    _ = b.addModule("forkunion", .{
+    // Create forkunion module for use as a dependency. It binds the C ABI with `extern fn`, so it
+    // carries the artifact itself - a dependent that imports it should not have to relink it by hand.
+    const module = b.addModule("forkunion", .{
         .root_source_file = b.path("zig/forkunion.zig"),
         .target = target,
+        .optimize = optimize,
     });
+    module.linkLibrary(lib);
+    if (target.result.os.tag == .linux) module.linkSystemLibrary("pthread", .{});
 
     // Unit tests
     const test_step = b.step("test", "Run library tests");
@@ -90,12 +89,7 @@ pub fn build(b: *std.Build) void {
 
     lib_tests.root_module.addIncludePath(b.path("include"));
     lib_tests.root_module.linkLibrary(lib);
-    if (target.result.os.tag == .linux) {
-        lib_tests.root_module.linkSystemLibrary("pthread", .{});
-        if (link_numa) {
-            lib_tests.root_module.linkSystemLibrary("numa", .{});
-        }
-    }
+    if (target.result.os.tag == .linux) lib_tests.root_module.linkSystemLibrary("pthread", .{});
 
     const run_tests = b.addRunArtifact(lib_tests);
     test_step.dependOn(&run_tests.step);

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.21)
 
 # Set modern CMake policies for better compatibility
 if (POLICY CMP0077)
@@ -39,9 +39,10 @@ option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL 
 
 # Each kernel facility the library can use is a tri-state: AUTO, ON, or OFF.
 #
-# AUTO is the default and defines *nothing*. The header derives it, from the platform and from whether <numa.h> is there
-# to include. That keeps the derivation rules in exactly one place, instead of spread across CMakeLists.txt, build.rs,
-# and build.zig, where they would drift.
+# AUTO is the default and defines *nothing*. The header derives it from the platform alone - no longer from whether
+# <numa.h> happened to be installed here, which let a build host's packages decide a run host's capabilities. That keeps
+# the derivation rules in exactly one place, instead of spread across CMakeLists.txt, build.rs, and build.zig, where
+# they would drift.
 #
 # ON and OFF pass `-DFU_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say - is
 # rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
@@ -81,15 +82,15 @@ set(PROJECT_CXX_EXTENSIONS OFF)
 set(PROJECT_CXX_STANDARD_REQUIRED ON)
 
 # Header-only interface library
-add_library(forkunion INTERFACE)
+add_library(forkunion_header INTERFACE)
 target_include_directories(
-    forkunion INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
+    forkunion_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 
 # Set C++17 requirement and features properly for library consumers
-target_compile_features(forkunion INTERFACE cxx_std_17)
+target_compile_features(forkunion_header INTERFACE cxx_std_17)
 set_target_properties(
-    forkunion
+    forkunion_header
     PROPERTIES CXX_STANDARD 17
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
@@ -98,7 +99,7 @@ set_target_properties(
 # Strictest possible compilation flags with fatal warnings
 if (FORKUNION_STRICT)
     target_compile_options(
-        forkunion
+        forkunion_header
         INTERFACE # GCC/Clang: Maximum warnings + treat warnings as errors + security hardening
                   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall
                   -Wextra
@@ -158,21 +159,41 @@ if (FORKUNION_STRICT)
     )
 endif ()
 
-# Pre-compiled libraries built from `c/forkunion.cpp`
-add_library(forkunion_dynamic SHARED c/forkunion.cpp)
+# Pre-compiled libraries built from `c/forkunion.cpp` - the same translation unit twice, differing only in linkage.
+add_library(forkunion_shared SHARED c/forkunion.cpp)
 add_library(forkunion_static STATIC c/forkunion.cpp)
+
+# What a consumer picks between, spelled as what they get:
+#
+# forkunion::header - the C++ core alone. Capabilities are baked in by the `FU_WITH_*` macros and `preferred_yield_t` at
+# compile time, so the binary is only as capable as the machine that built it. forkunion::static - the C ABI,
+# dispatching on `fu_runtime_capabilities()`, linked into the consumer's binary. forkunion::shared - the same C ABI, one
+# copy per process rather than one per consumer.
+#
+# The `static`/`shared` split is linkage, not dispatch: both run the same runtime-dispatched TU above, and a process
+# that links two static copies gets two pools and two topologies. `EXPORT_NAME` carries these spellings into the
+# installed package, while the raw target names stay prefixed - they are global, and `static` alone would not be.
+set_target_properties(forkunion_header PROPERTIES EXPORT_NAME header)
+set_target_properties(forkunion_static PROPERTIES EXPORT_NAME static)
+set_target_properties(forkunion_shared PROPERTIES EXPORT_NAME shared)
+
+# Mirror the exported spellings in-tree, so `add_subdirectory` and `find_package` consumers write the same line - and so
+# a typo fails to configure instead of quietly becoming a `-lforkunion` system lookup.
+add_library(forkunion::header ALIAS forkunion_header)
+add_library(forkunion::static ALIAS forkunion_static)
+add_library(forkunion::shared ALIAS forkunion_shared)
 
 # Prefer C++20 for library builds
 set_target_properties(
-    forkunion_dynamic forkunion_static
+    forkunion_shared forkunion_static
     PROPERTIES CXX_STANDARD 20
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
 )
 
 # Re-use the public interface of the header-only target
-target_link_libraries(forkunion_dynamic PUBLIC forkunion)
-target_link_libraries(forkunion_static PUBLIC forkunion)
+target_link_libraries(forkunion_shared PUBLIC forkunion_header)
+target_link_libraries(forkunion_static PUBLIC forkunion_header)
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
@@ -181,7 +202,7 @@ check_cxx_compiler_flag("-fcf-protection=full" HAS_CFP)
 
 # Security hardening flags for compiled libraries
 target_compile_options(
-    forkunion_dynamic
+    forkunion_shared
     PRIVATE # Stack protection and buffer overflow detection
             $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong
             -D_FORTIFY_SOURCE=2>
@@ -206,7 +227,7 @@ target_compile_options(
 
 # Hardened linking flags
 target_link_options(
-    forkunion_dynamic
+    forkunion_shared
     PRIVATE
     # Enable RELRO, stack canaries, and NX bit
     $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
@@ -271,7 +292,9 @@ endif ()
 # Tests & benchmarking scripts
 include(CTest)
 
-option(FORKUNION_BUILD_TESTS "Build forkunion tests" ON)
+# Default ON only when ForkUnion is the top-level project, so an `add_subdirectory` consumer does not inherit the
+# `scripts/` targets - and does not have to remember to switch them off.
+option(FORKUNION_BUILD_TESTS "Build forkunion tests" ${PROJECT_IS_TOP_LEVEL})
 
 if (BUILD_TESTING AND FORKUNION_BUILD_TESTS)
     enable_testing()
@@ -282,14 +305,11 @@ endif ()
 include(GNUInstallDirs)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
+# No `INCLUDES DESTINATION` here: `target_include_directories` above already declares the same
+# `$<INSTALL_INTERFACE:include>`, and naming it twice exports the path twice.
+install(TARGETS forkunion_header EXPORT forkunionTargets)
 install(
-    TARGETS forkunion
-    EXPORT forkunionTargets
-    INCLUDES
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-install(
-    TARGETS forkunion_dynamic forkunion_static
+    TARGETS forkunion_shared forkunion_static
     EXPORT forkunionTargets # same export set
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} # .so / .dylib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} # .a
@@ -320,36 +340,21 @@ install(
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
 )
 
-# Turn the tri-states into compile definitions, and link whatever they imply.
-#
-# Note the asymmetry: we pass definitions only for the capabilities a caller pinned, but we link libnuma whenever it is
-# present. Over-linking a library the code never calls costs a DT_NEEDED entry that `--as-needed` drops; under-linking
-# one the header decided to `#include` costs a link error the caller cannot diagnose.
+# Turn the tri-states into compile definitions. Nothing left to link for them: the topology comes from sysfs and the
+# placement calls `mbind` by syscall number, so the C library is the only dependency. `find_library(numa)` also baked
+# this host's absolute `libnuma.so` path into the installed package, where another host's loader cannot follow it.
 find_package(Threads)
 if (Threads_FOUND)
-    target_link_libraries(forkunion INTERFACE Threads::Threads)
-endif ()
-
-set(NUMA_FOUND FALSE)
-if (UNIX AND NOT APPLE)
-    find_library(NUMA_LIBRARY NAMES numa)
-    find_path(NUMA_INCLUDE_DIR NAMES numa.h)
-    if (NUMA_LIBRARY AND NUMA_INCLUDE_DIR)
-        set(NUMA_FOUND TRUE)
-        target_link_libraries(forkunion INTERFACE ${NUMA_LIBRARY})
-        message(STATUS "libNUMA found: ${NUMA_LIBRARY}")
-    else ()
-        message(STATUS "libNUMA not found - the header will lower the capabilities that need it")
-    endif ()
+    target_link_libraries(forkunion_header INTERFACE Threads::Threads)
 endif ()
 
 # Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
-# 0. Knows nothing of the environment - the libnuma check is its own concern, below.
+# 0. Knows nothing of the environment: there is no longer an environment to know.
 function (forkunion_apply mode macro)
     if (mode STREQUAL "ON")
-        target_compile_definitions(forkunion INTERFACE ${macro}=1)
+        target_compile_definitions(forkunion_header INTERFACE ${macro}=1)
     elseif (mode STREQUAL "OFF")
-        target_compile_definitions(forkunion INTERFACE ${macro}=0)
+        target_compile_definitions(forkunion_header INTERFACE ${macro}=0)
     elseif (NOT mode STREQUAL "AUTO")
         message(FATAL_ERROR "${macro} tri-state must be AUTO, ON, or OFF - got '${mode}'")
     endif ()
@@ -367,24 +372,12 @@ if (FORKUNION_PORTABLE)
         message(FATAL_ERROR "FORKUNION_PORTABLE is ON, but a FORKUNION_WITH_* capability is forced ON")
     endif ()
     foreach (macro IN LISTS FORKUNION_OPTIONAL_MACROS)
-        target_compile_definitions(forkunion INTERFACE ${macro}=0)
+        target_compile_definitions(forkunion_header INTERFACE ${macro}=0)
     endforeach ()
 else ()
-    # Forcing a libnuma-backed capability on without libnuma fails here, with a sentence, rather than at link time with
-    # a list of missing symbols. AUTO is fine - the header derives it off when libnuma is absent.
-    if (UNIX
-        AND NOT APPLE
-        AND NOT NUMA_FOUND
-        AND (FORKUNION_WITH_TOPOLOGY STREQUAL "ON"
-             OR FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN STREQUAL "ON"
-             OR FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN STREQUAL "ON")
-    )
-        message(
-            FATAL_ERROR
-                "topology/place-memory-on-domain/place-huge-pages-on-domain forced ON, but libnuma was not found"
-        )
-    endif ()
-
+    # No environment check precedes these. Forcing topology or placement ON used to need libnuma on the build host, and
+    # so needed a sentence here rather than a wall of missing symbols at link time; now it needs a Linux kernel, which
+    # the header checks for itself. A capability the platform cannot honour still stops at an `#error` in `types.hpp`.
     forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FU_WITH_TOPOLOGY)
     forkunion_apply("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FU_WITH_PLACE_MEMORY_ON_DOMAIN)
     forkunion_apply("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)

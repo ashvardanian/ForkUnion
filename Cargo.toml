@@ -36,7 +36,7 @@ std = []
 benchmarks = ["dep:rayon", "dep:rand", "dep:tokio"] # ? The demo binaries and their baseline runtimes
 
 # Kernel facilities. Left alone, each is decided by `include/forkunion/types.hpp` from the platform
-# and from whether `<numa.h>` is present; these only override that. See `build.rs`.
+# alone; these only override that. See `build.rs`.
 topology = []                   # ? Force compute/memory-domain enumeration on
 place-memory-on-domain = []     # ? Force page placement on a memory domain (implies topology)
 place-huge-pages-on-domain = [] # ? Force pages larger than the base page (implies place-memory-on-domain)

@@ -59,7 +59,7 @@ To integrate into your Rust project, add the following lines to Cargo.toml:
 [dependencies]
 forkunion = "3.0.0"                                          # detect what the platform offers
 forkunion = { version = "3.0.0", features = ["portable"] }   # STL thread pool only
-forkunion = { version = "2.3.1", features = ["place-memory-on-domain"] } # require NUMA-aware allocations
+forkunion = { version = "3.0.0", features = ["place-memory-on-domain"] } # require NUMA-aware allocations
 ```
 
 Or for the preview development version:
@@ -149,7 +149,7 @@ FetchContent_Declare(
     GIT_TAG v3.0.0
 )
 FetchContent_MakeAvailable(forkunion)
-target_link_libraries(your_target PRIVATE forkunion::forkunion)
+target_link_libraries(your_target PRIVATE forkunion::header)
 ```
 
 Then, include the header in your C++ code:
@@ -263,7 +263,7 @@ and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with 
 
 ### Intro in C
 
-ForkUnion provides a pure C99 API via `forkunion.h`, wrapping the C++ implementation in pre-compiled libraries: `forkunion_static.a` or `forkunion_dynamic.so`.
+ForkUnion provides a pure C99 API via `forkunion.h`, wrapping the C++ implementation in pre-compiled libraries: `forkunion_static.a` or `forkunion_shared.so`.
 The C API uses opaque `fu_pool_t` handles and function pointers for callbacks, making it compatible with any C99+ compiler.
 
 To integrate using CMake:
@@ -272,10 +272,10 @@ To integrate using CMake:
 FetchContent_Declare(
     forkunion
     GIT_REPOSITORY https://github.com/ashvardanian/ForkUnion
-    GIT_TAG v2.3.1
+    GIT_TAG v3.0.0
 )
 FetchContent_MakeAvailable(forkunion)
-target_link_libraries(your_target PRIVATE forkunion::forkunion_static)
+target_link_libraries(your_target PRIVATE forkunion::static)
 ```
 
 A minimal C example:
@@ -376,7 +376,7 @@ int main(void) {
 }
 ```
 
-Compile: `gcc -std=c11 test.c -lforkunion_static -lpthread -lnuma`
+Compile: `gcc -std=c11 test.c -lforkunion_static -lpthread`
 
 #### Clang Blocks Extension
 
@@ -422,7 +422,7 @@ int main(void) {
 }
 ```
 
-Compile: `clang -std=c11 -fblocks test.c -lforkunion_static -lpthread -lnuma -lBlocksRuntime`
+Compile: `clang -std=c11 -fblocks test.c -lforkunion_static -lpthread -lBlocksRuntime`
 
 ## Alternatives & Differences
 
@@ -901,12 +901,15 @@ cmake --build build_debug --target cppcheck     # detects bugs & undefined behav
 cmake --build build_debug --target clang-tidy   # suggest code improvements
 ```
 
-To include NUMA, Huge Pages, and other optimizations on Linux, make sure to install dependencies:
+No packages are needed for NUMA or Huge Pages, on any distribution.
+The topology is read from `/sys/devices/system/node`, pages are placed with the `mbind` syscall, and huge pages are requested with `mmap(MAP_HUGETLB)` — all kernel interfaces, so a build picks up whatever the machine it runs on offers rather than whatever the machine it was compiled on had installed.
+Neither `libnuma` nor `libhugetlbfs` is linked; `ld.hugetlbfs` remaps a program's own text segment, which is a different feature entirely.
+
+Huge pages do have to be _reserved_ before they can be placed, which is a runtime knob rather than a build dependency:
 
 ```bash
-sudo apt-get -y install libnuma-dev libnuma1                # NUMA
-sudo apt-get -y install libhugetlbfs-dev libhugetlbfs-bin   # Huge Pages
-sudo ln -s /usr/bin/ld.hugetlbfs /usr/share/libhugetlbfs/ld # Huge Pages linker
+cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages          # what exists now
+echo 1024 | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
 ```
 
 To build with an alternative compiler, like LLVM Clang, use the following command:

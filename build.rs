@@ -1,8 +1,11 @@
 //! Compiles the C++ core and decides which kernel facilities it may use.
 //!
 //! The derivation rules live in `include/forkunion/types.hpp`, not here. By default this script
-//! defines no `FU_WITH_*` macro at all and lets the header work it out from the platform and from
-//! whether `<numa.h>` is there to include. Cargo features only ever *override* that.
+//! defines no `FU_WITH_*` macro at all and lets the header work it out from the platform. Cargo
+//! features only ever *override* that.
+//!
+//! Nothing here probes the build host. The core reads its topology from sysfs and places memory by
+//! syscall, so there is no `libnuma` to find and no artifact that differs by where it was built.
 //!
 //! Features are additive, which is an awkward fit for a switch that wants three positions, so:
 //!
@@ -25,21 +28,6 @@ const OPTIONAL_CAPABILITIES: [&str; 6] = [
     "FU_WITH_PLACE_MEMORY_ON_DOMAIN",
     "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
 ];
-
-/// Whether `<numa.h>` sits somewhere the compiler will find it.
-///
-/// Only ever used to decide whether to *link* `libnuma`, never whether to *enable* a capability -
-/// that is the header's job. Over-linking a library the code never calls costs a `DT_NEEDED` entry
-/// that `--as-needed` drops. Under-linking one the header decided to `#include` costs a wall of
-/// undefined symbols that the caller has no way to trace back to a missing package.
-fn has_libnuma_header() -> bool {
-    if let Ok(directory) = std::env::var("NUMA_INCLUDE_DIR") {
-        return Path::new(&directory).join("numa.h").exists();
-    }
-    ["/usr/include", "/usr/local/include"]
-        .iter()
-        .any(|directory| Path::new(directory).join("numa.h").exists())
-}
 
 fn main() -> Result<(), cc::Error> {
     let mut build = cc::Build::new();
@@ -104,24 +92,23 @@ fn main() -> Result<(), cc::Error> {
 
     // Important: add dependent system libraries AFTER the static lib.
     // For GNU ld, static libraries are resolved left-to-right, so
-    // `-lnuma -lpthread` must appear after `-lforkunion` to satisfy symbols.
-    if target_os == "linux" && !portable {
-        if has_libnuma_header() {
-            println!("cargo:rustc-link-lib=numa");
-        } else if force_topology || force_place_memory_on_domain || force_place_huge_pages_on_domain
-        {
-            panic!(
-                "`topology`/`place-memory-on-domain`/`place-huge-pages-on-domain` were requested, but `numa.h` was not found"
-            );
-        }
-    }
-
-    // Always link `pthreads` on Linux since the library uses std::thread internally
+    // `-lpthread` must appear after `-lforkunion` to satisfy symbols.
     if target_os == "linux" {
         println!("cargo:rustc-link-lib=pthread");
     }
 
-    println!("cargo:rerun-if-env-changed=NUMA_INCLUDE_DIR");
+    // Hand dependents the headers, so a crate compiling its own C against the `fu_*` ABI need not
+    // vendor a copy that drifts; `links = "forkunion"` makes this their `DEP_FORKUNION_INCLUDE`.
+    // Anchored to the manifest, not the cwd, so it resolves inside a published crate too.
+    println!(
+        "cargo:include={}",
+        Path::new(
+            &std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR")
+        )
+        .join("include")
+        .display()
+    );
+
     println!("cargo:rerun-if-changed=c/forkunion.cpp");
     println!("cargo:rerun-if-changed=rust/forkunion.rs");
     println!("cargo:rerun-if-changed=include/forkunion.h");
