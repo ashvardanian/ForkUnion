@@ -552,7 +552,7 @@ Where no topology is harvested, every query degrades to a single compute domain 
 
 ### Non-Uniform Memory Access (NUMA)
 
-Placing memory on a chosen domain is implemented on Linux via [`libnuma`](https://github.com/numactl/numactl)'s `mbind`, on FreeBSD via `domainset` policies, and on Windows via `VirtualAllocExNuma`, and degrades to a single domain elsewhere.
+Placing memory on a chosen domain is implemented on Linux via the `mbind` syscall, on FreeBSD via `domainset` policies, and on Windows via `VirtualAllocExNuma`, and degrades to a single domain elsewhere.
 The portable `domain_allocator_t` alias picks the right backend per platform - `linux_numa_allocator_t`, `freebsd_numa_allocator_t`, `windows_numa_allocator_t`, or a plain aligned fallback - each an STL-compatible allocator that reads the machine through the `forkunion::machine_topology` template.
 
 Let's say you are working on a Big Data application, like brute-forcing Vector Search using the [NumKong](https://github.com/ashvardanian/NumKong) library on a 2 dual-socket CPU system, similar to [USearch](https://github.com/unum-cloud/usearch/pulls).

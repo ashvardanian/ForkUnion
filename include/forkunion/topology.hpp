@@ -375,6 +375,39 @@ FU_MAYBE_UNUSED_ static inline bool try_restore_thread_cores(FU_MAYBE_UNUSED_ co
 #endif
 }
 
+#if FU_ON_LINUX
+/**
+ *  @brief Reads one unsigned integer out of a `/sys` or `/proc` file.
+ *  @retval false where the file is absent or holds no number - @p value is then untouched.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_read_uint_at_path(char const *path, std::size_t &value) noexcept {
+    FILE *file = ::fopen(path, "r");
+    if (!file) return false;
+    unsigned long long parsed = 0;
+    bool const parsed_one = ::fscanf(file, "%llu", &parsed) == 1;
+    ::fclose(file);
+    if (parsed_one) value = static_cast<std::size_t>(parsed);
+    return parsed_one;
+}
+
+/**
+ *  @brief Reads the first line of a `/sys` or `/proc` file into @p line, newline and all.
+ *  @retval false where the file is absent, empty, or its first line did not fit.
+ *  @note Truncation is a failure, not a prefix: a clipped cpulist names fewer cores than the kernel
+ *        does, and would read like a complete answer.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_read_line_at_path(char const *path, char *line,
+                                                          std::size_t const line_capacity) noexcept {
+    FILE *file = ::fopen(path, "r");
+    if (!file) return false;
+    bool complete = ::fgets(line, static_cast<int>(line_capacity), file) != nullptr;
+    ::fclose(file);
+    if (!complete) return false;
+    std::size_t const length = std::strlen(line);
+    return !(length == line_capacity - 1 && line[line_capacity - 2] != '\n');
+}
+#endif // FU_ON_LINUX
+
 /**
  *  @brief One page size the kernel offers, and how many pages of it exist.
  *
@@ -402,9 +435,7 @@ static constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t ram_page_size() noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-    return static_cast<std::size_t>(::numa_pagesize()); // ! `numa_pagesize` is libnuma, Linux-only
-#elif FU_ON_POSIX
+#if FU_ON_POSIX
     return static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
 #elif FU_ON_WINDOWS
     SYSTEM_INFO system_info;
@@ -771,35 +802,6 @@ struct compute_domain_t {
     std::size_t logical_cores_count {0};
 };
 
-#if FU_WITH_TOPOLOGY && FU_ON_LINUX
-/**
- *  @brief Owns a `libnuma` CPU mask - the one harvest resource an allocator-aware array cannot hold.
- */
-struct numa_cpumask_guard_t {
-    struct bitmask *mask {nullptr};
-
-    numa_cpumask_guard_t() noexcept : mask(::numa_allocate_cpumask()) {}
-    numa_cpumask_guard_t(numa_cpumask_guard_t const &) = delete;
-    numa_cpumask_guard_t &operator=(numa_cpumask_guard_t const &) = delete;
-    ~numa_cpumask_guard_t() noexcept {
-        if (mask) ::numa_free_cpumask(mask);
-    }
-};
-
-/**
- *  @brief Clears from @p cpus every core that @p allowed does not hold.
- *  @note A node whose every core is masked away survives as a cpuless memory domain, which the rest
- *        of the harvest already models - its memory stays ours to allocate from.
- */
-FU_MAYBE_UNUSED_ static inline void restrict_cpumask_to_allowed(struct bitmask *cpus,
-                                                                core_mask_t const &allowed) noexcept {
-    for (std::size_t bit = 0; bit < cpus->size; ++bit)
-        if (::numa_bitmask_isbitset(cpus, static_cast<unsigned int>(bit)) &&
-            !allowed.contains(static_cast<core_id_t>(bit)))
-            ::numa_bitmask_clearbit(cpus, static_cast<unsigned int>(bit));
-}
-#endif
-
 /**
  *  @brief Fetches the socket ID for a given CPU core.
  *  @param[in] core_id The CPU core ID to query.
@@ -859,11 +861,12 @@ FU_MAYBE_UNUSED_ static inline std::size_t capacity_of_core(FU_MAYBE_UNUSED_ cor
 }
 
 /**
- *  @brief Whether every core in a Linux cpulist line - "0", "0-3", or "0,2-4" - belongs to @p cores.
- *  @note Pass only complete lines: a truncated tail could name cores the verdict never saw.
+ *  @brief Hands every `[low, high]` range of a Linux id list - "0", "0-3", or "0,2-4" - to @p visit.
+ *  @note One parser for every list the kernel publishes: `shared_cpu_list`, a domain's `cpulist`, and
+ *        `node/online`. Ranges arrive inclusive on both ends, as written.
  */
-FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t const *cores,
-                                                    std::size_t const cores_count) noexcept {
+template <typename visitor_type_>
+FU_MAYBE_UNUSED_ static inline void for_each_id_list_range(char const *line, visitor_type_ &&visit) noexcept {
     for (char const *cursor = line; *cursor;) {
         char *next = nullptr;
         long const low = ::strtol(cursor, &next, 10);
@@ -871,14 +874,26 @@ FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t 
         long high = low;
         cursor = next;
         if (*cursor == '-') high = ::strtol(cursor + 1, &next, 10), cursor = next;
-        for (long listed = low; listed <= high; ++listed) {
-            bool found = false;
-            for (std::size_t i = 0; i != cores_count && !found; ++i) found = cores[i] == static_cast<core_id_t>(listed);
-            if (!found) return false;
-        }
+        visit(low, high);
         while (*cursor == ',' || *cursor == ' ' || *cursor == '\n') ++cursor;
     }
-    return true;
+}
+
+/**
+ *  @brief Whether every core in a Linux cpulist line - "0", "0-3", or "0,2-4" - belongs to @p cores.
+ *  @note Pass only complete lines: a truncated tail could name cores the verdict never saw.
+ */
+FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t const *cores,
+                                                    std::size_t const cores_count) noexcept {
+    bool within = true;
+    for_each_id_list_range(line, [&](long const low, long const high) noexcept {
+        for (long listed = low; listed <= high && within; ++listed) {
+            bool found = false;
+            for (std::size_t i = 0; i != cores_count && !found; ++i) found = cores[i] == static_cast<core_id_t>(listed);
+            if (!found) within = false;
+        }
+    });
+    return within;
 }
 
 /**
@@ -977,6 +992,91 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
     return 0;
 #endif
 }
+
+#if FU_WITH_TOPOLOGY && FU_ON_LINUX
+/*  Everything `libnuma` was asked for, asked of `/sys/devices/system/node` instead - which is where
+ *  `libnuma` read it from too.  */
+
+static constexpr char const *sysfs_node_root_k = "/sys/devices/system/node";
+
+/**
+ *  @brief Whether this kernel enumerates memory domains at all - what `numa_available` answered.
+ *  @note A kernel built without `CONFIG_NUMA` mounts no such directory.
+ */
+FU_MAYBE_UNUSED_ static inline bool linux_has_memory_domains() noexcept {
+    DIR *node_dir = ::opendir(sysfs_node_root_k);
+    if (!node_dir) return false;
+    ::closedir(node_dir);
+    return true;
+}
+
+/**
+ *  @brief Highest online memory-domain id, or -1 where none can be read - what `numa_max_node` gave.
+ *  @note `node/online` is an id list, and hot-unplug makes it gappy ("0,2"), so this is a ceiling only.
+ */
+FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcept {
+    char path[256], line[256];
+    int const path_result = std::snprintf(path, sizeof(path), "%s/online", sysfs_node_root_k);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return -1; // ? Path too long
+    if (!try_read_line_at_path(path, line, sizeof(line))) return -1;
+
+    long highest = -1;
+    for_each_id_list_range(line, [&](long, long const high) noexcept {
+        if (high > highest) highest = high;
+    });
+    return static_cast<memory_domain_id_t>(highest);
+}
+
+/**
+ *  @brief Reads one memory domain's total RAM into @p bytes - what `numa_node_size64` returned.
+ *  @retval false where the domain publishes no `meminfo` - offline, or absent from a gappy id space.
+ *  @note Fallible rather than 0-sentinel because the distinction is load-bearing: false is that
+ *        function's negative return, while true with zero @p bytes is a memoryless domain, still real.
+ *        Its `free` out-parameter is not mirrored - the only caller wrote it and never read it.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_read_ram_bytes_of_memory_domain(memory_domain_id_t const id,
+                                                                        std::size_t &bytes) noexcept {
+    char path[256], line[256];
+    int const path_result = std::snprintf(path, sizeof(path), "%s/node%d/meminfo", sysfs_node_root_k, id);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return false; // ? Path too long
+
+    FILE *meminfo_file = ::fopen(path, "r");
+    if (!meminfo_file) return false; // ? Offline domain, or one this kernel will not describe
+    bytes = 0;
+    while (::fgets(line, sizeof(line), meminfo_file)) {
+        // ? "Node 0 MemTotal:       32768000 kB" - the id repeats on every line, so it is skipped
+        std::size_t memory_kb = 0;
+        if (::strncmp(line, "Node ", 5) == 0 && ::strstr(line, " MemTotal:") &&
+            ::sscanf(line, "Node %*d MemTotal: %zu kB", &memory_kb) == 1) {
+            bytes = memory_kb * 1024;
+            break;
+        }
+    }
+    ::fclose(meminfo_file);
+    return true;
+}
+
+/**
+ *  @brief Reads the cores of one memory domain into @p cores - what `numa_node_to_cpus` filled.
+ *  @retval false where the domain names no cpulist, or the mask could not be sized to hold it.
+ *  @note A `core_mask`, so the harvest's own allocator owns it - `numa_allocate_cpumask` malloc'd
+ *        behind its back, the very thing `core_mask` refuses `CPU_ALLOC` over.
+ */
+FU_MAYBE_UNUSED_ static inline bool try_capture_memory_domain_cores(memory_domain_id_t const id,
+                                                                    core_mask_t &cores) noexcept {
+    char path[256], line[1024];
+    int const path_result = std::snprintf(path, sizeof(path), "%s/node%d/cpulist", sysfs_node_root_k, id);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return false; // ? Path too long
+    if (!try_read_line_at_path(path, line, sizeof(line))) return false;
+    if (!cores.try_resize()) return false; // ! Allocation failed
+    cores.clear();
+
+    for_each_id_list_range(line, [&](long const low, long const high) noexcept {
+        for (long listed = low; listed <= high; ++listed) cores.add(static_cast<core_id_t>(listed));
+    });
+    return true;
+}
+#endif // FU_WITH_TOPOLOGY && FU_ON_LINUX
 
 #if FU_ON_WINDOWS
 /**
@@ -1276,7 +1376,13 @@ struct machine_topology {
      */
     bool try_harvest_portable() noexcept {
         reset();
-        std::size_t const cores = allowed_cores_count();
+
+        // Name the allowed cores, never just count them: a dense `0..n-1` iota over the count would
+        // report ids 0-7 under `taskset -c 8-15` - eight cores we may not run on. Where no mask exists
+        // the platform numbers them densely anyway, and the iota is then the honest answer.
+        core_mask_t allowed;
+        bool const allowed_known = try_capture_thread_cores(allowed) && allowed.count() != 0;
+        std::size_t const cores = allowed_known ? allowed.count() : possible_cores();
         if (cores == 0) return false;
 
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
@@ -1285,7 +1391,16 @@ struct machine_topology {
         if (!nodes.try_resize(1) || !core_ids.try_resize(cores) || !domains.try_resize(1)) return false;
 
         core_id_t *const core_ids_ptr = core_ids.data();
-        for (std::size_t i = 0; i < cores; ++i) core_ids_ptr[i] = static_cast<core_id_t>(i);
+        if (allowed_known) {
+            std::size_t written = 0;
+            std::size_t const id_space = allowed.capacity();
+            for (std::size_t bit = 0; bit < id_space && written < cores; ++bit)
+                if (allowed.contains(static_cast<core_id_t>(bit)))
+                    core_ids_ptr[written++] = static_cast<core_id_t>(bit);
+        }
+        else {
+            for (std::size_t i = 0; i < cores; ++i) core_ids_ptr[i] = static_cast<core_id_t>(i);
+        }
 
         memory_domain_t &node = nodes.data()[0];
         node.memory_domain_id = 0;
@@ -1446,26 +1561,30 @@ struct machine_topology {
         core_mask_t allowed;
         bool const allowed_known = try_capture_thread_cores(allowed) && allowed.count() != 0;
 
-        if (::numa_available() < 0) return try_harvest_portable(); // ? No NUMA - one uniform domain
-        ::numa_node_to_cpu_update();                               // ? Reset the outdated stale state
+        if (!linux_has_memory_domains()) return try_harvest_portable(); // ? No NUMA - one uniform domain
 
-        // The only resource here the arrays below cannot own for us.
-        numa_cpumask_guard_t numa_mask_guard;
-        struct bitmask *const numa_mask = numa_mask_guard.mask;
-        if (!numa_mask) return false; // ! Allocation failed
+        // A scratch mask reused for each domain's core set - sized once, refilled per domain, and
+        // owned by this harvest's allocator rather than by a `malloc` behind `numa_allocate_cpumask`.
+        core_mask_t domain_mask;
+        if (!domain_mask.try_resize()) return false; // ! Allocation failed
 
         // First pass - measure
         std::size_t fetched_memory_domains = 0, fetched_cores = 0;
-        memory_domain_id_t const max_numa_node_id = ::numa_max_node();
+        memory_domain_id_t const max_numa_node_id = max_memory_domain_id();
         for (memory_domain_id_t memory_domain_id = 0; memory_domain_id <= max_numa_node_id; ++memory_domain_id) {
-            long long dummy;
-            if (::numa_node_size64(memory_domain_id, &dummy) < 0) continue; // ! Offline node
-            ::numa_bitmask_clearall(numa_mask);
-            if (::numa_node_to_cpus(memory_domain_id, numa_mask) < 0) continue; // ! Invalid CPU map
-            if (allowed_known) restrict_cpumask_to_allowed(numa_mask, allowed);
+            std::size_t node_ram = 0;
+            if (!try_read_ram_bytes_of_memory_domain(memory_domain_id, node_ram)) continue; // ! Offline node
+            if (!try_capture_memory_domain_cores(memory_domain_id, domain_mask)) continue;  // ! Invalid CPU map
             // A cpuless memory domain (HBM-flat, CXL expander, GPU HBM) reports zero cores, yet is a
             // valid memory domain - and so is one whose every core was masked away from us.
-            std::size_t const node_cores = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
+            std::size_t node_cores = 0;
+            std::size_t const id_space = domain_mask.capacity();
+            for (std::size_t bit = 0; bit < id_space; ++bit) {
+                core_id_t const core = static_cast<core_id_t>(bit);
+                if (!domain_mask.contains(core)) continue;
+                if (allowed_known && !allowed.contains(core)) continue;
+                ++node_cores;
+            }
             fetched_memory_domains += 1;
             fetched_cores += node_cores;
         }
@@ -1485,7 +1604,7 @@ struct machine_topology {
 
         // A scratch table of every configured CPU's capacity, filled once below and read by the
         // per-node QoS split (which is O(n^2) in comparisons) instead of re-opening sysfs each time.
-        std::size_t const configured_cores = static_cast<std::size_t>(::numa_num_configured_cpus());
+        std::size_t const configured_cores = possible_cores();
         if (configured_cores == 0) return false; // ! No CPUs is not a valid state
         dynamic_array<std::size_t, capacities_allocator_t> capacities {capacities_allocator_t {allocator_}};
         if (!capacities.try_resize(configured_cores)) return false;
@@ -1494,23 +1613,26 @@ struct machine_topology {
         // Populate
         for (memory_domain_id_t memory_domain_id = 0, core_index = 0, node_index = 0;
              memory_domain_id <= max_numa_node_id; ++memory_domain_id) {
-            long long free_memory_size; // ? Only an out-parameter, the total size comes back as the return value
-            long long const total_memory_size = ::numa_node_size64(memory_domain_id, &free_memory_size);
-            if (total_memory_size < 0) continue;
-            ::numa_bitmask_clearall(numa_mask);
-            if (::numa_node_to_cpus(memory_domain_id, numa_mask) < 0) continue;
-            if (allowed_known) restrict_cpumask_to_allowed(numa_mask, allowed);
+            std::size_t node_ram = 0;
+            if (!try_read_ram_bytes_of_memory_domain(memory_domain_id, node_ram)) continue;
+            if (!try_capture_memory_domain_cores(memory_domain_id, domain_mask)) continue;
 
             memory_domain_t &node = domains_outb[node_index];
             node.memory_domain_id = memory_domain_id;
-            node.volume_ram = static_cast<std::size_t>(total_memory_size);
+            node.volume_ram = node_ram;
             node.first_core_id = core_ids_ptr + core_index;
-            node.logical_cores_count = static_cast<std::size_t>(::numa_bitmask_weight(numa_mask));
 
-            // Most likely, this will fill `core_ids_ptr` with `std::iota`-like values
-            for (std::size_t bit_offset = 0; bit_offset < numa_mask->size; ++bit_offset)
-                if (::numa_bitmask_isbitset(numa_mask, static_cast<unsigned int>(bit_offset)))
-                    core_ids_ptr[core_index++] = static_cast<core_id_t>(bit_offset);
+            // Most likely, this will fill `core_ids_ptr` with `std::iota`-like values. The count is
+            // whatever the loop admits, so the mask and the slice can never disagree.
+            std::size_t const core_index_before = core_index;
+            std::size_t const id_space = domain_mask.capacity();
+            for (std::size_t bit_offset = 0; bit_offset < id_space; ++bit_offset) {
+                core_id_t const core = static_cast<core_id_t>(bit_offset);
+                if (!domain_mask.contains(core)) continue;
+                if (allowed_known && !allowed.contains(core)) continue;
+                core_ids_ptr[core_index++] = core;
+            }
+            node.logical_cores_count = core_index - core_index_before;
 
             // ? Cpuless memory domains have no core to query - default the socket and skip the lookup.
             // ! Only valid once `first_core_id` points to initialized entries, hence after the loop above

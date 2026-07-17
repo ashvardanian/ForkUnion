@@ -698,17 +698,36 @@ inline capabilities_t cpu_capabilities() noexcept {
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 /**
- *  @brief Probes whether this process may actually place memory - `numa_available` only proves libnuma
- *         is present, while seccomp or a cgroup `cpuset.mems` can still refuse `mbind`.
+ *  @brief Binds [@p ptr, @p ptr + @p size_bytes) to the single memory domain @p memory_domain_id.
+ *  @param[in] mode An `MPOL_*` policy, already OR-ed with whatever mode flags the caller wants.
+ *  @note Lives here, not beside its allocator callers, because this is the last header both
+ *        `topology.hpp` and `allocators.hpp` see - so the `maxnode` quirk below is spelled once.
+ */
+FU_MAYBE_UNUSED_ static inline bool linux_bind_range_to_domain(void *ptr, std::size_t size_bytes,
+                                                               memory_domain_id_t memory_domain_id, int mode) noexcept {
+    if (memory_domain_id < 0 || static_cast<std::size_t>(memory_domain_id) >= max_memory_domains_k) return false;
+    std::size_t const bit = static_cast<std::size_t>(memory_domain_id);
+    std::size_t const bits_per_word = sizeof(unsigned long) * 8;
+    unsigned long node_mask[nodemask_words_k] {};
+    node_mask[bit / bits_per_word] = 1ul << (bit % bits_per_word);
+    // ! `+ 1`: the manual says the mask holds "up to `maxnode`" bits, but the kernel decrements it
+    // ! before sizing, so the exact width masks the top bit back off and the bind silently fails.
+    return ::syscall(SYS_mbind, ptr, size_bytes, mode, node_mask, max_memory_domains_k + 1, 0) == 0;
+}
+
+/**
+ *  @brief Probes whether this process may actually place memory - a kernel that offers `mbind` still
+ *         lets seccomp or a cgroup `cpuset.mems` refuse it, and only the call itself can say.
  */
 inline bool linux_can_place_memory_on_domain() noexcept {
-    std::size_t const page_bytes = static_cast<std::size_t>(::numa_pagesize());
+    std::size_t const page_bytes = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
     void *probe = ::mmap(nullptr, page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (probe == MAP_FAILED) return false;
-    unsigned long node_mask = 1ul; // Node 0, always present where a topology exists
-    long const status = ::mbind(probe, page_bytes, MPOL_BIND, &node_mask, sizeof(node_mask) * 8, 0);
+    // ? Node 0, always present where a topology exists. Bare `MPOL_BIND` - this asks only whether the
+    // ? kernel will place at all, not about a mode flag no caller requested.
+    bool const bound = linux_bind_range_to_domain(probe, page_bytes, 0, mpol_bind_k);
     ::munmap(probe, page_bytes);
-    return status == 0;
+    return bound;
 }
 #endif
 
@@ -727,8 +746,9 @@ inline capabilities_t ram_capabilities() noexcept {
     if (::GetLargePageMinimum() != 0) caps |= capability_place_huge_pages_on_domain_k;
 
 #elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-    // NUMA placement is claimed only when a real one-page `mbind` succeeds, not merely when libnuma loads.
-    if (::numa_available() >= 0 && linux_can_place_memory_on_domain()) caps |= capability_place_memory_on_domain_k;
+    // NUMA placement is claimed only when a real one-page `mbind` succeeds - which subsumes every
+    // weaker question, including the one `numa_available` used to be asked here.
+    if (linux_can_place_memory_on_domain()) caps |= capability_place_memory_on_domain_k;
 
     // Check for huge pages support - simplest method is checking if the global directory exists
     {

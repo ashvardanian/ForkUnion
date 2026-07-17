@@ -52,10 +52,9 @@
 
 /*  Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to derive
  *  the capabilities below. Nothing else in the library may ask `__linux__` again. Identity is the kernel
- *  ABI - pthreads, `sched_setaffinity`, `gettid`, `/proc`, `/sys` - which Android shares in full; what
- *  Bionic lacks is GLibC and `libnuma`, and that is the separate `FU_DETECT_LIBNUMA_` axis below, which
- *  keys on `__GLIBC__` and stays 0 on Bionic - so threads and affinity stay on there while topology and
- *  NUMA memory stay off.  */
+ *  ABI - pthreads, `sched_setaffinity`, `gettid`, `/proc`, `/sys` - which Android shares in full, and
+ *  which is all the capabilities below now ask for. What Bionic lacks is GLibC, and that is the separate
+ *  `FU_ON_GLIBC` axis below; it gates no capability, because none is glibc's to grant.  */
 #if defined(__linux__)
 #define FU_ON_LINUX 1
 #else
@@ -91,37 +90,17 @@
 
 #define FU_ON_POSIX (FU_ON_LINUX || FU_ON_APPLE || FU_ON_FREEBSD)
 
-/*  An implementation detail, not a capability: several Linux capabilities are provided by one
- *  library, and its absence must lower all of them together. `gettid` needs GLibC 2.30+.
- *
- *  The header must be present, not merely the GLibC that usually ships beside it: `libnuma-dev` is a
- *  separate package on every distribution, and a build that assumed it from the GLibC version alone
- *  would enable `FU_WITH_TOPOLOGY` and then fail at `#include <numa.h>`.
- *  @see https://man7.org/linux/man-pages/man2/gettid.2.html  */
 #if FU_ON_LINUX && __has_include(<features.h>)
-#include <features.h> // `__GLIBC__`, `__GLIBC_PREREQ`
-#endif
-
-/*  A shim so `__GLIBC_PREREQ` can be used in a flat `#if`: musl and Bionic leave it undefined, yet the
- *  preprocessor still tokenizes `__GLIBC_PREREQ(2, 30)` on a live `&&` line. Here it yields 0 instead.  */
-#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
-#define FU_GLIBC_PREREQ_(major, minor) __GLIBC_PREREQ(major, minor)
-#else
-#define FU_GLIBC_PREREQ_(major, minor) 0
+#include <features.h> // `__GLIBC__`
 #endif
 
 /*  Is-glibc, for facilities glibc provides that Bionic and musl do not - `backtrace`, say. Stays 0 on
- *  Apple and FreeBSD, whose libc is not glibc. `FU_GLIBC_PREREQ_` above gates on a specific version.  */
+ *  Apple and FreeBSD, whose libc is not glibc. Gates no capability below: sysfs and the syscall table
+ *  are the kernel's, and every libc on Linux shares them.  */
 #if defined(__GLIBC__)
 #define FU_ON_GLIBC 1
 #else
 #define FU_ON_GLIBC 0
-#endif
-
-#if FU_ON_LINUX && FU_GLIBC_PREREQ_(2, 30) && __has_include(<numa.h>)
-#define FU_DETECT_LIBNUMA_ 1
-#else
-#define FU_DETECT_LIBNUMA_ 0
 #endif
 
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
@@ -147,7 +126,9 @@
  *  kernel since Vista and reports NUMA nodes, cores, processor groups, and caches in one call. */
 /*  FreeBSD needs no separate library either: the in-kernel `cpuset`/NUMA framework enumerates memory
  *  domains through `sysctl vm.ndomains` and `cpuset_getaffinity(CPU_WHICH_DOMAIN)`. */
-#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || FU_ON_FREEBSD || (FU_ON_LINUX && FU_DETECT_LIBNUMA_))
+/*  Nor Linux: the harvest reads `/sys/devices/system/node`, which the kernel mounts wherever there are
+ *  domains to report - so no libc and no `libnuma-dev` on the build host gates it. */
+#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || FU_ON_FREEBSD || FU_ON_LINUX)
 #endif
 
 /**
@@ -228,14 +209,14 @@
 #include <exception> // `std::exception_ptr`
 #endif
 
-#if FU_WITH_TOPOLOGY && FU_ON_LINUX
-#include <numa.h> // `numa_available`, `numa_node_to_cpus`, `numa_distance`
-#endif
-
+/*  No `<numa.h>`, no `<numaif.h>`: sysfs needs no header, and `mbind` arrives by syscall number.  */
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-#include <numa.h>     // `numa_alloc_onnode`, `numa_free`
-#include <numaif.h>   // `mbind` manual assignment of `mmap` pages
-#include <sys/mman.h> // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`
+#include <sys/syscall.h> // `SYS_mbind`, the policy syscall no libc wraps
+#include <unistd.h>      // `syscall`
+#include <sys/mman.h>    // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`
+#if __has_include(<linux/mempolicy.h>)
+#include <linux/mempolicy.h> // `MPOL_BIND`, `MPOL_F_STATIC_NODES` - checked against, never needed
+#endif
 #endif
 
 #if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
@@ -421,7 +402,7 @@
 namespace ashvardanian {
 namespace forkunion {
 
-/** @brief The OS's NUMA node number, in [0, numa_max_node()]. */
+/** @brief The OS's NUMA node number - on Linux, an `N` for which `/sys/devices/system/node/nodeN` exists. */
 using memory_domain_id_t = int;
 /** @brief Opaque logical-processor id; on Windows it packs a group and a bit. */
 using core_id_t = int;
@@ -429,6 +410,27 @@ using core_id_t = int;
 using socket_id_t = int;
 /** @brief A core's performance tier, ranked from fastest to lowest-power, like "performance" or "efficiency". */
 using core_quality_t = int;
+
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+/*  The two `mbind` inputs `<numaif.h>` supplied. Syscall ABI, so naming them needs no header - and
+ *  where `<linux/mempolicy.h>` is installed, the `static_assert`s hold us to the kernel's spelling.  */
+static constexpr int mpol_bind_k = 2;               // ? `MPOL_BIND` - allocate strictly from the mask
+static constexpr int mpol_static_nodes_k = 1 << 15; // ? `MPOL_F_STATIC_NODES` - literal ids, not cpuset-relative
+
+#if defined(MPOL_BIND)
+static_assert(mpol_bind_k == MPOL_BIND, "MPOL_BIND is the kernel's; ours must match it");
+static_assert(mpol_static_nodes_k == MPOL_F_STATIC_NODES, "MPOL_F_STATIC_NODES is the kernel's; ours must match it");
+#endif
+
+/**
+ *  @brief One past the highest memory-domain id we will bind - the node mask's width.
+ *  @note The kernel's own ceiling: `MAX_NUMNODES` is `1 << CONFIG_NODES_SHIFT`, which peaks at 10.
+ *        An id at or past this is one the kernel cannot represent, so declining it declines nothing.
+ *        Bounds @b domains, never cores - those are a `core_mask`, which grows.
+ */
+static constexpr std::size_t max_memory_domains_k = 1024;
+static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
+#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
 /**
  *  @brief A position in `machine_topology`'s array of @b compute domains, in [0, compute_domains_count).

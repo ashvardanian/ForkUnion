@@ -971,11 +971,16 @@ static void test_for_n_dynamic_stealing() noexcept {
 }
 
 /**
- *  @brief One dynamic dispatch of @p n tasks must run exactly-once; @p crawl stalls thread 0.
+ *  @brief One dynamic dispatch of @p n tasks must run exactly-once; @p crawl stalls a whole domain.
  *
- *  With one thread crawling, at least one task must be executed by a thread pinned to a @b different
- *  domain than the one owning its slice, so the cross-interconnect path is exercised rather than
- *  silently idle. The owner of a task index mirrors the invoker's own split: domain `d` owns `split[d]`.
+ *  With domain 0 crawling, the other domains drain their own slices and must reach across the
+ *  interconnect for more, so the steal path is exercised rather than silently idle. The owner of a
+ *  task index mirrors the invoker's own split: domain `d` owns `split[d]`.
+ *
+ *  @note The crawl is @b per @b domain, not per thread. Stalling a single thread only forces a steal
+ *        where a domain has few of them: with 64 threads to a domain, one crawler is 1/64th of its
+ *        capacity, its neighbours absorb the slice, and no steal ever needs to cross - so the
+ *        assertion below passed on small CI runners and was a coin-flip on real hardware.
  */
 template <typename pool_type_>
 static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n, bool const crawl) noexcept {
@@ -988,7 +993,9 @@ static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n,
     for (auto &e : executions) e.store(0, std::memory_order_relaxed);
 
     pool.for_n_dynamic(n, [&](prong_t prong) noexcept {
-        if (crawl && prong.thread == 0) { // ? A spin, not a sleep, so the pool's yields don't mask it
+        // ? A spin, not a sleep, so the pool's yields don't mask it. Keyed on the executing thread's
+        // ? domain, so a stealer from elsewhere runs the stolen task at full speed.
+        if (crawl && prong.compute_domain == 0) {
             volatile std::size_t sink = 0;
             for (std::size_t i = 0; i < 200000; ++i) sink = sink + i;
         }
