@@ -1364,9 +1364,10 @@ inline constexpr wait_uncapped_t wait_uncapped_k {};
  */
 struct standard_yield_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
-                           bound_type_ = {}) const noexcept {
+    /** @brief Any waited word - a `std::atomic` object or a bare address - the yield watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         std::this_thread::yield();
     }
 };
