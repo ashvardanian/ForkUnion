@@ -103,6 +103,14 @@
 #define FU_ON_GLIBC 0
 #endif
 
+/*  The kernel UAPI headers ship separately from libc - `linux-headers` on Alpine and other musl
+ *  distributions - so `<linux/mman.h>` must be probed, not assumed from the platform.  */
+#if FU_ON_LINUX && __has_include(<linux/mman.h>)
+#define FU_DETECT_LINUX_MMAN_ 1
+#else
+#define FU_DETECT_LINUX_MMAN_ 0
+#endif
+
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
  *  facility rather than for the library that happens to provide it - so Windows' `VirtualAllocExNuma`
  *  satisfies `FU_WITH_PLACE_MEMORY_ON_DOMAIN` without inventing a second macro.
@@ -166,9 +174,13 @@
 #if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
 /*  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
  *  gated behind the `SeLockMemoryPrivilege` the caller must already hold; FreeBSD hints the alignment
- *  with `MAP_ALIGNED_SUPER` and lets its transparent superpages promote. */
+ *  with `MAP_ALIGNED_SUPER` and lets its transparent superpages promote.
+ *
+ *  On Linux the `MAP_HUGE_2MB`-family constants live in `<linux/mman.h>`, and the kernel UAPI headers
+ *  ship separately from libc (`linux-headers` on Alpine and other musl distributions) - the platform
+ *  alone does not guarantee the header, and assuming it would fail at `#include`, not at a check.  */
 #define FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN \
-    ((FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
+    (((FU_ON_LINUX && FU_DETECT_LINUX_MMAN_) || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
 #endif
 
 /*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
