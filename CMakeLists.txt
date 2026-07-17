@@ -184,16 +184,56 @@ add_library(forkunion::static ALIAS forkunion_static)
 add_library(forkunion::shared ALIAS forkunion_shared)
 
 # Prefer C++20 for library builds
+#
+# `POSITION_INDEPENDENT_CODE` covers the static archive too: a Python extension is itself a shared object, so a non-PIC
+# `libforkunion_static.a` cannot be linked into one at all. Visibility defaults to hidden so the only exported names are
+# the `FU_API_RUNTIME` C ABI - without it the C++ core's internals, like `globals_initialize()`, become public symbols.
 set_target_properties(
     forkunion_shared forkunion_static
     PROPERTIES CXX_STANDARD 20
                CXX_STANDARD_REQUIRED ON
                CXX_EXTENSIONS OFF
+               POSITION_INDEPENDENT_CODE ON
+               C_VISIBILITY_PRESET hidden
+               CXX_VISIBILITY_PRESET hidden
+               VISIBILITY_INLINES_HIDDEN ON
 )
+
+# `SOVERSION` is what `ld.so` de-duplicates on. Two consumers that each link a differently-named copy get two pools and
+# two topologies, so the versioned `SONAME` is what keeps one process to one thread pool.
+set_target_properties(
+    forkunion_shared
+    PROPERTIES OUTPUT_NAME forkunion # `libforkunion.so`, not `libforkunion_shared.so`
+               VERSION ${PROJECT_VERSION} # `libforkunion.so.3.0.0`
+               SOVERSION ${PROJECT_VERSION_MAJOR} # `SONAME libforkunion.so.3`
+)
+
+# Only the shared build exports. `PRIVATE` matters: `FU_BUILDING_SHARED` is what flips `FU_API_RUNTIME` to `dllexport`,
+# and a consumer that inherited it would export our symbols from its own binary.
+target_compile_definitions(forkunion_shared PRIVATE FU_BUILDING_SHARED=1)
 
 # Re-use the public interface of the header-only target
 target_link_libraries(forkunion_shared PUBLIC forkunion_header)
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
+
+# The libgomp-ABI shim: nothing links against it, it is `LD_PRELOAD`-ed or `dlopen`-ed to shadow libgomp's symbols in an
+# already-compiled binary. Off by default - it is only meaningful where OpenMP programs run.
+option(FORKUNION_BUILD_OPENMP_SHIM "Build the libgomp-compatible interposition shim" OFF)
+if (FORKUNION_BUILD_OPENMP_SHIM AND NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    add_library(forkunion_gomp SHARED c/forkunion_gomp.cpp)
+    add_library(forkunion::gomp ALIAS forkunion_gomp)
+    set_target_properties(
+        forkunion_gomp
+        PROPERTIES CXX_STANDARD 20
+                   CXX_STANDARD_REQUIRED ON
+                   CXX_EXTENSIONS OFF
+                   POSITION_INDEPENDENT_CODE ON
+                   OUTPUT_NAME forkunion_gomp
+    )
+    # No SONAME and no version script, deliberately. glibc accepts an unversioned definition for a versioned reference
+    # precisely so interposition works, while half-matching version nodes would bind nothing at all.
+    target_link_libraries(forkunion_gomp PRIVATE forkunion_static)
+endif ()
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)

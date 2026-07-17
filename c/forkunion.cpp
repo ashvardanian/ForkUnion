@@ -12,6 +12,11 @@
 #include <new>         // placement `new` operator
 #include <cstdint>     // `std::uint8_t`
 #include <type_traits> // `std::aligned_storage`
+#include <atomic>      // `std::atomic` for the `fork` epoch
+
+#if FU_ON_POSIX
+#include <pthread.h> // `pthread_atfork`
+#endif
 
 namespace fu = ashvardanian::forkunion;
 
@@ -241,6 +246,34 @@ static void construct_pool(pool_variants_t &variants, fu::capabilities_t effecti
 }
 
 /**
+ *  @brief Counts `fork()` calls observed by this process; pools spawned in an older epoch have no workers.
+ *
+ *  Only the forking thread survives into the child, so every worker vanishes while the pool's memory - its epoch
+ *  counters, its thread count - is copied intact. A pool that looks alive but has nobody to advance its epoch would
+ *  block forever on the first dispatch, which is why the child must be able to recognize it.
+ *
+ *  A registry of live pools would need a lock, and a lock is the one thing the child cannot take: whoever held it does
+ *  not exist anymore. A single counter keeps the handler async-signal-safe, which is what `pthread_atfork` requires.
+ */
+static std::atomic<unsigned> global_fork_epoch_ {0};
+
+#if FU_ON_POSIX
+/** @brief Runs in the child after `fork()`. Must stay async-signal-safe - one relaxed increment, nothing else. */
+static void forget_workers_in_child_() noexcept { global_fork_epoch_.fetch_add(1, std::memory_order_relaxed); }
+#endif
+
+/** @brief Registers the `fork()` child handler once per process. No-op where `fork()` does not exist. */
+static void ensure_fork_handler_() noexcept {
+#if FU_ON_POSIX
+    static bool const registered_ = [] {
+        ::pthread_atfork(nullptr, nullptr, &forget_workers_in_child_);
+        return true;
+    }();
+    (void)registered_;
+#endif
+}
+
+/**
  *  @brief What a `fu_pool_t` actually points at: a pool, plus the state the C callbacks need.
  *
  *  The C ABI passes a lambda as a context pointer and a function pointer, and the unsafe dispatch
@@ -258,6 +291,8 @@ struct opaque_pool_t {
     fu_for_threads_t current_callback {nullptr};
     /** @brief The caller's pool name, kept so a re-spawn can rebuild the variant without losing it. */
     char name[16] {};
+    /** @brief `global_fork_epoch_` as of the last spawn; a mismatch means the workers were lost to a `fork()`. */
+    unsigned fork_epoch {0};
 
     opaque_pool_t(char const *pool_name, fu::capabilities_t pool_capabilities) noexcept : effective(pool_capabilities) {
         char const *const source = pool_name ? pool_name : "forkunion";
@@ -266,6 +301,9 @@ struct opaque_pool_t {
         name[i] = '\0';
         // `variants` starts empty (kind `unknown_k`); the first spawn builds the pool the topology dictates.
     }
+
+    /** @brief True once a `fork()` has left this pool's workers behind in the parent. */
+    bool orphaned() const noexcept { return fork_epoch != global_fork_epoch_.load(std::memory_order_relaxed); }
 
     /** @brief A shim to redirect unsafe callbacks to the current context. */
     void operator()(fu::local_thread_t pinned) const noexcept {
@@ -594,6 +632,10 @@ fu_bool_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads, 
     opaque_pool_t *opaque = upcast_pool(pool);
     auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
 
+    // These workers are born in the current epoch; a later `fork()` bumps it and strands them in the parent.
+    ensure_fork_handler_();
+    opaque->fork_epoch = global_fork_epoch_.load(std::memory_order_relaxed);
+
     // A whole-machine pool is distributed when the mask allows placing memory on domains, else flat.
     // Rebuild to that shape if an earlier spawn left another, then spawn: `visit_kind` fixes the shape
     // and dispatches on the waiter alone, so each branch instantiates only its own `try_spawn`.
@@ -624,6 +666,10 @@ fu_bool_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comput
 
     fu::machine_topology_t const &machine = *upcast_topology(topology);
     if (compute_domain_index >= machine.compute_domains_count()) return 0;
+
+    // These workers are born in the current epoch; a later `fork()` bumps it and strands them in the parent.
+    ensure_fork_handler_();
+    opaque->fork_epoch = global_fork_epoch_.load(std::memory_order_relaxed);
 
     // Pin to a single compute domain: ensure the variant is colocated, rebuilding if it is not.
     if (opaque->variants.kind_ != fu::pool_kind_t::colocated_k) {
@@ -716,6 +762,7 @@ size_t fu_pool_compute_domains_count(fu_pool_t pool) {
 size_t fu_pool_threads_count_in(fu_pool_t pool, size_t compute_domain_index) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
+    if (opaque->orphaned()) return 0; // ! The count is stale memory copied by `fork()`, not living threads
     return visit([=](auto &variant) { return variant.threads_count(compute_domain_index); }, opaque->variants,
                  std::size_t {0});
 }
@@ -723,6 +770,7 @@ size_t fu_pool_threads_count_in(fu_pool_t pool, size_t compute_domain_index) {
 size_t fu_pool_threads_count(fu_pool_t pool) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
+    if (opaque->orphaned()) return 0; // ! The count is stale memory copied by `fork()`, not living threads
     return visit([](auto &variant) { return variant.threads_count(); }, opaque->variants, std::size_t {0});
 }
 
@@ -752,6 +800,9 @@ void fu_pool_terminate(fu_pool_t pool) {
 void fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_context_t context) {
     assert(pool != nullptr && callback != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
+    // A forked child has no workers to wake, so waiting on them would never return. Run the callback here instead:
+    // one caller is exactly the team a child has, and the work still happens.
+    if (opaque->orphaned()) return callback(context, 0, 0);
     visit(
         [&](auto &variant) {
             variant.for_threads([=](fu::local_thread_t pinned) noexcept { //
@@ -764,6 +815,7 @@ void fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_co
 void fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callback, fu_lambda_context_t context) {
     assert(pool != nullptr && callback != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
+    if (opaque->orphaned()) return callback(context, 0, n, 0, 0); // ! No workers survived `fork()`; one whole slice
     visit(
         [&](auto &variant) {
             variant.for_slices(n, [=](fu::local_prong_t prong, std::size_t count) noexcept { //
@@ -776,6 +828,10 @@ void fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callback, fu_l
 void fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context) {
     assert(pool != nullptr && callback != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
+    if (opaque->orphaned()) { // ! No workers survived `fork()`; the caller walks the whole range
+        for (size_t i = 0; i != n; ++i) callback(context, i, 0, 0);
+        return;
+    }
     visit(
         [&](auto &variant) {
             variant.for_n(n, [=](fu::local_prong_t prong) noexcept { //
@@ -788,6 +844,10 @@ void fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda
 void fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context) {
     assert(pool != nullptr && callback != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
+    if (opaque->orphaned()) { // ! No workers survived `fork()`; the caller walks the whole range
+        for (size_t i = 0; i != n; ++i) callback(context, i, 0, 0);
+        return;
+    }
     visit(
         [&](auto &variant) {
             variant.for_n_dynamic(n, [=](fu::local_prong_t prong) noexcept { //

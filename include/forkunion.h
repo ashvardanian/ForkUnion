@@ -85,12 +85,38 @@ extern "C" {
 
 #include <stddef.h> // `size_t`, `bool`
 
+/*  Annotation for the exported C ABI, named after StringZilla's `SZ_API_RUNTIME` taxonomy - `runtime` because these
+ *  entry points dispatch on `fu_runtime_capabilities()`, as opposed to the header-only C++ core in `forkunion.hpp`,
+ *  whose capabilities are baked in by the `FU_WITH_*` macros at compile time.
+ *
+ *  Unlike StringZilla, this header carries no implementations to collapse into - it only declares what
+ *  `c/forkunion.cpp` defines - so there is no header-only spelling of `FU_API_RUNTIME`.
+ *
+ *  - `FU_BUILDING_SHARED` is defined only while compiling the library itself.
+ *  - `FU_USING_SHARED` is what a consumer defines to link the shared build. It matters on Windows alone, where the
+ *    declaration must say `dllimport`; leaving it off a static consumer is what keeps `dllimport` from being emitted
+ *    against symbols that are already present.
+ */
+#if defined(_WIN32) || defined(__CYGWIN__) // FU-ALLOW: pure C ABI header, cannot see the C++ FU_ON_* vocabulary
+#if defined(FU_BUILDING_SHARED)
+#define FU_API_RUNTIME __declspec(dllexport)
+#elif defined(FU_USING_SHARED)
+#define FU_API_RUNTIME __declspec(dllimport)
+#else
+#define FU_API_RUNTIME // ? Static linkage needs no decoration
+#endif
+#elif defined(FU_BUILDING_SHARED)
+#define FU_API_RUNTIME extern __attribute__((visibility("default")))
+#else
+#define FU_API_RUNTIME extern
+#endif
+
 /** @brief Returns the major version component of the ForkUnion library. */
-int fu_version_major(void);
+FU_API_RUNTIME int fu_version_major(void);
 /** @brief Returns the minor version component of the ForkUnion library. */
-int fu_version_minor(void);
+FU_API_RUNTIME int fu_version_minor(void);
 /** @brief Returns the patch version component of the ForkUnion library. */
-int fu_version_patch(void);
+FU_API_RUNTIME int fu_version_patch(void);
 
 #pragma region Types
 
@@ -224,13 +250,13 @@ typedef enum fu_capabilities_t {
  *  @brief Which kernel facilities this build of ForkUnion was compiled to use.
  *  @sa fu_runtime_capabilities
  */
-fu_capabilities_t fu_comptime_capabilities(void);
+FU_API_RUNTIME fu_capabilities_t fu_comptime_capabilities(void);
 
 /**
  *  @brief Which features this machine turned out to offer, probing the CPU and the memory system.
  *  @sa fu_comptime_capabilities
  */
-fu_capabilities_t fu_runtime_capabilities(void);
+FU_API_RUNTIME fu_capabilities_t fu_runtime_capabilities(void);
 
 /**
  *  @brief Writes @p capabilities as a comma-separated name list such as "arm64_yield,arm64_wfet".
@@ -238,7 +264,8 @@ fu_capabilities_t fu_runtime_capabilities(void);
  *  @param[in] name_buffer_length Size of @p name_buffer in bytes.
  *  @retval Bytes written, excluding the null terminator.
  */
-size_t fu_name_capabilities(fu_capabilities_t capabilities, char *name_buffer, size_t name_buffer_length);
+FU_API_RUNTIME size_t fu_name_capabilities(fu_capabilities_t capabilities, char *name_buffer,
+                                           size_t name_buffer_length);
 
 /**
  *  @brief Harvests the machine topology - cores, compute and memory domains - into a handle.
@@ -246,7 +273,7 @@ size_t fu_name_capabilities(fu_capabilities_t capabilities, char *name_buffer, s
  *
  *  Build it once and thread it through `fu_pool_spawn` and the topology queries below.
  */
-fu_topology_t fu_topology_new(void);
+FU_API_RUNTIME fu_topology_t fu_topology_new(void);
 
 /**
  *  @brief Frees a topology handle from `fu_topology_new`.
@@ -254,7 +281,7 @@ fu_topology_t fu_topology_new(void);
  *
  *  Pools never retain the topology, so it may be freed as soon as the last spawn returns.
  */
-void fu_topology_delete(fu_topology_t topology);
+FU_API_RUNTIME void fu_topology_delete(fu_topology_t topology);
 
 /**
  *  @brief Returns the number of logical cores in a given compute domain.
@@ -265,14 +292,14 @@ void fu_topology_delete(fu_topology_t topology);
  *  compute domains of differing core counts, such as performance versus efficiency cores.
  *  @sa `fu_compute_domains_count`, `fu_pool_spawn_on`.
  */
-size_t fu_logical_cores_count_in(fu_topology_t, size_t compute_domain_index);
+FU_API_RUNTIME size_t fu_logical_cores_count_in(fu_topology_t, size_t compute_domain_index);
 
 /**
  *  @brief The number of logical cores the OS exposes - hyper-threads and every core class included.
  *  @retval 0 if detection failed; else the count, suitable as the thread count for `fu_pool_spawn`.
  *  @sa `fu_logical_cores_count_in` for the per-compute-domain count.
  */
-size_t fu_logical_cores_count(fu_topology_t);
+FU_API_RUNTIME size_t fu_logical_cores_count(fu_topology_t);
 
 /**
  *  @brief The number of compute domains: bindable clusters of same-QoS, co-located cores.
@@ -282,7 +309,7 @@ size_t fu_logical_cores_count(fu_topology_t);
  *  axis of the topology; memory domains are the other, bridged by `fu_local_memory_of`.
  *  @sa `fu_logical_cores_count_in`, `fu_pool_spawn_on`, `fu_memory_domains_count`.
  */
-size_t fu_compute_domains_count(fu_topology_t);
+FU_API_RUNTIME size_t fu_compute_domains_count(fu_topology_t);
 
 /**
  *  @brief Returns the performance level of a given compute domain.
@@ -295,7 +322,7 @@ size_t fu_compute_domains_count(fu_topology_t);
  *  media slow down - both match their native hardware conventions, so they run opposite ways by design.
  *  @sa `fu_compute_levels_count`, `fu_compute_domains_count`.
  */
-size_t fu_compute_level_in(fu_topology_t, size_t compute_domain_index);
+FU_API_RUNTIME size_t fu_compute_level_in(fu_topology_t, size_t compute_domain_index);
 
 /**
  *  @brief Returns the number of distinct compute performance levels across all compute domains.
@@ -304,7 +331,7 @@ size_t fu_compute_level_in(fu_topology_t, size_t compute_domain_index);
  *  as when equally-fast cores are split across cache clusters, or across NUMA nodes.
  *  @sa `fu_compute_level_in`.
  */
-size_t fu_compute_levels_count(fu_topology_t);
+FU_API_RUNTIME size_t fu_compute_levels_count(fu_topology_t);
 
 /**
  *  @brief Returns the relative throughput of @b one core in a given compute domain.
@@ -316,7 +343,7 @@ size_t fu_compute_levels_count(fu_topology_t);
  *  divided by. When this reports 0, weigh compute domains by `fu_logical_cores_count_in` instead.
  *  @sa `fu_compute_level_in`, `fu_logical_cores_count_in`.
  */
-size_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index);
+FU_API_RUNTIME size_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index);
 
 /**
  *  @brief Returns the bytes of deepest cache private to a given compute domain's cores.
@@ -328,7 +355,7 @@ size_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index);
  *  number can be inferred from the other.
  *  @sa `fu_compute_capacity_in`.
  */
-size_t fu_compute_cache_bytes_in(fu_topology_t, size_t compute_domain_index);
+FU_API_RUNTIME size_t fu_compute_cache_bytes_in(fu_topology_t, size_t compute_domain_index);
 
 /**
  *  @brief Returns the number of memory domains - the distinct allocation targets.
@@ -341,7 +368,7 @@ size_t fu_compute_cache_bytes_in(fu_topology_t, size_t compute_domain_index);
  *  the topology's to declare: a `fu_fabric_t` measures it in-process.
  *  @sa `fu_volume_ram_in`, `fu_local_memory_of`, `fu_allocate_on_domain_id`, `fu_fabric_harvest`.
  */
-size_t fu_memory_domains_count(fu_topology_t);
+FU_API_RUNTIME size_t fu_memory_domains_count(fu_topology_t);
 
 /**
  *  @brief Returns the memory domain nearest to a given compute domain.
@@ -353,7 +380,7 @@ size_t fu_memory_domains_count(fu_topology_t);
  *  to `fu_allocate_on_domain_id`. For the full cost picture use `fu_fabric_memory_distance`.
  *  @sa `fu_fabric_memory_distance`, `fu_allocate_on_domain_id`.
  */
-size_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index);
+FU_API_RUNTIME size_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index);
 
 /**
  *  @brief Returns the RAM volume in bytes of a given memory domain.
@@ -361,14 +388,14 @@ size_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index);
  *  @retval Number of bytes of RAM in that memory domain, regardless of page size; 0 if out of range.
  *  @sa `fu_volume_ram`, `fu_allocate_on_domain_id`.
  */
-size_t fu_volume_ram_in(fu_topology_t, size_t memory_domain_index);
+FU_API_RUNTIME size_t fu_volume_ram_in(fu_topology_t, size_t memory_domain_index);
 
 /**
  *  @brief Returns the total RAM volume in bytes across all memory domains.
  *  @retval Number of bytes of RAM installed, regardless of page size.
  *  @sa `fu_volume_ram_in`.
  */
-size_t fu_volume_ram(fu_topology_t);
+FU_API_RUNTIME size_t fu_volume_ram(fu_topology_t);
 
 /**
  *  @brief Returns the huge-page volume in bytes available in a given memory domain.
@@ -378,14 +405,14 @@ size_t fu_volume_ram(fu_topology_t);
  *  Huge pages reduce TLB pressure by mapping memory in larger units than the base page.
  *  @sa `fu_huge_pages_count_in`, `fu_allocate_at_least_on_domain_id`.
  */
-size_t fu_volume_huge_pages_in(fu_topology_t, size_t memory_domain_index);
+FU_API_RUNTIME size_t fu_volume_huge_pages_in(fu_topology_t, size_t memory_domain_index);
 
 /**
  *  @brief Returns the total huge-page volume in bytes across all memory domains.
  *  @retval Number of bytes backed by free huge pages, or 0 if huge pages are unavailable.
  *  @sa `fu_volume_huge_pages_in`, `fu_huge_pages_count`.
  */
-size_t fu_volume_huge_pages(fu_topology_t);
+FU_API_RUNTIME size_t fu_volume_huge_pages(fu_topology_t);
 
 /**
  *  @brief Returns the number of free huge pages in a given memory domain.
@@ -394,14 +421,14 @@ size_t fu_volume_huge_pages(fu_topology_t);
  *  out of range or unavailable.
  *  @sa `fu_volume_huge_pages_in`, `fu_huge_pages_count`.
  */
-size_t fu_huge_pages_count_in(fu_topology_t, size_t memory_domain_index);
+FU_API_RUNTIME size_t fu_huge_pages_count_in(fu_topology_t, size_t memory_domain_index);
 
 /**
  *  @brief Returns the total number of free huge pages across all memory domains.
  *  @retval Count of free huge pages of any size, or 0 if huge pages are unavailable.
  *  @sa `fu_volume_huge_pages`, `fu_huge_pages_count_in`.
  */
-size_t fu_huge_pages_count(fu_topology_t);
+FU_API_RUNTIME size_t fu_huge_pages_count(fu_topology_t);
 
 #pragma endregion Metadata
 
@@ -418,7 +445,7 @@ size_t fu_huge_pages_count(fu_topology_t);
  *  free with it alone.
  *  @sa `fu_allocate_on_domain_id`, `fu_local_memory_of`, `fu_memory_domains_count`.
  */
-fu_memory_domain_id_t fu_memory_domain_id_at_index(fu_topology_t topology, size_t memory_domain_index);
+FU_API_RUNTIME fu_memory_domain_id_t fu_memory_domain_id_at_index(fu_topology_t topology, size_t memory_domain_index);
 
 /**
  *  @brief Allocates memory in @p memory_domain_id with the largest suitable page size.
@@ -442,8 +469,8 @@ fu_memory_domain_id_t fu_memory_domain_id_at_index(fu_topology_t topology, size_
  *  @endcode
  *  @sa `fu_free_on_domain_id`, `fu_memory_domain_id_at_index`.
  */
-void *fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t minimum_bytes,
-                                        size_t *allocated_bytes, size_t *bytes_per_page);
+FU_API_RUNTIME void *fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t minimum_bytes,
+                                                       size_t *allocated_bytes, size_t *bytes_per_page);
 
 /**
  *  @brief Allocates exactly @p bytes in @p memory_domain_id.
@@ -455,7 +482,7 @@ void *fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domain_id, 
  *  @note The pointer is aligned to at least the cache-line default, matching `fu_allocate_at_least_on_domain_id`.
  *  @sa `fu_free_on_domain_id`, `fu_allocate_at_least_on_domain_id`.
  */
-void *fu_allocate_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t bytes);
+FU_API_RUNTIME void *fu_allocate_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t bytes);
 
 /**
  *  @brief Releases memory allocated in @p memory_domain_id.
@@ -465,7 +492,7 @@ void *fu_allocate_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t by
  *  @note This API is @b thread-safe. A mismatched @p bytes is undefined behavior.
  *  @sa `fu_allocate_at_least_on_domain_id`, `fu_allocate_on_domain_id`.
  */
-void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer, size_t bytes);
+FU_API_RUNTIME void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer, size_t bytes);
 
 /**
  *  @brief Allocates one @b symmetric mapping - `bytes_per_domain` striped across every memory domain.
@@ -488,8 +515,8 @@ void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer,
  *  @endcode
  *  @sa `fu_free_symmetric`, `fu_local_memory_of`, `fu_memory_domains_count`.
  */
-void *fu_allocate_symmetric(fu_topology_t topology, size_t bytes_per_domain, size_t *stride_bytes,
-                            size_t *memory_domains_count, size_t *total_bytes, size_t *bytes_per_page);
+FU_API_RUNTIME void *fu_allocate_symmetric(fu_topology_t topology, size_t bytes_per_domain, size_t *stride_bytes,
+                                           size_t *memory_domains_count, size_t *total_bytes, size_t *bytes_per_page);
 
 /**
  *  @brief Releases a symmetric mapping from `fu_allocate_symmetric`.
@@ -498,7 +525,7 @@ void *fu_allocate_symmetric(fu_topology_t topology, size_t bytes_per_domain, siz
  *  @note This API is @b thread-safe. The size is required - the Linux backing unmaps the whole range.
  *  @sa `fu_allocate_symmetric`.
  */
-void fu_free_symmetric(void *base, size_t total_bytes);
+FU_API_RUNTIME void fu_free_symmetric(void *base, size_t total_bytes);
 
 #pragma endregion Memory
 
@@ -517,7 +544,7 @@ void fu_free_symmetric(void *base, size_t total_bytes);
  *  pool starts empty; call `fu_pool_spawn` before use.
  *  @sa `fu_pool_spawn`, `fu_pool_capabilities`, `fu_pool_delete`.
  */
-fu_pool_t fu_pool_new(char const *name, fu_capabilities_t allowed);
+FU_API_RUNTIME fu_pool_t fu_pool_new(char const *name, fu_capabilities_t allowed);
 
 /**
  *  @brief Destroys a pool and frees its resources; the handle is invalid afterward.
@@ -525,13 +552,13 @@ fu_pool_t fu_pool_new(char const *name, fu_capabilities_t allowed);
  *  @note Must not run concurrently with other operations on @p pool.
  *  @sa `fu_pool_terminate` to stop workers but keep the handle.
  */
-void fu_pool_delete(fu_pool_t pool);
+FU_API_RUNTIME void fu_pool_delete(fu_pool_t pool);
 
 /**
  *  @brief The capabilities an initialized pool actually uses - a subset of comptime & runtime.
  *  @param[in] pool Pool handle, must not be NULL.
  */
-fu_capabilities_t fu_pool_capabilities(fu_pool_t pool);
+FU_API_RUNTIME fu_capabilities_t fu_pool_capabilities(fu_pool_t pool);
 
 /**
  *  @brief Spawns @p threads workers across the @b whole machine, readying the pool for dispatch.
@@ -547,7 +574,8 @@ fu_capabilities_t fu_pool_capabilities(fu_pool_t pool);
  *  domain, this rebuilds it as a whole-machine pool before spawning.
  *  @sa `fu_pool_spawn_on` to pin to one compute domain, `fu_logical_cores_count` for the count.
  */
-fu_bool_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads, fu_caller_exclusivity_t exclusivity);
+FU_API_RUNTIME fu_bool_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads,
+                                       fu_caller_exclusivity_t exclusivity);
 
 /**
  *  @brief Spawns @p threads workers pinned to a single compute domain.
@@ -565,8 +593,8 @@ fu_bool_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads, 
  *  @ref fu_pool_spawn instead spans @b all compute domains. Without NUMA, only compute domain 0 is valid.
  *  @sa `fu_pool_spawn`, `fu_compute_domains_count`, `fu_logical_cores_count_in`.
  */
-fu_bool_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t compute_domain_index, size_t threads,
-                           fu_caller_exclusivity_t exclusivity);
+FU_API_RUNTIME fu_bool_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t compute_domain_index,
+                                          size_t threads, fu_caller_exclusivity_t exclusivity);
 
 /**
  *  @brief Whether the calling thread executes a slice of each dispatch.
@@ -578,7 +606,7 @@ fu_bool_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comput
  *  `fu_pool_is_complete` cannot be reached by polling alone.
  *  @sa `fu_pool_spawn`, `fu_pool_is_complete`.
  */
-fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t pool);
+FU_API_RUNTIME fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t pool);
 
 /**
  *  @brief The number of compute domains the pool's workers span.
@@ -587,7 +615,7 @@ fu_caller_exclusivity_t fu_pool_caller_exclusivity(fu_pool_t pool);
  *  @note Not synchronized.
  *  @sa `fu_pool_threads_count_in`.
  */
-size_t fu_pool_compute_domains_count(fu_pool_t pool);
+FU_API_RUNTIME size_t fu_pool_compute_domains_count(fu_pool_t pool);
 
 /**
  *  @brief The worker count in one compute domain of the pool.
@@ -597,7 +625,7 @@ size_t fu_pool_compute_domains_count(fu_pool_t pool);
  *  @note Not synchronized.
  *  @sa `fu_pool_compute_domains_count`.
  */
-size_t fu_pool_threads_count_in(fu_pool_t pool, size_t compute_domain_index);
+FU_API_RUNTIME size_t fu_pool_threads_count_in(fu_pool_t pool, size_t compute_domain_index);
 
 /**
  *  @brief The total worker count, including the caller on an inclusive pool.
@@ -605,7 +633,7 @@ size_t fu_pool_threads_count_in(fu_pool_t pool, size_t compute_domain_index);
  *  @retval 0 if uninitialized, else the count from `fu_pool_spawn`.
  *  @note Not synchronized.
  */
-size_t fu_pool_threads_count(fu_pool_t pool);
+FU_API_RUNTIME size_t fu_pool_threads_count(fu_pool_t pool);
 
 /**
  *  @brief Converts a global thread index to a local thread index within a compute_domain.
@@ -614,7 +642,7 @@ size_t fu_pool_threads_count(fu_pool_t pool);
  *  @param[in] compute_domain_index Index of the compute_domain, must be < `fu_pool_compute_domains_count(pool)`.
  *  @retval Local thread index within the specified compute_domain.
  */
-size_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size_t compute_domain_index);
+FU_API_RUNTIME size_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size_t compute_domain_index);
 
 /**
  *  @brief Parks idle workers in a low-power sleep, re-checking for work every @p micros.
@@ -625,7 +653,7 @@ size_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size
  *  Trades up to @p micros of startup latency for lower power draw during long idle periods; on Linux
  *  it also de-prioritizes the sleeping threads with the scheduler.
  */
-void fu_pool_sleep(fu_pool_t pool, size_t micros);
+FU_API_RUNTIME void fu_pool_sleep(fu_pool_t pool, size_t micros);
 
 /**
  *  @brief Stops the workers and clears the pool, keeping the handle for a re-spawn.
@@ -636,7 +664,7 @@ void fu_pool_sleep(fu_pool_t pool, size_t micros);
  *  thread count. Use `fu_pool_delete` for permanent teardown.
  *  @sa `fu_pool_spawn`, `fu_pool_delete`.
  */
-void fu_pool_terminate(fu_pool_t pool);
+FU_API_RUNTIME void fu_pool_terminate(fu_pool_t pool);
 
 #pragma endregion Lifetime
 
@@ -651,14 +679,14 @@ void fu_pool_terminate(fu_pool_t pool);
  *  a harvest every query on the handle answers 0, and `fu_fabric_memory_levels_count` answers 1.
  *  @sa `fu_fabric_harvest`, `fu_fabric_delete`.
  */
-fu_fabric_t fu_fabric_new(void);
+FU_API_RUNTIME fu_fabric_t fu_fabric_new(void);
 
 /**
  *  @brief Destroys a fabric and frees its observations; the handle is invalid afterward.
  *  @param[in] fabric Fabric handle, may be NULL - a no-op.
  *  @note Must not run concurrently with other operations on @p fabric.
  */
-void fu_fabric_delete(fu_fabric_t fabric);
+FU_API_RUNTIME void fu_fabric_delete(fu_fabric_t fabric);
 
 /**
  *  @brief Measures the memory fabric through the pool's pinned workers, rebuilding @p fabric.
@@ -676,7 +704,7 @@ void fu_fabric_delete(fu_fabric_t fabric);
  *  @b Cpuless memory domains, like CXL expanders, stay unwalked: portable first-touch cannot
  *  place pages there, so their edges answer 0 and they share one tier past the slowest observed.
  */
-fu_bool_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_t fabric);
+FU_API_RUNTIME fu_bool_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_t fabric);
 
 /**
  *  @brief Returns the measured read latency from a compute domain to a memory domain.
@@ -685,7 +713,7 @@ fu_bool_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_t 
  *  @retval Dependent-load latency in nanoseconds - the best recording of the edge; 0 before a
  *  harvest, for an edge no worker could reach, or an out-of-range index.
  */
-size_t fu_fabric_memory_latency(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
+FU_API_RUNTIME size_t fu_fabric_memory_latency(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
 
 /**
  *  @brief Returns the measured read bandwidth from a compute domain to a memory domain.
@@ -695,7 +723,7 @@ size_t fu_fabric_memory_latency(fu_fabric_t, size_t compute_domain_index, size_t
  *  once - the best recording of the edge; 0 before a harvest, for an edge no worker could reach,
  *  or an out-of-range index.
  */
-size_t fu_fabric_memory_bandwidth(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
+FU_API_RUNTIME size_t fu_fabric_memory_bandwidth(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
 
 /**
  *  @brief Returns the relative access distance from a compute domain to a memory domain.
@@ -707,7 +735,7 @@ size_t fu_fabric_memory_bandwidth(fu_fabric_t, size_t compute_domain_index, size
  *  The measured latency ratio to the initiator's local domain, clamped so the local domain always
  *  carries the row's minimum; unwalked edges fall back to the 10-local / 20-remote convention.
  */
-size_t fu_fabric_memory_distance(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
+FU_API_RUNTIME size_t fu_fabric_memory_distance(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index);
 
 /**
  *  @brief Returns the derived speed class of a given memory domain, independent of any initiator.
@@ -719,14 +747,14 @@ size_t fu_fabric_memory_distance(fu_fabric_t, size_t compute_domain_index, size_
  *  latency, so HBM < DDR < CXL/PMEM; boundaries are measurement-derived and can shift between
  *  harvests. @note Runs opposite to `fu_compute_level_in`.
  */
-size_t fu_fabric_memory_level_in(fu_fabric_t, size_t memory_domain_index);
+FU_API_RUNTIME size_t fu_fabric_memory_level_in(fu_fabric_t, size_t memory_domain_index);
 
 /**
  *  @brief Returns the number of distinct derived memory tiers across all memory domains.
  *  @retval 1 on single-tier systems and before a harvest, 2+ when HBM / DDR / CXL are mixed.
  *  @note The memory-axis twin of `fu_compute_levels_count`; several memory domains may share a tier.
  */
-size_t fu_fabric_memory_levels_count(fu_fabric_t);
+FU_API_RUNTIME size_t fu_fabric_memory_levels_count(fu_fabric_t);
 
 #pragma endregion Fabric
 
@@ -749,7 +777,7 @@ size_t fu_fabric_memory_levels_count(fu_fabric_t);
  *  @endcode
  *  @sa `fu_pool_unsafe_for_threads` for the non-blocking form.
  */
-void fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_context_t context);
+FU_API_RUNTIME void fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_context_t context);
 
 /**
  *  @brief Splits [0, @p n) into @b contiguous slices, one per worker, and blocks until all finish.
@@ -771,7 +799,7 @@ void fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_co
  *  @endcode
  *  @sa `fu_pool_for_n` for per-index dispatch.
  */
-void fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callback, fu_lambda_context_t context);
+FU_API_RUNTIME void fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callback, fu_lambda_context_t context);
 
 /**
  *  @brief Runs @p callback for each of @p n @b similar-cost tasks, blocking until done.
@@ -792,7 +820,7 @@ void fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callback, fu_l
  *  @endcode
  *  @sa `fu_pool_for_n_dynamic` for uneven workloads, `fu_pool_for_slices` for range callbacks.
  */
-void fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context);
+FU_API_RUNTIME void fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context);
 
 /**
  *  @brief Runs @p callback for each of @p n @b uneven-cost tasks via work-stealing, blocking until done.
@@ -813,7 +841,8 @@ void fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda
  *  @endcode
  *  @sa `fu_pool_for_n` for balanced workloads.
  */
-void fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context);
+FU_API_RUNTIME void fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_prongs_t callback,
+                                          fu_lambda_context_t context);
 
 #pragma endregion Primary API
 
@@ -844,7 +873,8 @@ typedef size_t fu_generation_t;
  *  @endcode
  *  @sa `fu_pool_unsafe_join`, `fu_pool_for_threads` for the blocking form.
  */
-fu_generation_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_context_t context);
+FU_API_RUNTIME fu_generation_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback,
+                                                          fu_lambda_context_t context);
 
 /**
  *  @brief Whether @p generation has finished - a @b non-blocking poll.
@@ -854,7 +884,7 @@ fu_generation_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t call
  *  @note On @b inclusive pools this turns non-zero only after `fu_pool_unsafe_join` runs the caller's
  *  slice, so poll-then-join is for @b exclusive pools only.
  */
-fu_bool_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation);
+FU_API_RUNTIME fu_bool_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation);
 
 /**
  *  @brief Blocks until @p generation completes, running the caller's slice on an @b inclusive pool.
@@ -871,7 +901,7 @@ fu_bool_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation);
  *  @endcode
  *  @sa `fu_pool_unsafe_for_threads`, `fu_pool_for_threads`.
  */
-void fu_pool_unsafe_join(fu_pool_t pool, fu_generation_t generation);
+FU_API_RUNTIME void fu_pool_unsafe_join(fu_pool_t pool, fu_generation_t generation);
 
 #pragma endregion Flexible API
 

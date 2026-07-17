@@ -45,3 +45,10 @@ target/
 zig-out/
 zig-cache/
 zig-pkg/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+wheelhouse/

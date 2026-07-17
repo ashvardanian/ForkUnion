@@ -109,6 +109,23 @@ if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleC
     endif ()
 endif ()
 
+# A `fork()`-ed child inherits the pool's memory but none of its workers, so it must degrade to serial rather than wait
+# on threads that no longer exist. Python's `multiprocessing` reaches this path by default on Linux.
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    add_executable(forkunion_test_fork fork.c)
+    set_target_properties(
+        forkunion_test_fork
+        PROPERTIES C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_link_libraries(forkunion_test_fork PRIVATE forkunion_static)
+    if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+        target_link_libraries(forkunion_test_fork PRIVATE -latomic)
+    endif ()
+    add_test(NAME forkunion_test_fork COMMAND forkunion_test_fork)
+endif ()
+
 # Taskflow: a third comparison backend for the C++ benchmarks, fetched into the build tree so no submodule is vendored.
 # `FIND_PACKAGE_ARGS` lets a system install satisfy configure without a clone.
 find_package(Threads REQUIRED)
