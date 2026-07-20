@@ -795,8 +795,11 @@ inline capabilities_t ram_capabilities() noexcept {
     // weaker question, including the one `numa_available` used to be asked here.
     if (linux_can_place_memory_on_domain()) caps |= capability_place_memory_on_domain_k;
 
-    // Check for huge pages support - simplest method is checking if the global directory exists
-    {
+    // Huge pages are placed *on a domain*, so this capability cannot outlast memory placement itself -
+    // the prerequisite the compile-time layer spells with an `#error`. A host that mounts the hugepages
+    // sysfs but refuses `mbind` - a seccomp sandbox, a restricted container, qemu-user - must not report
+    // the impossible pair, or a caller that trusts the runtime set walks into a placement that cannot work.
+    if (caps & capability_place_memory_on_domain_k) {
         DIR *hugepages_dir = ::opendir("/sys/kernel/mm/hugepages");
         if (hugepages_dir) {
             caps |= capability_place_huge_pages_on_domain_k;
