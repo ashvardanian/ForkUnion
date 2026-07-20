@@ -44,7 +44,7 @@ fn main() -> Result<(), cc::Error> {
 
     build
         .cpp(true) // Enable C++ support
-        .std("c++17") // Use C++17 standard
+        .std("c++20") // C++20 is preferred over 17 for better atomics
         .file("c/forkunion.cpp")
         .include("include")
         .flag_if_supported("-pedantic") // Only for GCC/Clang

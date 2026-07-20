@@ -289,16 +289,30 @@
 /**
  *  On C++17 and later we can detect misuse of lambdas that are not properly annotated.
  *  On C++20 and later we can use concepts for cleaner compile-time checks.
- */
-#if __cplusplus >= 202002L
+ *  MSVC pins `__cplusplus` at `199711L` unless `/Zc:__cplusplus` is passed, and reports the real
+ *  standard through `_MSVC_LANG` instead - so read that where it is larger, or every gate below
+ *  collapses to pre-C++17 on MSVC even under `/std:c++20`.  */
+#if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
+#define FU_CPLUSPLUS_ _MSVC_LANG
+#else
+#define FU_CPLUSPLUS_ __cplusplus
+#endif
+
+#if FU_CPLUSPLUS_ >= 202002L
 #define FU_DETECT_CPP_20_ 1
 #else
 #define FU_DETECT_CPP_20_ 0
 #endif
-#if __cplusplus >= 201703L
+#if FU_CPLUSPLUS_ >= 201703L
 #define FU_DETECT_CPP_17_ 1
 #else
 #define FU_DETECT_CPP_17_ 0
+#endif
+
+/*  C++17 is the floor: `if constexpr`, inline variables, and `std::is_nothrow_invocable_r_v` have no
+ *  fallback here. Say so once, rather than let a C++14 build fail deeper in a cascade.  */
+#if !FU_DETECT_CPP_17_
+#error "ForkUnion requires C++17 or later"
 #endif
 
 /*  Detect target CPU architecture.

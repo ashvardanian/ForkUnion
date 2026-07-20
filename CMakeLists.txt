@@ -76,25 +76,18 @@ set(FORKUNION_OPTIONAL_MACROS
     FU_WITH_RESCHEDULE_THREADS_BY_CLASS FU_WITH_PLACE_MEMORY_ON_DOMAIN FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
 )
 
-# Enforce C++17 as the minimum standard for the project.
-set(PROJECT_CXX_STANDARD 17)
-set(PROJECT_CXX_EXTENSIONS OFF)
-set(PROJECT_CXX_STANDARD_REQUIRED ON)
-
 # Header-only interface library
 add_library(forkunion_header INTERFACE)
 target_include_directories(
     forkunion_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 
-# Set C++17 requirement and features properly for library consumers
+# C++17 is the floor consumers must clear, not a ceiling: `cxx_std_17` raises a consumer below it up to 17 and leaves
+# one already at 20/23 alone, so the C++20 fast paths - concepts, the `atomic_ref` monitor, `std::popcount` - stay
+# available to whoever asks for them. No `CXX_STANDARD` property here - it governs only a target's own compilation, and
+# an INTERFACE library has none, so it would be a no-op that reads like a cap. The pre-compiled libraries below pin
+# themselves to 20.
 target_compile_features(forkunion_header INTERFACE cxx_std_17)
-set_target_properties(
-    forkunion_header
-    PROPERTIES CXX_STANDARD 17
-               CXX_STANDARD_REQUIRED ON
-               CXX_EXTENSIONS OFF
-)
 
 # Strictest possible compilation flags with fatal warnings
 if (FORKUNION_STRICT)

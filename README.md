@@ -876,6 +876,10 @@ Now, the Rust library is a wrapper over the C binding of the C++ core implementa
 
 ## Testing and Benchmarking
 
+Toolchain floors, never caps.
+The header needs __C++17__, and a C++20+ consumer keeps its own standard — gaining concepts, the `atomic_ref` waiter, and `std::popcount` — while the pre-compiled libraries build at C++20 regardless.
+The C ABI needs __C99__, and the build tooling __CMake 3.21__, __Rust 1.64__, and __Zig 0.16__.
+
 To run the C++ tests, use CMake:
 
 ```bash

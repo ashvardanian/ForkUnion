@@ -222,8 +222,18 @@ struct x86_tpause_t {
     template <typename value_type_>
     static inline bool arm_monitor_(value_type_ const *watched, value_type_ const observed) noexcept {
         arm_address_(watched);
-        return std::atomic_ref<value_type_>(*const_cast<value_type_ *>(watched)).load(std::memory_order_acquire) ==
-               observed;
+        // Acquire-load the bare word: `std::atomic_ref` where it exists, else the compiler's own load,
+        // since C++17 has no portable `atomic_ref` and this waiter already needs GCC/Clang's opcodes.
+#if FU_DETECT_CPP_20_
+        value_type_ const current =
+            std::atomic_ref<value_type_>(*const_cast<value_type_ *>(watched)).load(std::memory_order_acquire);
+#elif defined(__GNUC__) || defined(__clang__)
+        value_type_ const current = __atomic_load_n(watched, __ATOMIC_ACQUIRE);
+#else
+        value_type_ const current = *static_cast<value_type_ const volatile *>(watched);
+        std::atomic_thread_fence(std::memory_order_acquire); // ? The monitor re-check tolerates a stale read
+#endif
+        return current == observed;
     }
 
     /** @brief Sleeps in the shallow C0.1 state until @p deadline as a TSC value, an interrupt, or a store. */
