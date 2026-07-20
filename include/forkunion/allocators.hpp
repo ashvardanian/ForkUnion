@@ -67,10 +67,11 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
     void *result_ptr = ::mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
     if (result_ptr == MAP_FAILED) return nullptr; // ! Allocation failed
 
-    if (!linux_numa_bind(result_ptr, size_bytes, memory_domain_id)) {
-        ::munmap(result_ptr, size_bytes); // ? Unbind failed, clean up
-        return nullptr;                   // ! Binding failed
-    }
+    // Binding is best-effort. The pages are already validly mapped; a kernel that refuses `mbind` -
+    // qemu-user answers ENOSYS, a seccomp sandbox EPERM - still gave us memory, just placed by the
+    // default policy rather than pinned to this domain. Discarding it would fail an allocation that in
+    // fact succeeded; `runtime_capabilities()` is where a caller learns placement was unavailable.
+    linux_numa_bind(result_ptr, size_bytes, memory_domain_id);
     return result_ptr;
 
 #else
@@ -260,10 +261,9 @@ FU_MAYBE_UNUSED_ static inline void *linux_symmetric_allocate(machine_topology_t
             memory_domain_id_t const memory_domain_id =
                 topology.memory_domain_at(static_cast<memory_domain_index_t>(domain)).memory_domain_id;
             void *slice = static_cast<char *>(base) + domain * stride_bytes;
-            if (!linux_numa_bind(slice, stride_bytes, memory_domain_id)) {
-                ::munmap(base, total_bytes); // ? A slice would not bind; clean up
-                return nullptr;              // ! Binding failed
-            }
+            // Best-effort, as in `linux_numa_allocate`: the slice is validly mapped, and a kernel that
+            // refuses `mbind` still gave us distinct memory - default placement, not a failed allocation.
+            linux_numa_bind(slice, stride_bytes, memory_domain_id);
         }
     return base;
 #else
