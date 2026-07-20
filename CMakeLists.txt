@@ -353,8 +353,12 @@ include(CheckCXXSourceCompiles)
 check_cxx_source_compiles(
     "#include <atomic>
      #include <cstdint>
-     std::atomic<std::uint64_t> value;
-     int main() { return static_cast<int>(value.load()); }"
+     // Mirror the pool's own `is_lock_free`, a member atomic queried through a method. The 64-bit ops
+     // inline on x86-64, but `is_lock_free()` lowers to an `__atomic_is_lock_free` libcall that clang
+     // with libstdc++ does not fold, so a load-only probe under-reports the need and the link fails.
+     struct probe { std::atomic<std::uint64_t> slot; bool query() const noexcept { return slot.is_lock_free(); } };
+     probe value;
+     int main() { return static_cast<int>(value.slot.load()) + value.query(); }"
     FORKUNION_ATOMICS_ARE_BUILTIN
 )
 if (NOT FORKUNION_ATOMICS_ARE_BUILTIN)
