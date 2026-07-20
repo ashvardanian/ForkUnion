@@ -341,6 +341,23 @@ if (Threads_FOUND)
     target_link_libraries(forkunion_header INTERFACE Threads::Threads)
 endif ()
 
+# Does `std::atomic` need libatomic on this target? x86-64 inlines the 64-bit operations; 32-bit Arm resolves them
+# through the library, and the pools use `std::atomic<std::uint64_t>`. Probe the target rather than guess by platform -
+# LLVM's `CheckAtomic` pattern - and carry the answer on the header, so every consumer inherits it: the tests, the
+# compiled libraries, and a downstream `find_package` alike, none restating `-latomic`. The bare name `atomic` becomes
+# `-latomic` at link and stays relocatable, unlike the absolute path `find_library` would bake into the package.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles(
+    "#include <atomic>
+     #include <cstdint>
+     std::atomic<std::uint64_t> value;
+     int main() { return static_cast<int>(value.load()); }"
+    FORKUNION_ATOMICS_ARE_BUILTIN
+)
+if (NOT FORKUNION_ATOMICS_ARE_BUILTIN)
+    target_link_libraries(forkunion_header INTERFACE atomic)
+endif ()
+
 # Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
 # 0. Knows nothing of the environment: there is no longer an environment to know.
 function (forkunion_apply mode macro)

@@ -58,14 +58,7 @@ foreach (STD IN LISTS CXX_STANDARDS)
     add_test(NAME ${TGT} COMMAND ${TGT})
     set_target_properties_for_forkunion_script(${TGT})
 
-    # Link against `libatomic` for Linux and Android toolchains that might need it. ! Not `UNIX AND NOT APPLE`: FreeBSD
-    # matches that too, and its atomics live in ! compiler-rt - there is no separate `libatomic` for the linker to find.
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
-            target_link_libraries(${TGT} PRIVATE -latomic)
-        endif ()
-    endif ()
-
+    # No `-latomic` here: `forkunion_header` carries it, probed, wherever the target needs it.
 endforeach ()
 
 enable_language(C)
@@ -82,9 +75,6 @@ function (add_forkunion_c_test target extensions)
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${target} PRIVATE forkunion_static)
-    if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
-        target_link_libraries(${target} PRIVATE -latomic)
-    endif ()
     add_test(NAME ${target} COMMAND ${target})
 endfunction ()
 
@@ -103,9 +93,10 @@ endif ()
 if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
     add_forkunion_c_test(forkunion_test_c_clang_blocks ON)
     target_compile_options(forkunion_test_c_clang_blocks PRIVATE -fblocks)
-    # Apple's `libSystem` ships the Blocks runtime; other UNIX needs it linked explicitly.
+    # Apple's `libSystem` ships the Blocks runtime; other UNIX needs it linked explicitly. The bare name resolves like
+    # any library, rather than passing an opaque `-l` flag CMake cannot reason about.
     if (UNIX AND NOT APPLE)
-        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE -lBlocksRuntime)
+        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE BlocksRuntime)
     endif ()
 endif ()
 
@@ -161,13 +152,6 @@ function (add_forkunion_benchmark target source)
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${target} PRIVATE forkunion_static)
-
-    # Link against `libatomic` for Linux and Android toolchains that might need it
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
-            target_link_libraries(${target} PRIVATE -latomic)
-        endif ()
-    endif ()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         target_compile_options(
