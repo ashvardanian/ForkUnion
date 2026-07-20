@@ -738,7 +738,7 @@ constexpr bool is_power_of_two(std::size_t x) noexcept { return x && ((x & (x - 
 template <typename scalar_type_>
 constexpr int popcount(scalar_type_ value) noexcept {
     static_assert(std::is_unsigned<scalar_type_>::value, "Scalar type must be an unsigned integer");
-#if FU_DETECT_CPP_20_
+#if defined(__cpp_lib_bitops)
     return std::popcount(value); // In C++20
 #else
     // Kernighan's trick: each `value &= value - 1` clears the lowest set bit, so the loop runs once

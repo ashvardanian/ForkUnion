@@ -224,7 +224,7 @@ struct x86_tpause_t {
         arm_address_(watched);
         // Acquire-load the bare word: `std::atomic_ref` where it exists, else the compiler's own load,
         // since C++17 has no portable `atomic_ref` and this waiter already needs GCC/Clang's opcodes.
-#if FU_DETECT_CPP_20_
+#if defined(__cpp_lib_atomic_ref)
         value_type_ const current =
             std::atomic_ref<value_type_>(*const_cast<value_type_ *>(watched)).load(std::memory_order_acquire);
 #elif defined(__GNUC__) || defined(__clang__)
