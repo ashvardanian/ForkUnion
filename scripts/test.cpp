@@ -22,6 +22,13 @@ namespace fu = ashvardanian::forkunion;
 #endif
 #endif
 
+/*  Correctness only: the throughput/stress suite hammers a race window a slow emulator neither
+ *  reproduces nor runs in tolerable time. `FORKUNION_TEST_SKIP_STRESS` in CMake defines this to 1 for
+ *  the cross builds; native builds leave it 0 and run the full suite.  */
+#ifndef FU_TEST_SKIP_STRESS_
+#define FU_TEST_SKIP_STRESS_ 0
+#endif
+
 /** @brief Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
 template <typename value_type_>
 static void format_value_(char *buffer, std::size_t capacity, value_type_ const &value) noexcept {
@@ -1452,6 +1459,13 @@ int main(void) {
     }
     std::printf("All %zu unit tests passed\n", total_unit_tests);
 
+#if FU_TEST_SKIP_STRESS_
+    // The stress suite hammers the dispatch/join race window for millions of epochs. A qemu-user
+    // emulator neither reproduces the guest memory model this probes nor runs it in tolerable time,
+    // so the cross builds define it away and lean on the native Arm64 job, where the weak memory
+    // model is actually exercised.
+    std::printf("Skipping stress tests: built with FU_TEST_SKIP_STRESS_\n");
+#else
     // Start stress-testing the implementation
     std::printf("Starting stress tests...\n");
     std::size_t const max_cores = fu::allowed_cores_count();
@@ -1497,6 +1511,7 @@ int main(void) {
         std::printf("PASS\n");
     }
     std::printf("All %zu stress tests passed\n", total_stress_tests);
+#endif
 
     return EXIT_SUCCESS;
 }

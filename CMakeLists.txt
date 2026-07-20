@@ -288,6 +288,9 @@ include(CTest)
 # Default ON only when ForkUnion is the top-level project, so an `add_subdirectory` consumer does not inherit the
 # `scripts/` targets - and does not have to remember to switch them off.
 option(FORKUNION_BUILD_TESTS "Build forkunion tests" ${PROJECT_IS_TOP_LEVEL})
+option(FORKUNION_TEST_SKIP_STRESS "Run only the tests' correctness suite, skipping the slow throughput/stress cases"
+       OFF
+)
 
 if (BUILD_TESTING AND FORKUNION_BUILD_TESTS)
     enable_testing()
