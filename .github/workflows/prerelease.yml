@@ -177,9 +177,15 @@ jobs:
         run: ctest --test-dir build -R '^forkunion_test_cpp' --output-on-failure
 
   test_ubuntu_clang:
-    name: Ubuntu (Clang)
+    name: Ubuntu (Clang, ${{ matrix.stdlib }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # libc++ is the second row because it is a different standard library, not a different flag on the same one: it
+    # catches a C++20 language mode over an incomplete C++20 library - `std::atomic_ref` absent - that libstdc++ hides.
+    strategy:
+      fail-fast: false
+      matrix:
+        stdlib: [libstdc++, libc++]
     env:
       CC: clang
       CXX: clang++
@@ -189,29 +195,40 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Build C/C++
+        # CMake reads CXXFLAGS into the compile flags and LDFLAGS into the link flags, so `-stdlib` lands on both
+        # without naming a CMake variable. The libstdc++ row sets neither and builds exactly as before.
+        env:
+          CXXFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
+          LDFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential clang libclang-rt-18-dev libblocksruntime-dev
+          if [ "${{ matrix.stdlib }}" = "libc++" ]; then sudo apt install -y libc++-dev libc++abi-dev; fi
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
 
       - name: Test C & C++
         run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
 
+      # Rust and Miri never touch the C++ standard library, so they run on one row, not both.
       - name: Set up Rust
+        if: matrix.stdlib == 'libstdc++'
         run: |
           rustup update stable
           rustup default stable
           rustc -vV
       - name: Build Rust
+        if: matrix.stdlib == 'libstdc++'
         run: cargo build
       - name: Test Rust
+        if: matrix.stdlib == 'libstdc++'
         run: cargo test
 
       # Miri can't call the C shim; `--lib` skips the FFI doctests, keeping the pure-Rust unit tests.
       - name: Test Rust under Miri
+        if: matrix.stdlib == 'libstdc++'
         run: |
           rustup toolchain install nightly --component miri
           cargo +nightly miri setup

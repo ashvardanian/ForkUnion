@@ -58,6 +58,11 @@ foreach (STD IN LISTS CXX_STANDARDS)
     add_test(NAME ${TGT} COMMAND ${TGT})
     set_target_properties_for_forkunion_script(${TGT})
 
+    # test.cpp uses no GNU extensions, so -pedantic-errors rejects a C++20 language feature that slips into a
+    # lower standard - the conformance check, on the comprehensive source, not a separate lean TU. Only the
+    # C++ tests: the C tests use nested functions and blocks, and the benchmarks pull Taskflow.
+    target_compile_options(${TGT} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-pedantic-errors>)
+
     # No `-latomic` here: `forkunion_header` carries it, probed, wherever the target needs it.
 endforeach ()
 
