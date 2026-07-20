@@ -22,7 +22,7 @@ namespace forkunion {
 /**
  *  @brief Sleeps the calling thread for @p micros microseconds.
  *  @note Linux's `clock_nanosleep` lets us name the clock; Darwin only has `nanosleep`, whose clock
- *        is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
+ *      is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
  */
 FU_MAYBE_UNUSED_ static inline void sleep_for_micros(FU_MAYBE_UNUSED_ std::size_t const micros) noexcept {
 #if FU_ON_WINDOWS
@@ -83,10 +83,10 @@ struct alignas(default_alignment_k) pinned_thread_t {
     /**
      *  @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`.
      *  @note Lives here, rather than in a second array, so the pool allocates once and the cursor
-     *        inherits both this record's cache-line padding and its NUMA node.
+     *      inherits both this record's cache-line padding and its NUMA node.
      *  @note Fixed to `std::size_t` because `colocated_pool` is not templated on an index
-     *        width, unlike `flat_pool`. The narrow-index debug configs, and the cursor's overflow
-     *        argument, therefore only ever exercise `flat_pool`.
+     *      width, unlike `flat_pool`. The narrow-index debug configs, and the cursor's overflow
+     *      argument, therefore only ever exercise `flat_pool`.
      */
     dynamic_claim<std::size_t> claim {};
 };
@@ -270,7 +270,7 @@ struct colocated_pool {
     /**
      *  @brief Whether every worker sits on the core this pool asked for.
      *  @note False on platforms with no thread placement, and false when a `cpuset` crowded the pool
-     *        onto fewer cores than it has threads - which is where spinning workers fall apart.
+     *      onto fewer cores than it has threads - which is where spinning workers fall apart.
      */
     bool all_threads_pinned() const noexcept { return threads_count() != 0 && unpinned_threads_ == 0; }
 
@@ -749,7 +749,7 @@ struct colocated_pool {
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
      *  @retval Same value as `threads_count()`, as we only support one compute_domain.
      *  @note Shape parity with `distributed_pool`: generic callers - the C ABI's `visit` and the
-     *        distributed invokers - call `pool.threads_count(domain)` on every pool kind.
+     *      distributed invokers - call `pool.threads_count(domain)` on every pool kind.
      */
     thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
@@ -1033,8 +1033,8 @@ class invoke_distributed_for_n_dynamic {
     index_type_ n_;
 
     /** @brief Where one domain's tasks live and how they split across its threads. Computed the
-     *         same way by `reset_slices_` (to publish cursors) and `operator()` (to place the
-     *         static prong), so the two can never drift. */
+     *      same way by `reset_slices_` (to publish cursors) and `operator()` (to place the
+     *      static prong), so the two can never drift. */
     struct domain_layout_t {
         /** @brief This domain's task span inside `[0, n_)`. */
         indexed_range<index_type_> range;
@@ -1253,7 +1253,7 @@ struct distributed_pool {
     /**
      *  @brief Whether every worker sits on the core this pool asked for.
      *  @note False on platforms with no thread placement, and false when a `cpuset` crowded the pool
-     *        onto fewer cores than it has threads - which is where spinning workers fall apart.
+     *      onto fewer cores than it has threads - which is where spinning workers fall apart.
      */
     bool all_threads_pinned() const noexcept { return threads_count_ != 0 && unpinned_threads_count() == 0; }
 
@@ -1578,14 +1578,14 @@ struct distributed_pool {
 
 /**
  *  @brief One recorded observation of a memory-fabric edge: what @p initiator's cores see when
- *         reaching memory resident on @p target.
+ *      reaching memory resident on @p target.
  *
  *  The chase and the stream are separate experiments, so each record carries the metric its
  *  experiment produced, 0 for the other; `measured_fabric` folds the log into per-metric envelopes.
  */
 struct measured_edge_t {
     /** @brief The compute domain whose cores issued the loads - the pool's pinning unit, never a
-     *         memory domain: sibling domains on one controller still measure apart. */
+     *      memory domain: sibling domains on one controller still measure apart. */
     compute_domain_index_t initiator {};
     /** @brief The memory domain whose DRAM answered the loads. */
     memory_domain_index_t target {};
@@ -1598,15 +1598,15 @@ struct measured_edge_t {
 /** @brief One hop of the latency walk, padded to a cache line so consecutive slots never share one. */
 struct alignas(64) chase_slot_t {
     /** @brief Index of the slot the walk visits next; no initializer, as `try_resize_uninitialized`
-     *         demands trivial construction and `thread_chase_list_` writes every slot anyway. */
+     *      demands trivial construction and `thread_chase_list_` writes every slot anyway. */
     std::uint32_t next_slot_index;
 };
 
 /**
  *  @brief Threads a single Sattolo cycle through @p slots - a linked list where every load's address
- *         depends on the previous load, so prefetchers see noise and the walk pays true latency.
+ *      depends on the previous load, so prefetchers see noise and the walk pays true latency.
  *  @note Writing the links is also the FIRST touch of every page, which is what places the list on
- *        the toucher's memory domain on every OS - no `mbind`, no `libnuma`, no ACPI.
+ *      the toucher's memory domain on every OS - no `mbind`, no `libnuma`, no ACPI.
  */
 inline void thread_chase_list_(chase_slot_t *slots, std::size_t const count) noexcept {
     for (std::size_t i = 0; i != count; ++i) slots[i].next_slot_index = static_cast<std::uint32_t>(i);
@@ -1620,9 +1620,9 @@ inline void thread_chase_list_(chase_slot_t *slots, std::size_t const count) noe
 
 /**
  *  @brief Walks dependent loads through the list in @p segments timed stretches, returning the
- *         @b fastest stretch's nanoseconds per hop - the least-contended glimpse of the fabric.
+ *      @b fastest stretch's nanoseconds per hop - the least-contended glimpse of the fabric.
  *  @note Each stretch continues where the last stopped, and the single Sattolo cycle revisits no
- *        slot until it closes, so every stretch walks lines no stretch has cached before.
+ *      slot until it closes, so every stretch walks lines no stretch has cached before.
  */
 inline std::size_t chase_ns_per_hop_(chase_slot_t const *slots, std::size_t const hops,
                                      std::size_t const segments) noexcept {
@@ -1640,7 +1640,7 @@ inline std::size_t chase_ns_per_hop_(chase_slot_t const *slots, std::size_t cons
 }
 
 /** @brief Runs @p work on the one pool worker with the given global @p thread index; the other
- *         workers pass through the broadcast untouched. */
+ *      workers pass through the broadcast untouched. */
 template <typename pool_type_, typename work_type_>
 static void run_on_worker_(pool_type_ &pool, std::size_t const thread, work_type_ &&work) noexcept {
     // ? A `local_thread` argument converts to its global index, so this fits every pool's callback shape
@@ -1661,13 +1661,13 @@ inline std::size_t chase_list_bytes_(memory_domain_t const &target) noexcept {
 }
 
 /** @brief Fills @p words with `split_mix` draws - the FIRST touch that places every page on the
- *         filling worker's memory domain, and data no reduction can constant-fold away. */
+ *      filling worker's memory domain, and data no reduction can constant-fold away. */
 inline void fill_stream_words_(std::uint64_t *words, std::size_t const count) noexcept {
     for (std::size_t i = 0; i != count; ++i) words[i] = split_mix(i);
 }
 
 /** @brief Sums @p count words - a plain reduction the compiler is free to vectorize, since
- *         saturating the controller is exactly what a bandwidth probe wants. */
+ *      saturating the controller is exactly what a bandwidth probe wants. */
 inline std::uint64_t stream_words_(std::uint64_t const *words, std::size_t const count) noexcept {
     std::uint64_t sum = 0;
     for (std::size_t i = 0; i != count; ++i) sum += words[i];
@@ -1675,8 +1675,8 @@ inline std::uint64_t stream_words_(std::uint64_t const *words, std::size_t const
 }
 
 /** @brief Bytes a stream needs to dwarf every cache the harvest can name - its repeats re-read
- *         the same buffer, and a cache-resident buffer would report the cache's bandwidth - and
- *         to run long past the fork-join overhead: at least 8 MiB per worker reading it. */
+ *      the same buffer, and a cache-resident buffer would report the cache's bandwidth - and
+ *      to run long past the fork-join overhead: at least 8 MiB per worker reading it. */
 inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_domain_t const &target,
                                  std::size_t const widest_domain_threads) noexcept {
     std::uint64_t largest_cache = 0;
@@ -1696,7 +1696,7 @@ inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_doma
 inline constexpr std::size_t unreachable_position_k = ~static_cast<std::size_t>(0);
 
 /** @brief One pool worker per memory domain, for first-touching lists onto it - placement is a
- *         property of the touching thread's position, so any local domain's worker serves. */
+ *      property of the touching thread's position, so any local domain's worker serves. */
 template <typename pool_type_>
 static bool touchers_per_position_(machine_topology_t const &topology, pool_type_ &pool,
                                    dynamic_array<std::size_t> &touchers) noexcept {
@@ -1716,7 +1716,7 @@ static bool touchers_per_position_(machine_topology_t const &topology, pool_type
 
 /**
  *  @brief Measures the saturated read bandwidth from every initiator compute domain to one @p target
- *         memory domain, appending the observations to @p edges.
+ *      memory domain, appending the observations to @p edges.
  *  @retval false when the stream cannot be allocated or an edge cannot be recorded.
  *
  *  One @p toucher-filled buffer serves every initiator: streams need no cold start, they evict
@@ -1778,7 +1778,7 @@ static bool try_measure_bandwidth_edges_(machine_topology_t const &topology, poo
 
 /**
  *  @brief Derives dense memory-tier ordinals from an edge log, writing one rank per memory domain
- *         into @p levels and returning the number of distinct tiers (>= 1).
+ *      into @p levels and returning the number of distinct tiers (>= 1).
  *  @param scratch Caller-provided workspace of `4 * memory_domains_count` entries.
  *
  *  A tier is a property of the MEDIUM, independent of any initiator: each target is keyed by the
@@ -1846,9 +1846,9 @@ FU_MAYBE_UNUSED_ static std::size_t derive_memory_levels_(measured_edge_t const 
 
 /**
  *  @brief The measured memory fabric - what this process @b observed, as opposed to the structure
- *         the OS @b declared in `machine_topology`. Two query families: EDGE queries `(initiator,
- *         target)` describe one interconnect link; MEDIUM queries `(target)` describe the memory
- *         pool itself, independent of any initiator.
+ *      the OS @b declared in `machine_topology`. Two query families: EDGE queries `(initiator,
+ *      target)` describe one interconnect link; MEDIUM queries `(target)` describe the memory
+ *      pool itself, independent of any initiator.
  *
  *  Completes the `try_harvest` pipeline: a `machine_topology` is harvested first and stays
  *  immutable, a `distributed_pool` spawns on it, and the fabric then harvests through that pool's
@@ -1966,7 +1966,7 @@ class measured_fabric {
     }
 
     /** @brief The pool's derived speed class, 0 = fastest; keyed by the best bandwidth any
-     *         initiator sustains to it, ties split by the best latency. 0 if out of range.
+     *      initiator sustains to it, ties split by the best latency. 0 if out of range.
      *  @note Tier boundaries are measurement-derived and can shift between harvests. */
     std::size_t memory_level_in(memory_domain_index_t const memory_domain_index) const noexcept {
         if (memory_domain_index >= memory_domains_count_) return 0;
@@ -1986,11 +1986,11 @@ class measured_fabric {
 
     /**
      *  @brief Harvests every reachable edge and the tiers derived from them through @p pool's
-     *         pinned workers, replacing any previous snapshot. The @p topology is only read.
+     *      pinned workers, replacing any previous snapshot. The @p topology is only read.
      *  @retval false when the pool spans no memory domains or a probe buffer cannot be allocated;
-     *          the fabric is then left empty, never half-written.
+     *      the fabric is then left empty, never half-written.
      *  @note Not thread-safe: dispatches on the pool and rebuilds this fabric, so call it between
-     *        task batches and do not query concurrently. Expect seconds of runtime on large fabrics.
+     *      task batches and do not query concurrently. Expect seconds of runtime on large fabrics.
      *
      *  Targets are the memory domains some worker can first-touch; @b cpuless domains, like CXL
      *  expanders, stay unwalked, since portable first-touch cannot place pages there.

@@ -104,7 +104,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
 static constexpr int win_core_group_shift_k = 6;
 static constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
 /** @brief Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap
- *         of 64 @b per @b group, never a cap on total cores (a machine with more uses several groups). */
+ *      of 64 @b per @b group, never a cap on total cores (a machine with more uses several groups). */
 static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
 
 FU_MAYBE_UNUSED_ static inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
@@ -145,9 +145,9 @@ using core_mask_word_t = std::uint64_t;
  *  logical processors from zero, and Windows packs `(group << 6) | bit` into the same integer.
  *
  *  @note Not `CPU_ALLOC`. That macro is `malloc` behind a name - glibc's `__sched_cpualloc` rounds
- *        the count up and tail-calls it - which would both bypass this allocator and contradict what
- *        the library promises. A `dynamic_array` sized from `possible_cores()` costs one cold-path
- *        allocation and, unlike a fixed `cpu_set_t`, does not stop at glibc's 1024-core `CPU_SETSIZE`.
+ *      the count up and tail-calls it - which would both bypass this allocator and contradict what
+ *      the library promises. A `dynamic_array` sized from `possible_cores()` costs one cold-path
+ *      allocation and, unlike a fixed `cpu_set_t`, does not stop at glibc's 1024-core `CPU_SETSIZE`.
  */
 template <typename allocator_type_ = std::allocator<core_mask_word_t>>
 class core_mask {
@@ -163,7 +163,7 @@ class core_mask {
     /**
      *  @brief Upper bound on the `core_id_t` values this machine can produce - the width a mask covers.
      *  @note Not `possible_cores()`. Windows ids are `(group << 6) | bit`, so a two-group machine with
-     *        80 logical processors still emits ids up to 103. Sizing by the core count would drop them.
+     *      80 logical processors still emits ids up to 103. Sizing by the core count would drop them.
      */
     static std::size_t id_space() noexcept {
 #if FU_ON_WINDOWS
@@ -259,7 +259,7 @@ FU_MAYBE_UNUSED_ static inline bool try_capture_thread_cores(FU_MAYBE_UNUSED_ co
 /**
  *  @brief Number of cores the calling thread may run on, or `possible_cores()` where unknowable.
  *  @note Prefer this to `std::thread::hardware_concurrency` when sizing a pool: the latter counts
- *        the machine's cores, not the ones this process was given.
+ *      the machine's cores, not the ones this process was given.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
     core_mask_t allowed;
@@ -331,7 +331,7 @@ FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ nati
  *  @brief Confines @p thread to the @p count cores listed in @p cores.
  *  @retval false when the platform exposes no thread placement, which is @b not an error.
  *  @note A thin adaptor: it builds a `core_mask` and defers to `try_apply_thread_cores`, which is
- *        where the per-platform placement lives. It owns no platform logic of its own.
+ *      where the per-platform placement lives. It owns no platform logic of its own.
  */
 FU_MAYBE_UNUSED_ static inline bool try_pin_thread_to_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
                                                             FU_MAYBE_UNUSED_ core_id_t const *cores,
@@ -394,7 +394,7 @@ FU_MAYBE_UNUSED_ static inline bool try_read_uint_at_path(char const *path, std:
  *  @brief Reads the first line of a `/sys` or `/proc` file into @p line, newline and all.
  *  @retval false where the file is absent, empty, or its first line did not fit.
  *  @note Truncation is a failure, not a prefix: a clipped cpulist names fewer cores than the kernel
- *        does, and would read like a complete answer.
+ *      does, and would read like a complete answer.
  */
 FU_MAYBE_UNUSED_ static inline bool try_read_line_at_path(char const *path, char *line,
                                                           std::size_t const line_capacity) noexcept {
@@ -863,7 +863,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t capacity_of_core(FU_MAYBE_UNUSED_ cor
 /**
  *  @brief Hands every `[low, high]` range of a Linux id list - "0", "0-3", or "0,2-4" - to @p visit.
  *  @note One parser for every list the kernel publishes: `shared_cpu_list`, a domain's `cpulist`, and
- *        `node/online`. Ranges arrive inclusive on both ends, as written.
+ *      `node/online`. Ranges arrive inclusive on both ends, as written.
  */
 template <typename visitor_type_>
 FU_MAYBE_UNUSED_ static inline void for_each_id_list_range(char const *line, visitor_type_ &&visit) noexcept {
@@ -1031,8 +1031,8 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
  *  @brief Reads one memory domain's total RAM into @p bytes - what `numa_node_size64` returned.
  *  @retval false where the domain publishes no `meminfo` - offline, or absent from a gappy id space.
  *  @note Fallible rather than 0-sentinel because the distinction is load-bearing: false is that
- *        function's negative return, while true with zero @p bytes is a memoryless domain, still real.
- *        Its `free` out-parameter is not mirrored - the only caller wrote it and never read it.
+ *      function's negative return, while true with zero @p bytes is a memoryless domain, still real.
+ *      Its `free` out-parameter is not mirrored - the only caller wrote it and never read it.
  */
 FU_MAYBE_UNUSED_ static inline bool try_read_ram_bytes_of_memory_domain(memory_domain_id_t const id,
                                                                         std::size_t &bytes) noexcept {
@@ -1060,7 +1060,7 @@ FU_MAYBE_UNUSED_ static inline bool try_read_ram_bytes_of_memory_domain(memory_d
  *  @brief Reads the cores of one memory domain into @p cores - what `numa_node_to_cpus` filled.
  *  @retval false where the domain names no cpulist, or the mask could not be sized to hold it.
  *  @note A `core_mask`, so the harvest's own allocator owns it - `numa_allocate_cpumask` malloc'd
- *        behind its back, the very thing `core_mask` refuses `CPU_ALLOC` over.
+ *      behind its back, the very thing `core_mask` refuses `CPU_ALLOC` over.
  */
 FU_MAYBE_UNUSED_ static inline bool try_capture_memory_domain_cores(memory_domain_id_t const id,
                                                                     core_mask_t &cores) noexcept {
@@ -1081,7 +1081,7 @@ FU_MAYBE_UNUSED_ static inline bool try_capture_memory_domain_cores(memory_domai
 #if FU_ON_WINDOWS
 /**
  *  @brief One accumulator per (processor group, efficiency class): the union of that class's core masks
- *         within the group, and the largest private cache seen for it.
+ *      within the group, and the largest private cache seen for it.
  *  @sa `try_harvest_windows` builds these from the processor-core and cache relationships, then reads
  *      them back per NUMA node - so it never keeps a per-processor scratch table.
  */
@@ -1095,7 +1095,7 @@ struct win_group_class_cell_t {
 /**
  *  @brief Detects whether this SDK's `NUMA_NODE_RELATIONSHIP` exposes the multi-group `GroupMasks[]`.
  *  @note Version macros are unreliable here - MinGW reports Windows 7 yet defines the member - so we
- *        probe the member itself. Older SDKs model a node as a single group, read by the fallback.
+ *      probe the member itself. Older SDKs model a node as a single group, read by the fallback.
  */
 template <typename numa_relationship_type_, typename = void>
 struct win_numa_has_group_masks : std::false_type {};
@@ -1107,8 +1107,8 @@ struct win_numa_has_group_masks<numa_relationship_type_,
 /**
  *  @brief Invokes @p visitor(group, mask) for every processor group a NUMA @p node owns.
  *  @note Templated on the node type so the discarded `if constexpr` branch is dependent and only the
- *        supported member is ever compiled. A node spanning several groups (the largest servers) is
- *        thus enumerated in full on new SDKs, and read through its single group on old ones.
+ *      supported member is ever compiled. A node spanning several groups (the largest servers) is
+ *      thus enumerated in full on new SDKs, and read through its single group on old ones.
  */
 template <typename numa_relationship_type_, typename visitor_type_>
 static inline void win_numa_for_each_group(numa_relationship_type_ const &node, visitor_type_ &&visitor) noexcept {
@@ -1181,7 +1181,7 @@ FU_MAYBE_UNUSED_ static inline bool apple_sysctl_string(char const *name, char *
 /**
  *  @brief Apple's `hw.perflevelN.name` vocabulary as an @b absolute ladder; higher is more performant.
  *  @note Absolute, unlike `compute_level`: "Performance" is the same class on an M1 (its top tier)
- *        and an M5 Pro (its bottom). Apple has shipped exactly these three names.
+ *      and an M5 Pro (its bottom). Apple has shipped exactly these three names.
  */
 enum apple_core_quality_t : core_quality_t {
     apple_efficiency_k = 0,  // "Efficiency" - the only tier that is physically E-cores
@@ -1762,8 +1762,8 @@ struct machine_topology {
      *  would hand a wide-cache cluster more tasks than it can necessarily retire any faster.
      *
      *  @note macOS exposes no hard pinning - `thread_policy_set(THREAD_AFFINITY_POLICY)` returns
-     *        `KERN_NOT_SUPPORTED` on arm64, and QoS classes are the only placement lever. These
-     *        domains are therefore descriptive: `spawn_on` reports them, the kernel still migrates.
+     *      `KERN_NOT_SUPPORTED` on arm64, and QoS classes are the only placement lever. These
+     *      domains are therefore descriptive: `spawn_on` reports them, the kernel still migrates.
      */
     bool try_harvest_apple() noexcept {
         std::size_t const total_cores = apple_sysctl_uint("hw.logicalcpu");
@@ -1896,9 +1896,9 @@ struct machine_topology {
      *  Apple path. `cache_bytes` is the largest private (L1/L2) cache the kernel reports for the class.
      *
      *  @note A `core_id_t` here is not a flat index: it packs the (group, in-group bit) pair via
-     *        `win_encode_core_id`, which `try_pin_thread_to_cores` decodes back into a `GROUP_AFFINITY`.
+     *      `win_encode_core_id`, which `try_pin_thread_to_cores` decodes back into a `GROUP_AFFINITY`.
      *  @note A NUMA node spanning several processor groups (the largest servers) is enumerated in full
-     *        where the SDK exposes `GroupMasks[]`; @sa `win_numa_for_each_group`.
+     *      where the SDK exposes `GroupMasks[]`; @sa `win_numa_for_each_group`.
      */
     bool try_harvest_windows() noexcept {
         // Pull one relationship class into a heap buffer the caller frees. The record layout is

@@ -142,10 +142,10 @@
 /**
  *  @brief Can we bind a thread to a set of cores, and have the kernel honour it?
  *  @note Deliberately independent of `FU_WITH_PLACE_MEMORY_ON_DOMAIN`. `pthread_setaffinity_np` needs no
- *        `libnuma`, and a Linux box without it could pin perfectly well - it simply never did,
- *        because a single NUMA macro guarded both.
+ *      `libnuma`, and a Linux box without it could pin perfectly well - it simply never did,
+ *      because a single NUMA macro guarded both.
  *  @note False on Apple Silicon, where `thread_policy_set(THREAD_AFFINITY_POLICY)` answers
- *        `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
+ *      `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
  */
 #if !defined(FU_WITH_PLACE_THREADS_BY_AFFINITY)
 #define FU_WITH_PLACE_THREADS_BY_AFFINITY (FU_ON_LINUX || FU_ON_FREEBSD || FU_ON_WINDOWS)
@@ -158,7 +158,7 @@
 
 /** @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply?
  *  @note Linux spells it `sched_setscheduler(SCHED_IDLE)`; FreeBSD rejects `SCHED_IDLE` but reaches the
- *        same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`. */
+ *      same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`. */
 #if !defined(FU_WITH_RESCHEDULE_THREADS_BY_CLASS)
 #define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
 #endif
@@ -399,10 +399,10 @@
 
 /** @brief Can we deterministically push a freshly-written cache line away from this core?
  *  @note x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the
- *        `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
- *        and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
- *        unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
- *        reached only through the runtime capability, never this gate. */
+ *      `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
+ *      and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
+ *      unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
+ *      reached only through the runtime capability, never this gate. */
 #if !defined(FU_WITH_DEMOTE_CACHE_LINES)
 #define FU_WITH_DEMOTE_CACHE_LINES                                    \
     ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
@@ -411,7 +411,7 @@
 
 /** @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
  *  @note Every ISA here places its write-prefetch in hint space - x86 `PREFETCHW`, AArch64
- *        `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
+ *      `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
 #if !defined(FU_WITH_PROMOTE_CACHE_LINES)
 #define FU_WITH_PROMOTE_CACHE_LINES                                   \
     ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
@@ -451,8 +451,8 @@ static_assert(mpol_static_nodes_k == MPOL_F_STATIC_NODES, "MPOL_F_STATIC_NODES i
 /**
  *  @brief One past the highest memory-domain id we will bind - the node mask's width.
  *  @note The kernel's own ceiling: `MAX_NUMNODES` is `1 << CONFIG_NODES_SHIFT`, which peaks at 10.
- *        An id at or past this is one the kernel cannot represent, so declining it declines nothing.
- *        Bounds @b domains, never cores - those are a `core_mask`, which grows.
+ *      An id at or past this is one the kernel cannot represent, so declining it declines nothing.
+ *      Bounds @b domains, never cores - those are a `core_mask`, which grows.
  */
 static constexpr std::size_t max_memory_domains_k = 1024;
 static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
@@ -474,7 +474,7 @@ static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(u
  *  with three compute domains over one memory domain.
  *
  *  @note The implicit widening also means a raw `array[compute_domain]` still compiles. The enums stop
- *        the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
+ *      the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
  */
 enum compute_domain_index_t : std::size_t {};
 
@@ -538,10 +538,10 @@ enum capabilities_t : unsigned int {
     capability_risc5_wrs_k = 1 << 5,
 
     /** Own the raw OS thread handle instead of a `std::thread` - the substrate the thread levers stand on. Built:
-       `FU_WITH_OS_THREADS`. */
+     * `FU_WITH_OS_THREADS`. */
     capability_os_threads_k = 1 << 6,
     /** Enumerate this machine's cores, compute domains, and memory domains. The root the placements need. Built:
-       `FU_WITH_TOPOLOGY`. */
+     * `FU_WITH_TOPOLOGY`. */
     capability_topology_k = 1 << 7,
     /**
      *  Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
@@ -1139,7 +1139,7 @@ class dynamic_array {
 
     /** @brief Like `try_resize`, but skips the zero-fill so the caller controls the first touch.
      *  @note Trivial value types only - nothing is constructed, so every element must be written
-     *        before it is read. @sa `sharded_array::try_resize_uninitialized`, the same contract. */
+     *      before it is read. @sa `sharded_array::try_resize_uninitialized`, the same contract. */
     bool try_resize_uninitialized(std::size_t const new_size) noexcept {
         static_assert(std::is_trivially_default_constructible_v<value_t> && std::is_trivially_destructible_v<value_t>,
                       "Uninitialized storage is only safe for trivial value types");
@@ -1530,8 +1530,8 @@ struct indexed_split {
     /**
      *  @brief The chunk owning task @p task - the inverse of `operator[]`, in closed form.
      *  @note The first `remainder_` chunks are one task larger, so the boundary between the two
-     *        regimes sits at `remainder_ * (quotient_ + 1)`; a `quotient_` of zero puts every valid
-     *        task in the first regime, so the division by `quotient_` below is never reached.
+     *      regimes sits at `remainder_ * (quotient_ + 1)`; a `quotient_` of zero puts every valid
+     *      task in the first regime, so the division by `quotient_` below is never reached.
      */
     inline index_t index_of(index_t const task) const noexcept {
         index_t const larger_chunks_end = static_cast<index_t>(remainder_ * (quotient_ + 1));
@@ -1544,7 +1544,7 @@ using indexed_split_t = indexed_split<>;
 
 /**
  *  @brief Pre-C++20 sentinel type for iterators.
- *  @see   https://en.cppreference.com/w/cpp/iterator/default_sentinel.html
+ *  @see https://en.cppreference.com/w/cpp/iterator/default_sentinel.html
  */
 struct default_sentinel_t {};
 
@@ -1640,8 +1640,8 @@ struct coprime_permutation_range {
 
     /**
      *  @note The seed shifts where the walk @b starts, not only how it steps. Deriving the stride
-     *        alone would leave every seed emitting the same first value, so a pool of drained threads
-     *        would descend on that one victim together before their strides pulled them apart.
+     *      alone would leave every seed emitting the same first value, so a pool of drained threads
+     *      would descend on that one victim together before their strides pulled them apart.
      */
     iterator begin() const noexcept { return iterator(start_, length_, stride_, first_offset_, length_); }
     default_sentinel_t end() const noexcept { return {}; }
@@ -1730,7 +1730,7 @@ using dynamic_claim_t = dynamic_claim<>;
 
 /**
  *  @brief Drains whatever is left of one thread's slice into @p fork - the shared core of both the
- *         flat and the distributed `for_n_dynamic` invokers, so its invariants live in one place.
+ *      flat and the distributed `for_n_dynamic` invokers, so its invariants live in one place.
  *
  *  A read-only probe first: a drained slice is skipped in Shared state - no dirtying add, no line
  *  migration - which is the entire cost of visiting an empty neighbour once a small dispatch runs

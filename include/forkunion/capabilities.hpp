@@ -153,12 +153,12 @@ inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
  *    it early. It is what this used to be; `UMWAIT` is strictly better when there is a word to watch.
  *
  *  @note `UMWAIT`'s control selects the sleep depth: bit 0 = 1 picks @b C0.1,
- *        shallow and fast-waking; bit 0 = 0 picks @b C0.2, deeper and slower. A fork-join barrier resolves in
- *        tens of nanoseconds, so we ask for C0.1. Neither lowers voltage: like ARM's `WFE`, this
- *        clock-gates and saves dynamic power only, and never releases the core to the scheduler.
+ *      shallow and fast-waking; bit 0 = 0 picks @b C0.2, deeper and slower. A fork-join barrier resolves in
+ *      tens of nanoseconds, so we ask for C0.1. Neither lowers voltage: like ARM's `WFE`, this
+ *      clock-gates and saves dynamic power only, and never releases the core to the scheduler.
  *
  *  @warning The `UMONITOR` and `UMWAIT` opcodes are hand-encoded and, unlike the AArch64 path, have
- *           not been exercised on `WAITPKG` silicon in this tree. Gated at runtime by `capability_x86_tpause_k`.
+ *      not been exercised on `WAITPKG` silicon in this tree. Gated at runtime by `capability_x86_tpause_k`.
  */
 struct x86_tpause_t {
     static constexpr capabilities_t capability_k = capability_x86_tpause_k;
@@ -438,15 +438,15 @@ struct risc5_pause_t {
  *  register-width epoch.
  *
  *  @note Like ARM's `WFE`, this clock-gates and saves dynamic power only; it never releases the hart
- *        to a scheduler. The sibling `WRS.NTO` "No TimeOut" waits unbounded, for a single-word loop.
+ *      to a scheduler. The sibling `WRS.NTO` "No TimeOut" waits unbounded, for a single-word loop.
  *
  *  @note `WRS.STO` is @b manually encoded as `.4byte 0x01d00073` so the surrounding build needs no
- *        `-march=...+zawrs` assembler support; `LR` is plain `A`-extension, present on any core that
- *        would carry `Zawrs`.
+ *      `-march=...+zawrs` assembler support; `LR` is plain `A`-extension, present on any core that
+ *      would carry `Zawrs`.
  *
  *  @warning Hand-encoded and not exercised on `Zawrs` silicon in this tree; it needs a runtime
- *           `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe (not yet wired) before it
- *           may be selected.
+ *      `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe (not yet wired) before it
+ *      may be selected.
  */
 struct risc5_wrs_t {
     static constexpr capabilities_t capability_k = capability_risc5_wrs_k;
@@ -543,9 +543,9 @@ using preferred_yield_t = standard_yield_t;
 /**
  *  @brief x86 cache hints: `CLDEMOTE` toward the LLC, `PREFETCHW` for write-intent promotion.
  *  @note Both live in hint or reserved-NOP space, so neither can fault on any x86-64 part; whether
- *        `CLDEMOTE` actually bites is reported by `capability_x86_cldemote_k` - detected, never
- *        dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
- *        MSVC encodes the same bytes through `_mm_cldemote` / `_m_prefetchw`, no `/arch` needed.
+ *      `CLDEMOTE` actually bites is reported by `capability_x86_cldemote_k` - detected, never
+ *      dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
+ *      MSVC encodes the same bytes through `_mm_cldemote` / `_m_prefetchw`, no `/arch` needed.
  */
 struct x86_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_x86_cldemote_k;
@@ -570,11 +570,11 @@ struct x86_cache_hints_t {
 /**
  *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes.
  *  @note There is no demote on Arm - the clean is the nearest thing: the next claimer's snoop finds
- *        a clean line instead of forcing a dirty intervention, at the price of a memory write. The
- *        clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
- *        `FU_WITH_DEMOTE_CACHE_LINES` gate requires `FU_ON_LINUX` on this architecture. The
- *        persistence-targeted `DC CVAP`/`CVADP` are deliberately absent: UNDEFINED without
- *        `FEAT_DPB`/`FEAT_DPB2`, and they buy a NUMA hand-off nothing.
+ *      a clean line instead of forcing a dirty intervention, at the price of a memory write. The
+ *      clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
+ *      `FU_WITH_DEMOTE_CACHE_LINES` gate requires `FU_ON_LINUX` on this architecture. The
+ *      persistence-targeted `DC CVAP`/`CVADP` are deliberately absent: UNDEFINED without
+ *      `FEAT_DPB`/`FEAT_DPB2`, and they buy a NUMA hand-off nothing.
  */
 struct arm64_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_arm64_dc_cvac_k;
@@ -590,10 +590,10 @@ struct arm64_cache_hints_t {
 #if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
 /**
  *  @brief AArch64 promotion only, for kernels that keep `SCTLR_EL1.UCI` clear - Windows and the
- *         BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
+ *      BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
  *  @note Mirrors `risc5_cache_hints_t`'s shape: the promote is a `PRFM` hint that cannot fault
- *        anywhere. MSVC reaches it through `__prefetch2(address, 0x10)`, whose prfop immediate
- *        `0b10000` spells PST-L1-KEEP - the same encoding the asm arm emits.
+ *      anywhere. MSVC reaches it through `__prefetch2(address, 0x10)`, whose prfop immediate
+ *      `0b10000` spells PST-L1-KEEP - the same encoding the asm arm emits.
  */
 struct arm64_prefetch_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
@@ -611,10 +611,10 @@ struct arm64_prefetch_cache_hints_t {
 #if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_
 /**
  *  @brief RISC-V promotion only: `prefetch.w` is an `ORI x0, ...` hint that cannot fault, with or
- *         without Zicbop silicon.
+ *      without Zicbop silicon.
  *  @note The `cbo.clean` demote is deliberately a no-op here: it raises illegal-instruction unless
- *        the kernel set `senvcfg.CBCFE`, which only `hwprobe` can attest at runtime - so it belongs
- *        to a runtime-dispatch tier behind `capability_risc5_zicbom_k`, never a compile-time policy.
+ *      the kernel set `senvcfg.CBCFE`, which only `hwprobe` can attest at runtime - so it belongs
+ *      to a runtime-dispatch tier behind `capability_risc5_zicbom_k`, never a compile-time policy.
  */
 struct risc5_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
@@ -627,10 +627,10 @@ struct risc5_cache_hints_t {
 
 /**
  *  @brief RISC-V cache hints where `hwprobe` attested Zicbom: `cbo.clean` writes the dirty block
- *         back toward another cache or memory, and `prefetch.w` promotes with write intent.
+ *      back toward another cache or memory, and `prefetch.w` promotes with write intent.
  *  @note Never selected at compile time - `cbo.clean` raises illegal-instruction unless the kernel
- *        set `senvcfg.CBCFE`, which only the `capability_risc5_zicbom_k` runtime bit can attest -
- *        so this functor is reachable exclusively through the C ABI's runtime cascade.
+ *      set `senvcfg.CBCFE`, which only the `capability_risc5_zicbom_k` runtime bit can attest -
+ *      so this functor is reachable exclusively through the C ABI's runtime cascade.
  */
 struct risc5_cbo_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_risc5_zicbom_k;
@@ -746,7 +746,7 @@ inline capabilities_t cpu_capabilities() noexcept {
  *  @brief Binds [@p ptr, @p ptr + @p size_bytes) to the single memory domain @p memory_domain_id.
  *  @param[in] mode An `MPOL_*` policy, already OR-ed with whatever mode flags the caller wants.
  *  @note Lives here, not beside its allocator callers, because this is the last header both
- *        `topology.hpp` and `allocators.hpp` see - so the `maxnode` quirk below is spelled once.
+ *      `topology.hpp` and `allocators.hpp` see - so the `maxnode` quirk below is spelled once.
  */
 FU_MAYBE_UNUSED_ static inline bool linux_bind_range_to_domain(void *ptr, std::size_t size_bytes,
                                                                memory_domain_id_t memory_domain_id, int mode) noexcept {
@@ -762,7 +762,7 @@ FU_MAYBE_UNUSED_ static inline bool linux_bind_range_to_domain(void *ptr, std::s
 
 /**
  *  @brief Probes whether this process may actually place memory - a kernel that offers `mbind` still
- *         lets seccomp or a cgroup `cpuset.mems` refuse it, and only the call itself can say.
+ *      lets seccomp or a cgroup `cpuset.mems` refuse it, and only the call itself can say.
  */
 inline bool linux_can_place_memory_on_domain() noexcept {
     std::size_t const page_bytes = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));

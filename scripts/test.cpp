@@ -310,8 +310,8 @@ static void test_fabric_level_derivation() noexcept {
 
 /**
  *  @brief A harvested fabric must cover every reachable edge with sane bounds and leave
- *         unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
- *         guests legitimately measure every edge the same.
+ *      unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
+ *      guests legitimately measure every edge the same.
  */
 static void test_measured_fabric() noexcept {
     fu::machine_topology_t const &topology = machine_topology;
@@ -978,9 +978,9 @@ static void test_for_n_dynamic_stealing() noexcept {
  *  task index mirrors the invoker's own split: domain `d` owns `split[d]`.
  *
  *  @note The crawl is @b per @b domain, not per thread. Stalling a single thread only forces a steal
- *        where a domain has few of them: with 64 threads to a domain, one crawler is 1/64th of its
- *        capacity, its neighbours absorb the slice, and no steal ever needs to cross - so the
- *        assertion below passed on small CI runners and was a coin-flip on real hardware.
+ *      where a domain has few of them: with 64 threads to a domain, one crawler is 1/64th of its
+ *      capacity, its neighbours absorb the slice, and no steal ever needs to cross - so the
+ *      assertion below passed on small CI runners and was a coin-flip on real hardware.
  */
 template <typename pool_type_>
 static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n, bool const crawl) noexcept {
