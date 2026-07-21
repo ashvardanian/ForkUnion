@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+title: "ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path for C, C++, Rust, and Zig"
+message: "If you use this software, please cite it as below."
+type: software
+license: Apache-2.0
+version: 3.0.1
+doi: 10.5281/zenodo.21472186
+repository-code: https://github.com/ashvardanian/ForkUnion
+url: https://github.com/ashvardanian/ForkUnion
+abstract: >-
+  ForkUnion is a NUMA-aware fork-join thread-pool for systems languages, built for the tightest
+  parallel-for loops rather than task queues. Its dispatch hot path makes no heap allocations, no
+  system calls, and no compare-and-swap operations, and shares no cache line between workers, so
+  fork-join latency stays flat as cores and sockets multiply. Idle workers park on a hardware address
+  monitor where the processor offers one, waking the instant a peer writes the watched cache line,
+  while per-domain memory placement and private per-worker cursors keep synchronization off the
+  interconnect.
+keywords:
+  - numa
+  - parallel
+  - thread-pool
+  - fork-join
+  - allocator
+
+authors:
+  - family-names: Vardanian
+    given-names: Ash
+    alias: ashvardanian
+    orcid: https://orcid.org/0000-0002-4882-1815
+
+references:
+  - type: blog
+    title: "Beyond OpenMP in C++ & Rust: Taskflow, Rayon, Fork Union"
+    authors:
+      - family-names: Vardanian
+        given-names: Ash
+    url: https://ashvardanian.com/posts/beyond-openmp-in-cpp-rust/
+    year: 2025

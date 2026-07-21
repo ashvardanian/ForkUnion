@@ -34,6 +34,7 @@ jobs:
           update-version-in: |
             CMakeLists.txt:^\s*VERSION (\d+\.\d+\.\d+)
             Cargo.toml:^version = "(\d+\.\d+\.\d+)"
+            CITATION.cff:^version: (\d+\.\d+\.\d+)
             README.md:^\s*GIT_TAG v(\d+\.\d+\.\d+)
             README.md:^\s*forkunion\s*=\s*"(\d+\.\d+\.\d+)"
             README.md:^\s*forkunion\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"

@@ -24,7 +24,7 @@ __`ForkUnion`__ is dead-simple to use!
 There is no nested parallelism, exception handling, or "future promises"; they are banned.
 The thread pool itself has a few core operations:
 
-- `try_spawn` to initialize worker threads, and 
+- `try_spawn` to initialize worker threads, and
 - `for_threads` to launch a blocking callback on all threads.
 
 Higher-level APIs for index-addressable tasks are also available:
@@ -688,7 +688,7 @@ These same wrappers back `spin_mutex_t`, or `SpinMutex` in Rust, a syscall-free 
 
 For Rayon-style ergonomics, use the parallel iterator API with the `prelude`.
 Unlike Rayon, ForkUnion's parallel iterators don't depend on the global state and allow explicit control over the thread pool and scheduling strategy.
-For statically shaped workloads, the default static scheduling is more efficient: 
+For statically shaped workloads, the default static scheduling is more efficient:
 
 ```rust
 use forkunion as fu;
@@ -978,6 +978,22 @@ PROPAGATION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
 ```
 
 Check the `scripts/nbody.zig` and `scripts/propagation.zig` headers for additional benchmarking options.
+
+## Citation
+
+If ForkUnion helps your research or product, please cite it:
+
+```bibtex
+@software{Vardanian_ForkUnion,
+  author = {Vardanian, Ash},
+  title = {{ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path for C, C++, Rust, and Zig}},
+  doi = {10.5281/zenodo.21472186},
+  url = {https://github.com/ashvardanian/ForkUnion},
+  license = {Apache-2.0}
+}
+```
+
+A machine-readable [`CITATION.cff`](CITATION.cff) is provided at the repository root.
 
 ## License
 

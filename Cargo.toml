@@ -1,6 +1,6 @@
 [package]
 name = "forkunion"
-description = "Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library"
+description = "Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path"
 version = "3.0.1"
 edition = "2021"
 authors = ["Ash Vardanian"]
