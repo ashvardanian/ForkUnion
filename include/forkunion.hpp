@@ -64,7 +64,7 @@
  *  and where the release workflows rewrite it.  */
 #define FORKUNION_VERSION_MAJOR 3
 #define FORKUNION_VERSION_MINOR 0
-#define FORKUNION_VERSION_PATCH 0
+#define FORKUNION_VERSION_PATCH 1
 
 /*
  *  One header per concern. Include order is dependency order; none is meant to be included alone.

@@ -1,7 +1,7 @@
 [package]
 name = "forkunion"
 description = "Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 authors = ["Ash Vardanian"]
 license = "Apache-2.0"
