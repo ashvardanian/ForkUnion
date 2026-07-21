@@ -353,12 +353,23 @@ include(CheckCXXSourceCompiles)
 check_cxx_source_compiles(
     "#include <atomic>
      #include <cstdint>
-     // Mirror the pool's own `is_lock_free`, a member atomic queried through a method. The 64-bit ops
-     // inline on x86-64, but `is_lock_free()` lowers to an `__atomic_is_lock_free` libcall that clang
-     // with libstdc++ does not fold, so a load-only probe under-reports the need and the link fails.
-     struct probe { std::atomic<std::uint64_t> slot; bool query() const noexcept { return slot.is_lock_free(); } };
+     // Mirror the pools' atomic footprint so the probe demands libatomic on exactly the targets whose
+     // build emits a libcall: i686 for the 64-bit read-modify-write, RISC-V for the sub-word one it has
+     // no native instruction for, and clang-with-libstdc++ for the `is_lock_free` it does not fold. A
+     // load-only probe inlines on every one of them, under-reports, and the link fails downstream.
+     struct probe {
+         std::atomic<std::uint64_t> wide;
+         std::atomic<std::uint16_t> half;
+         std::atomic<std::uint8_t> byte;
+         bool lock_free() const noexcept { return wide.is_lock_free() && half.is_lock_free() && byte.is_lock_free(); }
+     };
      probe value;
-     int main() { return static_cast<int>(value.slot.load()) + value.query(); }"
+     int main() {
+         value.wide.fetch_add(1);
+         value.half.fetch_add(1);
+         value.byte.fetch_add(1);
+         return static_cast<int>(value.wide.load()) + value.lock_free();
+     }"
     FORKUNION_ATOMICS_ARE_BUILTIN
 )
 if (NOT FORKUNION_ATOMICS_ARE_BUILTIN)
