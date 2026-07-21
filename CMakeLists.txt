@@ -28,7 +28,7 @@ endif ()
 
 project(
     forkunion
-    VERSION 3.0.1
+    VERSION 3.0.2
     DESCRIPTION
         "Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path"
     LANGUAGES CXX

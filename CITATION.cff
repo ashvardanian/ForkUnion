@@ -3,7 +3,7 @@ title: "ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero alloca
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
-version: 3.0.1
+version: 3.0.2
 doi: 10.5281/zenodo.21472186
 repository-code: https://github.com/ashvardanian/ForkUnion
 url: https://github.com/ashvardanian/ForkUnion

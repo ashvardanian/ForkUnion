@@ -1,7 +1,7 @@
 [package]
 name = "forkunion"
 description = "Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path"
-version = "3.0.1"
+version = "3.0.2"
 edition = "2021"
 authors = ["Ash Vardanian"]
 license = "Apache-2.0"
