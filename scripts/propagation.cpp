@@ -135,7 +135,7 @@ static inline vertex_t random_index(std::uint64_t const counter, vertex_t const 
 
 /**
  *  @brief Generates the necklace: @p communities independent R-MAT graphs of `2^scale` vertices,
- *         joined in a ring by one bridge per neighbouring pair, and scatters it all into a CSR.
+ *      joined in a ring by one bridge per neighbouring pair, and scatters it all into a CSR.
  *  @retval false on any allocation failure, leaving @p graph half-built but valid to destroy.
  *
  *  Community `c` owns global edge indices `[c * raw_local, (c+1) * raw_local)` and the vertex range
@@ -266,7 +266,7 @@ using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t, fu::prefe
 /**
  *  @brief One read-only replica of the CSR per memory domain, so no adjacency is ever remote.
  *  @note Only the immutable CSR replicates; the two label buffers stay shared by nature - every
- *        round's writes are remote for somebody, whichever node holds them.
+ *      round's writes are remote for somebody, whichever node holds them.
  */
 struct replicated_csr_t {
     fu::replicated_array<edge_offset_t> row_offsets;
@@ -428,7 +428,7 @@ static void run_openmp_dynamic(run_context_t &c) noexcept { run_openmp<true>(c);
 /**
  *  @brief The Taskflow baselines - a fresh `tf::Taskflow` per round on the long-lived executor.
  *  @note The per-round flow construction is charged to Taskflow by design: this benchmark measures
- *        exactly the cost of standing up one fork-join round, and a persisted flow would hide it.
+ *      exactly the cost of standing up one fork-join round, and a persisted flow would hide it.
  */
 template <typename partitioner_>
 static void run_taskflow(run_context_t &c, partitioner_ partitioner) noexcept {

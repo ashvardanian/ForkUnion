@@ -80,7 +80,7 @@ jobs:
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
-          sudo apt install -y cmake build-essential libomp-dev libnuma-dev
+          sudo apt install -y cmake build-essential libomp-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
 
@@ -88,6 +88,24 @@ jobs:
       # single source of truth and a new test target joins CI without a workflow edit.
       - name: Test C & C++
         run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
+
+      # `find_package` is the one consumption mode the tests above never touch: they build in-tree, so
+      # the install rules, the exported target set, and `forkunionConfig.cmake` went unexercised - and
+      # a config that named `Threads::Threads` without re-finding it shipped in v3.0.0. Both spellings
+      # are checked because both are documented, and both `add_subdirectory` and `find_package` promise them.
+      - name: Test the installed package
+        run: |
+          set -euxo pipefail
+          cmake --install build_artifacts --prefix "$PWD/_prefix"
+          mkdir -p _consumer && cd _consumer
+          printf 'cmake_minimum_required(VERSION 3.21)\nproject(c LANGUAGES CXX)\nfind_package(forkunion REQUIRED)\nadd_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE forkunion::static)\n' > CMakeLists.txt
+          printf '#include <forkunion.hpp>\nint main() { return 0; }\n' > main.cpp
+          cmake -B b -D forkunion_DIR="$PWD/../_prefix/lib/cmake/forkunion"
+          cmake --build b
+          # The un-namespaced spelling the config's own comment promises.
+          sed -i 's/forkunion::static/forkunion_static/' CMakeLists.txt
+          cmake -B b2 -D forkunion_DIR="$PWD/../_prefix/lib/cmake/forkunion"
+          cmake --build b2
 
       - name: Set up Rust
         run: |
@@ -159,9 +177,15 @@ jobs:
         run: ctest --test-dir build -R '^forkunion_test_cpp' --output-on-failure
 
   test_ubuntu_clang:
-    name: Ubuntu (Clang)
+    name: Ubuntu (Clang, ${{ matrix.stdlib }})
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # libc++ is the second row because it is a different standard library, not a different flag on the same one: it
+    # catches a C++20 language mode over an incomplete C++20 library - `std::atomic_ref` absent - that libstdc++ hides.
+    strategy:
+      fail-fast: false
+      matrix:
+        stdlib: [libstdc++, libc++]
     env:
       CC: clang
       CXX: clang++
@@ -171,29 +195,40 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Build C/C++
+        # CMake reads CXXFLAGS into the compile flags and LDFLAGS into the link flags, so `-stdlib` lands on both
+        # without naming a CMake variable. The libstdc++ row sets neither and builds exactly as before.
+        env:
+          CXXFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
+          LDFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y cmake build-essential clang libclang-rt-18-dev libblocksruntime-dev
+          if [ "${{ matrix.stdlib }}" = "libc++" ]; then sudo apt install -y libc++-dev libc++abi-dev; fi
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build build_artifacts --config RelWithDebInfo
 
       - name: Test C & C++
         run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
 
+      # Rust and Miri never touch the C++ standard library, so they run on one row, not both.
       - name: Set up Rust
+        if: matrix.stdlib == 'libstdc++'
         run: |
           rustup update stable
           rustup default stable
           rustc -vV
       - name: Build Rust
+        if: matrix.stdlib == 'libstdc++'
         run: cargo build
       - name: Test Rust
+        if: matrix.stdlib == 'libstdc++'
         run: cargo test
 
       # Miri can't call the C shim; `--lib` skips the FFI doctests, keeping the pure-Rust unit tests.
       - name: Test Rust under Miri
+        if: matrix.stdlib == 'libstdc++'
         run: |
           rustup toolchain install nightly --component miri
           cargo +nightly miri setup
@@ -218,7 +253,7 @@ jobs:
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
-          sudo apt install -y cmake build-essential libomp-dev libnuma-dev
+          sudo apt install -y cmake build-essential libomp-dev
           cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON
           cmake --build build_artifacts --config RelWithDebInfo
 
@@ -412,12 +447,26 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Configure, build, and test
+        # Correctness only under emulation: the stress suite hammers a race window qemu-user cannot
+        # faithfully model and emulates far too slowly, so it only times the job out. The native Arm64
+        # job is where the weak memory model is actually exercised.
         run: |
           # Static-link so the qemu-run binaries need no shared libatomic/libstdc++ at run time.
           cmake -B build -D CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" -D CMAKE_BUILD_TYPE=RelWithDebInfo \
-            -D CMAKE_EXE_LINKER_FLAGS="-static"
+            -D CMAKE_EXE_LINKER_FLAGS="-static" -D FORKUNION_TEST_SKIP_STRESS=ON
           cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
           ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
+
+      - name: Trace refused syscalls under QEMU
+        if: failure()
+        env:
+          QEMU_STRACE: 1
+        # qemu-user honours QEMU_STRACE. Re-run and tally only the syscalls the emulated kernel
+        # refused - the failure class a bare assertion hides, like `mbind() = -1 errno=38 (ENOSYS)`.
+        run: |
+          ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure 2>&1 \
+            | grep -aE ' = -1 errno=' | sed -E 's/^[0-9]+ +//; s/\([^)]*\) = -1/() = -1/' \
+            | sort | uniq -c | sort -rn | head -40 || true
 
   # The two libc floors the downstream wheels must clear: musl and manylinux2014's glibc 2.17. Toolchain
   # install precedes checkout because Alpine ships no git.
@@ -452,7 +501,7 @@ jobs:
           build/forkunion_test_cpp20
           build/forkunion_test_c11
 
-  # Bionic has pthreads and affinity but no libnuma; the toolchain defines __ANDROID__, so this
+  # Bionic shares the kernel ABI but not every GLibC extension; the toolchain defines __ANDROID__, so this
   # compile proves the threaded build survives it. Compile-only - device binaries can't run here.
   test_android:
     name: Android (${{ matrix.name }})
@@ -579,6 +628,9 @@ jobs:
           echo "=== guest serial tail ==="
           tail -n 100 serial.log || true
           grep -q "FU_VM_NODES=${{ matrix.expect }} nodes" serial.log
+          # ? The harvest's own count, not sysfs's: a collapsed enumeration would otherwise pass every
+          # ? test above, since a one-domain machine is indistinguishable from a degraded reading of a four.
+          grep -q "FU_VM_HARVESTED=${{ matrix.expect }} nodes" serial.log
           grep -q "FU_VM_DONE rc=0" serial.log
 
       - name: Upload the guest serial log
@@ -589,7 +641,7 @@ jobs:
           path: serial.log
 
   # Each `FU_WITH_*` capability is a switch a downstream build may flip; the combinations do not
-  # collapse - a Linux box without `libnuma` can still pin threads. Each row builds under `-Werror`.
+  # collapse - a box with no memory placement can still pin threads. Each row builds under `-Werror`.
   test_ubuntu_capabilities:
     name: Ubuntu (Capability Matrix)
     runs-on: ubuntu-24.04
@@ -598,23 +650,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: auto, libnuma present
-            libnuma: true
-            flags: ""
-          - name: auto, libnuma absent
-            libnuma: false
+          - name: auto
             flags: ""
           - name: no topology
-            libnuma: true
             flags: "-DFU_WITH_TOPOLOGY=0"
           - name: no memory placement, but still pinning
-            libnuma: true
             flags: "-DFU_WITH_PLACE_MEMORY_ON_DOMAIN=0"
           - name: no huge pages
-            libnuma: true
             flags: "-DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=0"
           - name: no pinning
-            libnuma: true
             flags: "-DFU_WITH_PLACE_THREADS_BY_AFFINITY=0"
     steps:
       - name: Checkout
@@ -626,16 +670,16 @@ jobs:
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential
-          if [ "${{ matrix.libnuma }}" = "true" ]; then sudo apt install -y libnuma-dev; fi
 
       - name: Build & test C++ and the C shim (${{ matrix.name }})
         run: |
           set -euxo pipefail
-          LIBS=(-latomic)
-          if [ "${{ matrix.libnuma }}" = "true" ]; then LIBS=(-lnuma "${LIBS[@]}"); fi
-          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude scripts/test.cpp -o test_cpp "${LIBS[@]}"
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude scripts/test.cpp -o test_cpp -latomic
           ./test_cpp
           g++ -std=c++17 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
+          # The artifact must name no library but the C one: a `numa_*` here is a build host's packages
+          # leaking into a binary that has to load on hosts without them.
+          ! nm -u forkunion.o | grep -E 'numa_|mbind'
 
   # A capability nobody can turn off by hand is not a capability. These must be rejected at the
   # `#include`, by an `#error` naming the contradiction - never at link time, with missing symbols.
@@ -658,7 +702,7 @@ jobs:
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
-          sudo apt install -y build-essential libnuma-dev
+          sudo apt install -y build-essential
 
       - name: The contradiction must fail to compile
         run: |
@@ -693,7 +737,7 @@ jobs:
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
-          sudo apt install -y build-essential libnuma-dev
+          sudo apt install -y build-essential
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

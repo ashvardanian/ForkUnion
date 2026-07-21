@@ -20,27 +20,11 @@ namespace forkunion {
 FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_bytes,
                                                     memory_domain_id_t memory_domain_id) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-    // Pin the memory - that may require an extra allocation for `node_mask` on some systems
-    ::nodemask_t node_mask;
-    ::bitmask node_mask_as_bitset;
-    node_mask_as_bitset.size = sizeof(node_mask) * 8;
-    node_mask_as_bitset.maskp = &node_mask.n[0];
-    ::numa_bitmask_setbit(&node_mask_as_bitset, static_cast<unsigned int>(memory_domain_id));
     // ! `MPOL_F_STATIC_NODES` is a @b mode flag - it belongs OR-ed into the policy, not in the trailing
     // ! `flags` argument, which only accepts `MPOL_MF_*`. Those flags are 0: this memory is freshly mapped
     // ! and unfaulted, so there is nothing to migrate, and `MPOL_MF_MOVE` would only demand a `CAP_SYS_NICE`
     // ! that a sandbox may refuse.
-    int mbind_mode_flag;
-#if defined(MPOL_F_STATIC_NODES)
-    mbind_mode_flag = MPOL_F_STATIC_NODES;
-#else
-    mbind_mode_flag = 1 << 15;
-#endif // MPOL_F_STATIC_NODES
-
-    long binding_status =
-        ::mbind(ptr, size_bytes, MPOL_BIND | mbind_mode_flag, &node_mask.n[0], sizeof(node_mask) * 8, 0);
-    if (binding_status < 0) return false; // ! Binding failed
-    return true;                          // ? Binding succeeded
+    return linux_bind_range_to_domain(ptr, size_bytes, memory_domain_id, mpol_bind_k | mpol_static_nodes_k);
 #else
     fu_unused_(ptr);
     fu_unused_(size_bytes);
@@ -60,34 +44,35 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
-    // Fast path: regular pages – let `libnuma` handle any rounding internally.
-    if (page_size_bytes == static_cast<std::size_t>(::numa_pagesize()))
-        return ::numa_alloc_onnode(size_bytes, memory_domain_id);
-
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
-
-    // Huge/explicit page sizes must be exact multiples
-    assert(size_bytes % page_size_bytes == 0 && "Size must be a multiple of page size");
-
-    // Make sure the page size makes sense for Linux
+    // One path, not two: `numa_alloc_onnode` was only ever the `mmap` plus `mbind` below, so the base
+    // page is that ladder without `MAP_HUGETLB` rather than a fast path beside it.
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    if (page_size_bytes == page_size_4k_k) { mmap_flags |= MAP_HUGETLB; }
-    else if (page_size_bytes == page_size_2m_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_2MB); }
-    else if (page_size_bytes == page_size_1g_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_1GB); }
-    else { return nullptr; } // ! Unsupported page size
+    if (page_size_bytes != ram_page_size()) {
+#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+        // Huge/explicit page sizes must be exact multiples
+        assert(size_bytes % page_size_bytes == 0 && "Size must be a multiple of page size");
 
-    // Under the hood, `numa_alloc_onnode` uses `mmap` and `mbind` to allocate memory
+        // Make sure the page size makes sense for Linux
+        if (page_size_bytes == page_size_4k_k) { mmap_flags |= MAP_HUGETLB; }
+        else if (page_size_bytes == page_size_2m_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_2MB); }
+        else if (page_size_bytes == page_size_1g_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_1GB); }
+        else { return nullptr; } // ! Unsupported page size
+#else
+        return nullptr; // ! Every page size but the base one needs `MAP_HUGETLB`
+#endif
+    }
+
+    // ? `mmap` rounds the length up to a page, as the `munmap` in `linux_numa_free` will - so the
+    // ? rounding `numa_alloc_onnode`/`numa_free` hid still matches on both sides.
     void *result_ptr = ::mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
     if (result_ptr == MAP_FAILED) return nullptr; // ! Allocation failed
 
-    if (!linux_numa_bind(result_ptr, size_bytes, memory_domain_id)) {
-        ::munmap(result_ptr, size_bytes); // ? Unbind failed, clean up
-        return nullptr;                   // ! Binding failed
-    }
+    // Binding is best-effort. The pages are already validly mapped; a kernel that refuses `mbind` -
+    // qemu-user answers ENOSYS, a seccomp sandbox EPERM - still gave us memory, just placed by the
+    // default policy rather than pinned to this domain. Discarding it would fail an allocation that in
+    // fact succeeded; `runtime_capabilities()` is where a caller learns placement was unavailable.
+    linux_numa_bind(result_ptr, size_bytes, memory_domain_id);
     return result_ptr;
-#else
-    return nullptr; // ! Every page size but the base one needs `MAP_HUGETLB`
-#endif
 
 #else
     fu_unused_(size_bytes);
@@ -101,7 +86,7 @@ FU_MAYBE_UNUSED_ static inline void linux_numa_free(void *ptr, std::size_t size_
     assert(ptr != nullptr && "Pointer must not be null");
     assert(size_bytes > 0 && "Size must be greater than zero");
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-    numa_free(ptr, size_bytes);
+    ::munmap(ptr, size_bytes); // ? What `numa_free` was, rounding the length up just as `mmap` did
 #else
     fu_unused_(ptr);
     fu_unused_(size_bytes);
@@ -257,7 +242,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_symmetric_allocate(machine_topology_t
     std::size_t const total_bytes = domains * stride_bytes;
 
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    if (page_size_bytes != static_cast<std::size_t>(::numa_pagesize())) {
+    if (page_size_bytes != ram_page_size()) {
 #if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
         if (page_size_bytes == page_size_2m_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_2MB); }
         else if (page_size_bytes == page_size_1g_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_1GB); }
@@ -276,10 +261,9 @@ FU_MAYBE_UNUSED_ static inline void *linux_symmetric_allocate(machine_topology_t
             memory_domain_id_t const memory_domain_id =
                 topology.memory_domain_at(static_cast<memory_domain_index_t>(domain)).memory_domain_id;
             void *slice = static_cast<char *>(base) + domain * stride_bytes;
-            if (!linux_numa_bind(slice, stride_bytes, memory_domain_id)) {
-                ::munmap(base, total_bytes); // ? A slice would not bind; clean up
-                return nullptr;              // ! Binding failed
-            }
+            // Best-effort, as in `linux_numa_allocate`: the slice is validly mapped, and a kernel that
+            // refuses `mbind` still gave us distinct memory - default placement, not a failed allocation.
+            linux_numa_bind(slice, stride_bytes, memory_domain_id);
         }
     return base;
 #else
@@ -684,8 +668,8 @@ using freebsd_symmetric_allocator_t = freebsd_symmetric_allocator<>;
  *  @brief Enables `SeLockMemoryPrivilege` for the current process, needed before large-page allocation.
  *  @retval true if the privilege is now held by the process token.
  *  @note This only @b enables a privilege the account already holds; the account must first be granted
- *        "Lock pages in memory" (Local Security Policy / `SeLockMemoryPrivilege`), typically by an admin.
- *        Call once at start-up, then construct a `windows_numa_allocator` with `large_pages = true`.
+ *      "Lock pages in memory" (Local Security Policy / `SeLockMemoryPrivilege`), typically by an admin.
+ *      Call once at start-up, then construct a `windows_numa_allocator` with `large_pages = true`.
  */
 FU_MAYBE_UNUSED_ static inline bool windows_enable_lock_memory_privilege() noexcept {
 #if FU_ON_WINDOWS
@@ -831,7 +815,7 @@ struct windows_numa_allocator {
      *  @return allocation_result with a pointer to the allocated memory and the number of elements allocated.
      *  @retval empty object if the allocation failed.
      *  @note Unlike `linux_numa_allocator` there is no huge-page ladder: `VirtualAllocExNuma` commits at
-     *        the base page size, or the large-page size when `large_pages` is set on this allocator.
+     *      the base page size, or the large-page size when `large_pages` is set on this allocator.
      */
     allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
         size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();

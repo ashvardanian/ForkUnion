@@ -1,13 +1,33 @@
 @PACKAGE_INIT@
 
+# The exported interface names `Threads::Threads`, and an imported target is not a promise the
+# consumer's project has already kept - `find_package(forkunion)` must re-find what it links, or the
+# first `target_link_libraries` fails on a target nobody defined.
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
 include("${CMAKE_CURRENT_LIST_DIR}/forkunionTargets.cmake")
 
-# Provide an un-namespaced alias so downstream consumers can do both:
+# The export defines `forkunion::header`, `forkunion::static`, and `forkunion::shared`. Add the plain
+# spellings too, so a consumer can write either:
 # ~~~
-# target_link_libraries(my_executable PRIVATE forkunion)
-# target_link_libraries(my_executable PRIVATE forkunion::forkunion)
+# target_link_libraries(my_executable PRIVATE forkunion_header)
+# target_link_libraries(my_executable PRIVATE forkunion::header)
 # ~~~
-if (NOT TARGET forkunion::forkunion)
-    add_library(forkunion::forkunion ALIAS forkunion)
+# `add_subdirectory` consumers get the mirror image from the `ALIAS` targets in `CMakeLists.txt`. The
+# plain names keep their prefix - unlike the exported ones they are global, and a bare `static` in the
+# consumer's namespace would be a landmine.
+#
+# Aliasing a non-GLOBAL imported target - which is what `install(EXPORT)` writes - is only legal from
+# CMake 3.18, and this file runs under the *consumer's* CMake, not ours. Below that, the namespaced
+# spelling still works; only this convenience is skipped, which beats failing the `find_package`.
+if (NOT CMAKE_VERSION VERSION_LESS 3.18)
+    foreach (_forkunion_flavor header static shared)
+        if (NOT TARGET forkunion_${_forkunion_flavor})
+            add_library(forkunion_${_forkunion_flavor} ALIAS forkunion::${_forkunion_flavor})
+        endif ()
+    endforeach ()
+    unset(_forkunion_flavor)
 endif ()
+
 set(forkunion_VERSION @PACKAGE_VERSION@)

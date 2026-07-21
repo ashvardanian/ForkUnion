@@ -1,8 +1,8 @@
 /**
- *  @brief  Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file   forkunion.h
+ *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
+ *  @file forkunion.h
  *  @author Ash Vardanian
- *  @date   June 17, 2025
+ *  @date June 17, 2025
  *
  *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
  *  avoiding dynamic memory allocations, exceptions, system calls, and heavy Compare-And-Swap instructions.

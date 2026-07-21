@@ -22,6 +22,13 @@ namespace fu = ashvardanian::forkunion;
 #endif
 #endif
 
+/*  Correctness only: the throughput/stress suite hammers a race window a slow emulator neither
+ *  reproduces nor runs in tolerable time. `FORKUNION_TEST_SKIP_STRESS` in CMake defines this to 1 for
+ *  the cross builds; native builds leave it 0 and run the full suite.  */
+#ifndef FU_TEST_SKIP_STRESS_
+#define FU_TEST_SKIP_STRESS_ 0
+#endif
+
 /** @brief Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
 template <typename value_type_>
 static void format_value_(char *buffer, std::size_t capacity, value_type_ const &value) noexcept {
@@ -310,8 +317,8 @@ static void test_fabric_level_derivation() noexcept {
 
 /**
  *  @brief A harvested fabric must cover every reachable edge with sane bounds and leave
- *         unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
- *         guests legitimately measure every edge the same.
+ *      unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
+ *      guests legitimately measure every edge the same.
  */
 static void test_measured_fabric() noexcept {
     fu::machine_topology_t const &topology = machine_topology;
@@ -971,11 +978,16 @@ static void test_for_n_dynamic_stealing() noexcept {
 }
 
 /**
- *  @brief One dynamic dispatch of @p n tasks must run exactly-once; @p crawl stalls thread 0.
+ *  @brief One dynamic dispatch of @p n tasks must run exactly-once; @p crawl stalls a whole domain.
  *
- *  With one thread crawling, at least one task must be executed by a thread pinned to a @b different
- *  domain than the one owning its slice, so the cross-interconnect path is exercised rather than
- *  silently idle. The owner of a task index mirrors the invoker's own split: domain `d` owns `split[d]`.
+ *  With domain 0 crawling, the other domains drain their own slices and must reach across the
+ *  interconnect for more, so the steal path is exercised rather than silently idle. The owner of a
+ *  task index mirrors the invoker's own split: domain `d` owns `split[d]`.
+ *
+ *  @note The crawl is @b per @b domain, not per thread. Stalling a single thread only forces a steal
+ *      where a domain has few of them: with 64 threads to a domain, one crawler is 1/64th of its
+ *      capacity, its neighbours absorb the slice, and no steal ever needs to cross - so the
+ *      assertion below passed on small CI runners and was a coin-flip on real hardware.
  */
 template <typename pool_type_>
 static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n, bool const crawl) noexcept {
@@ -988,7 +1000,9 @@ static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n,
     for (auto &e : executions) e.store(0, std::memory_order_relaxed);
 
     pool.for_n_dynamic(n, [&](prong_t prong) noexcept {
-        if (crawl && prong.thread == 0) { // ? A spin, not a sleep, so the pool's yields don't mask it
+        // ? A spin, not a sleep, so the pool's yields don't mask it. Keyed on the executing thread's
+        // ? domain, so a stealer from elsewhere runs the stolen task at full speed.
+        if (crawl && prong.compute_domain == 0) {
             volatile std::size_t sink = 0;
             for (std::size_t i = 0; i < 200000; ++i) sink = sink + i;
         }
@@ -1445,6 +1459,13 @@ int main(void) {
     }
     std::printf("All %zu unit tests passed\n", total_unit_tests);
 
+#if FU_TEST_SKIP_STRESS_
+    // The stress suite hammers the dispatch/join race window for millions of epochs. A qemu-user
+    // emulator neither reproduces the guest memory model this probes nor runs it in tolerable time,
+    // so the cross builds define it away and lean on the native Arm64 job, where the weak memory
+    // model is actually exercised.
+    std::printf("Skipping stress tests: built with FU_TEST_SKIP_STRESS_\n");
+#else
     // Start stress-testing the implementation
     std::printf("Starting stress tests...\n");
     std::size_t const max_cores = fu::allowed_cores_count();
@@ -1490,6 +1511,7 @@ int main(void) {
         std::printf("PASS\n");
     }
     std::printf("All %zu stress tests passed\n", total_stress_tests);
+#endif
 
     return EXIT_SUCCESS;
 }

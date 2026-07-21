@@ -1,6 +1,6 @@
 # Shared logic for setting target properties for tests and examples
 function (set_target_properties_for_forkunion_script target_name)
-    target_link_libraries(${target_name} PRIVATE forkunion)
+    target_link_libraries(${target_name} PRIVATE forkunion_header)
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # This warning annoys us by reminding, that before GCC 4.6 the ABI for passing objects aligned to ≥32-bytes was
@@ -58,14 +58,18 @@ foreach (STD IN LISTS CXX_STANDARDS)
     add_test(NAME ${TGT} COMMAND ${TGT})
     set_target_properties_for_forkunion_script(${TGT})
 
-    # Link against `libatomic` for Linux and Android toolchains that might need it. ! Not `UNIX AND NOT APPLE`: FreeBSD
-    # matches that too, and its atomics live in ! compiler-rt - there is no separate `libatomic` for the linker to find.
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
-            target_link_libraries(${TGT} PRIVATE -latomic)
-        endif ()
+    # test.cpp uses no GNU extensions, so -pedantic-errors rejects a C++20 language feature that slips into a lower
+    # standard - the conformance check, on the comprehensive source, not a separate lean TU. Only the C++ tests: the C
+    # tests use nested functions and blocks, and the benchmarks pull Taskflow.
+    target_compile_options(${TGT} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-pedantic-errors>)
+
+    # Correctness only where the option asks - the cross jobs, whose emulator cannot run the throughput suite in time.
+    # `test.c` carries no stress cases, so only the C++ targets take the define.
+    if (FORKUNION_TEST_SKIP_STRESS)
+        target_compile_definitions(${TGT} PRIVATE FU_TEST_SKIP_STRESS_=1)
     endif ()
 
+    # No `-latomic` here: `forkunion_header` carries it, probed, wherever the target needs it.
 endforeach ()
 
 enable_language(C)
@@ -82,9 +86,6 @@ function (add_forkunion_c_test target extensions)
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${target} PRIVATE forkunion_static)
-    if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
-        target_link_libraries(${target} PRIVATE -latomic)
-    endif ()
     add_test(NAME ${target} COMMAND ${target})
 endfunction ()
 
@@ -103,9 +104,10 @@ endif ()
 if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
     add_forkunion_c_test(forkunion_test_c_clang_blocks ON)
     target_compile_options(forkunion_test_c_clang_blocks PRIVATE -fblocks)
-    # Apple's `libSystem` ships the Blocks runtime; other UNIX needs it linked explicitly.
+    # Apple's `libSystem` ships the Blocks runtime; other UNIX needs it linked explicitly. The bare name resolves like
+    # any library, rather than passing an opaque `-l` flag CMake cannot reason about.
     if (UNIX AND NOT APPLE)
-        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE -lBlocksRuntime)
+        target_link_libraries(forkunion_test_c_clang_blocks PRIVATE BlocksRuntime)
     endif ()
 endif ()
 
@@ -125,13 +127,27 @@ set(TF_BUILD_PROFILER
     OFF
     CACHE BOOL "" FORCE
 )
-FetchContent_Declare(
-    taskflow
-    GIT_REPOSITORY https://github.com/taskflow/taskflow.git
-    GIT_TAG v4.1.0
-    FIND_PACKAGE_ARGS NAMES Taskflow
-)
-FetchContent_MakeAvailable(taskflow)
+# Taskflow is header-only, so configuring it buys nothing but its `install()` rules - which are not ours to run: they
+# shipped 71 of its headers and a `taskflow.pc` into ForkUnion's own prefix, so a package built from a top-level
+# checkout carried Taskflow's headers under ForkUnion's name. `EXCLUDE_FROM_ALL` does not help - it excludes targets
+# from `ALL`, not `install()`.
+#
+# So: find a system copy first, and otherwise populate the source without ever configuring it. The sentinel
+# `SOURCE_SUBDIR` names a directory holding no `CMakeLists.txt`, which is what makes `MakeAvailable` skip the
+# `add_subdirectory` - and it replaces the deprecated single-argument `FetchContent_Populate`. Either way the benchmarks
+# below just link `Taskflow::Taskflow`.
+find_package(Taskflow QUIET)
+if (NOT TARGET Taskflow::Taskflow)
+    FetchContent_Declare(
+        taskflow
+        GIT_REPOSITORY https://github.com/taskflow/taskflow.git
+        GIT_TAG v4.1.0
+        SOURCE_SUBDIR forkunion-populate-only
+    )
+    FetchContent_MakeAvailable(taskflow)
+    add_library(Taskflow::Taskflow INTERFACE IMPORTED)
+    target_include_directories(Taskflow::Taskflow SYSTEM INTERFACE ${taskflow_SOURCE_DIR})
+endif ()
 
 # Both demo benchmarks share identical wiring - C++ for clear state ownership, but linking the pre-compiled C ABI so the
 # runtime busy-wait waiter resolves at runtime - the whole point, since AArch64 `WFET` is unreachable through the
@@ -147,13 +163,6 @@ function (add_forkunion_benchmark target source)
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${target} PRIVATE forkunion_static)
-
-    # Link against `libatomic` for Linux and Android toolchains that might need it
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        if (CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
-            target_link_libraries(${target} PRIVATE -latomic)
-        endif ()
-    endif ()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         target_compile_options(

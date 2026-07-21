@@ -1,8 +1,8 @@
 /**
- *  @brief  Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file   forkunion.cpp
+ *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
+ *  @file forkunion.cpp
  *  @author Ash Vardanian
- *  @date   June 27, 2025
+ *  @date June 27, 2025
  */
 #include <forkunion.h>   // C type aliases
 #include <forkunion.hpp> // C++ core implementation
@@ -18,7 +18,7 @@ namespace fu = ashvardanian::forkunion;
 using thread_allocator_t = std::allocator<std::thread>;
 
 /** @brief The concrete pool type for a shape, a waiter, and a cache-hints policy - the reverse map
- *         from a pool's `kind_k` and its stored capability bits. */
+ *      from a pool's `kind_k` and its stored capability bits. */
 template <fu::pool_kind_t kind_, typename yield_type_, typename cache_hints_type_>
 struct pool_for;
 template <typename yield_type_, typename cache_hints_type_>
@@ -142,9 +142,9 @@ static bool selects(fu::capabilities_t const bits) noexcept {
 
 /**
  *  @brief The one capability→type cascade: walks the silicon-real (waiter, cache-hints) pairs, most
- *         capable first, and invokes @p action with the tag of the first pair whose every declared
- *         bit is in @p bits; anything unexpected degrades to the nearest pair that only drops
- *         capabilities, down to the portable `(standard_yield_t, standard_cache_hints_t)` fallback.
+ *      capable first, and invokes @p action with the tag of the first pair whose every declared
+ *      bit is in @p bits; anything unexpected degrades to the nearest pair that only drops
+ *      capabilities, down to the portable `(standard_yield_t, standard_cache_hints_t)` fallback.
  *
  *  Serves both directions - `construct_pool` passes the probed machine capabilities, `visit_kind`
  *  passes the bits stored at construction - so selection and decoding can never disagree.
@@ -189,9 +189,9 @@ static auto select_pool(FU_MAYBE_UNUSED_ fu::capabilities_t const bits, action_t
 
 /**
  *  @brief Dispatches to the stored pool of a known @p kind_, decoding the stored capability bits
- *         through the same `select_pool` cascade that chose them at construction.
+ *      through the same `select_pool` cascade that chose them at construction.
  *  @sa `visit`, which selects the kind first. There is no bitmask overlap: the shape is the tag,
- *       and the waiter and hints bits together name the concrete type.
+ *      and the waiter and hints bits together name the concrete type.
  */
 template <fu::pool_kind_t kind_, typename visitor_type_>
 auto visit_kind(visitor_type_ &&visitor, pool_variants_t &variants) {
@@ -226,8 +226,8 @@ void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
 
 /**
  *  @brief Constructs into @p variants the pool of the requested @p kind_k, picking the best
- *         (waiter, cache-hints) pair the @p effective capabilities allow and forwarding @p args to
- *         that pool's constructor.
+ *      (waiter, cache-hints) pair the @p effective capabilities allow and forwarding @p args to
+ *      that pool's constructor.
  *
  *  One cascade for every pool shape - `select_pool` is the sole place the C ABI turns a capability
  *  mask into a concrete `flat_pool` / `colocated_pool` / `distributed_pool` instantiation.

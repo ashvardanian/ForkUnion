@@ -468,8 +468,8 @@ static bool test_topology_memory_bounds(fu_capabilities_t mask) {
 
 /**
  *  @brief `fu_fabric_harvest` must fill every reachable edge with sane numbers and keep the SLIT
- *         convention: no row's distance may undercut its own local domain. Runs once from `main`,
- *         not in the battery - the harvest takes seconds and is identical under every mask.
+ *      convention: no row's distance may undercut its own local domain. Runs once from `main`,
+ *      not in the battery - the harvest takes seconds and is identical under every mask.
  */
 static bool test_fabric_harvest(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_fabric", mask, fu_caller_exclusive_k);

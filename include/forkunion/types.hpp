@@ -52,10 +52,9 @@
 
 /*  Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to derive
  *  the capabilities below. Nothing else in the library may ask `__linux__` again. Identity is the kernel
- *  ABI - pthreads, `sched_setaffinity`, `gettid`, `/proc`, `/sys` - which Android shares in full; what
- *  Bionic lacks is GLibC and `libnuma`, and that is the separate `FU_DETECT_LIBNUMA_` axis below, which
- *  keys on `__GLIBC__` and stays 0 on Bionic - so threads and affinity stay on there while topology and
- *  NUMA memory stay off.  */
+ *  ABI - pthreads, `sched_setaffinity`, `gettid`, `/proc`, `/sys` - which Android shares in full, and
+ *  which is all the capabilities below now ask for. What Bionic lacks is GLibC, and that is the separate
+ *  `FU_ON_GLIBC` axis below; it gates no capability, because none is glibc's to grant.  */
 #if defined(__linux__)
 #define FU_ON_LINUX 1
 #else
@@ -91,37 +90,25 @@
 
 #define FU_ON_POSIX (FU_ON_LINUX || FU_ON_APPLE || FU_ON_FREEBSD)
 
-/*  An implementation detail, not a capability: several Linux capabilities are provided by one
- *  library, and its absence must lower all of them together. `gettid` needs GLibC 2.30+.
- *
- *  The header must be present, not merely the GLibC that usually ships beside it: `libnuma-dev` is a
- *  separate package on every distribution, and a build that assumed it from the GLibC version alone
- *  would enable `FU_WITH_TOPOLOGY` and then fail at `#include <numa.h>`.
- *  @see https://man7.org/linux/man-pages/man2/gettid.2.html  */
 #if FU_ON_LINUX && __has_include(<features.h>)
-#include <features.h> // `__GLIBC__`, `__GLIBC_PREREQ`
-#endif
-
-/*  A shim so `__GLIBC_PREREQ` can be used in a flat `#if`: musl and Bionic leave it undefined, yet the
- *  preprocessor still tokenizes `__GLIBC_PREREQ(2, 30)` on a live `&&` line. Here it yields 0 instead.  */
-#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
-#define FU_GLIBC_PREREQ_(major, minor) __GLIBC_PREREQ(major, minor)
-#else
-#define FU_GLIBC_PREREQ_(major, minor) 0
+#include <features.h> // `__GLIBC__`
 #endif
 
 /*  Is-glibc, for facilities glibc provides that Bionic and musl do not - `backtrace`, say. Stays 0 on
- *  Apple and FreeBSD, whose libc is not glibc. `FU_GLIBC_PREREQ_` above gates on a specific version.  */
+ *  Apple and FreeBSD, whose libc is not glibc. Gates no capability below: sysfs and the syscall table
+ *  are the kernel's, and every libc on Linux shares them.  */
 #if defined(__GLIBC__)
 #define FU_ON_GLIBC 1
 #else
 #define FU_ON_GLIBC 0
 #endif
 
-#if FU_ON_LINUX && FU_GLIBC_PREREQ_(2, 30) && __has_include(<numa.h>)
-#define FU_DETECT_LIBNUMA_ 1
+/*  The kernel UAPI headers ship separately from libc - `linux-headers` on Alpine and other musl
+ *  distributions - so `<linux/mman.h>` must be probed, not assumed from the platform.  */
+#if FU_ON_LINUX && __has_include(<linux/mman.h>)
+#define FU_DETECT_LINUX_MMAN_ 1
 #else
-#define FU_DETECT_LIBNUMA_ 0
+#define FU_DETECT_LINUX_MMAN_ 0
 #endif
 
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
@@ -147,16 +134,18 @@
  *  kernel since Vista and reports NUMA nodes, cores, processor groups, and caches in one call. */
 /*  FreeBSD needs no separate library either: the in-kernel `cpuset`/NUMA framework enumerates memory
  *  domains through `sysctl vm.ndomains` and `cpuset_getaffinity(CPU_WHICH_DOMAIN)`. */
-#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || FU_ON_FREEBSD || (FU_ON_LINUX && FU_DETECT_LIBNUMA_))
+/*  Nor Linux: the harvest reads `/sys/devices/system/node`, which the kernel mounts wherever there are
+ *  domains to report - so no libc and no `libnuma-dev` on the build host gates it. */
+#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || FU_ON_FREEBSD || FU_ON_LINUX)
 #endif
 
 /**
  *  @brief Can we bind a thread to a set of cores, and have the kernel honour it?
  *  @note Deliberately independent of `FU_WITH_PLACE_MEMORY_ON_DOMAIN`. `pthread_setaffinity_np` needs no
- *        `libnuma`, and a Linux box without it could pin perfectly well - it simply never did,
- *        because a single NUMA macro guarded both.
+ *      `libnuma`, and a Linux box without it could pin perfectly well - it simply never did,
+ *      because a single NUMA macro guarded both.
  *  @note False on Apple Silicon, where `thread_policy_set(THREAD_AFFINITY_POLICY)` answers
- *        `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
+ *      `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
  */
 #if !defined(FU_WITH_PLACE_THREADS_BY_AFFINITY)
 #define FU_WITH_PLACE_THREADS_BY_AFFINITY (FU_ON_LINUX || FU_ON_FREEBSD || FU_ON_WINDOWS)
@@ -169,7 +158,7 @@
 
 /** @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply?
  *  @note Linux spells it `sched_setscheduler(SCHED_IDLE)`; FreeBSD rejects `SCHED_IDLE` but reaches the
- *        same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`. */
+ *      same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`. */
 #if !defined(FU_WITH_RESCHEDULE_THREADS_BY_CLASS)
 #define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
 #endif
@@ -185,9 +174,13 @@
 #if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
 /*  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
  *  gated behind the `SeLockMemoryPrivilege` the caller must already hold; FreeBSD hints the alignment
- *  with `MAP_ALIGNED_SUPER` and lets its transparent superpages promote. */
+ *  with `MAP_ALIGNED_SUPER` and lets its transparent superpages promote.
+ *
+ *  On Linux the `MAP_HUGE_2MB`-family constants live in `<linux/mman.h>`, and the kernel UAPI headers
+ *  ship separately from libc (`linux-headers` on Alpine and other musl distributions) - the platform
+ *  alone does not guarantee the header, and assuming it would fail at `#include`, not at a check.  */
 #define FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN \
-    ((FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
+    (((FU_ON_LINUX && FU_DETECT_LINUX_MMAN_) || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
 #endif
 
 /*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
@@ -228,14 +221,14 @@
 #include <exception> // `std::exception_ptr`
 #endif
 
-#if FU_WITH_TOPOLOGY && FU_ON_LINUX
-#include <numa.h> // `numa_available`, `numa_node_to_cpus`, `numa_distance`
-#endif
-
+/*  No `<numa.h>`, no `<numaif.h>`: sysfs needs no header, and `mbind` arrives by syscall number.  */
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-#include <numa.h>     // `numa_alloc_onnode`, `numa_free`
-#include <numaif.h>   // `mbind` manual assignment of `mmap` pages
-#include <sys/mman.h> // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`
+#include <sys/syscall.h> // `SYS_mbind`, the policy syscall no libc wraps
+#include <unistd.h>      // `syscall`
+#include <sys/mman.h>    // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`
+#if __has_include(<linux/mempolicy.h>)
+#include <linux/mempolicy.h> // `MPOL_BIND`, `MPOL_F_STATIC_NODES` - checked against, never needed
+#endif
 #endif
 
 #if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
@@ -296,16 +289,30 @@
 /**
  *  On C++17 and later we can detect misuse of lambdas that are not properly annotated.
  *  On C++20 and later we can use concepts for cleaner compile-time checks.
- */
-#if __cplusplus >= 202002L
+ *  MSVC pins `__cplusplus` at `199711L` unless `/Zc:__cplusplus` is passed, and reports the real
+ *  standard through `_MSVC_LANG` instead - so read that where it is larger, or every gate below
+ *  collapses to pre-C++17 on MSVC even under `/std:c++20`.  */
+#if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
+#define FU_CPLUSPLUS_ _MSVC_LANG
+#else
+#define FU_CPLUSPLUS_ __cplusplus
+#endif
+
+#if FU_CPLUSPLUS_ >= 202002L
 #define FU_DETECT_CPP_20_ 1
 #else
 #define FU_DETECT_CPP_20_ 0
 #endif
-#if __cplusplus >= 201703L
+#if FU_CPLUSPLUS_ >= 201703L
 #define FU_DETECT_CPP_17_ 1
 #else
 #define FU_DETECT_CPP_17_ 0
+#endif
+
+/*  C++17 is the floor: `if constexpr`, inline variables, and `std::is_nothrow_invocable_r_v` have no
+ *  fallback here. Say so once, rather than let a C++14 build fail deeper in a cascade.  */
+#if !FU_DETECT_CPP_17_
+#error "ForkUnion requires C++17 or later"
 #endif
 
 /*  Detect target CPU architecture.
@@ -392,10 +399,10 @@
 
 /** @brief Can we deterministically push a freshly-written cache line away from this core?
  *  @note x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the
- *        `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
- *        and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
- *        unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
- *        reached only through the runtime capability, never this gate. */
+ *      `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
+ *      and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
+ *      unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
+ *      reached only through the runtime capability, never this gate. */
 #if !defined(FU_WITH_DEMOTE_CACHE_LINES)
 #define FU_WITH_DEMOTE_CACHE_LINES                                    \
     ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
@@ -404,7 +411,7 @@
 
 /** @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
  *  @note Every ISA here places its write-prefetch in hint space - x86 `PREFETCHW`, AArch64
- *        `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
+ *      `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
 #if !defined(FU_WITH_PROMOTE_CACHE_LINES)
 #define FU_WITH_PROMOTE_CACHE_LINES                                   \
     ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
@@ -421,7 +428,7 @@
 namespace ashvardanian {
 namespace forkunion {
 
-/** @brief The OS's NUMA node number, in [0, numa_max_node()]. */
+/** @brief The OS's NUMA node number - on Linux, an `N` for which `/sys/devices/system/node/nodeN` exists. */
 using memory_domain_id_t = int;
 /** @brief Opaque logical-processor id; on Windows it packs a group and a bit. */
 using core_id_t = int;
@@ -429,6 +436,27 @@ using core_id_t = int;
 using socket_id_t = int;
 /** @brief A core's performance tier, ranked from fastest to lowest-power, like "performance" or "efficiency". */
 using core_quality_t = int;
+
+#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+/*  The two `mbind` inputs `<numaif.h>` supplied. Syscall ABI, so naming them needs no header - and
+ *  where `<linux/mempolicy.h>` is installed, the `static_assert`s hold us to the kernel's spelling.  */
+static constexpr int mpol_bind_k = 2;               // ? `MPOL_BIND` - allocate strictly from the mask
+static constexpr int mpol_static_nodes_k = 1 << 15; // ? `MPOL_F_STATIC_NODES` - literal ids, not cpuset-relative
+
+#if defined(MPOL_BIND)
+static_assert(mpol_bind_k == MPOL_BIND, "MPOL_BIND is the kernel's; ours must match it");
+static_assert(mpol_static_nodes_k == MPOL_F_STATIC_NODES, "MPOL_F_STATIC_NODES is the kernel's; ours must match it");
+#endif
+
+/**
+ *  @brief One past the highest memory-domain id we will bind - the node mask's width.
+ *  @note The kernel's own ceiling: `MAX_NUMNODES` is `1 << CONFIG_NODES_SHIFT`, which peaks at 10.
+ *      An id at or past this is one the kernel cannot represent, so declining it declines nothing.
+ *      Bounds @b domains, never cores - those are a `core_mask`, which grows.
+ */
+static constexpr std::size_t max_memory_domains_k = 1024;
+static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
+#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
 /**
  *  @brief A position in `machine_topology`'s array of @b compute domains, in [0, compute_domains_count).
@@ -446,7 +474,7 @@ using core_quality_t = int;
  *  with three compute domains over one memory domain.
  *
  *  @note The implicit widening also means a raw `array[compute_domain]` still compiles. The enums stop
- *        the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
+ *      the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
  */
 enum compute_domain_index_t : std::size_t {};
 
@@ -510,10 +538,10 @@ enum capabilities_t : unsigned int {
     capability_risc5_wrs_k = 1 << 5,
 
     /** Own the raw OS thread handle instead of a `std::thread` - the substrate the thread levers stand on. Built:
-       `FU_WITH_OS_THREADS`. */
+     * `FU_WITH_OS_THREADS`. */
     capability_os_threads_k = 1 << 6,
     /** Enumerate this machine's cores, compute domains, and memory domains. The root the placements need. Built:
-       `FU_WITH_TOPOLOGY`. */
+     * `FU_WITH_TOPOLOGY`. */
     capability_topology_k = 1 << 7,
     /**
      *  Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
@@ -710,7 +738,7 @@ constexpr bool is_power_of_two(std::size_t x) noexcept { return x && ((x & (x - 
 template <typename scalar_type_>
 constexpr int popcount(scalar_type_ value) noexcept {
     static_assert(std::is_unsigned<scalar_type_>::value, "Scalar type must be an unsigned integer");
-#if FU_DETECT_CPP_20_
+#if defined(__cpp_lib_bitops)
     return std::popcount(value); // In C++20
 #else
     // Kernighan's trick: each `value &= value - 1` clears the lowest set bit, so the loop runs once
@@ -1111,7 +1139,7 @@ class dynamic_array {
 
     /** @brief Like `try_resize`, but skips the zero-fill so the caller controls the first touch.
      *  @note Trivial value types only - nothing is constructed, so every element must be written
-     *        before it is read. @sa `sharded_array::try_resize_uninitialized`, the same contract. */
+     *      before it is read. @sa `sharded_array::try_resize_uninitialized`, the same contract. */
     bool try_resize_uninitialized(std::size_t const new_size) noexcept {
         static_assert(std::is_trivially_default_constructible_v<value_t> && std::is_trivially_destructible_v<value_t>,
                       "Uninitialized storage is only safe for trivial value types");
@@ -1350,9 +1378,10 @@ inline constexpr wait_uncapped_t wait_uncapped_k {};
  */
 struct standard_yield_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
-                           bound_type_ = {}) const noexcept {
+    /** @brief Any waited word - a `std::atomic` object or a bare address - the yield watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         std::this_thread::yield();
     }
 };
@@ -1501,8 +1530,8 @@ struct indexed_split {
     /**
      *  @brief The chunk owning task @p task - the inverse of `operator[]`, in closed form.
      *  @note The first `remainder_` chunks are one task larger, so the boundary between the two
-     *        regimes sits at `remainder_ * (quotient_ + 1)`; a `quotient_` of zero puts every valid
-     *        task in the first regime, so the division by `quotient_` below is never reached.
+     *      regimes sits at `remainder_ * (quotient_ + 1)`; a `quotient_` of zero puts every valid
+     *      task in the first regime, so the division by `quotient_` below is never reached.
      */
     inline index_t index_of(index_t const task) const noexcept {
         index_t const larger_chunks_end = static_cast<index_t>(remainder_ * (quotient_ + 1));
@@ -1515,7 +1544,7 @@ using indexed_split_t = indexed_split<>;
 
 /**
  *  @brief Pre-C++20 sentinel type for iterators.
- *  @see   https://en.cppreference.com/w/cpp/iterator/default_sentinel.html
+ *  @see https://en.cppreference.com/w/cpp/iterator/default_sentinel.html
  */
 struct default_sentinel_t {};
 
@@ -1611,8 +1640,8 @@ struct coprime_permutation_range {
 
     /**
      *  @note The seed shifts where the walk @b starts, not only how it steps. Deriving the stride
-     *        alone would leave every seed emitting the same first value, so a pool of drained threads
-     *        would descend on that one victim together before their strides pulled them apart.
+     *      alone would leave every seed emitting the same first value, so a pool of drained threads
+     *      would descend on that one victim together before their strides pulled them apart.
      */
     iterator begin() const noexcept { return iterator(start_, length_, stride_, first_offset_, length_); }
     default_sentinel_t end() const noexcept { return {}; }
@@ -1701,7 +1730,7 @@ using dynamic_claim_t = dynamic_claim<>;
 
 /**
  *  @brief Drains whatever is left of one thread's slice into @p fork - the shared core of both the
- *         flat and the distributed `for_n_dynamic` invokers, so its invariants live in one place.
+ *      flat and the distributed `for_n_dynamic` invokers, so its invariants live in one place.
  *
  *  A read-only probe first: a drained slice is skipped in Shared state - no dirtying add, no line
  *  migration - which is the entire cost of visiting an empty neighbour once a small dispatch runs

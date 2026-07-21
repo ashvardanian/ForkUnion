@@ -32,14 +32,26 @@
 namespace ashvardanian {
 namespace forkunion {
 
+/** @brief The address of a waited word - a `std::atomic` object or a bare `std::atomic_ref`-owned slot.
+ *      A monitored waiter needs only the address and the observed bit pattern, so both forms route here. */
+template <typename value_type_>
+inline void const *watched_address(std::atomic<value_type_> const &watched) noexcept {
+    return &watched;
+}
+template <typename value_type_>
+inline void const *watched_address(value_type_ const *watched) noexcept {
+    return watched;
+}
+
 #if FU_DETECT_ARCH_X86_64_
 
 /** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
 struct x86_pause_t {
     static constexpr capabilities_t capability_k = capability_x86_pause_k;
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
-                           bound_type_ = {}) const noexcept {
+    /** @brief Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
 #if FU_DETECT_INLINE_ASM_SUPPORT_
         __asm__ __volatile__("pause");
 #else
@@ -141,35 +153,28 @@ inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
  *    it early. It is what this used to be; `UMWAIT` is strictly better when there is a word to watch.
  *
  *  @note `UMWAIT`'s control selects the sleep depth: bit 0 = 1 picks @b C0.1,
- *        shallow and fast-waking; bit 0 = 0 picks @b C0.2, deeper and slower. A fork-join barrier resolves in
- *        tens of nanoseconds, so we ask for C0.1. Neither lowers voltage: like ARM's `WFE`, this
- *        clock-gates and saves dynamic power only, and never releases the core to the scheduler.
+ *      shallow and fast-waking; bit 0 = 0 picks @b C0.2, deeper and slower. A fork-join barrier resolves in
+ *      tens of nanoseconds, so we ask for C0.1. Neither lowers voltage: like ARM's `WFE`, this
+ *      clock-gates and saves dynamic power only, and never releases the core to the scheduler.
  *
  *  @warning The `UMONITOR` and `UMWAIT` opcodes are hand-encoded and, unlike the AArch64 path, have
- *           not been exercised on `WAITPKG` silicon in this tree. Gated at runtime by `capability_x86_tpause_k`.
+ *      not been exercised on `WAITPKG` silicon in this tree. Gated at runtime by `capability_x86_tpause_k`.
  */
 struct x86_tpause_t {
     static constexpr capabilities_t capability_k = capability_x86_tpause_k;
-    /** @brief Waits until a deadline ~1 micro-second ahead, for a loop that also guards another line. */
-    template <typename value_type_, typename thread_index_type_>
-    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+    /** @brief Waits until a deadline ~1 micro-second ahead, for a loop that also guards another line.
+     *      Accepts a `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
         if (!arm_monitor_(watched, observed)) return;
-
-        // Build a deadline one microsecond of TSC cycles ahead of now.
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-        std::uint32_t rdtsc_lo, rdtsc_hi;
-        __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
-        std::uint64_t const now_cycles = (static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo;
-#else
-        std::uint64_t const now_cycles = __rdtsc();
-#endif
-        umwait_until_(now_cycles + x86_tsc_cycles_per_micro());
+        // A deadline one microsecond of TSC cycles ahead of now.
+        umwait_until_(now_tsc_() + x86_tsc_cycles_per_micro());
     }
 
     /** @brief Waits for the store with no effective cap, for a single-word loop. */
-    template <typename value_type_, typename thread_index_type_>
-    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
         if (!arm_monitor_(watched, observed)) return;
         // A TSC deadline centuries away: the monitor-clearing store or an interrupt ends the wait first.
@@ -177,6 +182,30 @@ struct x86_tpause_t {
     }
 
   private:
+    /** @brief Reads the time-stamp counter, via inline assembly or MSVC's `__rdtsc`. */
+    static inline std::uint64_t now_tsc_() noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        std::uint32_t rdtsc_lo, rdtsc_hi;
+        __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
+        return (static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo;
+#else
+        return __rdtsc();
+#endif
+    }
+
+    /** @brief Arms this core's address-range monitor on the line holding @p watched_address.
+     *      Where inline assembly is available the UMONITOR opcode is hand-encoded so no header is
+     *      pulled in; MSVC has no inline assembly and instead calls the `<immintrin.h>` intrinsic
+     *      the encoding stands in for - `_umonitor(const_cast<void *>(watched_address))`. */
+    static inline void arm_address_(void const *watched_address) noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
+        __asm__ __volatile__(".byte 0xf3, 0x0f, 0xae, 0xf0" : : "a"(watched_address) : "memory");
+#else
+        _umonitor(const_cast<void *>(watched_address));
+#endif
+    }
+
     /**
      *  @brief Arms this core's address-range monitor on @p watched and reports whether to enter the wait.
      *  @retval true if the monitor is armed and @p watched still holds @p observed - proceed to wait.
@@ -184,21 +213,27 @@ struct x86_tpause_t {
      */
     template <typename value_type_>
     static inline bool arm_monitor_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
-        void const *const watched_address = &watched;
-
-        // Arm this core's address-range monitor on the watched line. Where inline assembly is available
-        // the UMONITOR opcode is hand-encoded so no header is pulled in; MSVC has no inline assembly and
-        // instead calls the `<immintrin.h>` intrinsic the encoding stands in for - the same one that in
-        // pseudo-code reads `_umonitor(const_cast<void *>(watched_address))`.
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-        // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
-        __asm__ __volatile__(".byte 0xf3, 0x0f, 0xae, 0xf0" : : "a"(watched_address) : "memory");
-#else
-        _umonitor(const_cast<void *>(watched_address));
-#endif
-
+        arm_address_(&watched);
         // A normal load does not disarm the monitor, so re-check: if the word already moved, don't wait.
         return watched.load(std::memory_order_acquire) == observed;
+    }
+
+    /** @brief Same, for a word owned through `std::atomic_ref` rather than a `std::atomic` object. */
+    template <typename value_type_>
+    static inline bool arm_monitor_(value_type_ const *watched, value_type_ const observed) noexcept {
+        arm_address_(watched);
+        // Acquire-load the bare word: `std::atomic_ref` where it exists, else the compiler's own load,
+        // since C++17 has no portable `atomic_ref` and this waiter already needs GCC/Clang's opcodes.
+#if defined(__cpp_lib_atomic_ref)
+        value_type_ const current =
+            std::atomic_ref<value_type_>(*const_cast<value_type_ *>(watched)).load(std::memory_order_acquire);
+#elif defined(__GNUC__) || defined(__clang__)
+        value_type_ const current = __atomic_load_n(watched, __ATOMIC_ACQUIRE);
+#else
+        value_type_ const current = *static_cast<value_type_ const volatile *>(watched);
+        std::atomic_thread_fence(std::memory_order_acquire); // ? The monitor re-check tolerates a stale read
+#endif
+        return current == observed;
     }
 
     /** @brief Sleeps in the shallow C0.1 state until @p deadline as a TSC value, an interrupt, or a store. */
@@ -234,9 +269,10 @@ struct x86_tpause_t {
 /** @brief On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
 struct arm64_yield_t {
     static constexpr capabilities_t capability_k = capability_arm64_yield_k;
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
-                           bound_type_ = {}) const noexcept {
+    /** @brief Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
 #if FU_DETECT_INLINE_ASM_SUPPORT_
         __asm__ __volatile__("yield");
 #else
@@ -278,12 +314,27 @@ struct arm64_yield_t {
  */
 struct arm64_wfet_t {
     static constexpr capabilities_t capability_k = capability_arm64_wfet_k;
-    /** @brief Waits with a ~1 micro-second cap, for a loop that also guards another line. */
-    template <typename value_type_, typename thread_index_type_>
-    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+    /** @brief Waits with a ~1 micro-second cap, for a loop that also guards another line. Accepts a
+     *      `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
-        if (!arm_monitor_(watched, observed)) return;
+        if (!arm_monitor_(watched_address(watched), observed)) return;
+        wfet_one_micro_();
+    }
 
+    /** @brief Waits with no cap, for a single-word loop where the armed line is the only wake source. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
+                           wait_uncapped_t) const noexcept {
+        if (!arm_monitor_(watched_address(watched), observed)) return;
+        // `WFE` returns on the monitor-clearing store; Apple's event stream is a periodic safety net.
+        __asm__ __volatile__("wfe" ::: "memory");
+    }
+
+  private:
+    /** @brief Enters a timed wait with a deadline ~1 micro-second ahead of the generic timer. */
+    static inline void wfet_one_micro_() noexcept {
         std::uint64_t cntfrq_el0, cntvct_el0;
         // Read the timer frequency (ticks per second)
         __asm__ __volatile__("mrs %0, CNTFRQ_EL0" : "=r"(cntfrq_el0));
@@ -306,25 +357,16 @@ struct arm64_wfet_t {
             : "x0", "memory", "cc");
     }
 
-    /** @brief Waits with no cap, for a single-word loop where the armed line is the only wake source. */
-    template <typename value_type_, typename thread_index_type_>
-    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
-                           wait_uncapped_t) const noexcept {
-        if (!arm_monitor_(watched, observed)) return;
-        // `WFE` returns on the monitor-clearing store; Apple's event stream is a periodic safety net.
-        __asm__ __volatile__("wfe" ::: "memory");
-    }
-
-  private:
     /**
-     *  @brief Arms this core's exclusive monitor on @p watched and reports whether to enter the wait.
-     *  @retval true if the monitor is armed and @p watched still holds @p observed - proceed to wait.
-     *  @retval false if @p watched already moved - the monitor is dropped and the caller must re-check.
+     *  @brief Arms this core's exclusive monitor on the word at @p watched_address and reports
+     *      whether to enter the wait - it only ever needed the address and the bit pattern, so
+     *      both `std::atomic` objects and in-place `std::atomic_ref`-owned words route here.
+     *  @retval true if the monitor is armed and the word still holds @p observed - proceed to wait.
+     *  @retval false if the word already moved - the monitor is dropped and the caller must re-check.
      */
     template <typename value_type_>
-    static inline bool arm_monitor_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
+    static inline bool arm_monitor_(void const *watched_address, value_type_ const observed) noexcept {
         static_assert(sizeof(value_type_) <= 8, "The exclusive monitor watches at most a 64-bit word");
-        void const *const watched_address = &watched;
 
         // Compare bit patterns, so an enum or any trivially-copyable word works unchanged.
         std::uint64_t observed_bits = 0;
@@ -371,9 +413,10 @@ struct arm64_wfet_t {
 /** @brief On RISC-V, the `Zihintpause` spin-wait hint. */
 struct risc5_pause_t {
     static constexpr capabilities_t capability_k = capability_risc5_pause_k;
-    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    inline void operator()(std::atomic<value_type_> const &, value_type_, thread_index_type_,
-                           bound_type_ = {}) const noexcept {
+    /** @brief Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         // Zihintpause `PAUSE` is `FENCE W, 0`; the mnemonic needs `-march=...+zihintpause` to assemble,
         // so the fixed encoding is emitted directly - it decodes as a no-op fence on cores without it.
         __asm__ __volatile__(".4byte 0x0100000f");
@@ -395,45 +438,47 @@ struct risc5_pause_t {
  *  register-width epoch.
  *
  *  @note Like ARM's `WFE`, this clock-gates and saves dynamic power only; it never releases the hart
- *        to a scheduler. The sibling `WRS.NTO` "No TimeOut" waits unbounded, for a single-word loop.
+ *      to a scheduler. The sibling `WRS.NTO` "No TimeOut" waits unbounded, for a single-word loop.
  *
  *  @note `WRS.STO` is @b manually encoded as `.4byte 0x01d00073` so the surrounding build needs no
- *        `-march=...+zawrs` assembler support; `LR` is plain `A`-extension, present on any core that
- *        would carry `Zawrs`.
+ *      `-march=...+zawrs` assembler support; `LR` is plain `A`-extension, present on any core that
+ *      would carry `Zawrs`.
  *
  *  @warning Hand-encoded and not exercised on `Zawrs` silicon in this tree; it needs a runtime
- *           `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe (not yet wired) before it
- *           may be selected.
+ *      `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe (not yet wired) before it
+ *      may be selected.
  */
 struct risc5_wrs_t {
     static constexpr capabilities_t capability_k = capability_risc5_wrs_k;
-    /** @brief Waits with the implementation-bounded short timeout, for a loop that also guards another line. */
-    template <typename value_type_, typename thread_index_type_>
-    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+    /** @brief Waits with the implementation-bounded short timeout, for a loop that also guards another
+     *      line. Accepts a `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
-        if (!arm_reservation_(watched, observed)) return;
+        if (!arm_reservation_(watched_address(watched), observed)) return;
         // WRS.STO: wait for the reservation set, short bounded timeout.
         __asm__ __volatile__(".4byte 0x01d00073" ::: "memory");
     }
 
     /** @brief Waits unbounded, for a single-word loop where the reservation is the only wake source. */
-    template <typename value_type_, typename thread_index_type_>
-    inline void operator()(std::atomic<value_type_> const &watched, value_type_ const observed, thread_index_type_,
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
-        if (!arm_reservation_(watched, observed)) return;
+        if (!arm_reservation_(watched_address(watched), observed)) return;
         // WRS.NTO: wait for the reservation set, no timeout.
         __asm__ __volatile__(".4byte 0x00d00073" ::: "memory");
     }
 
   private:
     /**
-     *  @brief Arms a reservation on @p watched and reports whether to enter the wait.
-     *  @retval true if the reservation is set and @p watched still holds @p observed - proceed to `WRS`.
-     *  @retval false if @p watched moved, or the width has no `LR` (a `pause` spin was emitted instead).
+     *  @brief Arms a reservation on the word at @p watched_address and reports whether to enter the
+     *      wait - it only ever needed the address and the bit pattern, so both `std::atomic` objects
+     *      and in-place `std::atomic_ref`-owned words route here.
+     *  @retval true if the reservation is set and the word still holds @p observed - proceed to `WRS`.
+     *  @retval false if the word moved, or the width has no `LR` (a `pause` spin was emitted instead).
      */
     template <typename value_type_>
-    static inline bool arm_reservation_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
-        void const *const watched_address = &watched;
+    static inline bool arm_reservation_(void const *watched_address, value_type_ const observed) noexcept {
 
         // Compare bit patterns, so an enum or any trivially-copyable word works unchanged.
         std::uint64_t observed_bits = 0;
@@ -498,9 +543,9 @@ using preferred_yield_t = standard_yield_t;
 /**
  *  @brief x86 cache hints: `CLDEMOTE` toward the LLC, `PREFETCHW` for write-intent promotion.
  *  @note Both live in hint or reserved-NOP space, so neither can fault on any x86-64 part; whether
- *        `CLDEMOTE` actually bites is reported by `capability_x86_cldemote_k` - detected, never
- *        dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
- *        MSVC encodes the same bytes through `_mm_cldemote` / `_m_prefetchw`, no `/arch` needed.
+ *      `CLDEMOTE` actually bites is reported by `capability_x86_cldemote_k` - detected, never
+ *      dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
+ *      MSVC encodes the same bytes through `_mm_cldemote` / `_m_prefetchw`, no `/arch` needed.
  */
 struct x86_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_x86_cldemote_k;
@@ -525,11 +570,11 @@ struct x86_cache_hints_t {
 /**
  *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes.
  *  @note There is no demote on Arm - the clean is the nearest thing: the next claimer's snoop finds
- *        a clean line instead of forcing a dirty intervention, at the price of a memory write. The
- *        clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
- *        `FU_WITH_DEMOTE_CACHE_LINES` gate requires `FU_ON_LINUX` on this architecture. The
- *        persistence-targeted `DC CVAP`/`CVADP` are deliberately absent: UNDEFINED without
- *        `FEAT_DPB`/`FEAT_DPB2`, and they buy a NUMA hand-off nothing.
+ *      a clean line instead of forcing a dirty intervention, at the price of a memory write. The
+ *      clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
+ *      `FU_WITH_DEMOTE_CACHE_LINES` gate requires `FU_ON_LINUX` on this architecture. The
+ *      persistence-targeted `DC CVAP`/`CVADP` are deliberately absent: UNDEFINED without
+ *      `FEAT_DPB`/`FEAT_DPB2`, and they buy a NUMA hand-off nothing.
  */
 struct arm64_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_arm64_dc_cvac_k;
@@ -545,10 +590,10 @@ struct arm64_cache_hints_t {
 #if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
 /**
  *  @brief AArch64 promotion only, for kernels that keep `SCTLR_EL1.UCI` clear - Windows and the
- *         BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
+ *      BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
  *  @note Mirrors `risc5_cache_hints_t`'s shape: the promote is a `PRFM` hint that cannot fault
- *        anywhere. MSVC reaches it through `__prefetch2(address, 0x10)`, whose prfop immediate
- *        `0b10000` spells PST-L1-KEEP - the same encoding the asm arm emits.
+ *      anywhere. MSVC reaches it through `__prefetch2(address, 0x10)`, whose prfop immediate
+ *      `0b10000` spells PST-L1-KEEP - the same encoding the asm arm emits.
  */
 struct arm64_prefetch_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
@@ -566,10 +611,10 @@ struct arm64_prefetch_cache_hints_t {
 #if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_
 /**
  *  @brief RISC-V promotion only: `prefetch.w` is an `ORI x0, ...` hint that cannot fault, with or
- *         without Zicbop silicon.
+ *      without Zicbop silicon.
  *  @note The `cbo.clean` demote is deliberately a no-op here: it raises illegal-instruction unless
- *        the kernel set `senvcfg.CBCFE`, which only `hwprobe` can attest at runtime - so it belongs
- *        to a runtime-dispatch tier behind `capability_risc5_zicbom_k`, never a compile-time policy.
+ *      the kernel set `senvcfg.CBCFE`, which only `hwprobe` can attest at runtime - so it belongs
+ *      to a runtime-dispatch tier behind `capability_risc5_zicbom_k`, never a compile-time policy.
  */
 struct risc5_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
@@ -582,10 +627,10 @@ struct risc5_cache_hints_t {
 
 /**
  *  @brief RISC-V cache hints where `hwprobe` attested Zicbom: `cbo.clean` writes the dirty block
- *         back toward another cache or memory, and `prefetch.w` promotes with write intent.
+ *      back toward another cache or memory, and `prefetch.w` promotes with write intent.
  *  @note Never selected at compile time - `cbo.clean` raises illegal-instruction unless the kernel
- *        set `senvcfg.CBCFE`, which only the `capability_risc5_zicbom_k` runtime bit can attest -
- *        so this functor is reachable exclusively through the C ABI's runtime cascade.
+ *      set `senvcfg.CBCFE`, which only the `capability_risc5_zicbom_k` runtime bit can attest -
+ *      so this functor is reachable exclusively through the C ABI's runtime cascade.
  */
 struct risc5_cbo_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_risc5_zicbom_k;
@@ -698,17 +743,36 @@ inline capabilities_t cpu_capabilities() noexcept {
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 /**
- *  @brief Probes whether this process may actually place memory - `numa_available` only proves libnuma
- *         is present, while seccomp or a cgroup `cpuset.mems` can still refuse `mbind`.
+ *  @brief Binds [@p ptr, @p ptr + @p size_bytes) to the single memory domain @p memory_domain_id.
+ *  @param[in] mode An `MPOL_*` policy, already OR-ed with whatever mode flags the caller wants.
+ *  @note Lives here, not beside its allocator callers, because this is the last header both
+ *      `topology.hpp` and `allocators.hpp` see - so the `maxnode` quirk below is spelled once.
+ */
+FU_MAYBE_UNUSED_ static inline bool linux_bind_range_to_domain(void *ptr, std::size_t size_bytes,
+                                                               memory_domain_id_t memory_domain_id, int mode) noexcept {
+    if (memory_domain_id < 0 || static_cast<std::size_t>(memory_domain_id) >= max_memory_domains_k) return false;
+    std::size_t const bit = static_cast<std::size_t>(memory_domain_id);
+    std::size_t const bits_per_word = sizeof(unsigned long) * 8;
+    unsigned long node_mask[nodemask_words_k] {};
+    node_mask[bit / bits_per_word] = 1ul << (bit % bits_per_word);
+    // ! `+ 1`: the manual says the mask holds "up to `maxnode`" bits, but the kernel decrements it
+    // ! before sizing, so the exact width masks the top bit back off and the bind silently fails.
+    return ::syscall(SYS_mbind, ptr, size_bytes, mode, node_mask, max_memory_domains_k + 1, 0) == 0;
+}
+
+/**
+ *  @brief Probes whether this process may actually place memory - a kernel that offers `mbind` still
+ *      lets seccomp or a cgroup `cpuset.mems` refuse it, and only the call itself can say.
  */
 inline bool linux_can_place_memory_on_domain() noexcept {
-    std::size_t const page_bytes = static_cast<std::size_t>(::numa_pagesize());
+    std::size_t const page_bytes = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
     void *probe = ::mmap(nullptr, page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (probe == MAP_FAILED) return false;
-    unsigned long node_mask = 1ul; // Node 0, always present where a topology exists
-    long const status = ::mbind(probe, page_bytes, MPOL_BIND, &node_mask, sizeof(node_mask) * 8, 0);
+    // ? Node 0, always present where a topology exists. Bare `MPOL_BIND` - this asks only whether the
+    // ? kernel will place at all, not about a mode flag no caller requested.
+    bool const bound = linux_bind_range_to_domain(probe, page_bytes, 0, mpol_bind_k);
     ::munmap(probe, page_bytes);
-    return status == 0;
+    return bound;
 }
 #endif
 
@@ -727,11 +791,15 @@ inline capabilities_t ram_capabilities() noexcept {
     if (::GetLargePageMinimum() != 0) caps |= capability_place_huge_pages_on_domain_k;
 
 #elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
-    // NUMA placement is claimed only when a real one-page `mbind` succeeds, not merely when libnuma loads.
-    if (::numa_available() >= 0 && linux_can_place_memory_on_domain()) caps |= capability_place_memory_on_domain_k;
+    // NUMA placement is claimed only when a real one-page `mbind` succeeds - which subsumes every
+    // weaker question, including the one `numa_available` used to be asked here.
+    if (linux_can_place_memory_on_domain()) caps |= capability_place_memory_on_domain_k;
 
-    // Check for huge pages support - simplest method is checking if the global directory exists
-    {
+    // Huge pages are placed *on a domain*, so this capability cannot outlast memory placement itself -
+    // the prerequisite the compile-time layer spells with an `#error`. A host that mounts the hugepages
+    // sysfs but refuses `mbind` - a seccomp sandbox, a restricted container, qemu-user - must not report
+    // the impossible pair, or a caller that trusts the runtime set walks into a placement that cannot work.
+    if (caps & capability_place_memory_on_domain_k) {
         DIR *hugepages_dir = ::opendir("/sys/kernel/mm/hugepages");
         if (hugepages_dir) {
             caps |= capability_place_huge_pages_on_domain_k;

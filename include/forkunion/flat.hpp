@@ -148,8 +148,8 @@ class flat_pool {
      *  and holds no `std::thread`. That costs one cell and buys `claim` and `worker` the same index.
      *
      *  @note Separation comes from the buffer's @b stride, not from an `alignas` on this type. A
-     *        `std::allocator` only promises `__STDCPP_DEFAULT_NEW_ALIGNMENT__`, so over-aligning the
-     *        cell would placement-new it into storage that cannot satisfy the request.
+     *      `std::allocator` only promises `__STDCPP_DEFAULT_NEW_ALIGNMENT__`, so over-aligning the
+     *      cell would placement-new it into storage that cannot satisfy the request.
      */
     struct worker_cell_t {
         /** @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`. */
@@ -544,7 +544,7 @@ class flat_pool {
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
      *  @return Same value as `threads_count()`, as we only support one compute_domain.
      *  @note Shape parity with `distributed_pool`: generic callers - the C ABI's `visit` and the
-     *        distributed invokers - call `pool.threads_count(domain)` on every pool kind.
+     *      distributed invokers - call `pool.threads_count(domain)` on every pool kind.
      */
     thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
