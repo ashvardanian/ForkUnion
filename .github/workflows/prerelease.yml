@@ -98,12 +98,12 @@ jobs:
           set -euxo pipefail
           cmake --install build_artifacts --prefix "$PWD/_prefix"
           mkdir -p _consumer && cd _consumer
-          printf 'cmake_minimum_required(VERSION 3.21)\nproject(c LANGUAGES CXX)\nfind_package(forkunion REQUIRED)\nadd_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE forkunion::forkunion_static)\n' > CMakeLists.txt
+          printf 'cmake_minimum_required(VERSION 3.21)\nproject(c LANGUAGES CXX)\nfind_package(forkunion REQUIRED)\nadd_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE forkunion::static)\n' > CMakeLists.txt
           printf '#include <forkunion.hpp>\nint main() { return 0; }\n' > main.cpp
           cmake -B b -D forkunion_DIR="$PWD/../_prefix/lib/cmake/forkunion"
           cmake --build b
           # The un-namespaced spelling the config's own comment promises.
-          sed -i 's/forkunion::forkunion_static/forkunion/' CMakeLists.txt
+          sed -i 's/forkunion::static/forkunion_static/' CMakeLists.txt
           cmake -B b2 -D forkunion_DIR="$PWD/../_prefix/lib/cmake/forkunion"
           cmake --build b2
 
