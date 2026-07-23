@@ -138,6 +138,83 @@ inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
     return cycles_per_us;
 }
 
+/** @brief `UMWAIT` sleep-depth control: bit 0 = 1 selects the shallow, fast-waking C0.1 state. */
+inline constexpr std::uint32_t x86_umwait_shallow_c01_k = 1;
+/** @brief `UMWAIT` sleep-depth control: bit 0 = 0 selects the deeper C0.2 state - slower to wake,
+ *      but ceding more of the shared core's pipeline resources to the SMT sibling meanwhile. */
+inline constexpr std::uint32_t x86_umwait_deeper_c02_k = 0;
+
+/** @brief Reads the time-stamp counter, via inline assembly or MSVC's `__rdtsc`. */
+inline std::uint64_t x86_now_tsc() noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+    std::uint32_t rdtsc_lo, rdtsc_hi;
+    __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
+    return (static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo;
+#else
+    return __rdtsc();
+#endif
+}
+
+/** @brief Arms this core's address-range monitor on the line holding @p watched_address.
+ *      Where inline assembly is available the UMONITOR opcode is hand-encoded so no header is
+ *      pulled in; MSVC has no inline assembly and instead calls the `<immintrin.h>` intrinsic
+ *      the encoding stands in for - `_umonitor(const_cast<void *>(watched_address))`. */
+inline void x86_arm_address(void const *watched_address) noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+    // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
+    __asm__ __volatile__(".byte 0xf3, 0x0f, 0xae, 0xf0" : : "a"(watched_address) : "memory");
+#else
+    _umonitor(const_cast<void *>(watched_address));
+#endif
+}
+
+/**
+ *  @brief Arms this core's address-range monitor on @p watched and reports whether to enter the wait.
+ *  @retval true if the monitor is armed and @p watched still holds @p observed - proceed to wait.
+ *  @retval false if @p watched already moved - the caller must re-check.
+ */
+template <typename value_type_>
+inline bool x86_arm_monitor(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
+    x86_arm_address(&watched);
+    // A normal load does not disarm the monitor, so re-check: if the word already moved, don't wait.
+    return watched.load(std::memory_order_acquire) == observed;
+}
+
+/** @brief Same, for a word owned through `std::atomic_ref` rather than a `std::atomic` object. */
+template <typename value_type_>
+inline bool x86_arm_monitor(value_type_ const *watched, value_type_ const observed) noexcept {
+    x86_arm_address(watched);
+    // Acquire-load the bare word: `std::atomic_ref` where it exists, else the compiler's own load,
+    // since C++17 has no portable `atomic_ref` and this waiter already needs GCC/Clang's opcodes.
+#if defined(__cpp_lib_atomic_ref)
+    value_type_ const current =
+        std::atomic_ref<value_type_>(*const_cast<value_type_ *>(watched)).load(std::memory_order_acquire);
+#elif defined(__GNUC__) || defined(__clang__)
+    value_type_ const current = __atomic_load_n(watched, __ATOMIC_ACQUIRE);
+#else
+    value_type_ const current = *static_cast<value_type_ const volatile *>(watched);
+    std::atomic_thread_fence(std::memory_order_acquire); // ? The monitor re-check tolerates a stale read
+#endif
+    return current == observed;
+}
+
+/** @brief Sleeps in @p sleep_state until @p deadline as a TSC value, an interrupt, or a store to the
+ *      monitored line. Inline assembly hand-encodes the opcode to avoid an include, while MSVC calls
+ *      the `<immintrin.h>` intrinsic - in pseudo-code, `_umwait(sleep_state, deadline)`. */
+inline void x86_umwait_until(std::uint64_t const deadline, std::uint32_t const sleep_state) noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+    // Hand-encoding UMWAIT r32 as `F2 0F AE /6`, with the control in ECX and the deadline in EDX:EAX:
+    std::uint32_t const deadline_lo = static_cast<std::uint32_t>(deadline);
+    std::uint32_t const deadline_hi = static_cast<std::uint32_t>(deadline >> 32);
+    __asm__ __volatile__(".byte 0xf2, 0x0f, 0xae, 0xf1"
+                         :
+                         : "a"(deadline_lo), "d"(deadline_hi), "c"(sleep_state)
+                         : "cc", "memory");
+#else
+    (void)_umwait(sleep_state, deadline);
+#endif
+}
+
 /**
  *  @brief On x86 `WAITPKG`, a monitored wait built on `UMONITOR` + `UMWAIT`.
  *
@@ -167,92 +244,53 @@ struct x86_tpause_t {
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
-        if (!arm_monitor_(watched, observed)) return;
-        // A deadline one microsecond of TSC cycles ahead of now.
-        umwait_until_(now_tsc_() + x86_tsc_cycles_per_micro());
+        if (!x86_arm_monitor(watched, observed)) return;
+        // A deadline one microsecond of TSC cycles ahead of now, in the shallow fast-waking state:
+        // a fork-join barrier resolves in tens of nanoseconds, so wake latency dominates the choice.
+        x86_umwait_until(x86_now_tsc() + x86_tsc_cycles_per_micro(), x86_umwait_shallow_c01_k);
     }
 
     /** @brief Waits for the store with no effective cap, for a single-word loop. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
-        if (!arm_monitor_(watched, observed)) return;
+        if (!x86_arm_monitor(watched, observed)) return;
         // A TSC deadline centuries away: the monitor-clearing store or an interrupt ends the wait first.
-        umwait_until_(~std::uint64_t {0});
+        x86_umwait_until(~std::uint64_t {0}, x86_umwait_shallow_c01_k);
+    }
+};
+
+/**
+ *  @brief Sibling of `x86_tpause_t` for saturated hosts - every logical core busy, SMT siblings
+ *      competing for pipeline slots.
+ *
+ *  The policy differs only in what each wait-bound tag selects. Capped two-word waits - lock and
+ *  capacity gates whose wakes are rare - sleep in the deeper C0.2 state with a quarter-microsecond
+ *  deadline, trading ~100 ns of extra wake latency for pipeline resources the sibling hyper-thread
+ *  reclaims meanwhile. Uncapped single-word waits - serialized publication convoys where every
+ *  nanosecond of wake latency lands on the critical chain - keep the shallow C0.1 state.
+ *
+ *  Motivated by a 128-thread convoy workload where the shallow-everywhere policy of `x86_tpause_t`
+ *  measured 13-16% behind plain `std::this_thread::yield` at full occupancy, while leading at the
+ *  7/8-occupancy operating point - the saturated sibling is the tool for the former regime.
+ */
+struct x86_tpause_saturated_t {
+    static constexpr capabilities_t capability_k = capability_x86_tpause_k;
+
+    /** @brief Rare-wake wait: a quarter-microsecond deadline in the deeper C0.2 state. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
+                           wait_capped_t = {}) const noexcept {
+        if (!x86_arm_monitor(watched, observed)) return;
+        x86_umwait_until(x86_now_tsc() + (x86_tsc_cycles_per_micro() >> 2), x86_umwait_deeper_c02_k);
     }
 
-  private:
-    /** @brief Reads the time-stamp counter, via inline assembly or MSVC's `__rdtsc`. */
-    static inline std::uint64_t now_tsc_() noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-        std::uint32_t rdtsc_lo, rdtsc_hi;
-        __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
-        return (static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo;
-#else
-        return __rdtsc();
-#endif
-    }
-
-    /** @brief Arms this core's address-range monitor on the line holding @p watched_address.
-     *      Where inline assembly is available the UMONITOR opcode is hand-encoded so no header is
-     *      pulled in; MSVC has no inline assembly and instead calls the `<immintrin.h>` intrinsic
-     *      the encoding stands in for - `_umonitor(const_cast<void *>(watched_address))`. */
-    static inline void arm_address_(void const *watched_address) noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-        // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
-        __asm__ __volatile__(".byte 0xf3, 0x0f, 0xae, 0xf0" : : "a"(watched_address) : "memory");
-#else
-        _umonitor(const_cast<void *>(watched_address));
-#endif
-    }
-
-    /**
-     *  @brief Arms this core's address-range monitor on @p watched and reports whether to enter the wait.
-     *  @retval true if the monitor is armed and @p watched still holds @p observed - proceed to wait.
-     *  @retval false if @p watched already moved - the caller must re-check.
-     */
-    template <typename value_type_>
-    static inline bool arm_monitor_(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
-        arm_address_(&watched);
-        // A normal load does not disarm the monitor, so re-check: if the word already moved, don't wait.
-        return watched.load(std::memory_order_acquire) == observed;
-    }
-
-    /** @brief Same, for a word owned through `std::atomic_ref` rather than a `std::atomic` object. */
-    template <typename value_type_>
-    static inline bool arm_monitor_(value_type_ const *watched, value_type_ const observed) noexcept {
-        arm_address_(watched);
-        // Acquire-load the bare word: `std::atomic_ref` where it exists, else the compiler's own load,
-        // since C++17 has no portable `atomic_ref` and this waiter already needs GCC/Clang's opcodes.
-#if defined(__cpp_lib_atomic_ref)
-        value_type_ const current =
-            std::atomic_ref<value_type_>(*const_cast<value_type_ *>(watched)).load(std::memory_order_acquire);
-#elif defined(__GNUC__) || defined(__clang__)
-        value_type_ const current = __atomic_load_n(watched, __ATOMIC_ACQUIRE);
-#else
-        value_type_ const current = *static_cast<value_type_ const volatile *>(watched);
-        std::atomic_thread_fence(std::memory_order_acquire); // ? The monitor re-check tolerates a stale read
-#endif
-        return current == observed;
-    }
-
-    /** @brief Sleeps in the shallow C0.1 state until @p deadline as a TSC value, an interrupt, or a store. */
-    static inline void umwait_until_(std::uint64_t const deadline) noexcept {
-        // Sleep in the shallow, fast-waking C0.1 state via control bit 0 = 1. As with the monitor above,
-        // inline assembly hand-encodes the opcode to avoid an include, while MSVC calls the
-        // `<immintrin.h>` intrinsic - in pseudo-code, `_umwait(shallow_c0_1_state, deadline)`.
-        constexpr std::uint32_t shallow_c0_1_state = 1;
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-        // Hand-encoding UMWAIT r32 as `F2 0F AE /6`, with the control in ECX and the deadline in EDX:EAX:
-        std::uint32_t const deadline_lo = static_cast<std::uint32_t>(deadline);
-        std::uint32_t const deadline_hi = static_cast<std::uint32_t>(deadline >> 32);
-        __asm__ __volatile__(".byte 0xf2, 0x0f, 0xae, 0xf1"
-                             :
-                             : "a"(deadline_lo), "d"(deadline_hi), "c"(shallow_c0_1_state)
-                             : "cc", "memory");
-#else
-        (void)_umwait(shallow_c0_1_state, deadline);
-#endif
+    /** @brief Critical-chain wait: uncapped, but shallow - the waking store must land instantly. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
+                           wait_uncapped_t) const noexcept {
+        if (!x86_arm_monitor(watched, observed)) return;
+        x86_umwait_until(~std::uint64_t {0}, x86_umwait_shallow_c01_k);
     }
 };
 
