@@ -617,13 +617,13 @@ size_t fu_pool_threads_count(fu_pool_t pool);
 size_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size_t compute_domain_index);
 
 /**
- *  @brief Parks idle workers in a low-power sleep, re-checking for work every @p micros.
+ *  @brief Parks idle workers in a low-power sleep until the next dispatch.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @param[in] micros Wake-up poll interval in microseconds, must be > 0.
- *  @note Not thread-safe; call between task batches. The next dispatch wakes the workers.
+ *  @param[in] micros Maximum fallback wake interval in microseconds, must be > 0.
+ *  @note Not thread-safe; call between task batches.
  *
- *  Trades up to @p micros of startup latency for lower power draw during long idle periods; on Linux
- *  it also de-prioritizes the sleeping threads with the scheduler.
+ *  C++20 builds wake workers directly on the next dispatch. C++17 builds poll at @p micros; on Linux
+ *  sleeping threads are also de-prioritized with the scheduler.
  */
 void fu_pool_sleep(fu_pool_t pool, size_t micros);
 

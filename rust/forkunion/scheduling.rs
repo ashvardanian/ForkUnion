@@ -419,11 +419,10 @@ impl ThreadPool {
         unsafe { fu_pool_locate_thread_in(self.inner, global_thread_index, compute_domain_index) }
     }
 
-    /// Transitions worker threads to a power-saving sleep state.
+    /// Transitions worker threads to a low-power sleep state until the next dispatch.
     ///
-    /// This function places worker threads into a low-power sleep state when no work
-    /// is available for extended periods. Threads will periodically check for new work
-    /// at the specified interval.
+    /// The bundled C++20 core wakes workers directly on the next dispatch. `micros` remains a
+    /// fallback wake interval for C++17 consumers.
     ///
     /// # Arguments
     ///

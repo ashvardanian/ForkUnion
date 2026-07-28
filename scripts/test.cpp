@@ -5,6 +5,8 @@
 #include <vector>      // `std::vector`
 #include <algorithm>   // `std::sort`
 #include <type_traits> // `std::is_integral`, `std::is_enum`
+#include <chrono>      // `std::chrono::milliseconds`
+#include <thread>      // `std::this_thread::sleep_for`
 
 #include <forkunion.hpp>
 
@@ -1085,6 +1087,13 @@ static void test_sleep_wake() noexcept {
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter {0};
+#if FU_DETECT_ATOMIC_WAIT_
+    pool.sleep(100000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    auto const started = std::chrono::steady_clock::now();
+    pool.for_n(default_parallel_tasks_k, [](std::size_t) noexcept {});
+    expect(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(50));
+#endif
     for (std::size_t batch = 0; batch != 4; ++batch) {
         pool.sleep(100); // ? Nap in 100 us intervals until the next dispatch
         counter.store(0, std::memory_order_relaxed);

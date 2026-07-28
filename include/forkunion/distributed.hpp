@@ -505,6 +505,9 @@ struct colocated_pool {
 
         // Stop all threads and wait for them to finish
         mood_.store(mood_t::die_k, std::memory_order_release);
+#if FU_DETECT_ATOMIC_WAIT_
+        mood_.notify_all();
+#endif
 
         caller_exclusivity_t const exclusivity = caller_exclusivity();
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
@@ -533,16 +536,12 @@ struct colocated_pool {
     }
 
     /**
-     *  @brief Transitions "workers" to a sleeping state, waiting for a wake-up call.
-     *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
+     *  @brief Transitions workers to a low-power sleep until the next dispatch.
+     *  @param[in] wake_up_periodicity_micros Maximum fallback wake interval in microseconds.
      *  @note Can only be called @b between the tasks for a single thread. No synchronization is performed.
      *
-     *  This function may be used in some batch-processing operations when we clearly understand
-     *  that the next task won't be arriving for a while and power can be saved without major
-     *  latency penalties.
-     *
-     *  It may also be used in a high-level Python or JavaScript library offloading some parallel
-     *  operations to an underlying C++ engine, where latency is irrelevant.
+     *  C++20 builds wake sleeping workers directly on the next dispatch. C++17 builds poll at the
+     *  supplied interval, which caps their wake latency.
      */
     void sleep(std::size_t wake_up_periodicity_micros) noexcept {
         assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
@@ -654,13 +653,11 @@ struct colocated_pool {
         // on `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
         threads_to_sync_.store(threads, std::memory_order_relaxed);
 
-        // We are most likely already "grinding", but in the unlikely case we are not,
-        // let's wake up from the "chilling" state with relaxed semantics. Assuming the sleeping
-        // logic for the workers also checks the epoch counter, no synchronization is needed and
-        // no immediate wake-up is required.
+        // A dispatch moves workers out of `chill_k`, publishes its epoch, then wakes their atomic
+        // waits. `compare_exchange_strong` ensures a sleeping pool always makes this transition.
         mood_t may_be_chilling = mood_t::chill_k;
-        bool const was_chilling = mood_.compare_exchange_weak( //
-            may_be_chilling, mood_t::grind_k,                  //
+        bool const was_chilling = mood_.compare_exchange_strong( //
+            may_be_chilling, mood_t::grind_k,                    //
             std::memory_order_relaxed, std::memory_order_relaxed);
         generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
 
@@ -685,6 +682,9 @@ struct colocated_pool {
         }
 #else
         fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin or Windows
+#endif
+#if FU_DETECT_ATOMIC_WAIT_
+        if (was_chilling) mood_.notify_all();
 #endif
         return generation;
     }
@@ -845,20 +845,22 @@ struct colocated_pool {
         }
         thread_index_t const global_thread_index = pool->first_thread_ + local_thread_index;
 
-        // Run the infinite loop, using Linux-specific napping mechanism
+        // Run the infinite loop, waiting on the hot epoch while active.
         epoch_index_t last_epoch = 0;
         epoch_index_t new_epoch;
         while (true) {
             // Wait for either: a new ticket or a stop flag
-            // Two independent lines guard this loop - arm the hot one (`epoch_`, bumped by a dispatch)
-            // and let the waiter's timeout cap bound how late a rare `mood_` change is noticed.
             while ((new_epoch = pool->epoch_.load(std::memory_order_acquire)) == last_epoch &&
                    (mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
                 micro_yield(pool->epoch_, last_epoch, global_thread_index);
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
+#if FU_DETECT_ATOMIC_WAIT_
+                pool->mood_.wait(mood_t::chill_k, std::memory_order_acquire);
+#else
                 sleep_for_micros(pool->sleep_length_micros_);
+#endif
                 continue;
             }
 

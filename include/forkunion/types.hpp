@@ -358,6 +358,13 @@
 #include <concepts> // `std::same_as`, `std::invocable`
 #include <bit>      // `std::popcount`
 #endif
+/* `std::atomic::wait`/`notify_all` give a sleeping pool an event-driven wake path. Keep the
+ * C++17 headers usable: their timed sleep remains the portable fallback. */
+#if FU_DETECT_CPP_20_ && defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
+#define FU_DETECT_ATOMIC_WAIT_ 1
+#else
+#define FU_DETECT_ATOMIC_WAIT_ 0
+#endif
 
 #if FU_DETECT_CPP_17_
 #define FU_MAYBE_UNUSED_ [[maybe_unused]]
