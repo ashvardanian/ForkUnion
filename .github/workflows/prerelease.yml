@@ -118,6 +118,21 @@ jobs:
       - name: Test Rust
         run: cargo test
 
+      # Nothing else builds `benchmarks`, so both `[[bin]]` targets went uncompiled.
+      - name: Build the Rust benchmarks
+        run: cargo build --features benchmarks
+
+      # Otherwise `cargo publish` on `main` is the first read of `include` and the `[[bin]]` paths.
+      # `cargo package` only warns when it drops a target, so promote that.
+      - name: Package the crate
+        run: |
+          set -euo pipefail
+          cargo package --locked 2>&1 | tee package.log
+          if grep -q 'warning: ignoring' package.log; then
+            echo "cargo package dropped a declared target - check the include list in Cargo.toml"
+            exit 1
+          fi
+
       # Miri can't call the C shim; `--lib` skips the FFI doctests, keeping the pure-Rust unit tests.
       - name: Test Rust under Miri
         run: |

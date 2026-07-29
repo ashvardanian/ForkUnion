@@ -35,8 +35,7 @@
 /build*/
 /Testing/
 
-# Rust build artifacts
-Cargo.lock
+# Rust build artifacts. `Cargo.lock` is tracked - this package ships `[[bin]]` targets, and CI needs `--locked`.
 target/
 .cache/
 

@@ -11,15 +11,19 @@ readme = "README.md"
 documentation = "https://docs.rs/forkunion"
 homepage = "https://github.com/ashvardanian/ForkUnion"
 keywords = ["numa", "parallel", "thread-pool", "allocator", "no-std"]
-categories = ["concurrency", "os::linux-apis", "external-ffi-bindings"]
+categories = ["concurrency", "os::linux-apis", "no-std"]
+# Leading slashes anchor to the package root; Cargo matches these like gitignore, so a bare `README.md`
+# also picked up every one under `build*/_deps/`. The two scripts are here because `[[bin]]` names them.
 include = [
-    "Cargo.toml",
-    "README.md",
-    "LICENSE",
-    "build.rs",
-    "rust/**",
-    "include/**",
-    "c/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+    "/build.rs",
+    "/rust/**",
+    "/include/**",
+    "/c/**",
+    "/scripts/nbody.rs",
+    "/scripts/propagation.rs",
 ]
 links = "forkunion"
 
@@ -33,7 +37,7 @@ cc = "1.2.40"
 [features]
 default = ["std"]
 std = []
-benchmarks = ["dep:rayon", "dep:rand", "dep:tokio"] # ? The demo binaries and their baseline runtimes
+benchmarks = ["dep:rayon", "dep:tokio"] # ? The demo binaries and their baseline runtimes
 
 # Kernel facilities. Left alone, each is decided by `include/forkunion/types.hpp` from the platform
 # alone; these only override that. See `build.rs`.
@@ -68,5 +72,4 @@ required-features = ["benchmarks"]
 
 [dependencies]
 rayon = { version = "1.11", optional = true }
-rand = { version = "0.9", optional = true }
 tokio = { version = "1.46.1", features = ["rt-multi-thread", "sync"], optional = true }
