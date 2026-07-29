@@ -182,6 +182,8 @@ class flat_pool {
     caller_exclusivity_t exclusivity_ {caller_inclusive_k};
     /** @brief How long to nap in microseconds while `chill_k`, waiting for work. */
     std::size_t sleep_length_micros_ {0};
+    /** @brief Whether `sleep` blocks on the dispatch notification instead of polling. */
+    bool interruptible_sleep_ {false};
     /** @brief Lifecycle switch between spinning (`grind_k`), sleeping (`chill_k`), and exiting (`die_k`). */
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
@@ -201,7 +203,9 @@ class flat_pool {
     flat_pool &operator=(flat_pool &&) = delete;
     flat_pool &operator=(flat_pool const &) = delete;
 
-    flat_pool(allocator_t const &alloc = {}) noexcept : allocator_(alloc) {}
+    flat_pool(allocator_t const &alloc = {}, bool const interruptible_sleep = false) noexcept
+        : allocator_(alloc), interruptible_sleep_(interruptible_sleep) {}
+    explicit flat_pool(bool const interruptible_sleep) noexcept : flat_pool({}, interruptible_sleep) {}
     ~flat_pool() noexcept { terminate(); }
 
     /**
@@ -358,7 +362,7 @@ class flat_pool {
         // Notify all worker threads...
         mood_.store(mood_t::die_k, std::memory_order_release);
 #if FU_DETECT_ATOMIC_WAIT_
-        mood_.notify_all();
+        if (interruptible_sleep_) mood_.notify_all();
 #endif
 
         // ... and wait for them to finish
@@ -380,8 +384,8 @@ class flat_pool {
      *  @param[in] wake_up_periodicity_micros Maximum fallback wake interval in microseconds.
      *  @note Can only be called @b between the tasks for a single thread. No synchronization is performed.
      *
-     *  C++20 builds wake sleeping workers directly on the next dispatch. C++17 builds poll at the
-     *  supplied interval, which caps their wake latency.
+     *  When constructed with `capability_interruptible_sleep_k`, workers wake directly on dispatch.
+     *  Otherwise, workers poll at the supplied interval, which caps their wake latency.
      */
     void sleep(std::size_t wake_up_periodicity_micros) noexcept {
         assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
@@ -480,7 +484,7 @@ class flat_pool {
             std::memory_order_relaxed, std::memory_order_relaxed);
         generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
 #if FU_DETECT_ATOMIC_WAIT_
-        if (was_chilling) mood_.notify_all();
+        if (interruptible_sleep_ && was_chilling) mood_.notify_all();
 #else
         fu_unused_(was_chilling);
 #endif
@@ -609,10 +613,10 @@ class flat_pool {
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
 #if FU_DETECT_ATOMIC_WAIT_
-                mood_.wait(mood_t::chill_k, std::memory_order_acquire);
-#else
-                std::this_thread::sleep_for(std::chrono::microseconds(sleep_length_micros_));
+                if (interruptible_sleep_) mood_.wait(mood_t::chill_k, std::memory_order_acquire);
+                else
 #endif
+                    std::this_thread::sleep_for(std::chrono::microseconds(sleep_length_micros_));
                 continue;
             }
 

@@ -173,13 +173,13 @@ impl ThreadPool {
             name,
             threads,
             exclusivity,
-            Capabilities::ALL,
+            Capabilities(Capabilities::ALL.0 & !Capabilities::INTERRUPTIBLE_SLEEP.0),
         )
     }
 
-    /// As [`try_named_spawn_with_exclusivity`](Self::try_named_spawn_with_exclusivity), but constrains
-    /// the pool to `allowed`: clear a waiter bit to force a lower-priority busy-wait, or clear
-    /// [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] to force the flat (non-NUMA) pool.
+    /// the pool to `allowed`: clear a waiter bit to force a lower-priority busy-wait, clear
+    /// [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] to force the flat (non-NUMA) pool, or include
+    /// [`Capabilities::INTERRUPTIBLE_SLEEP`] to wake sleeping workers directly on dispatch.
     pub fn try_named_spawn_with_capabilities(
         topology: &Topology,
         name: Option<&str>,
@@ -250,11 +250,12 @@ impl ThreadPool {
             compute_domain_index,
             threads,
             exclusivity,
-            Capabilities::ALL,
+            Capabilities(Capabilities::ALL.0 & !Capabilities::INTERRUPTIBLE_SLEEP.0),
         )
     }
 
     /// As [`try_spawn_on`](Self::try_spawn_on), but constrains the colocated pool to `allowed`.
+    /// Include [`Capabilities::INTERRUPTIBLE_SLEEP`] to wake sleeping workers directly on dispatch.
     pub fn try_spawn_on_with_capabilities(
         topology: &Topology,
         compute_domain_index: usize,
@@ -421,8 +422,8 @@ impl ThreadPool {
 
     /// Transitions worker threads to a low-power sleep state until the next dispatch.
     ///
-    /// The bundled C++20 core wakes workers directly on the next dispatch. `micros` remains a
-    /// fallback wake interval for C++17 consumers.
+    /// Include [`Capabilities::INTERRUPTIBLE_SLEEP`] in the pool's allowed capabilities to wake
+    /// workers directly on the next dispatch. Without it, `micros` is the wake-up polling interval.
     ///
     /// # Arguments
     ///
@@ -1264,6 +1265,31 @@ mod tests {
         let pool = spawn(&topology, 2);
         assert_eq!(pool.threads_count(), 2);
         assert!(pool.compute_domains_count() > 0);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn interruptible_sleep_is_opt_in() {
+        let topology = Topology::new().unwrap();
+        let default = spawn(&topology, 2);
+        assert!(!default
+            .capabilities()
+            .contains(Capabilities::INTERRUPTIBLE_SLEEP));
+
+        let enabled = ThreadPool::try_named_spawn_with_capabilities(
+            &topology,
+            None,
+            2,
+            CallerExclusivity::Inclusive,
+            Capabilities::ALL,
+        )
+        .unwrap();
+        assert_eq!(
+            enabled
+                .capabilities()
+                .contains(Capabilities::INTERRUPTIBLE_SLEEP),
+            comptime_capabilities().contains(Capabilities::INTERRUPTIBLE_SLEEP)
+        );
     }
 
     #[cfg_attr(miri, ignore)]

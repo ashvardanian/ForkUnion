@@ -867,7 +867,8 @@ constexpr capabilities_t comptime_capabilities() noexcept {
         (FU_WITH_RESCHEDULE_THREADS_BY_CLASS ? capability_reschedule_threads_by_class_k : capabilities_unknown_k) |
         (FU_WITH_PLACE_MEMORY_ON_DOMAIN ? capability_place_memory_on_domain_k : capabilities_unknown_k) | //
         (FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN ? capability_place_huge_pages_on_domain_k : capabilities_unknown_k) |
-        (FU_WITH_COLOCATE_POOLS_ON_DOMAIN ? capability_colocate_pools_on_domain_k : capabilities_unknown_k);
+        (FU_WITH_COLOCATE_POOLS_ON_DOMAIN ? capability_colocate_pools_on_domain_k : capabilities_unknown_k) |
+        (FU_DETECT_ATOMIC_WAIT_ ? capability_interruptible_sleep_k : capabilities_unknown_k);
 }
 
 } // namespace forkunion

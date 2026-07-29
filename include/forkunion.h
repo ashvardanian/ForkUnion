@@ -211,6 +211,8 @@ typedef enum fu_capabilities_t {
     /** The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
      *  the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet. */
     fu_capability_risc5_zicbom_k = 1 << 17,
+    /** Sleeping workers wait for a dispatch notification instead of polling. Built with C++20 atomics support. */
+    fu_capability_interruptible_sleep_k = 1 << 18,
 
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
@@ -622,8 +624,8 @@ size_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size
  *  @param[in] micros Maximum fallback wake interval in microseconds, must be > 0.
  *  @note Not thread-safe; call between task batches.
  *
- *  C++20 builds wake workers directly on the next dispatch. C++17 builds poll at @p micros; on Linux
- *  sleeping threads are also de-prioritized with the scheduler.
+ *  Workers wake directly when the pool was created with `fu_capability_interruptible_sleep_k` in
+ *  its allowed mask; otherwise they poll at @p micros. On Linux, sleepers are also de-prioritized.
  */
 void fu_pool_sleep(fu_pool_t pool, size_t micros);
 

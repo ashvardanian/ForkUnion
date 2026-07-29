@@ -169,6 +169,8 @@ struct colocated_pool {
     thread_index_t first_thread_ {0};
     /** @brief How long to nap in microseconds while `chill_k`, waiting for work. */
     std::size_t sleep_length_micros_ {0};
+    /** @brief Whether `sleep` blocks on the dispatch notification instead of polling. */
+    bool interruptible_sleep_ {false};
 
     using char16_name_t = char[16]; // ? Fixed-size thread name buffer, for POSIX thread naming
     /** @brief Thread name buffer applied to each worker for POSIX/OS naming. */
@@ -206,10 +208,17 @@ struct colocated_pool {
     colocated_pool &operator=(colocated_pool &&) = delete;
     colocated_pool &operator=(colocated_pool const &) = delete;
 
-    explicit colocated_pool(char const *name = "forkunion") noexcept { rename(name); }
+    explicit colocated_pool(char const *name = "forkunion", bool const interruptible_sleep = false) noexcept
+        : interruptible_sleep_(interruptible_sleep) {
+        rename(name);
+    }
+
+    /** @brief Selects direct dispatch wakeups; call before spawning workers. */
+    void set_interruptible_sleep(bool const enabled) noexcept { interruptible_sleep_ = enabled; }
 
     /** @brief Replaces the pool's name; only threads spawned after the call pick it up. */
     void rename(char const *name) noexcept {
+
         // Accept NULL or empty names by falling back to a sensible default
         char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::size_t const source_length = std::strlen(effective_name);
@@ -506,7 +515,7 @@ struct colocated_pool {
         // Stop all threads and wait for them to finish
         mood_.store(mood_t::die_k, std::memory_order_release);
 #if FU_DETECT_ATOMIC_WAIT_
-        mood_.notify_all();
+        if (interruptible_sleep_) mood_.notify_all();
 #endif
 
         caller_exclusivity_t const exclusivity = caller_exclusivity();
@@ -540,8 +549,8 @@ struct colocated_pool {
      *  @param[in] wake_up_periodicity_micros Maximum fallback wake interval in microseconds.
      *  @note Can only be called @b between the tasks for a single thread. No synchronization is performed.
      *
-     *  C++20 builds wake sleeping workers directly on the next dispatch. C++17 builds poll at the
-     *  supplied interval, which caps their wake latency.
+     *  When constructed with `capability_interruptible_sleep_k`, workers wake directly on dispatch.
+     *  Otherwise, workers poll at the supplied interval, which caps their wake latency.
      */
     void sleep(std::size_t wake_up_periodicity_micros) noexcept {
         assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
@@ -684,7 +693,7 @@ struct colocated_pool {
         fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin or Windows
 #endif
 #if FU_DETECT_ATOMIC_WAIT_
-        if (was_chilling) mood_.notify_all();
+        if (interruptible_sleep_ && was_chilling) mood_.notify_all();
 #endif
         return generation;
     }
@@ -857,10 +866,10 @@ struct colocated_pool {
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
 #if FU_DETECT_ATOMIC_WAIT_
-                pool->mood_.wait(mood_t::chill_k, std::memory_order_acquire);
-#else
-                sleep_for_micros(pool->sleep_length_micros_);
+                if (pool->interruptible_sleep_) pool->mood_.wait(mood_t::chill_k, std::memory_order_acquire);
+                else
 #endif
+                    sleep_for_micros(pool->sleep_length_micros_);
                 continue;
             }
 
@@ -1176,6 +1185,8 @@ struct distributed_pool {
     thread_index_t threads_count_ {0};
     /** @brief Whether the caller thread is counted as one of the contributors. */
     caller_exclusivity_t exclusivity_ {caller_inclusive_k};
+    /** @brief Whether child pools wait for a dispatch notification instead of polling. */
+    bool interruptible_sleep_ {false};
     /**
      *  @brief One pinned sub-pool per compute domain, in one flat contiguous array.
      *
@@ -1195,9 +1206,10 @@ struct distributed_pool {
     distributed_pool &operator=(distributed_pool &&) = delete;
     distributed_pool &operator=(distributed_pool const &) = delete;
 
-    distributed_pool() noexcept : distributed_pool("forkunion") {}
+    distributed_pool() noexcept : distributed_pool("forkunion", false) {}
 
-    explicit distributed_pool(char const *name) noexcept {
+    explicit distributed_pool(char const *name, bool const interruptible_sleep = false) noexcept
+        : interruptible_sleep_(interruptible_sleep) {
         // Accept null or empty names by falling back to a sensible default
         char const *effective_name = (name && name[0] != '\0') ? name : "forkunion";
         std::size_t const source_length = std::strlen(effective_name);
@@ -1310,8 +1322,10 @@ struct distributed_pool {
 
         colocations_t colocations(allocator);
         if (!colocations.try_resize(colocations_count)) return false; // ! Allocation failed
-        for (index_t compute_domain_index = 0; compute_domain_index < colocations_count; ++compute_domain_index)
+        for (index_t compute_domain_index = 0; compute_domain_index < colocations_count; ++compute_domain_index) {
+            colocations[compute_domain_index].set_interruptible_sleep(interruptible_sleep_);
             colocations[compute_domain_index].rename(name_);
+        }
 
         auto reset_on_failure = [&]() noexcept {
             for (index_t compute_domain_index = 0; compute_domain_index < colocations_count; ++compute_domain_index)

@@ -117,6 +117,8 @@ impl Capabilities {
     pub const HUGE_TRANSPARENT_PAGES: Capabilities = Capabilities(1 << 13);
     /// The domain-aware `colocated_pool` and `distributed_pool` are compiled in.
     pub const COLOCATE_POOLS_ON_DOMAIN: Capabilities = Capabilities(1 << 14);
+    /// Sleeping workers wait for a dispatch notification instead of polling.
+    pub const INTERRUPTIBLE_SLEEP: Capabilities = Capabilities(1 << 18);
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub const ALL: Capabilities = Capabilities(u32::MAX);
