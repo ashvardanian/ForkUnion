@@ -1,0 +1,12 @@
+prefix=@FORKUNION_PC_PREFIX@
+exec_prefix=${prefix}
+libdir=@FORKUNION_PC_LIBDIR@
+includedir=@FORKUNION_PC_INCLUDEDIR@
+
+Name: ForkUnion
+Description: @PROJECT_DESCRIPTION@
+URL: https://github.com/ashvardanian/ForkUnion
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lforkunion_shared
+Libs.private: @FORKUNION_PC_PRIVATE@

@@ -263,7 +263,8 @@ and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with 
 
 ### Intro in C
 
-ForkUnion provides a pure C99 API via `forkunion.h`, wrapping the C++ implementation in pre-compiled libraries: `forkunion_static.a` or `forkunion_shared.so`.
+ForkUnion provides a pure C99 API via `forkunion.h`, wrapping the C++ implementation in pre-compiled libraries: `libforkunion_static.a` or `libforkunion_shared.so`.
+Installing also drops a `forkunion.pc`, so `pkg-config --cflags --libs forkunion` works outside CMake.
 The C API uses opaque `fu_pool_t` handles and function pointers for callbacks, making it compatible with any C99+ compiler.
 
 To integrate using CMake:
@@ -376,7 +377,8 @@ int main(void) {
 }
 ```
 
-Compile: `gcc -std=c11 test.c -lforkunion_static -lpthread`
+Compile: `gcc -std=c11 test.c -lforkunion_static -lstdc++ -lpthread`
+The archive is C++ behind a C facade, so a C consumer names the C++ runtime itself — `-lc++` under Apple's toolchain.
 
 #### Clang Blocks Extension
 
@@ -422,7 +424,7 @@ int main(void) {
 }
 ```
 
-Compile: `clang -std=c11 -fblocks test.c -lforkunion_static -lpthread -lBlocksRuntime`
+Compile: `clang -std=c11 -fblocks test.c -lforkunion_static -lc++ -lpthread -lBlocksRuntime`
 
 ## Alternatives & Differences
 

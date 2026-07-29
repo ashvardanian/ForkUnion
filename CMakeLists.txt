@@ -185,6 +185,20 @@ set_target_properties(
                CXX_EXTENSIONS OFF
 )
 
+# `SOVERSION` carries the major alone - the only break the C ABI admits, matching `SameMajorVersion` below.
+set_target_properties(forkunion_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+
+# Hide everything `forkunion.h` does not declare. On its own this exports zero symbols; the visibility pragma in
+# `c/forkunion.cpp` is the other half. Static too - same translation unit, and a consumer may link it into their own
+# shared object.
+set_target_properties(
+    forkunion_shared forkunion_static PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
+)
+
+# No `__declspec(dllexport)` in this source, so MSVC built a DLL with no import library and an unusable
+# `forkunion::shared`. Let CMake write the module definition file instead.
+set_target_properties(forkunion_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
 # Re-use the public interface of the header-only target
 target_link_libraries(forkunion_shared PUBLIC forkunion_header)
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
@@ -198,8 +212,12 @@ check_cxx_compiler_flag("-fcf-protection=full" HAS_CFP)
 target_compile_options(
     forkunion_shared
     PRIVATE # Stack protection and buffer overflow detection
-            $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong
-            -D_FORTIFY_SOURCE=2>
+            $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
+            # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_STRICT. Allowlist the
+            # optimized configs, since an empty `CMAKE_BUILD_TYPE` is not Debug yet emits no `-O`. The `-U` disarms
+            # distributions that predefine it, whose redefinition would warn on the same path.
+            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
+            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
             # Control flow integrity and stack clash protection
             $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
             $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
@@ -210,8 +228,10 @@ target_compile_options(
 )
 target_compile_options(
     forkunion_static
-    PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong
-            -D_FORTIFY_SOURCE=2>
+    PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
+            # Same reasoning as the shared target above.
+            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
+            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
             $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
             $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
             $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
@@ -376,6 +396,45 @@ check_cxx_source_compiles(
 if (NOT FORKUNION_ATOMICS_ARE_BUILTIN)
     target_link_libraries(forkunion_header INTERFACE atomic)
 endif ()
+
+# A `.pc` for the consumers CMake never reaches. Must follow the two probes above: `configure_file` substitutes now,
+# unlike `install(EXPORT)`, which writes at generate time and so tolerates a link interface declared later. Spelling the
+# prefix against `${pcfiledir}` keeps it correct after `cmake --install --prefix` moves the tree.
+file(RELATIVE_PATH FORKUNION_PC_PREFIX "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
+string(REGEX REPLACE "/+$" "" FORKUNION_PC_PREFIX "${FORKUNION_PC_PREFIX}")
+set(FORKUNION_PC_PREFIX "\${pcfiledir}/${FORKUNION_PC_PREFIX}")
+
+# `GNUInstallDirs` returns a relative path unless a distro forced an absolute one; only the former may follow a prefix.
+if (IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+    set(FORKUNION_PC_LIBDIR "${CMAKE_INSTALL_LIBDIR}")
+else ()
+    set(FORKUNION_PC_LIBDIR "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
+endif ()
+if (IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+    set(FORKUNION_PC_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}")
+else ()
+    set(FORKUNION_PC_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+endif ()
+
+# A C caller linking the archive has to name the C++ runtime itself, so read it off the compiler rather than the
+# platform. These go in `Libs.private`, emitted only for `--static`; `Requires.private` would name pkg-config modules,
+# and none of the three ship one.
+set(FORKUNION_PC_PRIVATE "")
+foreach (fu_implicit_library IN LISTS CMAKE_CXX_IMPLICIT_LINK_LIBRARIES)
+    if (fu_implicit_library MATCHES "^(stdc\\+\\+|c\\+\\+)$")
+        list(APPEND FORKUNION_PC_PRIVATE "-l${fu_implicit_library}")
+    endif ()
+endforeach ()
+if (CMAKE_THREAD_LIBS_INIT)
+    list(APPEND FORKUNION_PC_PRIVATE "${CMAKE_THREAD_LIBS_INIT}")
+endif ()
+if (NOT FORKUNION_ATOMICS_ARE_BUILTIN)
+    list(APPEND FORKUNION_PC_PRIVATE "-latomic")
+endif ()
+list(JOIN FORKUNION_PC_PRIVATE " " FORKUNION_PC_PRIVATE)
+
+configure_file(cmake/forkunion.pc.in "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
 # Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
 # 0. Knows nothing of the environment: there is no longer an environment to know.

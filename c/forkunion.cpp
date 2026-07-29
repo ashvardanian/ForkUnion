@@ -299,6 +299,13 @@ static fu::machine_topology_t *upcast_topology(fu_topology_t topology) noexcept 
     return std::launder(reinterpret_cast<fu::machine_topology_t *>(topology));
 }
 
+/*  `CXX_VISIBILITY_PRESET hidden` keeps the pool templates out of the dynamic symbol table, but alone
+ *  it exports nothing, so this re-opens the C ABI below. Guarded on `__GNUC__`, not `__clang__`:
+ *  clang-cl defines the latter yet rejects the pragma, and takes its exports from the `.def` instead.  */
+#if defined(__GNUC__)
+#pragma GCC visibility push(default)
+#endif
+
 extern "C" {
 
 #pragma region Metadata
@@ -839,3 +846,7 @@ void fu_pool_unsafe_join(fu_pool_t pool, fu_generation_t generation) {
 
 #pragma endregion Flexible API
 }
+
+#if defined(__GNUC__)
+#pragma GCC visibility pop
+#endif
