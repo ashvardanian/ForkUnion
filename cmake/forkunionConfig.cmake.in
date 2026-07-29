@@ -30,4 +30,15 @@ if (NOT CMAKE_VERSION VERSION_LESS 3.18)
     unset(_forkunion_flavor)
 endif ()
 
-set(forkunion_VERSION @PACKAGE_VERSION@)
+# The three flavors as components. `check_required_components` reads these, so leaving them unset would
+# fail a correct `COMPONENTS static` too.
+foreach (_forkunion_flavor header static shared)
+    if (TARGET forkunion::${_forkunion_flavor})
+        set(forkunion_${_forkunion_flavor}_FOUND TRUE)
+    endif ()
+endforeach ()
+unset(_forkunion_flavor)
+
+# No `forkunion_VERSION` here: `find_package` sets it from the version file before loading this one, and
+# the `@PACKAGE_VERSION@` that used to sit here expanded to nothing and overwrote it.
+check_required_components(forkunion)
