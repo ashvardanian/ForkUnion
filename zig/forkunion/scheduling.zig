@@ -69,6 +69,12 @@ extern fn fu_fabric_memory_levels_count(fabric: *anyopaque) usize;
 pub const Pool = struct {
     handle: *anyopaque,
 
+    fn defaultCapabilities() Capabilities {
+        var allowed = Capabilities.all();
+        allowed.interruptible_sleep = false;
+        return allowed;
+    }
+
     /// Creates a new thread pool
     pub fn init(topo: Topology, thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
         return initNamed(topo, null, thread_count, exclusivity);
@@ -81,11 +87,12 @@ pub const Pool = struct {
         thread_count: usize,
         exclusivity: CallerExclusivity,
     ) Error!Pool {
-        return initNamedWithCapabilities(topo, name, thread_count, exclusivity, Capabilities.all());
+        return initNamedWithCapabilities(topo, name, thread_count, exclusivity, defaultCapabilities());
     }
 
     /// As `initNamed`, but constrains the pool to `allowed`: clear a waiter bit to force a
-    /// lower-priority busy-wait, or clear `place_memory_on_domain` to force the flat (non-NUMA) pool.
+    /// lower-priority busy-wait, clear `place_memory_on_domain` to force the flat (non-NUMA) pool,
+    /// or include `interruptible_sleep` to wake sleeping workers directly on dispatch.
     pub fn initNamedWithCapabilities(
         topo: Topology,
         name: ?[]const u8,
@@ -116,10 +123,11 @@ pub const Pool = struct {
     /// single thread with the generation-token API. On builds without NUMA, only compute
     /// domain 0 is valid.
     pub fn spawnOn(topo: Topology, compute_domain_index: usize, thread_count: usize, exclusivity: CallerExclusivity) Error!Pool {
-        return spawnOnWithCapabilities(topo, compute_domain_index, thread_count, exclusivity, Capabilities.all());
+        return spawnOnWithCapabilities(topo, compute_domain_index, thread_count, exclusivity, defaultCapabilities());
     }
 
-    /// As `spawnOn`, but constrains the colocated pool to `allowed`.
+    /// As `spawnOn`, but constrains the colocated pool to `allowed`. Include `interruptible_sleep`
+    /// to wake sleeping workers directly on dispatch.
     pub fn spawnOnWithCapabilities(
         topo: Topology,
         compute_domain_index: usize,
@@ -180,7 +188,8 @@ pub const Pool = struct {
         fu_pool_terminate(self.handle);
     }
 
-    /// Puts worker threads into power-saving sleep state
+    /// Puts worker threads into power-saving sleep state. Include `interruptible_sleep` in the
+    /// pool's allowed capabilities to wake workers directly on the next dispatch.
     pub fn sleep(self: *const Pool, microseconds: usize) void {
         fu_pool_sleep(self.handle, microseconds);
     }
@@ -574,9 +583,20 @@ test "pool capabilities reflect the build" {
     defer pool.deinit();
     const full: u32 = @bitCast(pool.capabilities());
 
+    // Default helpers leave direct wakeups off; an explicit all-ones mask enables them when this
+    // build has C++20 atomic waits.
+    try std.testing.expect(!pool.capabilities().interruptible_sleep);
+    var interruptible_pool = try Pool.initNamedWithCapabilities(topo, null, 2, .inclusive, Capabilities.all());
+    defer interruptible_pool.deinit();
+    try std.testing.expectEqual(
+        topology.comptimeCapabilities().interruptible_sleep,
+        interruptible_pool.capabilities().interruptible_sleep,
+    );
+
     // Clearing a bit in the allow-mask must clear it in the effective set - the mask can
     // only subtract: forcing off `place_memory_on_domain` demotes a NUMA pool to the flat pool.
     var flat_mask = Capabilities.all();
+    flat_mask.interruptible_sleep = false;
     flat_mask.place_memory_on_domain = false;
     var flat_pool = try Pool.initNamedWithCapabilities(topo, null, 2, .inclusive, flat_mask);
     defer flat_pool.deinit();

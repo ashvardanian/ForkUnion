@@ -358,6 +358,13 @@
 #include <concepts> // `std::same_as`, `std::invocable`
 #include <bit>      // `std::popcount`
 #endif
+/* `std::atomic::wait`/`notify_all` make direct wakeups possible; a pool enables them through
+ * `capability_interruptible_sleep_k`. */
+#if FU_DETECT_CPP_20_ && defined(__cpp_lib_atomic_wait) && __cpp_lib_atomic_wait >= 201907L
+#define FU_DETECT_ATOMIC_WAIT_ 1
+#else
+#define FU_DETECT_ATOMIC_WAIT_ 0
+#endif
 
 #if FU_DETECT_CPP_17_
 #define FU_MAYBE_UNUSED_ [[maybe_unused]]
@@ -603,6 +610,9 @@ enum capabilities_t : unsigned int {
      */
     capability_risc5_zicbom_k = 1 << 17,
 
+    /** Sleeping workers wait for a dispatch notification instead of polling. Built when C++20 atomics support it. */
+    capability_interruptible_sleep_k = 1 << 18,
+
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
                              capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
@@ -660,6 +670,7 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_place_huge_pages_on_domain_k: return "place_huge_pages_on_domain";
     case capability_huge_transparent_pages_k: return "huge_transparent_pages";
     case capability_colocate_pools_on_domain_k: return "colocate_pools_on_domain";
+    case capability_interruptible_sleep_k: return "interruptible_sleep";
     default: return nullptr;
     }
 }

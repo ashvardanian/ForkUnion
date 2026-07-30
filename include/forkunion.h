@@ -211,6 +211,8 @@ typedef enum fu_capabilities_t {
     /** The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
      *  the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet. */
     fu_capability_risc5_zicbom_k = 1 << 17,
+    /** Sleeping workers wait for a dispatch notification instead of polling. Built with C++20 atomics support. */
+    fu_capability_interruptible_sleep_k = 1 << 18,
 
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
@@ -617,13 +619,13 @@ size_t fu_pool_threads_count(fu_pool_t pool);
 size_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size_t compute_domain_index);
 
 /**
- *  @brief Parks idle workers in a low-power sleep, re-checking for work every @p micros.
+ *  @brief Parks idle workers in a low-power sleep until the next dispatch.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @param[in] micros Wake-up poll interval in microseconds, must be > 0.
- *  @note Not thread-safe; call between task batches. The next dispatch wakes the workers.
+ *  @param[in] micros Maximum fallback wake interval in microseconds, must be > 0.
+ *  @note Not thread-safe; call between task batches.
  *
- *  Trades up to @p micros of startup latency for lower power draw during long idle periods; on Linux
- *  it also de-prioritizes the sleeping threads with the scheduler.
+ *  Workers wake directly when the pool was created with `fu_capability_interruptible_sleep_k` in
+ *  its allowed mask; otherwise they poll at @p micros. On Linux, sleepers are also de-prioritized.
  */
 void fu_pool_sleep(fu_pool_t pool, size_t micros);
 

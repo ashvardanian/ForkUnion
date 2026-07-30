@@ -182,6 +182,8 @@ class flat_pool {
     caller_exclusivity_t exclusivity_ {caller_inclusive_k};
     /** @brief How long to nap in microseconds while `chill_k`, waiting for work. */
     std::size_t sleep_length_micros_ {0};
+    /** @brief Whether `sleep` blocks on the dispatch notification instead of polling. */
+    bool interruptible_sleep_ {false};
     /** @brief Lifecycle switch between spinning (`grind_k`), sleeping (`chill_k`), and exiting (`die_k`). */
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
@@ -201,7 +203,9 @@ class flat_pool {
     flat_pool &operator=(flat_pool &&) = delete;
     flat_pool &operator=(flat_pool const &) = delete;
 
-    flat_pool(allocator_t const &alloc = {}) noexcept : allocator_(alloc) {}
+    flat_pool(allocator_t const &alloc = {}, bool const interruptible_sleep = false) noexcept
+        : allocator_(alloc), interruptible_sleep_(interruptible_sleep) {}
+    explicit flat_pool(bool const interruptible_sleep) noexcept : flat_pool({}, interruptible_sleep) {}
     ~flat_pool() noexcept { terminate(); }
 
     /**
@@ -357,6 +361,9 @@ class flat_pool {
 
         // Notify all worker threads...
         mood_.store(mood_t::die_k, std::memory_order_release);
+#if FU_DETECT_ATOMIC_WAIT_
+        if (interruptible_sleep_) mood_.notify_all();
+#endif
 
         // ... and wait for them to finish
         thread_index_t const worker_threads = threads_count_ - use_caller_thread;
@@ -373,16 +380,12 @@ class flat_pool {
     }
 
     /**
-     *  @brief Transitions "workers" to a sleeping state, waiting for a wake-up call.
-     *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
+     *  @brief Transitions workers to a low-power sleep until the next dispatch.
+     *  @param[in] wake_up_periodicity_micros Maximum fallback wake interval in microseconds.
      *  @note Can only be called @b between the tasks for a single thread. No synchronization is performed.
      *
-     *  This function may be used in some batch-processing operations when we clearly understand
-     *  that the next task won't be arriving for a while and power can be saved without major
-     *  latency penalties.
-     *
-     *  It may also be used in a high-level Python or JavaScript library offloading some parallel
-     *  operations to an underlying C++ engine, where latency is irrelevant.
+     *  When constructed with `capability_interruptible_sleep_k`, workers wake directly on dispatch.
+     *  Otherwise, workers poll at the supplied interval, which caps their wake latency.
      */
     void sleep(std::size_t wake_up_periodicity_micros) noexcept {
         assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
@@ -473,15 +476,19 @@ class flat_pool {
         // on `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
         threads_to_sync_.store(threads, std::memory_order_relaxed);
 
-        // We are most likely already "grinding", but in the unlikely case we are not,
-        // let's wake up from the "chilling" state with relaxed semantics. Assuming the sleeping
-        // logic for the workers also checks the epoch counter, no synchronization is needed and
-        // no immediate wake-up is required.
+        // A dispatch moves workers out of `chill_k`, publishes its epoch, then wakes their atomic
+        // waits. `compare_exchange_strong` ensures a sleeping pool always makes this transition.
         mood_t may_be_chilling = mood_t::chill_k;
-        mood_.compare_exchange_weak(          //
-            may_be_chilling, mood_t::grind_k, //
+        bool const was_chilling = mood_.compare_exchange_strong( //
+            may_be_chilling, mood_t::grind_k,                    //
             std::memory_order_relaxed, std::memory_order_relaxed);
-        return static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
+        generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
+#if FU_DETECT_ATOMIC_WAIT_
+        if (interruptible_sleep_ && was_chilling) mood_.notify_all();
+#else
+        fu_unused_(was_chilling);
+#endif
+        return generation;
     }
 
     /**
@@ -605,7 +612,11 @@ class flat_pool {
 
             if (fu_unlikely_(mood == mood_t::die_k)) break;
             if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
-                std::this_thread::sleep_for(std::chrono::microseconds(sleep_length_micros_));
+#if FU_DETECT_ATOMIC_WAIT_
+                if (interruptible_sleep_) mood_.wait(mood_t::chill_k, std::memory_order_acquire);
+                else
+#endif
+                    std::this_thread::sleep_for(std::chrono::microseconds(sleep_length_micros_));
                 continue;
             }
 

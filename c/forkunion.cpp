@@ -234,9 +234,11 @@ void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
  */
 template <fu::pool_kind_t pool_kind_, typename... args_types_>
 static void construct_pool(pool_variants_t &variants, fu::capabilities_t effective, args_types_ &&...args) noexcept {
+    bool const interruptible_sleep = effective & fu::capability_interruptible_sleep_k;
     select_pool<pool_kind_>(effective, [&](auto tag) {
         using pool_t = typename decltype(tag)::type;
-        variants.construct<pool_t>(std::forward<args_types_>(args)...);
+        variants.construct<pool_t>(std::forward<args_types_>(args)..., interruptible_sleep);
+        if (interruptible_sleep) variants.capabilities_ |= fu::capability_interruptible_sleep_k;
     });
 }
 
@@ -328,6 +330,7 @@ fu_assert_same_bit_(fu_capability_place_memory_on_domain_k, capability_place_mem
 fu_assert_same_bit_(fu_capability_place_huge_pages_on_domain_k, capability_place_huge_pages_on_domain_k);
 fu_assert_same_bit_(fu_capability_huge_transparent_pages_k, capability_huge_transparent_pages_k);
 fu_assert_same_bit_(fu_capability_colocate_pools_on_domain_k, capability_colocate_pools_on_domain_k);
+fu_assert_same_bit_(fu_capability_interruptible_sleep_k, capability_interruptible_sleep_k);
 
 #undef fu_assert_same_bit_
 
@@ -556,8 +559,10 @@ inline void fu_aligned_free(void *ptr, std::size_t alignment) noexcept {
 }
 
 fu_pool_t fu_pool_new(FU_MAYBE_UNUSED_ char const *name, fu_capabilities_t allowed) {
-    fu::capabilities_t const effective =
+    fu::capabilities_t effective =
         static_cast<fu::capabilities_t>(machine_capabilities() & static_cast<fu::capabilities_t>(allowed));
+    if (FU_DETECT_ATOMIC_WAIT_ && (allowed & fu_capability_interruptible_sleep_k))
+        effective |= fu::capability_interruptible_sleep_k;
     opaque_pool_t *opaque =
         static_cast<opaque_pool_t *>(fu_aligned_malloc(sizeof(opaque_pool_t), alignof(opaque_pool_t)));
     if (!opaque) return nullptr;

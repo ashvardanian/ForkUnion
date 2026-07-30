@@ -102,8 +102,12 @@ pub const Capabilities = packed struct(u32) {
     huge_transparent_pages: bool = false,
     /// The domain-aware `colocated_pool` and `distributed_pool` are compiled in
     colocate_pools_on_domain: bool = false,
+    // Bits 15–17 are C++ cache-hint capabilities not exposed by the Zig wrapper.
+    _cache_hint_capabilities: u3 = 0,
+    /// Sleeping workers wait for a dispatch notification instead of polling.
+    interruptible_sleep: bool = false,
 
-    _unused: u17 = 0,
+    _unused: u13 = 0,
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub fn all() Capabilities {
