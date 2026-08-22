@@ -57,9 +57,9 @@ To integrate into your Rust project, add the following lines to Cargo.toml:
 
 ```toml
 [dependencies]
-forkunion = "3.0.2"                                          # detect what the platform offers
-forkunion = { version = "3.0.2", features = ["portable"] }   # STL thread pool only
-forkunion = { version = "3.0.2", features = ["place-memory-on-domain"] } # require NUMA-aware allocations
+forkunion = "3.0.3"                                          # detect what the platform offers
+forkunion = { version = "3.0.3", features = ["portable"] }   # STL thread pool only
+forkunion = { version = "3.0.3", features = ["place-memory-on-domain"] } # require NUMA-aware allocations
 ```
 
 Or for the preview development version:
@@ -146,7 +146,7 @@ Alternatively, using CMake:
 FetchContent_Declare(
     forkunion
     GIT_REPOSITORY https://github.com/ashvardanian/ForkUnion
-    GIT_TAG v3.0.2
+    GIT_TAG v3.0.3
 )
 FetchContent_MakeAvailable(forkunion)
 target_link_libraries(your_target PRIVATE forkunion::header)
@@ -210,7 +210,7 @@ Call `fu_comptime_capabilities()` to see what survived the build, `fu_runtime_ca
 To integrate into your Zig project, let `zig fetch` pin the dependency and its content hash into `build.zig.zon`:
 
 ```bash
-zig fetch --save=forkunion https://github.com/ashvardanian/ForkUnion/archive/refs/tags/v3.0.2.tar.gz
+zig fetch --save=forkunion https://github.com/ashvardanian/ForkUnion/archive/refs/tags/v3.0.3.tar.gz
 ```
 
 Then import and use in your code:
@@ -273,7 +273,7 @@ To integrate using CMake:
 FetchContent_Declare(
     forkunion
     GIT_REPOSITORY https://github.com/ashvardanian/ForkUnion
-    GIT_TAG v3.0.2
+    GIT_TAG v3.0.3
 )
 FetchContent_MakeAvailable(forkunion)
 target_link_libraries(your_target PRIVATE forkunion::static)
