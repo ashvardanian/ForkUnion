@@ -105,6 +105,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     /// ```
+    #[must_use]
     pub const fn new(data: T) -> Self {
         Self {
             locked: AtomicBool::new(false),
@@ -126,6 +127,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// let mut guard = mutex.lock();
     /// *guard = 42;
     /// ```
+    #[must_use]
     pub fn lock(&self) -> BasicSpinMutexGuard<'_, T, PAUSE> {
         loop {
             // The only store in the loop, so contenders spin on a shared line rather than
@@ -188,6 +190,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     ///
     /// assert!(!mutex.is_locked());
     /// ```
+    #[must_use]
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire)
     }
@@ -206,6 +209,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// let data = mutex.into_inner();
     /// assert_eq!(data, 42);
     /// ```
+    #[must_use]
     pub fn into_inner(self) -> T {
         self.data.into_inner()
     }
@@ -224,6 +228,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// *mutex.get_mut() = 42;
     /// assert_eq!(*mutex.lock(), 42);
     /// ```
+    #[must_use]
     pub fn get_mut(&mut self) -> &mut T {
         self.data.get_mut()
     }
@@ -246,6 +251,7 @@ impl<'a, T, const PAUSE: bool> BasicSpinMutexGuard<'a, T, PAUSE> {
     /// Returns a reference to the protected data.
     ///
     /// This method is rarely needed since the guard implements `Deref`.
+    #[must_use]
     pub fn get(&self) -> &T {
         unsafe { &*self.mutex.data.get() }
     }
@@ -253,6 +259,7 @@ impl<'a, T, const PAUSE: bool> BasicSpinMutexGuard<'a, T, PAUSE> {
     /// Returns a mutable reference to the protected data.
     ///
     /// This method is rarely needed since the guard implements `DerefMut`.
+    #[must_use]
     pub fn get_mut(&mut self) -> &mut T {
         unsafe { &mut *self.mutex.data.get() }
     }
@@ -313,36 +320,6 @@ pub struct Prong {
     pub compute_domain_index: usize,
 }
 
-/// A thread-safe wrapper for raw pointers used in parallel operations.
-///
-/// # Safety
-/// This wrapper is only safe when used with NUMA-aware thread pools where
-/// each thread accesses different memory locations - different memory domains.
-
-pub struct SafePtr<T>(*mut T);
-
-unsafe impl<T> Send for SafePtr<T> {}
-unsafe impl<T> Sync for SafePtr<T> {}
-
-impl<T> SafePtr<T> {
-    /// Creates a new SafePtr from a raw pointer.
-    pub fn new(ptr: *mut T) -> Self {
-        SafePtr(ptr)
-    }
-
-    /// Accesses the element at the given index.
-    #[allow(clippy::mut_from_ref)]
-    pub fn get_mut_at(&self, index: usize) -> &mut T {
-        unsafe { &mut *self.0.add(index) }
-    }
-
-    /// Accesses the element.
-    #[allow(clippy::mut_from_ref)]
-    pub fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0 }
-    }
-}
-
 /// A thread-safe wrapper around raw pointers for sharing read-only data across threads.
 ///
 /// This type is designed for scenarios where you need to share immutable data
@@ -376,14 +353,8 @@ pub struct SyncConstPtr<T> {
 }
 
 impl<T> SyncConstPtr<T> {
-    /// Creates a new `SyncConstPtr` from a raw pointer.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that:
-    /// - The pointer is valid for the intended usage duration
-    /// - The pointed-to data will not be modified during use
-    /// - The pointer is properly aligned for type `T`
+    /// Wraps a raw pointer; every obligation is discharged at [`get`](Self::get).
+    #[must_use]
     pub fn new(ptr: *const T) -> Self {
         Self { ptr }
     }
@@ -405,12 +376,14 @@ impl<T> SyncConstPtr<T> {
     ///
     /// A reference to the element at the given index.
     #[inline]
+    #[must_use]
     pub unsafe fn get(&self, index: usize) -> &T {
         &*self.ptr.add(index)
     }
 
     /// Returns the raw pointer.
     #[inline]
+    #[must_use]
     pub fn as_ptr(&self) -> *const T {
         self.ptr
     }
@@ -426,6 +399,7 @@ pub struct SyncMutPtr<T> {
 }
 
 impl<T> SyncMutPtr<T> {
+    #[must_use]
     pub const fn new(ptr: *mut T) -> Self {
         Self {
             ptr,
@@ -443,11 +417,13 @@ impl<T> SyncMutPtr<T> {
     /// - Each thread accesses disjoint indices when used concurrently
     /// - The pointer remains valid for the duration of access
     #[inline]
+    #[must_use]
     pub unsafe fn get(&self, index: usize) -> *mut T {
         self.ptr.add(index)
     }
 
     #[inline]
+    #[must_use]
     pub fn as_ptr(&self) -> *mut T {
         self.ptr
     }
@@ -480,6 +456,7 @@ impl IndexedSplit {
     /// # Panics
     ///
     /// Panics if `threads_count` is zero.
+    #[must_use]
     pub fn new(tasks_count: usize, threads_count: usize) -> Self {
         assert!(threads_count > 0, "Threads count must be greater than zero");
         Self {
@@ -490,6 +467,7 @@ impl IndexedSplit {
 
     /// Returns the range for a specific thread index.
     #[inline]
+    #[must_use]
     pub fn get(&self, thread_index: usize) -> core::ops::Range<usize> {
         let begin = self.quotient * thread_index + thread_index.min(self.remainder);
         let count = self.quotient + if thread_index < self.remainder { 1 } else { 0 };
@@ -623,6 +601,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "Threads count must be greater than zero")]
     fn indexed_split_zero_threads() {
-        IndexedSplit::new(10, 0);
+        let _ = IndexedSplit::new(10, 0);
     }
 }

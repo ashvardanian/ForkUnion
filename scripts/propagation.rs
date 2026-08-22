@@ -297,6 +297,7 @@ fn replicate_into<T: Copy + Sync>(
     let n = host.len();
     let source = fu::SyncConstPtr::new(host.as_ptr());
     pool.scope(|scope| {
+        let view = scope.view();
         scope.broadcast(|thread_index, compute_domain_index| {
             let memory_domain = topology.local_memory_of(fu::ComputeDomain(compute_domain_index));
 
@@ -304,17 +305,17 @@ fn replicate_into<T: Copy + Sync>(
             // whole team splits [0, n) without overlap even when several compute domains share the node.
             let mut threads_on_memory_domain = 0usize;
             let mut local_index_on_memory_domain = 0usize;
-            for other in 0..scope.compute_domains_count() {
+            for other in 0..view.compute_domains_count() {
                 if topology.local_memory_of(fu::ComputeDomain(other)) != memory_domain {
                     continue;
                 }
                 if other < compute_domain_index {
-                    local_index_on_memory_domain += scope.threads_count_in(other);
+                    local_index_on_memory_domain += view.threads_count_in(other);
                 }
-                threads_on_memory_domain += scope.threads_count_in(other);
+                threads_on_memory_domain += view.threads_count_in(other);
             }
             local_index_on_memory_domain +=
-                scope.locate_thread_in(thread_index, compute_domain_index);
+                view.locate_thread_in(thread_index, compute_domain_index);
 
             let range = fu::IndexedSplit::new(n, threads_on_memory_domain)
                 .get(local_index_on_memory_domain);

@@ -97,6 +97,24 @@ pool.for_n_dynamic(100, |prong| {
 });
 ```
 
+To let a worker closure borrow the caller's stack, reach for a scope.
+`Scope` dispatches and joins on the calling thread; `ScopeView` is its `Copy` read-only half, and is what a worker carries:
+
+```rust
+let counter = fu::SpinMutex::new(0usize);
+pool.scope(|scope| {
+    let view = scope.view();
+    scope.broadcast(|thread_index, compute_domain_index| {
+        let local = view.locate_thread_in(thread_index, compute_domain_index);
+        println!("thread # {} is # {} within its compute domain", thread_index, local);
+        *counter.lock() += 1;
+    });
+});
+```
+
+`Scope` is deliberately not `Sync`, so a worker cannot capture it and start a second dispatch on a pool that is still mid-generation — that would re-enter the pool and deadlock.
+Taking a `ScopeView` first is the one line that separates the two capabilities.
+
 A more realistic example with named threads and error handling may look like this:
 
 ```rust

@@ -53,14 +53,11 @@ pub trait ParallelSchedule: Copy {
     where
         F: Fn(Prong) + Sync;
 
+    /// Runs `function` over contiguous runs. The count is a real run length under static
+    /// scheduling and always 1 under dynamic, which has no batched entry point.
     fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F)
     where
-        F: Fn(Prong, usize) + Sync,
-    {
-        self.dispatch(pool, tasks, move |prong| {
-            function(prong, 1);
-        });
-    }
+        F: Fn(Prong, usize) + Sync;
 }
 
 impl ParallelSchedule for StaticScheduler {
@@ -97,6 +94,15 @@ impl ParallelSchedule for DynamicScheduler {
         }
 
         let _operation = pool.for_n_dynamic(tasks, function);
+    }
+
+    /// Work-stealing hands out one task at a time, so every run is length 1 - the C core exposes
+    /// no batched dynamic entry point. Use [`StaticScheduler`] when the batching is what you want.
+    fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F)
+    where
+        F: Fn(Prong, usize) + Sync,
+    {
+        self.dispatch(pool, tasks, move |prong| function(prong, 1));
     }
 }
 
@@ -187,6 +193,7 @@ where
     I: ParallelIterator,
     S: ParallelSchedule,
 {
+    #[must_use]
     pub fn with_schedule<S2>(self, schedule: S2) -> ParallelRunner<'pool, I, S2>
     where
         S2: ParallelSchedule,
@@ -266,6 +273,7 @@ where
     ///         |a, b| a.0 += b.0,
     ///     );
     /// ```
+    #[must_use]
     pub fn reduce_with_scratch<T, F, C>(self, scratch: &mut [T], fold: F, combine: C) -> T
     where
         T: Send + Default,
@@ -351,7 +359,6 @@ where
         let scratch_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
 
         iterator.drive(pool, schedule, &|item, prong| {
-            // Check if we should stop (Acquire: see all writes before Release swap)
             if stop.load(Ordering::Acquire) {
                 return;
             }
@@ -359,7 +366,6 @@ where
             let slot = unsafe { &mut *scratch_ptr.get(prong.thread_index) };
 
             if let Err(error) = fold(slot, item, prong) {
-                // Try to set stop flag (Release: make error write visible to Acquire loads)
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
                     // SAFETY: Only one thread sets stop to true, so only one write
@@ -426,13 +432,11 @@ where
         let stop = AtomicBool::new(false);
         let first_err = SyncOnceCell::new();
         iterator.drive(pool, schedule, &|item, prong| {
-            // Check if we should stop (Acquire: see all writes before Release swap)
             if stop.load(Ordering::Acquire) {
                 return;
             }
 
             if let Err(error) = function(item, prong) {
-                // Try to set stop flag (Release: make error write visible to Acquire loads)
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
                     // SAFETY: Only one thread sets stop to true, so only one write
@@ -451,7 +455,6 @@ where
     /// Searches for the first element that matches a predicate (deterministic, by index).
     ///
     /// Returns the element with the smallest `task_index` among all matches.
-    /// Uses `fetch_min` to track the minimum index found so far.
     ///
     /// # Returns
     ///
@@ -539,7 +542,6 @@ where
     /// Searches for the last element that matches a predicate (deterministic, by index).
     ///
     /// Returns the element with the largest `task_index` among all matches.
-    /// Uses `fetch_max` to track the maximum index found so far.
     ///
     /// # Returns
     ///
@@ -657,13 +659,11 @@ where
         let stop = AtomicBool::new(false);
         let found = SyncOnceCell::new();
         iterator.drive(pool, schedule, &|item, _prong| {
-            // Check if already found (Acquire: see all writes before Release swap)
             if stop.load(Ordering::Acquire) {
                 return;
             }
 
             if predicate(&item) {
-                // Try to set stop flag (Release: make item write visible to Acquire loads)
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
                     // SAFETY: Only one thread sets stop to true, so only one write
@@ -696,6 +696,7 @@ where
     ///
     /// assert!(has_large);
     /// ```
+    #[must_use]
     pub fn any<P>(self, predicate: P) -> bool
     where
         I::Item: Send,
@@ -724,6 +725,7 @@ where
     ///
     /// assert!(all_small);
     /// ```
+    #[must_use]
     pub fn all<P>(self, predicate: P) -> bool
     where
         I::Item: Send,
@@ -754,6 +756,7 @@ where
     /// let total = (&data[..]).into_par_iter().with_pool(&mut pool)
     ///     .reduce(|| 0, |acc, value, _| *acc += *value, |a, b| a + b);
     /// ```
+    #[must_use]
     pub fn reduce<T, Init, F, C>(self, init: Init, fold: F, combine: C) -> T
     where
         Init: Fn() -> T + Sync,
@@ -811,6 +814,7 @@ where
     /// let sum: u64 = (&data[..]).into_par_iter().with_pool(&mut pool).sum();
     /// assert_eq!(sum, 15);
     /// ```
+    #[must_use]
     pub fn sum<T>(self) -> T
     where
         T: Send
@@ -833,6 +837,7 @@ where
     /// let data: Vec<usize> = (0..1000).collect();
     /// let count = (&data[..]).into_par_iter().with_pool(&mut pool).count();
     /// ```
+    #[must_use]
     pub fn count(self) -> usize {
         self.reduce(|| 0usize, |acc, _item, _| *acc += 1, |a, b| a + b)
     }
@@ -944,6 +949,7 @@ pub struct ParallelSlice<'a, T> {
 }
 
 impl<'a, T> ParallelSlice<'a, T> {
+    #[must_use]
     pub fn new(data: &'a [T]) -> Self {
         Self { data }
     }
@@ -964,6 +970,7 @@ impl<'a, T> ParallelSlice<'a, T> {
         self.drive_dynamic(pool, function);
     }
 
+    #[must_use]
     pub fn zip<'b, U>(self, other: ParallelSlice<'b, U>) -> ParallelSliceZip<'a, 'b, T, U> {
         ParallelSliceZip {
             left: self,
@@ -1045,6 +1052,7 @@ pub struct ParallelSliceMut<'a, T> {
 }
 
 impl<'a, T> ParallelSliceMut<'a, T> {
+    #[must_use]
     pub fn new(data: &'a mut [T]) -> Self {
         Self {
             ptr: SyncMutPtr::new(data.as_mut_ptr()),
@@ -1103,6 +1111,7 @@ pub struct ParallelRange {
 }
 
 impl ParallelRange {
+    #[must_use]
     pub fn new(range: core::ops::Range<usize>) -> Self {
         Self { range }
     }
@@ -1144,6 +1153,7 @@ impl<T, I> ParallelExactIter<T, I>
 where
     I: Fn(usize) -> T + Sync,
 {
+    #[must_use]
     pub fn new(len: usize, indexer: I) -> Self {
         Self {
             len,
@@ -1508,9 +1518,7 @@ mod tests {
         assert_eq!(found, Some(&100));
     }
 
-    /// The old implementation decided from a `fetch_min` and stored under a separate lock, so a
-    /// higher index could overwrite a lower one. It failed roughly seven runs in twelve; one pass is
-    /// not evidence, so repeat until the race would have had every chance to show.
+    /// Repeated, because a lost race shows up as a flake rather than a failure.
     #[cfg_attr(miri, ignore)]
     #[test]
     fn find_first_not_found() {

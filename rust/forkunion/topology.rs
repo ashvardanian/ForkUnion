@@ -132,32 +132,38 @@ impl Capabilities {
     pub const ALL: Capabilities = Capabilities(u32::MAX);
 
     /// Whether every bit of `other` is set in `self`.
+    #[must_use]
     pub const fn contains(self, other: Capabilities) -> bool {
         (self.0 & other.0) == other.0
     }
 }
 
 /// Returns the major version number of the ForkUnion library.
+#[must_use]
 pub fn version_major() -> usize {
     unsafe { fu_version_major() as usize }
 }
 
 /// Returns the minor version number of the ForkUnion library.
+#[must_use]
 pub fn version_minor() -> usize {
     unsafe { fu_version_minor() as usize }
 }
 
 /// Returns the patch version number of the ForkUnion library.
+#[must_use]
 pub fn version_patch() -> usize {
     unsafe { fu_version_patch() as usize }
 }
 
 /// Returns the library version as a tuple of (major, minor, patch).
+#[must_use]
 pub fn version() -> (usize, usize, usize) {
     (version_major(), version_minor(), version_patch())
 }
 
 /// Which kernel facilities this build of ForkUnion was compiled to use.
+#[must_use]
 pub fn comptime_capabilities() -> Capabilities {
     Capabilities(unsafe { fu_comptime_capabilities() })
 }
@@ -194,6 +200,7 @@ pub fn comptime_capabilities_string() -> Option<std::string::String> {
 }
 
 /// Which features this machine turned out to offer, probing the CPU and the memory system.
+#[must_use]
 pub fn runtime_capabilities() -> Capabilities {
     Capabilities(unsafe { fu_runtime_capabilities() })
 }
@@ -235,6 +242,7 @@ pub struct MemoryDomainId(pub i32);
 impl ComputeDomain {
     /// The raw index, for the FFI boundary and for arithmetic.
     #[inline]
+    #[must_use]
     pub fn get(self) -> usize {
         self.0
     }
@@ -243,6 +251,7 @@ impl ComputeDomain {
 impl MemoryDomain {
     /// The raw index, for the FFI boundary and for arithmetic.
     #[inline]
+    #[must_use]
     pub fn get(self) -> usize {
         self.0
     }
@@ -251,12 +260,14 @@ impl MemoryDomain {
 impl MemoryDomainId {
     /// The raw OS id, for the FFI boundary; `-1` names no domain.
     #[inline]
+    #[must_use]
     pub fn get(self) -> i32 {
         self.0
     }
 
     /// Whether this id names a real domain rather than the `-1` sentinel.
     #[inline]
+    #[must_use]
     pub fn is_valid(self) -> bool {
         self.0 >= 0
     }
@@ -309,11 +320,13 @@ impl Topology {
     ///
     /// Zero if `compute_domain` is out of range. Use it to size a per-compute-domain pool
     /// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
+    #[must_use]
     pub fn logical_cores_count_in(&self, compute_domain: ComputeDomain) -> usize {
         unsafe { fu_logical_cores_count_in(self.inner, compute_domain.get()) }
     }
 
     /// Returns the number of logical CPU cores available on the system.
+    #[must_use]
     pub fn logical_cores_count(&self) -> usize {
         unsafe { fu_logical_cores_count(self.inner) }
     }
@@ -330,11 +343,13 @@ impl Topology {
     /// - `1` on most desktop, laptop, or IoT platforms with unified memory
     /// - `2-8` on typical dual-socket servers or heterogeneous mobile chips
     /// - `4-32` on high-end cloud servers with multiple sockets
+    #[must_use]
     pub fn compute_domains_count(&self) -> usize {
         unsafe { fu_compute_domains_count(self.inner) }
     }
 
     /// Returns the performance level of a compute domain (higher = more performant).
+    #[must_use]
     pub fn compute_level_in(&self, compute_domain: ComputeDomain) -> usize {
         unsafe { fu_compute_level_in(self.inner, compute_domain.get()) }
     }
@@ -344,6 +359,7 @@ impl Topology {
     /// May be smaller than [`compute_domains_count`](Self::compute_domains_count), as several
     /// domains can share one level - equally-fast cores may still be split across cache clusters,
     /// or across NUMA nodes.
+    #[must_use]
     pub fn compute_levels_count(&self) -> usize {
         unsafe { fu_compute_levels_count(self.inner) }
     }
@@ -354,6 +370,7 @@ impl Topology {
     /// This is the number to weight work by - [`compute_level_in`](Self::compute_level_in) is a
     /// dense ordinal and must never be divided by. Platforms that rank cores without rating them
     /// report 0 here; fall back to [`threads_count_in`](ThreadPool::threads_count_in) when they do.
+    #[must_use]
     pub fn compute_capacity_in(&self, compute_domain: ComputeDomain) -> usize {
         unsafe { fu_compute_capacity_in(self.inner, compute_domain.get()) }
     }
@@ -362,11 +379,13 @@ impl Topology {
     ///
     /// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
     /// deserves - domains of equal throughput may back onto very differently sized caches.
+    #[must_use]
     pub fn compute_cache_bytes_in(&self, compute_domain: ComputeDomain) -> usize {
         unsafe { fu_compute_cache_bytes_in(self.inner, compute_domain.get()) }
     }
 
     /// Returns the number of memory domains available.
+    #[must_use]
     pub fn memory_domains_count(&self) -> usize {
         unsafe { fu_memory_domains_count(self.inner) }
     }
@@ -375,6 +394,7 @@ impl Topology {
     ///
     /// Returns [`MemoryDomainId(-1)`](MemoryDomainId) if the index is out of range. The id is the one
     /// place the topology is consulted for allocation; once resolved, the allocator needs it alone.
+    #[must_use]
     pub fn memory_domain_id_at_index(&self, memory_domain: MemoryDomain) -> MemoryDomainId {
         MemoryDomainId(unsafe { fu_memory_domain_id_at_index(self.inner, memory_domain.get()) })
     }
@@ -383,36 +403,43 @@ impl Topology {
     ///
     /// Performance - tiers, latencies, bandwidths, distances - is not the topology's to declare:
     /// harvest a [`Fabric`](crate::Fabric) to measure it in-process.
+    #[must_use]
     pub fn local_memory_of(&self, compute_domain: ComputeDomain) -> MemoryDomain {
         MemoryDomain(unsafe { fu_local_memory_of(self.inner, compute_domain.get()) })
     }
 
     /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+    #[must_use]
     pub fn volume_ram_in(&self, memory_domain: MemoryDomain) -> usize {
         unsafe { fu_volume_ram_in(self.inner, memory_domain.get()) }
     }
 
     /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
+    #[must_use]
     pub fn volume_ram(&self) -> usize {
         unsafe { fu_volume_ram(self.inner) }
     }
 
     /// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
+    #[must_use]
     pub fn volume_huge_pages_in(&self, memory_domain: MemoryDomain) -> usize {
         unsafe { fu_volume_huge_pages_in(self.inner, memory_domain.get()) }
     }
 
     /// Returns the total huge-page volume (bytes) across all memory domains.
+    #[must_use]
     pub fn volume_huge_pages(&self) -> usize {
         unsafe { fu_volume_huge_pages(self.inner) }
     }
 
     /// Returns the number of free huge pages in a given memory domain (0 if out of range).
+    #[must_use]
     pub fn huge_pages_count_in(&self, memory_domain: MemoryDomain) -> usize {
         unsafe { fu_huge_pages_count_in(self.inner, memory_domain.get()) }
     }
 
     /// Returns the total number of free huge pages across all memory domains.
+    #[must_use]
     pub fn huge_pages_count(&self) -> usize {
         unsafe { fu_huge_pages_count(self.inner) }
     }

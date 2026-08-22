@@ -43,31 +43,37 @@ pub struct AllocationResult {
 
 impl AllocationResult {
     /// Returns the allocated memory as a mutable byte slice.
+    #[must_use]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.allocated_bytes) }
     }
 
     /// Returns the allocated memory as an immutable byte slice.
+    #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.allocated_bytes) }
     }
 
     /// Returns the raw pointer to the allocated memory.
+    #[must_use]
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
 
     /// Returns the number of bytes actually allocated (may be larger than requested).
+    #[must_use]
     pub fn allocated_bytes(&self) -> usize {
         self.allocated_bytes
     }
 
     /// Returns the page size used for this allocation.
+    #[must_use]
     pub fn bytes_per_page(&self) -> usize {
         self.bytes_per_page
     }
 
     /// Returns the OS id of the memory domain this memory was allocated on.
+    #[must_use]
     pub fn memory_domain_id(&self) -> MemoryDomainId {
         self.memory_domain_id
     }
@@ -80,6 +86,7 @@ impl AllocationResult {
     /// - `T` has the correct alignment for the allocated memory
     /// - The allocation is large enough to hold the requested number of `T` elements
     /// - The memory is properly initialized before use
+    #[must_use]
     pub unsafe fn as_mut_slice_of<T>(&mut self) -> &mut [T] {
         let element_size = core::mem::size_of::<T>();
         let element_count = self.allocated_bytes / element_size;
@@ -93,6 +100,7 @@ impl AllocationResult {
     /// The caller must ensure that:
     /// - `T` has the correct alignment for the allocated memory
     /// - The allocation contains valid data of type `T`
+    #[must_use]
     pub unsafe fn as_slice_of<T>(&self) -> &[T] {
         let element_size = core::mem::size_of::<T>();
         let element_count = self.allocated_bytes / element_size;
@@ -181,6 +189,7 @@ impl DomainAllocator {
     }
 
     /// Returns the OS id of the memory domain this allocator is bound to.
+    #[must_use]
     pub fn memory_domain_id(&self) -> MemoryDomainId {
         self.memory_domain_id
     }
@@ -458,6 +467,7 @@ impl<T> PinnedVec<T> {
     /// assert_eq!(vec.len(), 0);
     /// assert_eq!(vec.capacity(), 0);
     /// ```
+    #[must_use]
     pub fn new_in(allocator: DomainAllocator) -> Self {
         Self {
             allocator,
@@ -507,21 +517,25 @@ impl<T> PinnedVec<T> {
     }
 
     /// Returns the number of elements in the vector.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
     /// Returns `true` if the vector contains no elements.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// Returns the number of elements the vector can hold without reallocating.
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
     /// Returns the OS id of the memory domain this vector's memory is allocated on.
+    #[must_use]
     pub fn memory_domain_id(&self) -> MemoryDomainId {
         self.allocator.memory_domain_id()
     }
@@ -556,7 +570,7 @@ impl<T> PinnedVec<T> {
             return Ok(());
         }
 
-        let new_capacity = needed_capacity.max(self.capacity * 2).max(4);
+        let new_capacity = needed_capacity.max(self.capacity.saturating_mul(2)).max(4);
         self.grow_to(new_capacity)
     }
 
@@ -675,6 +689,7 @@ impl<T> PinnedVec<T> {
     }
 
     /// Returns a raw pointer to the vector's buffer.
+    #[must_use]
     pub fn as_ptr(&self) -> *const T {
         match &self.allocation {
             Some(alloc) => alloc.as_ptr() as *const T,
@@ -683,6 +698,7 @@ impl<T> PinnedVec<T> {
     }
 
     /// Returns a mutable raw pointer to the vector's buffer.
+    #[must_use]
     pub fn as_mut_ptr(&mut self) -> *mut T {
         match &self.allocation {
             Some(alloc) => alloc.as_ptr() as *mut T,
@@ -694,6 +710,7 @@ impl<T> PinnedVec<T> {
     ///
     /// The returned pointer can be shared between threads as long as each
     /// thread accesses disjoint indices.
+    #[must_use]
     pub fn sync_ptr(&self) -> SyncMutPtr<T> {
         let ptr = match &self.allocation {
             Some(alloc) => alloc.as_ptr() as *mut T,
@@ -703,11 +720,13 @@ impl<T> PinnedVec<T> {
     }
 
     /// Returns a slice containing the entire vector.
+    #[must_use]
     pub fn as_slice(&self) -> &[T] {
         unsafe { core::slice::from_raw_parts(self.as_ptr(), self.len) }
     }
 
     /// Returns a mutable slice containing the entire vector.
+    #[must_use]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
     }
@@ -723,11 +742,13 @@ impl<T> PinnedVec<T> {
     }
 
     /// Creates a read-only parallel slice view over the vector.
+    #[must_use]
     pub fn par_iter(&self) -> ParallelSlice<'_, T> {
         ParallelSlice::new(self.as_slice())
     }
 
     /// Creates a mutable parallel slice view over the vector.
+    #[must_use]
     pub fn par_iter_mut(&mut self) -> ParallelSliceMut<'_, T>
     where
         T: Send,
@@ -779,6 +800,7 @@ impl<T> PinnedVec<T> {
     /// # Panics
     ///
     /// Panics if `index >= len`.
+    #[must_use]
     pub fn remove(&mut self, index: usize) -> T {
         if index >= self.len {
             panic!(
@@ -866,6 +888,7 @@ impl<T> PinnedVec<T> {
     }
 
     /// Returns `true` if the vector contains an element with the given value.
+    #[must_use]
     pub fn contains(&self, x: &T) -> bool
     where
         T: PartialEq,
@@ -1058,6 +1081,7 @@ pub struct ReplicatedArray<T> {
 
 impl<T: Copy> ReplicatedArray<T> {
     /// An empty array holding no mapping.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             allocation: None,
@@ -1071,7 +1095,8 @@ impl<T: Copy> ReplicatedArray<T> {
         if n == 0 {
             return Some(Self::new());
         }
-        let allocation = SymmetricAllocation::new(topology, n * core::mem::size_of::<T>())?;
+        let bytes_per_domain = n.checked_mul(core::mem::size_of::<T>())?;
+        let allocation = SymmetricAllocation::new(topology, bytes_per_domain)?;
         Some(Self {
             allocation: Some(allocation),
             len: n,
@@ -1080,16 +1105,19 @@ impl<T: Copy> ReplicatedArray<T> {
     }
 
     /// The logical length of each replica.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
     /// Whether the array holds no elements.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// The number of per-domain replicas.
+    #[must_use]
     pub fn memory_domains_count(&self) -> usize {
         self.allocation
             .as_ref()
@@ -1097,6 +1125,7 @@ impl<T: Copy> ReplicatedArray<T> {
     }
 
     /// The page-aligned byte distance between consecutive replicas.
+    #[must_use]
     pub fn stride_bytes(&self) -> usize {
         self.allocation
             .as_ref()
@@ -1104,22 +1133,26 @@ impl<T: Copy> ReplicatedArray<T> {
     }
 
     /// Raw start of the replica on `memory_domain`, for concurrent first-touch fills through a raw pointer.
+    #[must_use]
     pub fn replica_ptr(&self, memory_domain: MemoryDomain) -> *mut T {
         let allocation = self.allocation.as_ref().expect("empty ReplicatedArray");
         allocation.slice_base(memory_domain.get()) as *mut T
     }
 
     /// The whole replica living on `memory_domain`.
+    #[must_use]
     pub fn on_memory_domain(&self, memory_domain: MemoryDomain) -> &[T] {
         unsafe { slice::from_raw_parts(self.replica_ptr(memory_domain), self.len) }
     }
 
     /// The whole replica living on `memory_domain`, mutably.
+    #[must_use]
     pub fn on_memory_domain_mut(&mut self, memory_domain: MemoryDomain) -> &mut [T] {
         unsafe { slice::from_raw_parts_mut(self.replica_ptr(memory_domain), self.len) }
     }
 
     /// One element of the replica on `memory_domain`.
+    #[must_use]
     pub fn at(&self, memory_domain: MemoryDomain, local_index: usize) -> &T {
         &self.on_memory_domain(memory_domain)[local_index]
     }
@@ -1156,6 +1189,7 @@ pub struct ShardedArray<T> {
 
 impl<T: Copy> ShardedArray<T> {
     /// An empty array holding no mapping.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             allocation: None,
@@ -1175,7 +1209,8 @@ impl<T: Copy> ShardedArray<T> {
             return None;
         }
         let segment = n.div_ceil(domains);
-        let allocation = SymmetricAllocation::new(topology, segment * core::mem::size_of::<T>())?;
+        let bytes_per_domain = segment.checked_mul(core::mem::size_of::<T>())?;
+        let allocation = SymmetricAllocation::new(topology, bytes_per_domain)?;
         Some(Self {
             allocation: Some(allocation),
             len: n,
@@ -1185,16 +1220,19 @@ impl<T: Copy> ShardedArray<T> {
     }
 
     /// The logical length, summed across the shards.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
     /// Whether the array holds no elements.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// The number of shards, one per memory domain.
+    #[must_use]
     pub fn memory_domains_count(&self) -> usize {
         self.allocation
             .as_ref()
@@ -1202,6 +1240,7 @@ impl<T: Copy> ShardedArray<T> {
     }
 
     /// The page-aligned byte distance between consecutive shards.
+    #[must_use]
     pub fn stride_bytes(&self) -> usize {
         self.allocation
             .as_ref()
@@ -1209,11 +1248,13 @@ impl<T: Copy> ShardedArray<T> {
     }
 
     /// The contiguous logical segment size per domain - `ceil(n / memory_domains_count())`.
+    #[must_use]
     pub fn segment(&self) -> usize {
         self.segment
     }
 
     /// How many elements the shard on `memory_domain` holds - a trailing shard may be shorter.
+    #[must_use]
     pub fn length_on_memory_domain(&self, memory_domain: MemoryDomain) -> usize {
         let start = memory_domain.get() * self.segment;
         if start >= self.len {
@@ -1224,6 +1265,9 @@ impl<T: Copy> ShardedArray<T> {
     }
 
     /// The memory domain and local index that store logical element `logical_index`.
+    ///
+    /// Requires a non-empty array - `segment()` is the divisor and is zero when empty.
+    #[must_use]
     pub fn location_of(&self, logical_index: usize) -> ShardLocation {
         ShardLocation {
             memory_domain: MemoryDomain(logical_index / self.segment),
@@ -1232,17 +1276,20 @@ impl<T: Copy> ShardedArray<T> {
     }
 
     /// The logical index of the element at `local_index` on `memory_domain` - inverse of `location_of`.
+    #[must_use]
     pub fn logical_index_of(&self, memory_domain: MemoryDomain, local_index: usize) -> usize {
         memory_domain.get() * self.segment + local_index
     }
 
     /// Raw start of the shard on `memory_domain`, for concurrent fills through a raw pointer.
+    #[must_use]
     pub fn shard_ptr(&self, memory_domain: MemoryDomain) -> *mut T {
         let allocation = self.allocation.as_ref().expect("empty ShardedArray");
         allocation.slice_base(memory_domain.get()) as *mut T
     }
 
     /// The whole shard living on `memory_domain`.
+    #[must_use]
     pub fn on_memory_domain(&self, memory_domain: MemoryDomain) -> &[T] {
         unsafe {
             slice::from_raw_parts(
@@ -1253,12 +1300,14 @@ impl<T: Copy> ShardedArray<T> {
     }
 
     /// The whole shard living on `memory_domain`, mutably.
+    #[must_use]
     pub fn on_memory_domain_mut(&mut self, memory_domain: MemoryDomain) -> &mut [T] {
         let len = self.length_on_memory_domain(memory_domain);
         unsafe { slice::from_raw_parts_mut(self.shard_ptr(memory_domain), len) }
     }
 
     /// The single home of a logical element.
+    #[must_use]
     pub fn at(&self, memory_domain: MemoryDomain, local_index: usize) -> &T {
         &self.on_memory_domain(memory_domain)[local_index]
     }
