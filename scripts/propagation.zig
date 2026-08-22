@@ -153,7 +153,7 @@ const FillContext = struct {
 };
 
 /// Fills raw edge `e`'s pair of slots `2e, 2e+1` from its quadrant walk; self-loops stay sentinels.
-fn fillEdge(prong: fu.Prong, context: FillContext) void {
+fn fillEdge(context: *const FillContext, prong: fu.Prong) void {
     const e = prong.task_index;
     var row: u32 = 0;
     var column: u32 = 0;
@@ -185,7 +185,7 @@ fn fillEdge(prong: fu.Prong, context: FillContext) void {
 /// Community `c` owns global edge indices `[c * raw_local, (c+1) * raw_local)` and the vertex range
 /// `[c << scale, (c+1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters as the
 /// single-graph generators. Bridge draws live in their own counter range above all edge draws.
-fn generateNecklace(pool: *const fu.Pool, scale: usize, communities: usize, edge_factor: usize) !CsrHost {
+fn generateNecklace(pool: fu.Pool, scale: usize, communities: usize, edge_factor: usize) !CsrHost {
     const allocator = std.heap.page_allocator;
     const community_vertices = @as(usize, 1) << @intCast(scale);
     const vertices = communities * community_vertices;
@@ -197,7 +197,8 @@ fn generateNecklace(pool: *const fu.Pool, scale: usize, communities: usize, edge
     var edges = try allocator.alloc(Edge, raw_edges * 2 + bridges * 2);
     defer allocator.free(edges);
     @memset(edges, sentinel_edge);
-    pool.forN(raw_edges, fillEdge, FillContext{ .slots = edges.ptr, .scale = scale, .raw_local = raw_local });
+    const fill = FillContext{ .slots = edges.ptr, .scale = scale, .raw_local = raw_local };
+    pool.forN(raw_edges, &fill, fillEdge);
 
     // Bridges: endpoints in each community's first 64 vertices - R-MAT's quadrant bias piles the
     // hubs at low indices, so a low endpoint is essentially guaranteed well-connected.
@@ -255,16 +256,17 @@ fn RetouchContext(comptime T: type) type {
 }
 
 /// Rewrites `values` into fresh pages, first-touched by the pinned pool's static split.
-fn retouchDeterministically(comptime T: type, pool: *const fu.Pool, values: *[]T) !void {
+fn retouchDeterministically(comptime T: type, pool: fu.Pool, values: *[]T) !void {
     const allocator = std.heap.page_allocator;
     const placed = try allocator.alloc(T, values.len); // ? Pages stay unfaulted until the copy below
     const Context = RetouchContext(T);
-    pool.forSlices(values.len, struct {
-        fn copy(prong: fu.Prong, count: usize, context: Context) void {
+    const context = Context{ .source = values.ptr, .destination = placed.ptr };
+    pool.forSlices(values.len, &context, struct {
+        fn copy(carried: *const Context, prong: fu.Prong, count: usize) void {
             const first = prong.task_index;
-            @memcpy(context.destination[first .. first + count], context.source[first .. first + count]);
+            @memcpy(carried.destination[first .. first + count], carried.source[first .. first + count]);
         }
-    }.copy, Context{ .source = values.ptr, .destination = placed.ptr });
+    }.copy);
     allocator.free(values.*);
     values.* = placed;
 }
@@ -301,14 +303,14 @@ const WorkContext = struct {
 };
 
 /// One vertex's update: read the immutable previous labels, write only your own slot.
-fn labelKernel(comptime placement: Placement) fn (fu.Prong, WorkContext) void {
+fn labelKernel(comptime placement: Placement) fn (*const WorkContext, fu.Prong) void {
     return struct {
-        fn update(prong: fu.Prong, work: WorkContext) void {
+        fn update(work: *const WorkContext, prong: fu.Prong) void {
             const v = prong.task_index;
             var row_offsets = work.row_offsets;
             var column_indices = work.column_indices;
             if (placement == .replicated) {
-                const memory_domain = work.topology.localMemoryOf(prong.compute_domain_index);
+                const memory_domain = work.topology.localMemoryOf(prong.compute_domain);
                 row_offsets = work.replicas_offsets.?.onMemoryDomain(memory_domain).ptr;
                 column_indices = work.replicas_columns.?.onMemoryDomain(memory_domain).ptr;
             }
@@ -320,15 +322,15 @@ fn labelKernel(comptime placement: Placement) fn (fu.Prong, WorkContext) void {
 }
 
 /// Dispatches the round on the chosen schedule: pre-divided static, or work-stolen dynamic.
-fn forNScheduled(comptime schedule: Schedule, pool: *const fu.Pool, n: usize, comptime kernel: anytype, work: WorkContext) void {
-    if (schedule == .static) pool.forN(n, kernel, work) else pool.forNDynamic(n, kernel, work);
+fn forNScheduled(comptime schedule: Schedule, pool: fu.Pool, n: usize, comptime kernel: anytype, work: *const WorkContext) void {
+    if (schedule == .static) pool.forN(n, work, kernel) else pool.forNDynamic(n, work, kernel);
 }
 
 /// One convergence pass on the ForkUnion pool; every round is one fork-join dispatch.
 fn runForkUnion(
     comptime schedule: Schedule,
     comptime placement: Placement,
-    pool: *const fu.Pool,
+    pool: fu.Pool,
     topology: fu.Topology,
     graph: CsrView,
     labels_a: []Label,
@@ -355,7 +357,7 @@ fn runForkUnion(
             .replicas_offsets = replicas_offsets,
             .replicas_columns = replicas_columns,
         };
-        forNScheduled(schedule, pool, vertices, labelKernel(placement), work);
+        forNScheduled(schedule, pool, vertices, labelKernel(placement), &work);
         rounds += 1;
         var changes: u64 = 0;
         for (counters) |*counter| changes += counter.value;
@@ -371,7 +373,7 @@ fn runForkUnion(
 
 fn runStdIoGroup(allocator: std.mem.Allocator, io: std.Io, graph: CsrView, labels_a: []Label, labels_b: []Label, n_threads: usize) !usize {
     const vertices: usize = graph.vertices();
-        const changes_per_thread = try allocator.alloc(Counter, n_threads);
+    const changes_per_thread = try allocator.alloc(Counter, n_threads);
     defer allocator.free(changes_per_thread);
     const chunk = std.math.divCeil(usize, vertices, n_threads) catch unreachable;
 
@@ -398,7 +400,7 @@ fn runStdIoGroup(allocator: std.mem.Allocator, io: std.Io, graph: CsrView, label
                     tally.value = changed;
                 }
             }.sweep, .{ graph, old_labels, new_labels, &changes_per_thread[thread_id], start, end });
-                    }
+        }
         try group.await(io);
         rounds += 1;
         var changes: u64 = 0;
@@ -463,7 +465,7 @@ pub fn main() !void {
 
     // One pinned pool spawns for EVERY backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; std_io_group ignores it.
-    var pool = try fu.Pool.init(topology, n_threads, .inclusive);
+    const pool = try fu.Pool.init(topology, .{ .threads = n_threads, .name = "fu-propagate" });
     defer pool.deinit();
 
     // The standard library's executor, sized to match: past `async_limit` an `Io.async` runs the
@@ -472,16 +474,16 @@ pub fn main() !void {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var host = try generateNecklace(&pool, scale, communities, edge_factor);
+    var host = try generateNecklace(pool, scale, communities, edge_factor);
     const vertices: usize = @as(usize, host.row_offsets.len - 1);
     var labels_a = try allocator.alloc(Label, vertices);
     var labels_b = try allocator.alloc(Label, vertices);
     @memset(labels_a, 0);
     @memset(labels_b, 0);
-    try retouchDeterministically(u64, &pool, &host.row_offsets);
-    try retouchDeterministically(u32, &pool, &host.column_indices);
-    try retouchDeterministically(Label, &pool, &labels_a);
-    try retouchDeterministically(Label, &pool, &labels_b);
+    try retouchDeterministically(u64, pool, &host.row_offsets);
+    try retouchDeterministically(u32, pool, &host.column_indices);
+    try retouchDeterministically(Label, pool, &labels_a);
+    try retouchDeterministically(Label, pool, &labels_b);
     const graph = host.view();
 
     var line_buffer: [256]u8 = undefined;
@@ -497,11 +499,12 @@ pub fn main() !void {
     defer if (replicas_offsets) |*r| r.deinit();
     defer if (replicas_columns) |*r| r.deinit();
     if (backend == .forkunion_static_replicated or backend == .forkunion_dynamic_replicated) {
-        replicas_offsets = fu.ReplicatedArray(u64).init(topology, graph.row_offsets.len) orelse return error.OutOfMemory;
-        replicas_columns = fu.ReplicatedArray(u32).init(topology, graph.column_indices.len) orelse return error.OutOfMemory;
-        for (0..topology.memoryDomainsCount()) |domain| {
-            @memcpy(replicas_offsets.?.onMemoryDomain(domain), graph.row_offsets);
-            @memcpy(replicas_columns.?.onMemoryDomain(domain), graph.column_indices);
+        replicas_offsets = try fu.ReplicatedArray(u64).init(topology, graph.row_offsets.len);
+        replicas_columns = try fu.ReplicatedArray(u32).init(topology, graph.column_indices.len);
+        for (0..topology.countMemoryDomains()) |domain| {
+            const memory_domain = fu.MemoryDomain.at(domain);
+            @memcpy(replicas_offsets.?.onMemoryDomain(memory_domain), graph.row_offsets);
+            @memcpy(replicas_columns.?.onMemoryDomain(memory_domain), graph.column_indices);
         }
     }
 
@@ -509,7 +512,7 @@ pub fn main() !void {
     defer allocator.free(counters);
 
     const runOnce = struct {
-        fn call(b: Backend, p: *const fu.Pool, alloc: std.mem.Allocator, standard_io: std.Io, topo: fu.Topology, g: CsrView, a: []Label, bb: []Label, c: []Counter, ro: ?*fu.ReplicatedArray(u64), rc: ?*fu.ReplicatedArray(u32), threads: usize) !usize {
+        fn call(b: Backend, p: fu.Pool, alloc: std.mem.Allocator, standard_io: std.Io, topo: fu.Topology, g: CsrView, a: []Label, bb: []Label, c: []Counter, ro: ?*fu.ReplicatedArray(u64), rc: ?*fu.ReplicatedArray(u32), threads: usize) !usize {
             return switch (b) {
                 .forkunion_static_shared => runForkUnion(.static, .shared, p, topo, g, a, bb, c, ro, rc),
                 .forkunion_dynamic_shared => runForkUnion(.dynamic, .shared, p, topo, g, a, bb, c, ro, rc),
@@ -525,7 +528,7 @@ pub fn main() !void {
 
     // One untimed warmup pass: page-faults and cache warming would otherwise bias the first timed
     // pass, and by a different amount for each backend.
-    var rounds = try runOnce(backend, &pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
+    var rounds = try runOnce(backend, pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
 
     // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
     // long enough to amortize scheduling noise - and reports the rate it sustained, with no
@@ -534,11 +537,11 @@ pub fn main() !void {
     const started = monotonicNanos();
     var passes: usize = 0;
     if (n_iters > 0) {
-        for (0..n_iters) |_| rounds = try runOnce(backend, &pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
+        for (0..n_iters) |_| rounds = try runOnce(backend, pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
         passes = n_iters;
     } else {
         while (true) {
-            rounds = try runOnce(backend, &pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
+            rounds = try runOnce(backend, pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
             passes += 1;
             if (monotonicNanos() - started >= budget_ns) break;
         }

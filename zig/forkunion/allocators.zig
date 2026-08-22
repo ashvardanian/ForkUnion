@@ -6,6 +6,9 @@
 
 const std = @import("std");
 const Topology = @import("topology.zig").Topology;
+const types = @import("types.zig");
+const MemoryDomain = types.MemoryDomain;
+const MemoryDomainId = types.MemoryDomainId;
 
 extern fn fu_allocate_on_domain_id(memory_domain_id: i32, bytes: usize) ?*anyopaque;
 extern fn fu_allocate_at_least_on_domain_id(
@@ -27,7 +30,7 @@ extern fn fu_free_symmetric(base: *anyopaque, total_bytes: usize) void;
 
 /// Result of a memory-domain allocation; carries only the OS id, so it can outlive the topology.
 pub const AllocationResult = struct {
-    memory_domain_id: i32,
+    memory_domain_id: MemoryDomainId,
     ptr: [*]u8,
     allocated_bytes: usize,
     bytes_per_page: usize,
@@ -39,17 +42,17 @@ pub const AllocationResult = struct {
 
     /// Frees the allocation
     pub fn free(self: AllocationResult) void {
-        fu_free_on_domain_id(self.memory_domain_id, @ptrCast(self.ptr), self.allocated_bytes);
+        fu_free_on_domain_id(self.memory_domain_id.identifier(), @ptrCast(self.ptr), self.allocated_bytes);
     }
 };
 
 /// Allocates memory on a memory domain with optimal page size; id from `Topology.memoryDomainIdAtIndex`.
-pub fn allocateAtLeast(memory_domain_id: i32, minimum_bytes: usize) ?AllocationResult {
+pub fn allocateAtLeast(memory_domain_id: MemoryDomainId, minimum_bytes: usize) ?AllocationResult {
     var allocated_bytes: usize = undefined;
     var bytes_per_page: usize = undefined;
 
     const ptr = fu_allocate_at_least_on_domain_id(
-        memory_domain_id,
+        memory_domain_id.identifier(),
         minimum_bytes,
         &allocated_bytes,
         &bytes_per_page,
@@ -64,8 +67,8 @@ pub fn allocateAtLeast(memory_domain_id: i32, minimum_bytes: usize) ?AllocationR
 }
 
 /// Allocates exactly the requested bytes on a memory domain; id from `Topology.memoryDomainIdAtIndex`.
-pub fn allocate(memory_domain_id: i32, bytes: usize) ?[*]u8 {
-    const ptr = fu_allocate_on_domain_id(memory_domain_id, bytes) orelse return null;
+pub fn allocate(memory_domain_id: MemoryDomainId, bytes: usize) ?[*]u8 {
+    const ptr = fu_allocate_on_domain_id(memory_domain_id.identifier(), bytes) orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
@@ -75,7 +78,7 @@ pub fn allocate(memory_domain_id: i32, bytes: usize) ?[*]u8 {
 /// `Topology.memoryDomainIdAtIndex` - and it both hands out `AllocationResult`s through
 /// `allocateAtLeast`/`allocate` and backs a `std.mem.Allocator` through `allocator`.
 pub const DomainAllocator = struct {
-    memory_domain_id: i32,
+    memory_domain_id: MemoryDomainId,
 
     const Self = @This();
     const Allocator = std.mem.Allocator;
@@ -92,9 +95,10 @@ pub const DomainAllocator = struct {
         .free = free,
     };
 
-    /// Binds to the memory domain named by @p memory_domain_id, or null if the id is the -1 sentinel.
-    pub fn init(memory_domain_id: i32) ?Self {
-        if (memory_domain_id < 0) return null;
+    /// Binds to the memory domain named by @p memory_domain_id, which must name a real domain -
+    /// ask `isValid` first, since an out-of-range lookup answers `.none`.
+    pub fn init(memory_domain_id: MemoryDomainId) Self {
+        std.debug.assert(memory_domain_id.isValid());
         return .{ .memory_domain_id = memory_domain_id };
     }
 
@@ -103,7 +107,7 @@ pub const DomainAllocator = struct {
         var allocated_bytes: usize = undefined;
         var bytes_per_page: usize = undefined;
         const ptr = fu_allocate_at_least_on_domain_id(
-            self.memory_domain_id,
+            self.memory_domain_id.identifier(),
             minimum_bytes,
             &allocated_bytes,
             &bytes_per_page,
@@ -118,7 +122,7 @@ pub const DomainAllocator = struct {
 
     /// Allocates exactly @p bytes on this domain, or null on failure.
     pub fn allocate(self: Self, bytes: usize) ?[*]u8 {
-        const ptr = fu_allocate_on_domain_id(self.memory_domain_id, bytes) orelse return null;
+        const ptr = fu_allocate_on_domain_id(self.memory_domain_id.identifier(), bytes) orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -175,7 +179,7 @@ pub const DomainAllocator = struct {
         var allocated_bytes: usize = undefined;
         var bytes_per_page: usize = undefined;
         const raw_ptr = fu_allocate_at_least_on_domain_id(
-            self.memory_domain_id,
+            self.memory_domain_id.identifier(),
             request_bytes,
             &allocated_bytes,
             &bytes_per_page,
@@ -184,7 +188,7 @@ pub const DomainAllocator = struct {
         const base_addr = @intFromPtr(raw_ptr);
         const data_addr = alignment.forward(base_addr + header_size);
         if (data_addr + len > base_addr + allocated_bytes) {
-            fu_free_on_domain_id(self.memory_domain_id, raw_ptr, allocated_bytes);
+            fu_free_on_domain_id(self.memory_domain_id.identifier(), raw_ptr, allocated_bytes);
             return null;
         }
 
@@ -226,7 +230,7 @@ pub const DomainAllocator = struct {
         const header_ptr = @as(*Header, @ptrFromInt(@intFromPtr(buf.ptr) - @sizeOf(Header)));
         const header = header_ptr.*;
         const base_ptr = @as(*anyopaque, @ptrFromInt(header.base_addr));
-        fu_free_on_domain_id(self.memory_domain_id, base_ptr, header.allocated_bytes);
+        fu_free_on_domain_id(self.memory_domain_id.identifier(), base_ptr, header.allocated_bytes);
     }
 };
 
@@ -246,8 +250,8 @@ pub fn ReplicatedArray(comptime T: type) type {
         total_bytes: usize = 0,
         len: usize = 0,
 
-        /// Allocates one uninitialized length-`n` replica per memory domain, or null on failure.
-        pub fn init(topology: Topology, n: usize) ?Self {
+        /// Allocates one uninitialized length-`n` replica per memory domain.
+        pub fn init(topology: Topology, n: usize) std.mem.Allocator.Error!Self {
             if (n == 0) return Self{};
             var stride_bytes: usize = 0;
             var domains: usize = 0;
@@ -260,7 +264,7 @@ pub fn ReplicatedArray(comptime T: type) type {
                 &domains,
                 &total_bytes,
                 &bytes_per_page,
-            ) orelse return null;
+            ) orelse return error.OutOfMemory;
             return .{
                 .base_bytes = @ptrCast(@alignCast(base_bytes)),
                 .stride_bytes = stride_bytes,
@@ -287,7 +291,7 @@ pub fn ReplicatedArray(comptime T: type) type {
         }
 
         /// The number of per-domain replicas.
-        pub fn memoryDomainsCount(self: Self) usize {
+        pub fn countMemoryDomains(self: Self) usize {
             return self.domains;
         }
 
@@ -296,16 +300,16 @@ pub fn ReplicatedArray(comptime T: type) type {
             return self.stride_bytes;
         }
 
-        /// The whole replica living on `memory_domain_index`.
-        pub fn onMemoryDomain(self: Self, memory_domain_index: usize) []T {
-            const slice_base = self.base_bytes.? + memory_domain_index * self.stride_bytes;
+        /// The whole replica living on `memory_domain`.
+        pub fn onMemoryDomain(self: Self, memory_domain: MemoryDomain) []T {
+            const slice_base = self.base_bytes.? + memory_domain.index() * self.stride_bytes;
             const typed: [*]T = @ptrCast(@alignCast(slice_base));
             return typed[0..self.len];
         }
 
-        /// One element of the replica on `memory_domain_index`.
-        pub fn at(self: Self, memory_domain_index: usize, local_index: usize) *T {
-            return &self.onMemoryDomain(memory_domain_index)[local_index];
+        /// One element of the replica on `memory_domain`.
+        pub fn at(self: Self, memory_domain: MemoryDomain, local_index: usize) *T {
+            return &self.onMemoryDomain(memory_domain)[local_index];
         }
     };
 }
@@ -328,11 +332,11 @@ pub fn ShardedArray(comptime T: type) type {
         segment: usize = 0,
 
         /// Allocates uninitialized storage for `n` elements partitioned round-robin across the domains.
-        pub fn init(topology: Topology, n: usize) ?Self {
+        pub fn init(topology: Topology, n: usize) std.mem.Allocator.Error!Self {
             if (n == 0) return Self{};
-            const domains = topology.memoryDomainsCount();
-            if (domains == 0) return null;
-            const segment = (n + domains - 1) / domains;
+            const domains = topology.countMemoryDomains();
+            if (domains == 0) return error.OutOfMemory;
+            const segment = std.math.divCeil(usize, n, domains) catch unreachable;
             var stride_bytes: usize = 0;
             var domains_out: usize = 0;
             var total_bytes: usize = 0;
@@ -344,7 +348,7 @@ pub fn ShardedArray(comptime T: type) type {
                 &domains_out,
                 &total_bytes,
                 &bytes_per_page,
-            ) orelse return null;
+            ) orelse return error.OutOfMemory;
             return .{
                 .base_bytes = @ptrCast(@alignCast(base_bytes)),
                 .stride_bytes = stride_bytes,
@@ -372,7 +376,7 @@ pub fn ShardedArray(comptime T: type) type {
         }
 
         /// The number of shards, one per memory domain.
-        pub fn memoryDomainsCount(self: Self) usize {
+        pub fn countMemoryDomains(self: Self) usize {
             return self.domains;
         }
 
@@ -381,36 +385,36 @@ pub fn ShardedArray(comptime T: type) type {
             return self.stride_bytes;
         }
 
-        /// How many elements the shard on `memory_domain_index` holds - a trailing shard may be shorter.
-        pub fn lengthOnMemoryDomain(self: Self, memory_domain_index: usize) usize {
-            const start = memory_domain_index * self.segment;
+        /// How many elements the shard on `memory_domain` holds - a trailing shard may be shorter.
+        pub fn lengthOnMemoryDomain(self: Self, memory_domain: MemoryDomain) usize {
+            const start = memory_domain.index() * self.segment;
             if (start >= self.len) return 0;
             return @min(self.len - start, self.segment);
         }
 
         /// The memory domain and local index that store logical element `logical_index`.
-        pub fn locationOf(self: Self, logical_index: usize) struct { memory_domain: usize, local_index: usize } {
+        pub fn locationOf(self: Self, logical_index: usize) struct { memory_domain: MemoryDomain, local_index: usize } {
             return .{
-                .memory_domain = logical_index / self.segment,
+                .memory_domain = MemoryDomain.at(logical_index / self.segment),
                 .local_index = logical_index % self.segment,
             };
         }
 
-        /// The logical index of the element at `local_index` on `memory_domain_index` - inverse of `locationOf`.
-        pub fn logicalIndexOf(self: Self, memory_domain_index: usize, local_index: usize) usize {
-            return memory_domain_index * self.segment + local_index;
+        /// The logical index of the element at `local_index` on `memory_domain` - inverse of `locationOf`.
+        pub fn logicalIndexOf(self: Self, memory_domain: MemoryDomain, local_index: usize) usize {
+            return memory_domain.index() * self.segment + local_index;
         }
 
-        /// The whole shard living on `memory_domain_index`.
-        pub fn onMemoryDomain(self: Self, memory_domain_index: usize) []T {
-            const slice_base = self.base_bytes.? + memory_domain_index * self.stride_bytes;
+        /// The whole shard living on `memory_domain`.
+        pub fn onMemoryDomain(self: Self, memory_domain: MemoryDomain) []T {
+            const slice_base = self.base_bytes.? + memory_domain.index() * self.stride_bytes;
             const typed: [*]T = @ptrCast(@alignCast(slice_base));
-            return typed[0..self.lengthOnMemoryDomain(memory_domain_index)];
+            return typed[0..self.lengthOnMemoryDomain(memory_domain)];
         }
 
         /// The single home of a logical element.
-        pub fn at(self: Self, memory_domain_index: usize, local_index: usize) *T {
-            return &self.onMemoryDomain(memory_domain_index)[local_index];
+        pub fn at(self: Self, memory_domain: MemoryDomain, local_index: usize) *T {
+            return &self.onMemoryDomain(memory_domain)[local_index];
         }
     };
 }
@@ -420,11 +424,14 @@ test "NUMA allocation" {
 
     const topo = try Topology.init();
     defer topo.deinit();
-    const allocation = allocateAtLeast(topo.memoryDomainIdAtIndex(0), 1024) orelse return error.SkipZigTest;
+    const first_domain = MemoryDomain.at(0);
+    // The capability guard above already said this machine places pages on a domain, so a 1 KiB
+    // request failing is a defect - skipping here would bury it.
+    const allocation = allocateAtLeast(topo.memoryDomainIdAtIndex(first_domain), 1024) orelse return error.OutOfMemory;
     defer allocation.free();
 
     try std.testing.expect(allocation.allocated_bytes >= 1024);
-    try std.testing.expectEqual(topo.memoryDomainIdAtIndex(0), allocation.memory_domain_id);
+    try std.testing.expectEqual(topo.memoryDomainIdAtIndex(first_domain), allocation.memory_domain_id);
 
     // Write to memory to ensure it's usable
     const slice = allocation.asSlice();
@@ -438,7 +445,9 @@ test "NUMA allocator integrates with std collections" {
 
     const topo = try Topology.init();
     defer topo.deinit();
-    var domain_alloc = DomainAllocator.init(topo.memoryDomainIdAtIndex(0)) orelse return error.SkipZigTest;
+    const memory_domain_id = topo.memoryDomainIdAtIndex(MemoryDomain.at(0));
+    if (!memory_domain_id.isValid()) return error.SkipZigTest;
+    var domain_alloc = DomainAllocator.init(memory_domain_id);
     const allocator = domain_alloc.allocator();
 
     var list = try std.ArrayList(u64).initCapacity(allocator, 0);
@@ -471,20 +480,21 @@ test "ReplicatedArray per-domain buffer" {
     defer topo.deinit();
 
     const n: usize = 4096;
-    var replicas = ReplicatedArray(u32).init(topo, n) orelse return error.OutOfMemory;
+    var replicas = try ReplicatedArray(u32).init(topo, n);
     defer replicas.deinit();
     try std.testing.expectEqual(n, replicas.len);
-    try std.testing.expectEqual(topo.memoryDomainsCount(), replicas.memoryDomainsCount());
+    try std.testing.expectEqual(topo.countMemoryDomains(), replicas.countMemoryDomains());
 
-    const domains = replicas.memoryDomainsCount();
+    const domains = replicas.countMemoryDomains();
     for (0..domains) |domain| {
-        const replica = replicas.onMemoryDomain(domain);
+        const replica = replicas.onMemoryDomain(MemoryDomain.at(domain));
         try std.testing.expectEqual(n, replica.len);
         for (replica, 0..) |*slot, index| slot.* = @intCast(domain * n + index);
     }
     for (0..domains) |domain| {
         for (0..n) |index| {
-            try std.testing.expectEqual(@as(u32, @intCast(domain * n + index)), replicas.at(domain, index).*);
+            const slot = replicas.at(MemoryDomain.at(domain), index);
+            try std.testing.expectEqual(@as(u32, @intCast(domain * n + index)), slot.*);
         }
     }
 }
@@ -496,18 +506,18 @@ test "ShardedArray segment round trip" {
     defer topo.deinit();
 
     const n: usize = 4096;
-    var shards = ShardedArray(u32).init(topo, n) orelse return error.OutOfMemory;
+    var shards = try ShardedArray(u32).init(topo, n);
     defer shards.deinit();
-    const domains = shards.memoryDomainsCount();
+    const domains = shards.countMemoryDomains();
     const segment = shards.segment;
     try std.testing.expectEqual(n, shards.len);
 
     var footprint: usize = 0;
-    for (0..domains) |domain| footprint += shards.lengthOnMemoryDomain(domain);
+    for (0..domains) |domain| footprint += shards.lengthOnMemoryDomain(MemoryDomain.at(domain));
     try std.testing.expectEqual(n, footprint);
 
     for (0..domains) |domain| {
-        const shard = shards.onMemoryDomain(domain);
+        const shard = shards.onMemoryDomain(MemoryDomain.at(domain));
         for (shard, 0..) |*slot, local| slot.* = @intCast(domain * segment + local);
     }
     for (0..n) |logical| {
