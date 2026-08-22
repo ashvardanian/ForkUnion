@@ -85,6 +85,7 @@ const _: () = assert!(
 ///
 /// Fast for short critical sections but spins continuously. Use when latency matters
 /// more than CPU usage. Avoid for long critical sections or high contention scenarios.
+#[repr(align(128))]
 pub struct BasicSpinMutex<T, const PAUSE: bool> {
     locked: AtomicBool,
     data: UnsafeCell<T>,
@@ -126,17 +127,18 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// *guard = 42;
     /// ```
     pub fn lock(&self) -> BasicSpinMutexGuard<'_, T, PAUSE> {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            // Busy-wait with pause instructions if enabled
-            if PAUSE {
-                core::hint::spin_loop();
+        loop {
+            // The only store in the loop, so contenders spin on a shared line rather than
+            // taking it exclusive on every attempt.
+            if !self.locked.swap(true, Ordering::Acquire) {
+                return BasicSpinMutexGuard { mutex: self };
+            }
+            while self.locked.load(Ordering::Relaxed) {
+                if PAUSE {
+                    core::hint::spin_loop();
+                }
             }
         }
-        BasicSpinMutexGuard { mutex: self }
     }
 
     /// Attempts to acquire the lock without blocking.
@@ -159,11 +161,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// };
     /// ```
     pub fn try_lock(&self) -> Option<BasicSpinMutexGuard<'_, T, PAUSE>> {
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        if !self.locked.swap(true, Ordering::Acquire) {
             Some(BasicSpinMutexGuard { mutex: self })
         } else {
             None
