@@ -1,4 +1,4 @@
-//! Demo app: Connected Components by label propagation, with ForkUnion and raw std.Thread.
+//! Demo app: Connected Components by label propagation, with ForkUnion and `std.Io.Group`.
 //!
 //! The N-body simulation gives every task an identical cost, so it can only measure dispatch latency.
 //! Label propagation is the opposite end of fork-join usage: one parallel sweep per round, repeated
@@ -26,7 +26,7 @@
 //! - PROPAGATION_CHECK: also converge serially, and fail unless labels and rounds agree exactly
 //!
 //! The ForkUnion backends are the four cells of forkunion_{static,dynamic}_{shared,replicated};
-//! the baseline is std_threads, re-spawning raw threads every round. Cells run bare, with no pinning
+//! the baseline is std_io_group, the standard library's own fork-join answer. Cells run bare, with no pinning
 //! environment; the residual spread on SMT machines is preemption - one delayed hyperthread stalls
 //! every barrier of a pass - which the fixed window amortizes. The _replicated backends are a
 //! deliberate non-win on this workload: the hot traffic is the shared label array every round must
@@ -365,14 +365,13 @@ fn runForkUnion(
     return rounds;
 }
 
-// std.Thread backend (static work division)
-// Divides the vertices into equal slices, one raw std.Thread per slice, joined at the end of each round.
+// std.Io.Group backend (static work division)
+// The standard library's fork-join answer since 0.16 removed `std.Thread.Pool`: one `Io.Group` per
+// round, one task per vertex slice, awaited before the labels swap.
 
-fn runStdThreads(allocator: std.mem.Allocator, graph: CsrView, labels_a: []Label, labels_b: []Label, n_threads: usize) !usize {
+fn runStdIoGroup(allocator: std.mem.Allocator, io: std.Io, graph: CsrView, labels_a: []Label, labels_b: []Label, n_threads: usize) !usize {
     const vertices: usize = graph.vertices();
-    const threads = try allocator.alloc(std.Thread, n_threads);
-    defer allocator.free(threads);
-    const changes_per_thread = try allocator.alloc(Counter, n_threads);
+        const changes_per_thread = try allocator.alloc(Counter, n_threads);
     defer allocator.free(changes_per_thread);
     const chunk = std.math.divCeil(usize, vertices, n_threads) catch unreachable;
 
@@ -382,12 +381,13 @@ fn runStdThreads(allocator: std.mem.Allocator, graph: CsrView, labels_a: []Label
     var new_labels = labels_b;
     while (true) {
         for (changes_per_thread) |*counter| counter.value = 0;
-        var spawned: usize = 0;
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
         for (0..n_threads) |thread_id| {
             const start = thread_id * chunk;
             if (start >= vertices) break;
             const end = @min(start + chunk, vertices);
-            threads[spawned] = try std.Thread.spawn(.{}, struct {
+            group.async(io, struct {
                 fn sweep(g: CsrView, old: []const Label, new: []Label, tally: *Counter, range_start: usize, range_end: usize) void {
                     var changed: u64 = 0;
                     for (range_start..range_end) |v| {
@@ -398,9 +398,8 @@ fn runStdThreads(allocator: std.mem.Allocator, graph: CsrView, labels_a: []Label
                     tally.value = changed;
                 }
             }.sweep, .{ graph, old_labels, new_labels, &changes_per_thread[thread_id], start, end });
-            spawned += 1;
-        }
-        for (threads[0..spawned]) |t| t.join();
+                    }
+        try group.await(io);
         rounds += 1;
         var changes: u64 = 0;
         for (changes_per_thread) |*counter| changes += counter.value;
@@ -438,7 +437,7 @@ const Backend = enum {
     forkunion_dynamic_shared,
     forkunion_static_replicated,
     forkunion_dynamic_replicated,
-    std_threads,
+    std_io_group,
 };
 
 pub fn main() !void {
@@ -463,9 +462,15 @@ pub fn main() !void {
     if (n_threads == 0) n_threads = topology.countLogicalCores();
 
     // One pinned pool spawns for EVERY backend - first to give the graph and label pages their
-    // deterministic first touch, then to serve the ForkUnion backends; std_threads ignores it.
+    // deterministic first touch, then to serve the ForkUnion backends; std_io_group ignores it.
     var pool = try fu.Pool.init(topology, n_threads, .inclusive);
     defer pool.deinit();
+
+    // The standard library's executor, sized to match: past `async_limit` an `Io.async` runs the
+    // task inline on the caller, so N-1 workers plus the caller mirrors an inclusive pool of N.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .async_limit = .limited(n_threads - 1) });
+    defer threaded.deinit();
+    const io = threaded.io();
 
     var host = try generateNecklace(&pool, scale, communities, edge_factor);
     const vertices: usize = @as(usize, host.row_offsets.len - 1);
@@ -504,13 +509,13 @@ pub fn main() !void {
     defer allocator.free(counters);
 
     const runOnce = struct {
-        fn call(b: Backend, p: *const fu.Pool, alloc: std.mem.Allocator, topo: fu.Topology, g: CsrView, a: []Label, bb: []Label, c: []Counter, ro: ?*fu.ReplicatedArray(u64), rc: ?*fu.ReplicatedArray(u32), threads: usize) !usize {
+        fn call(b: Backend, p: *const fu.Pool, alloc: std.mem.Allocator, standard_io: std.Io, topo: fu.Topology, g: CsrView, a: []Label, bb: []Label, c: []Counter, ro: ?*fu.ReplicatedArray(u64), rc: ?*fu.ReplicatedArray(u32), threads: usize) !usize {
             return switch (b) {
                 .forkunion_static_shared => runForkUnion(.static, .shared, p, topo, g, a, bb, c, ro, rc),
                 .forkunion_dynamic_shared => runForkUnion(.dynamic, .shared, p, topo, g, a, bb, c, ro, rc),
                 .forkunion_static_replicated => runForkUnion(.static, .replicated, p, topo, g, a, bb, c, ro, rc),
                 .forkunion_dynamic_replicated => runForkUnion(.dynamic, .replicated, p, topo, g, a, bb, c, ro, rc),
-                .std_threads => try runStdThreads(alloc, g, a, bb, threads),
+                .std_io_group => try runStdIoGroup(alloc, standard_io, g, a, bb, threads),
             };
         }
     }.call;
@@ -520,7 +525,7 @@ pub fn main() !void {
 
     // One untimed warmup pass: page-faults and cache warming would otherwise bias the first timed
     // pass, and by a different amount for each backend.
-    var rounds = try runOnce(backend, &pool, allocator, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
+    var rounds = try runOnce(backend, &pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
 
     // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
     // long enough to amortize scheduling noise - and reports the rate it sustained, with no
@@ -529,11 +534,11 @@ pub fn main() !void {
     const started = monotonicNanos();
     var passes: usize = 0;
     if (n_iters > 0) {
-        for (0..n_iters) |_| rounds = try runOnce(backend, &pool, allocator, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
+        for (0..n_iters) |_| rounds = try runOnce(backend, &pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
         passes = n_iters;
     } else {
         while (true) {
-            rounds = try runOnce(backend, &pool, allocator, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
+            rounds = try runOnce(backend, &pool, allocator, io, topology, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
             passes += 1;
             if (monotonicNanos() - started >= budget_ns) break;
         }

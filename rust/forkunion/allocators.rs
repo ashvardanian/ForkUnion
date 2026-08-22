@@ -1174,7 +1174,7 @@ impl<T: Copy> ShardedArray<T> {
         if domains == 0 {
             return None;
         }
-        let segment = (n + domains - 1) / domains;
+        let segment = n.div_ceil(domains);
         let allocation = SymmetricAllocation::new(topology, segment * core::mem::size_of::<T>())?;
         Some(Self {
             allocation: Some(allocation),

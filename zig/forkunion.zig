@@ -4,8 +4,9 @@
 //! parallelism, avoiding dynamic memory allocations, exceptions, system calls, and heavy
 //! Compare-And-Swap instructions on the hot path.
 //!
-//! Unlike std.Thread.Pool (which is a task queue for async work), ForkUnion is designed for
-//! data parallelism and tight parallel loops - think OpenMP's `#pragma omp parallel for`.
+//! Zig 0.16 removed std.Thread.Pool, and its replacement std.Io.Group allocates per task and has
+//! no notion of topology. ForkUnion is designed for data parallelism and tight parallel loops -
+//! think OpenMP's `#pragma omp parallel for` - with a fixed pool and no allocation on the hot path.
 //!
 //! Basic usage:
 //! ```zig

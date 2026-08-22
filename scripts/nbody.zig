@@ -5,7 +5,7 @@
 //! - forkunion_dynamic_shared: dynamic work-stealing (ForkUnion's work-stealing scheduler)
 //! - forkunion_static_replicated: static, with body positions replicated into each domain's local memory
 //! - forkunion_dynamic_replicated: work-stealing, over the same per-domain replicas
-//! - std_threads: static work division (one raw std.Thread per slice, joined per pass)
+//! - std_io_group: static work division (one `std.Io.Group` task per slice, awaited per pass)
 //! - libxev: dynamic lock-free queue (Mitchell Hashimoto's lock-free thread pool)
 //!
 //! On a machine with one memory domain the replicas collapse to one, and the portable allocator backs
@@ -265,7 +265,7 @@ fn refreshReplicas(pool: *const fu.Pool, topology: fu.Topology, bodies: []const 
             local_index += context.pool.locateThreadIn(thread_index, compute_domain_index);
             if (threads_on_memory_domain == 0) return;
 
-            const chunk = (context.n + threads_on_memory_domain - 1) / threads_on_memory_domain;
+            const chunk = std.math.divCeil(usize, context.n, threads_on_memory_domain) catch unreachable;
             const start = local_index * chunk;
             if (start >= context.n) return;
             const end = @min(start + chunk, context.n);
@@ -301,47 +301,46 @@ fn iterationForkUnion(
     pool.forN(n, applyKernel, work);
 }
 
-// std.Thread backend (static work division)
-// Divides N tasks into equal slices, one raw std.Thread per slice, joined at the end of each pass.
+// std.Io.Group backend (static work division)
+// The standard library's fork-join answer since 0.16 removed `std.Thread.Pool`: one `Io.Group` per
+// pass, one task per body slice, awaited before the next pass reads what it wrote.
 
-fn iterationStdThreads(allocator: std.mem.Allocator, bodies: []Body, forces: []Vector3, n_threads: usize) !void {
+fn iterationStdIoGroup(io: std.Io, bodies: []Body, forces: []Vector3, n_threads: usize) !void {
     const n = bodies.len;
-    const threads = try allocator.alloc(std.Thread, n_threads);
-    defer allocator.free(threads);
-    const chunk = (n + n_threads - 1) / n_threads;
+        const chunk = std.math.divCeil(usize, n, n_threads) catch unreachable;
 
     {
-        var spawned: usize = 0;
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
         for (0..n_threads) |thread_id| {
             const start = thread_id * chunk;
             if (start >= n) break;
             const end = @min(start + chunk, n);
-            threads[spawned] = try std.Thread.spawn(.{}, struct {
+            group.async(io, struct {
                 fn calc(bodies_slice: []const Body, forces_slice: []Vector3, range_start: usize, range_end: usize) void {
                     for (range_start..range_end) |i| {
                         forces_slice[i] = netForce(&bodies_slice[i], bodies_slice);
                     }
                 }
             }.calc, .{ bodies, forces, start, end });
-            spawned += 1;
-        }
-        for (threads[0..spawned]) |t| t.join();
+                    }
+        try group.await(io);
     }
 
     {
-        var spawned: usize = 0;
+        var group: std.Io.Group = .init;
+        defer group.cancel(io);
         for (0..n_threads) |thread_id| {
             const start = thread_id * chunk;
             if (start >= n) break;
             const end = @min(start + chunk, n);
-            threads[spawned] = try std.Thread.spawn(.{}, struct {
+            group.async(io, struct {
                 fn apply(bodies_slice: []Body, forces_slice: []const Vector3, range_start: usize, range_end: usize) void {
                     for (range_start..range_end) |i| applyForce(&bodies_slice[i], &forces_slice[i]);
                 }
             }.apply, .{ bodies, forces, start, end });
-            spawned += 1;
-        }
-        for (threads[0..spawned]) |t| t.join();
+                    }
+        try group.await(io);
     }
 }
 
@@ -421,7 +420,7 @@ fn iterationLibxev(pool: *xev.ThreadPool, bodies: []Body, forces: []Vector3, all
 // Registry
 
 /// Which execution engine a backend runs on, so `main` builds exactly the resource it needs.
-const Engine = enum { forkunion, forkunion_replicated, std_threads, libxev };
+const Engine = enum { forkunion, forkunion_replicated, std_io_group, libxev };
 
 /// Everything a backend reads or writes for one simulation step; `main` owns the lifetimes and hands
 /// each backend only the execution engine it asked for.
@@ -432,6 +431,7 @@ const Context = struct {
     pool: ?*fu.Pool,
     replicas: ?*fu.ReplicatedArray(Body),
     xev_pool: ?*xev.ThreadPool,
+    io: ?std.Io,
     allocator: std.mem.Allocator,
     n_threads: usize,
 };
@@ -451,9 +451,9 @@ fn runForkUnion(comptime schedule: Schedule, comptime placement: Placement) fn (
     }.call;
 }
 
-fn runStdThreads(context: *Context) void {
-    iterationStdThreads(context.allocator, context.bodies, context.forces, context.n_threads) catch |e|
-        std.debug.panic("std_threads backend failed: {}", .{e});
+fn runStdIoGroup(context: *Context) void {
+    iterationStdIoGroup(context.io.?, context.bodies, context.forces, context.n_threads) catch |e|
+        std.debug.panic("std_io_group backend failed: {}", .{e});
 }
 
 fn runLibxev(context: *Context) void {
@@ -466,7 +466,7 @@ const backends = [_]Backend{
     .{ .name = "forkunion_dynamic_shared", .run = runForkUnion(.dynamic, .shared), .engine = .forkunion },
     .{ .name = "forkunion_static_replicated", .run = runForkUnion(.static, .replicated), .engine = .forkunion_replicated },
     .{ .name = "forkunion_dynamic_replicated", .run = runForkUnion(.dynamic, .replicated), .engine = .forkunion_replicated },
-    .{ .name = "std_threads", .run = runStdThreads, .engine = .std_threads },
+    .{ .name = "std_io_group", .run = runStdIoGroup, .engine = .std_io_group },
     .{ .name = "libxev", .run = runLibxev, .engine = .libxev },
 };
 
@@ -528,15 +528,19 @@ pub fn main() !void {
         x.shutdown();
         x.deinit();
     };
+var threaded: ?std.Io.Threaded = null;
+    defer if (threaded) |*t| t.deinit();
 
     switch (selected.engine) {
         .forkunion, .forkunion_replicated => {
             pool = try fu.Pool.init(topology, n_threads, .inclusive);
             if (selected.engine == .forkunion_replicated) {
-                replicas = fu.ReplicatedArray(Body).init(topology, n_bodies) orelse return error.OutOfMemory;
+                replicas = try fu.ReplicatedArray(Body).init(topology, n_bodies);
             }
         },
-        .std_threads => {},
+// Past `async_limit` an `Io.async` runs the task inline on the caller, so N-1 workers plus
+        // the caller mirrors an inclusive ForkUnion pool of N.
+        .std_io_group => threaded = .init(allocator, .{ .async_limit = .limited(n_threads - 1) }),
         .libxev => xev_pool = xev.ThreadPool.init(.{ .max_threads = @intCast(n_threads) }),
     }
 
@@ -547,6 +551,7 @@ pub fn main() !void {
         .pool = if (pool) |*p| p else null,
         .replicas = if (replicas) |*r| r else null,
         .xev_pool = if (xev_pool) |*x| x else null,
+.io = if (threaded) |*t| t.io() else null,
         .allocator = allocator,
         .n_threads = n_threads,
     };
