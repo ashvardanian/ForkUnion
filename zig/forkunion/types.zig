@@ -14,14 +14,14 @@ const std = @import("std");
 /// `std::hardware_destructive_interference_size`, which trips GCC ABI warnings and picks worse.
 pub const default_alignment = 128;
 
-/// A dense compute-domain index, in `0..Topology.countComputeDomains()`.
+/// A dense compute-domain index, in `0..Topology.computeDomainsCount()`.
 ///
 /// A distinct type from `MemoryDomain` because the two index different axes of the machine and
 /// the compiler is the only thing that can tell them apart at a call site.
 pub const ComputeDomain = enum(usize) {
     _,
 
-    /// Wraps a dense index, as produced by iterating `0..countComputeDomains()`.
+    /// Wraps a dense index, as produced by iterating `0..computeDomainsCount()`.
     pub fn at(dense_index: usize) ComputeDomain {
         return @enumFromInt(dense_index);
     }
@@ -32,11 +32,11 @@ pub const ComputeDomain = enum(usize) {
     }
 };
 
-/// A dense memory-domain index, in `0..Topology.countMemoryDomains()`.
+/// A dense memory-domain index, in `0..Topology.memoryDomainsCount()`.
 pub const MemoryDomain = enum(usize) {
     _,
 
-    /// Wraps a dense index, as produced by iterating `0..countMemoryDomains()`.
+    /// Wraps a dense index, as produced by iterating `0..memoryDomainsCount()`.
     pub fn at(dense_index: usize) MemoryDomain {
         return @enumFromInt(dense_index);
     }

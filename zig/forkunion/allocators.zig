@@ -291,7 +291,7 @@ pub fn ReplicatedArray(comptime T: type) type {
         }
 
         /// The number of per-domain replicas.
-        pub fn countMemoryDomains(self: Self) usize {
+        pub fn memoryDomainsCount(self: Self) usize {
             return self.domains;
         }
 
@@ -334,7 +334,7 @@ pub fn ShardedArray(comptime T: type) type {
         /// Allocates uninitialized storage for `n` elements partitioned round-robin across the domains.
         pub fn init(topology: Topology, n: usize) std.mem.Allocator.Error!Self {
             if (n == 0) return Self{};
-            const domains = topology.countMemoryDomains();
+            const domains = topology.memoryDomainsCount();
             if (domains == 0) return error.OutOfMemory;
             const segment = std.math.divCeil(usize, n, domains) catch unreachable;
             var stride_bytes: usize = 0;
@@ -376,7 +376,7 @@ pub fn ShardedArray(comptime T: type) type {
         }
 
         /// The number of shards, one per memory domain.
-        pub fn countMemoryDomains(self: Self) usize {
+        pub fn memoryDomainsCount(self: Self) usize {
             return self.domains;
         }
 
@@ -483,9 +483,9 @@ test "ReplicatedArray per-domain buffer" {
     var replicas = try ReplicatedArray(u32).init(topo, n);
     defer replicas.deinit();
     try std.testing.expectEqual(n, replicas.len);
-    try std.testing.expectEqual(topo.countMemoryDomains(), replicas.countMemoryDomains());
+    try std.testing.expectEqual(topo.memoryDomainsCount(), replicas.memoryDomainsCount());
 
-    const domains = replicas.countMemoryDomains();
+    const domains = replicas.memoryDomainsCount();
     for (0..domains) |domain| {
         const replica = replicas.onMemoryDomain(MemoryDomain.at(domain));
         try std.testing.expectEqual(n, replica.len);
@@ -508,7 +508,7 @@ test "ShardedArray segment round trip" {
     const n: usize = 4096;
     var shards = try ShardedArray(u32).init(topo, n);
     defer shards.deinit();
-    const domains = shards.countMemoryDomains();
+    const domains = shards.memoryDomainsCount();
     const segment = shards.segment;
     try std.testing.expectEqual(n, shards.len);
 

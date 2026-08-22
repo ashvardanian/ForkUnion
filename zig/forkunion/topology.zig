@@ -171,12 +171,12 @@ pub const Topology = struct {
     }
 
     /// Returns the number of logical CPU cores available
-    pub fn countLogicalCores(self: Topology) usize {
+    pub fn logicalCoresCount(self: Topology) usize {
         return fu_logical_cores_count(self.handle);
     }
 
     /// Returns the number of memory domains available
-    pub fn countMemoryDomains(self: Topology) usize {
+    pub fn memoryDomainsCount(self: Topology) usize {
         return fu_memory_domains_count(self.handle);
     }
 
@@ -186,12 +186,12 @@ pub const Topology = struct {
     }
 
     /// Returns the number of distinct thread compute_domains
-    pub fn countComputeDomains(self: Topology) usize {
+    pub fn computeDomainsCount(self: Topology) usize {
         return fu_compute_domains_count(self.handle);
     }
 
     /// Returns the number of logical cores backing a given compute domain (0 if out of range).
-    pub fn countLogicalCoresIn(self: Topology, compute_domain: ComputeDomain) usize {
+    pub fn logicalCoresCountIn(self: Topology, compute_domain: ComputeDomain) usize {
         return fu_logical_cores_count_in(self.handle, compute_domain.index());
     }
 
@@ -210,9 +210,9 @@ pub const Topology = struct {
 
     /// Returns the number of distinct Quality-of-Service levels.
     ///
-    /// May be smaller than `countComputeDomains`, as several domains can share one level - equally-fast
+    /// May be smaller than `computeDomainsCount`, as several domains can share one level - equally-fast
     /// cores may still be split across cache clusters, or across NUMA nodes.
-    pub fn countComputeLevels(self: Topology) usize {
+    pub fn computeLevelsCount(self: Topology) usize {
         return fu_compute_levels_count(self.handle);
     }
 
@@ -254,12 +254,12 @@ pub const Topology = struct {
     }
 
     /// Returns the total number of free huge pages across all memory domains.
-    pub fn countHugePages(self: Topology) usize {
+    pub fn hugePagesCount(self: Topology) usize {
         return fu_huge_pages_count(self.handle);
     }
 
     /// Returns the number of free huge pages in a given memory domain (0 if out of range).
-    pub fn countHugePagesIn(self: Topology, memory_domain: MemoryDomain) usize {
+    pub fn hugePagesCountIn(self: Topology, memory_domain: MemoryDomain) usize {
         return fu_huge_pages_count_in(self.handle, memory_domain.index());
     }
 };
@@ -316,7 +316,7 @@ test "system capabilities" {
     if (comptime_caps.place_memory_on_domain) try std.testing.expect(comptime_caps.topology);
 
     // Without the pools, the library can still see exactly one domain, and never more.
-    if (!comptime_caps.colocate_pools_on_domain) try std.testing.expectEqual(@as(usize, 1), topo.countComputeDomains());
+    if (!comptime_caps.colocate_pools_on_domain) try std.testing.expectEqual(@as(usize, 1), topo.computeDomainsCount());
 
     // A machine can only _offer_ page placement if this build compiled the path that asks for it.
     if (runtime_caps.place_memory_on_domain) try std.testing.expect(comptime_caps.place_memory_on_domain);
@@ -326,12 +326,12 @@ test "system metadata" {
     const topo = try Topology.init();
     defer topo.deinit();
 
-    const cores = topo.countLogicalCores();
+    const cores = topo.logicalCoresCount();
     try std.testing.expect(cores > 0);
 
-    const numa = topo.countMemoryDomains();
+    const numa = topo.memoryDomainsCount();
     try std.testing.expect(numa > 0);
 
-    const colocs = topo.countComputeDomains();
+    const colocs = topo.computeDomainsCount();
     try std.testing.expect(colocs > 0);
 }

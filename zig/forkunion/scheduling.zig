@@ -176,7 +176,7 @@ pub const Pool = struct {
     }
 
     /// Returns the number of threads in the pool
-    pub fn countThreads(self: Pool) usize {
+    pub fn threadsCount(self: Pool) usize {
         return fu_pool_threads_count(self.handle);
     }
 
@@ -195,12 +195,12 @@ pub const Pool = struct {
     }
 
     /// Returns the number of compute domains the pool spans
-    pub fn countComputeDomains(self: Pool) usize {
+    pub fn computeDomainsCount(self: Pool) usize {
         return fu_pool_compute_domains_count(self.handle);
     }
 
     /// Returns the number of threads in a specific compute domain
-    pub fn countThreadsIn(self: Pool, compute_domain: ComputeDomain) usize {
+    pub fn threadsCountIn(self: Pool, compute_domain: ComputeDomain) usize {
         return fu_pool_threads_count_in(self.handle, compute_domain.index());
     }
 
@@ -371,7 +371,7 @@ pub const Pool = struct {
         checkCallable(func, if (Context == void) 2 else 3);
 
         const Scatter = struct { data: []T, context: Context, threads: usize };
-        var scatter = Scatter{ .data = data, .context = context, .threads = self.countThreads() };
+        var scatter = Scatter{ .data = data, .context = context, .threads = self.threadsCount() };
         self.forThreads(&scatter, struct {
             fn spread(carried: *const Scatter, thread_index: usize, compute_domain: ComputeDomain) void {
                 _ = compute_domain;
@@ -436,7 +436,7 @@ pub const Pool = struct {
 /// Completes the `tryHarvest` pipeline: a `Topology` is harvested first and stays immutable, a
 /// `Pool` spawns on it, and the fabric then harvests through that pool's pinned workers,
 /// snapshotting what it needs so the topology may be freed after. Before a harvest every query
-/// answers 0, and `countMemoryLevels` answers 1.
+/// answers 0, and `memoryLevelsCount` answers 1.
 pub const Fabric = struct {
     handle: *anyopaque,
 
@@ -488,8 +488,8 @@ pub const Fabric = struct {
     }
 
     /// Returns the number of distinct derived memory tiers, the memory-axis twin of
-    /// `Topology.countComputeLevels`; 1 on single-tier systems and before a harvest.
-    pub fn countMemoryLevels(self: Fabric) usize {
+    /// `Topology.computeLevelsCount`; 1 on single-tier systems and before a harvest.
+    pub fn memoryLevelsCount(self: Fabric) usize {
         return fu_fabric_memory_levels_count(self.handle);
     }
 };
@@ -500,7 +500,7 @@ test "pool creation and destruction" {
     const pool = try Pool.init(topo, .{ .threads = 2 });
     defer pool.deinit();
 
-    try std.testing.expectEqual(2, pool.countThreads());
+    try std.testing.expectEqual(2, pool.threadsCount());
 }
 
 test "caller exclusivity query" {
@@ -539,11 +539,11 @@ test "pool capabilities reflect the build" {
 test "per-compute_domain pool" {
     const topo = try Topology.init();
     defer topo.deinit();
-    const compute_domains = topo.countComputeDomains();
+    const compute_domains = topo.computeDomainsCount();
     try std.testing.expect(compute_domains >= 1);
 
     const first = ComputeDomain.at(0);
-    const cores = @max(topo.countLogicalCoresIn(first), 1);
+    const cores = @max(topo.logicalCoresCountIn(first), 1);
     const pool = try Pool.init(topo, .{
         .threads = cores,
         .placement = .{ .on_compute_domain = first },
@@ -560,7 +560,7 @@ test "per-compute_domain pool" {
         }
     }.worker);
     pool.unsafeJoin(generation);
-    try std.testing.expectEqual(pool.countThreads(), counter.load(.acquire));
+    try std.testing.expectEqual(pool.threadsCount(), counter.load(.acquire));
 }
 
 test "fabric harvest fills edges" {
@@ -573,7 +573,7 @@ test "fabric harvest fills edges" {
 
     // An unharvested fabric answers zeros and a single tier.
     try std.testing.expectEqual(0, fabric.memoryLatency(ComputeDomain.at(0), MemoryDomain.at(0)));
-    try std.testing.expectEqual(1, fabric.countMemoryLevels());
+    try std.testing.expectEqual(1, fabric.memoryLevelsCount());
 
     // A flat pool without domain placement has no fabric to walk. Skip rather than return: a bare
     // return counts as a pass, so the summary would claim coverage this run never had.
@@ -586,7 +586,7 @@ test "fabric harvest fills edges" {
     try std.testing.expect(fabric.memoryLatency(first, local) > 0);
     try std.testing.expect(fabric.memoryBandwidth(first, local) > 0);
     try std.testing.expectEqual(10, fabric.memoryDistance(first, local));
-    try std.testing.expect(fabric.countMemoryLevels() >= 1);
+    try std.testing.expect(fabric.memoryLevelsCount() >= 1);
 }
 
 test "named pool creation" {
@@ -598,7 +598,7 @@ test "named pool creation" {
     const long_name = "a-pool-name-far-longer-than-any-platform-thread-naming-accepts";
     const pool = try Pool.init(topo, .{ .threads = 2, .name = long_name });
     defer pool.deinit();
-    try std.testing.expectEqual(2, pool.countThreads());
+    try std.testing.expectEqual(2, pool.threadsCount());
 }
 
 test "for_threads execution" {

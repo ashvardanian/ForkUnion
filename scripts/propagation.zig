@@ -461,7 +461,7 @@ pub fn main() !void {
     const topology = try fu.Topology.init();
     defer topology.deinit();
     var n_threads = envUsize("PROPAGATION_THREADS", 0);
-    if (n_threads == 0) n_threads = topology.countLogicalCores();
+    if (n_threads == 0) n_threads = topology.logicalCoresCount();
 
     // One pinned pool spawns for EVERY backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; std_io_group ignores it.
@@ -501,7 +501,7 @@ pub fn main() !void {
     if (backend == .forkunion_static_replicated or backend == .forkunion_dynamic_replicated) {
         replicas_offsets = try fu.ReplicatedArray(u64).init(topology, graph.row_offsets.len);
         replicas_columns = try fu.ReplicatedArray(u32).init(topology, graph.column_indices.len);
-        for (0..topology.countMemoryDomains()) |domain| {
+        for (0..topology.memoryDomainsCount()) |domain| {
             const memory_domain = fu.MemoryDomain.at(domain);
             @memcpy(replicas_offsets.?.onMemoryDomain(memory_domain), graph.row_offsets);
             @memcpy(replicas_columns.?.onMemoryDomain(memory_domain), graph.column_indices);

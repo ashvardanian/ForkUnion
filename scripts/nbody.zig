@@ -258,11 +258,11 @@ fn refreshReplicas(pool: fu.Pool, topology: fu.Topology, bodies: []const Body, r
             // whole team splits [0, n) without overlap even when several compute domains share the node.
             var threads_on_memory_domain: usize = 0;
             var local_index: usize = 0;
-            for (0..carried.pool.countComputeDomains()) |index| {
+            for (0..carried.pool.computeDomainsCount()) |index| {
                 const other = fu.ComputeDomain.at(index);
                 if (carried.topology.localMemoryOf(other) != memory_domain) continue;
-                if (index < compute_domain.index()) local_index += carried.pool.countThreadsIn(other);
-                threads_on_memory_domain += carried.pool.countThreadsIn(other);
+                if (index < compute_domain.index()) local_index += carried.pool.threadsCountIn(other);
+                threads_on_memory_domain += carried.pool.threadsCountIn(other);
             }
             local_index += carried.pool.locateThreadIn(thread_index, compute_domain);
             if (threads_on_memory_domain == 0) return;
@@ -482,7 +482,7 @@ pub fn main() !void {
     defer topology.deinit();
 
     var n_threads = envUsize("NBODY_THREADS", 0);
-    if (n_threads == 0) n_threads = topology.countLogicalCores();
+    if (n_threads == 0) n_threads = topology.logicalCoresCount();
 
     const budget_seconds = envF64("NBODY_SECONDS", 10); // The primary knob: a fixed window
     const n_iters = envUsize("NBODY_ITERATIONS", 0); // Overrides with an exact count when set

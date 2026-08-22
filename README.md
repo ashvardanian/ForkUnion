@@ -213,53 +213,72 @@ To integrate into your Zig project, let `zig fetch` pin the dependency and its c
 zig fetch --save=forkunion https://github.com/ashvardanian/ForkUnion/archive/refs/tags/v3.0.3.tar.gz
 ```
 
+That records the dependency; `build.zig` still has to wire it, and the module carries the compiled artifact so a consumer does not relink it by hand:
+
+```zig
+const forkunion = b.dependency("forkunion", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("forkunion", forkunion.module("forkunion"));
+```
+
 Then import and use in your code:
 
 ```zig
 const std = @import("std");
 const fu = @import("forkunion");
 
-const Context = struct { results: []i32 };
-
 pub fn main() !void {
     const topology = try fu.Topology.init();
     defer topology.deinit();
-    var pool = try fu.Pool.init(topology, 4, .inclusive);
+    const pool = try fu.Pool.init(topology, .{ .threads = 4 });
     defer pool.deinit();
 
     // Execute work on each thread (OpenMP-style parallel)
-    pool.forThreads(struct {
-        fn work(thread_idx: usize, compute_domain_idx: usize) void {
-            _ = compute_domain_idx;
-            std.debug.print("Thread {}\n", .{thread_idx});
+    pool.forThreads({}, struct {
+        fn work(thread_index: usize, compute_domain: fu.ComputeDomain) void {
+            _ = compute_domain;
+            std.debug.print("Thread {}\n", .{thread_index});
         }
-    }.work, {});
+    }.work);
 
     // Distribute 1000 tasks across threads (OpenMP-style parallel for)
     var results = [_]i32{0} ** 1000;
-    pool.forN(1000, struct {
-        fn process(prong: fu.Prong, ctx: Context) void {
-            ctx.results[prong.task_index] = @intCast(prong.task_index * 2);
+    pool.forN(1000, &results, struct {
+        fn process(slots: *[1000]i32, prong: fu.Prong) void {
+            slots[prong.task_index] = @intCast(prong.task_index * 2);
         }
-    }.process, Context{ .results = results[0..] });
+    }.process);
+
+    // Or let the pool hand each thread a disjoint sub-slice, with no index arithmetic
+    pool.forSlicesMut(i32, &results, {}, struct {
+        fn scale(thread_index: usize, chunk: []i32) void {
+            _ = thread_index;
+            for (chunk) |*slot| slot.* *= 2;
+        }
+    }.scale);
 }
 ```
+
+The context comes before the callback and travels as a caller-owned pointer, so the callback receives exactly the qualifiers the caller chose — the same shape `std.sort` uses, and the reason a `std.atomic.Value` in a context can never be silently copied per task.
+Pass `{}` when a kernel needs no state at all.
 
 The `Topology` handle reports the [hardware topology](#hardware-topology), to size and place work:
 
 ```zig
 const topology = try fu.Topology.init();
 defer topology.deinit();
-var domain: usize = 0;
-while (domain < topology.countComputeDomains()) : (domain += 1) {
+for (0..topology.computeDomainsCount()) |index| {
+    const domain = fu.ComputeDomain.at(index);
     std.debug.print("domain {d}: {d} cores, level {d}, allocate on memory domain {d}\n", .{
-        domain, topology.countLogicalCoresIn(domain), topology.computeLevelIn(domain), topology.localMemoryOf(domain),
+        index, topology.logicalCoresCountIn(domain), topology.computeLevelIn(domain), topology.localMemoryOf(domain).index(),
     });
 }
 ```
 
-Unlike `std.Thread.Pool` task queue for async work, ForkUnion is designed for __data parallelism__
-and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
+A compute domain, a memory domain, and a memory domain's OS id are three distinct types — `ComputeDomain`, `MemoryDomain`, and `MemoryDomainId` — exactly as in Rust and Mojo, so passing one where another belongs is a compile error rather than a silent read of the wrong node.
+
+The Zig standard library no longer ships a fork-join pool at all; its replacement, `std.Io.Group`, allocates per task, grows its thread set lazily, runs work inline on the caller once saturated, and knows nothing about NUMA.
+ForkUnion is designed for __data parallelism__ and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
+
 
 ### Intro in C
 
@@ -434,7 +453,7 @@ That shape is what most alternatives are built around, and it is the wrong shape
 - Modern C++: [`taskflow/taskflow`](https://github.com/taskflow/taskflow), [`progschj/ThreadPool`](https://github.com/progschj/ThreadPool), [`bshoshany/thread-pool`](https://github.com/bshoshany/thread-pool)
 - Traditional C++: [`vit-vit/CTPL`](https://github.com/vit-vit/CTPL), [`mtrebi/thread-pool`](https://github.com/mtrebi/thread-pool)
 - Rust: [`tokio-rs/tokio`](https://github.com/tokio-rs/tokio), [`rayon-rs/rayon`](https://github.com/rayon-rs/rayon), [`smol-rs/smol`](https://github.com/smol-rs/smol)
-- Zig: [`std.Thread.Pool`](https://ziglang.org/documentation/master/std/#std.Thread.Pool)
+- Zig: [`std.Io.Group`](https://ziglang.org/documentation/0.16.0/std/#std.Io.Group), which replaced the removed `std.Thread.Pool` in 0.16
 
 __Reach for ForkUnion__ when you have data-parallel loops, bulk-synchronous phases, or NUMA-sharded scans, and you want them to dispatch in nanoseconds with neither an allocator nor the kernel on the hot path.
 __Reach for something else__ when you need task graphs, async I/O, futures and promises, work that outlives its scope, or nested parallelism — Taskflow, Tokio, and oneTBB are built for exactly that, and ForkUnion deliberately bans it.
