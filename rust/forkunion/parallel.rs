@@ -5,7 +5,7 @@
 use crate::allocators::{DomainAllocator, PinnedVec};
 use crate::scheduling::{fold_with_scratch, ThreadPool};
 use crate::topology::{MemoryDomain, Topology};
-use crate::types::{CacheAligned, Prong, SyncConstPtr, SyncMutPtr};
+use crate::types::{CacheAligned, Prong, SyncMutPtr};
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 
@@ -72,11 +72,7 @@ impl ParallelSchedule for StaticScheduler {
             return;
         }
 
-        let function_ptr = SyncConstPtr::new(&function as *const F);
-        let _operation = pool.for_n(tasks, move |prong| {
-            let func = unsafe { &*function_ptr.as_ptr() };
-            func(prong);
-        });
+        let _operation = pool.for_n(tasks, function);
     }
 
     fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F)
@@ -87,11 +83,7 @@ impl ParallelSchedule for StaticScheduler {
             return;
         }
 
-        let function_ptr = SyncConstPtr::new(&function as *const F);
-        let _operation = pool.for_slices(tasks, move |prong, count| {
-            let func = unsafe { &*function_ptr.as_ptr() };
-            func(prong, count);
-        });
+        let _operation = pool.for_slices(tasks, function);
     }
 }
 
@@ -104,11 +96,7 @@ impl ParallelSchedule for DynamicScheduler {
             return;
         }
 
-        let function_ptr = SyncConstPtr::new(&function as *const F);
-        let _operation = pool.for_n_dynamic(tasks, move |prong| {
-            let func = unsafe { &*function_ptr.as_ptr() };
-            func(prong);
-        });
+        let _operation = pool.for_n_dynamic(tasks, function);
     }
 }
 
@@ -220,11 +208,7 @@ where
             iterator,
             schedule,
         } = self;
-        let function_ptr = SyncConstPtr::new(&function as *const F);
-        iterator.drive(pool, schedule, &move |item, _| {
-            let func = unsafe { &*function_ptr.as_ptr() };
-            func(item);
-        });
+        iterator.drive(pool, schedule, &move |item, _| function(item));
     }
 
     pub fn for_each_with_prong<F>(self, function: F)
@@ -236,11 +220,7 @@ where
             iterator,
             schedule,
         } = self;
-        let function_ptr = SyncConstPtr::new(&function as *const F);
-        iterator.drive(pool, schedule, &move |item, prong| {
-            let func = unsafe { &*function_ptr.as_ptr() };
-            func(item, prong);
-        });
+        iterator.drive(pool, schedule, &move |item, prong| function(item, prong));
     }
 
     pub fn fold_with_scratch<T, F>(self, scratch: &mut [T], fold: F)
@@ -368,8 +348,7 @@ where
 
         let stop = AtomicBool::new(false);
         let first_err = SyncOnceCell::new();
-        let f_ptr = SyncConstPtr::new(&fold as *const F);
-        let s_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
+        let scratch_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
 
         iterator.drive(pool, schedule, &|item, prong| {
             // Check if we should stop (Acquire: see all writes before Release swap)
@@ -377,15 +356,14 @@ where
                 return;
             }
 
-            let slot = unsafe { &mut *s_ptr.get(prong.thread_index) };
-            let func = unsafe { &*f_ptr.as_ptr() };
+            let slot = unsafe { &mut *scratch_ptr.get(prong.thread_index) };
 
-            if let Err(e) = func(slot, item, prong) {
+            if let Err(error) = fold(slot, item, prong) {
                 // Try to set stop flag (Release: make error write visible to Acquire loads)
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
                     // SAFETY: Only one thread sets stop to true, so only one write
-                    unsafe { first_err.set(e) };
+                    unsafe { first_err.set(error) };
                 }
             }
         });
@@ -447,21 +425,18 @@ where
 
         let stop = AtomicBool::new(false);
         let first_err = SyncOnceCell::new();
-        let f_ptr = SyncConstPtr::new(&function as *const F);
-
         iterator.drive(pool, schedule, &|item, prong| {
             // Check if we should stop (Acquire: see all writes before Release swap)
             if stop.load(Ordering::Acquire) {
                 return;
             }
 
-            let func = unsafe { &*f_ptr.as_ptr() };
-            if let Err(e) = func(item, prong) {
+            if let Err(error) = function(item, prong) {
                 // Try to set stop flag (Release: make error write visible to Acquire loads)
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
                     // SAFETY: Only one thread sets stop to true, so only one write
-                    unsafe { first_err.set(e) };
+                    unsafe { first_err.set(error) };
                 }
             }
         });
@@ -681,16 +656,13 @@ where
 
         let stop = AtomicBool::new(false);
         let found = SyncOnceCell::new();
-        let p_ptr = SyncConstPtr::new(&predicate as *const P);
-
         iterator.drive(pool, schedule, &|item, _prong| {
             // Check if already found (Acquire: see all writes before Release swap)
             if stop.load(Ordering::Acquire) {
                 return;
             }
 
-            let pred = unsafe { &*p_ptr.as_ptr() };
-            if pred(&item) {
+            if predicate(&item) {
                 // Try to set stop flag (Release: make item write visible to Acquire loads)
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
@@ -928,14 +900,7 @@ where
         F: Fn(Self::Item, Prong) + Sync,
     {
         let Map { base, mapper } = self;
-        let mapper_ptr = SyncConstPtr::new(&mapper as *const M);
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
-        let mapped = move |item: I::Item, prong: Prong| {
-            let mp = unsafe { &*mapper_ptr.as_ptr() };
-            let next = mp(item);
-            let consumer_ref = unsafe { &*consumer_ptr.as_ptr() };
-            consumer_ref(next, prong);
-        };
+        let mapped = move |item: I::Item, prong: Prong| consumer(mapper(item), prong);
 
         base.drive(pool, schedule, &mapped);
     }
@@ -963,13 +928,9 @@ where
         F: Fn(Self::Item, Prong) + Sync,
     {
         let Filter { base, predicate } = self;
-        let predicate_ptr = SyncConstPtr::new(&predicate as *const P);
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         let filtered = move |item: I::Item, prong: Prong| {
-            let pred = unsafe { &*predicate_ptr.as_ptr() };
-            if pred(&item) {
-                let consumer_ref = unsafe { &*consumer_ptr.as_ptr() };
-                consumer_ref(item, prong);
+            if predicate(&item) {
+                consumer(item, prong);
             }
         };
 
@@ -1031,11 +992,9 @@ where
         }
 
         let slice = self.data;
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         schedule.dispatch(pool, slice.len(), move |prong| {
             let item = unsafe { slice.get_unchecked(prong.task_index) };
-            let func = unsafe { &*consumer_ptr.as_ptr() };
-            func(item, prong);
+            consumer(item, prong);
         });
     }
 }
@@ -1071,12 +1030,10 @@ where
 
         let left = self.left.data;
         let right = self.right.data;
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         schedule.dispatch(pool, len, move |prong| {
             let lhs = unsafe { left.get_unchecked(prong.task_index) };
             let rhs = unsafe { right.get_unchecked(prong.task_index) };
-            let func = unsafe { &*consumer_ptr.as_ptr() };
-            func((lhs, rhs), prong);
+            consumer((lhs, rhs), prong);
         });
     }
 }
@@ -1133,12 +1090,9 @@ where
         }
 
         let ptr = self.ptr;
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         schedule.dispatch(pool, self.len, move |prong| {
-            let raw = unsafe { ptr.get(prong.task_index) };
-            let item = unsafe { &mut *raw };
-            let func = unsafe { &*consumer_ptr.as_ptr() };
-            func(item, prong);
+            let item = unsafe { &mut *ptr.get(prong.task_index) };
+            consumer(item, prong);
         });
     }
 }
@@ -1172,12 +1126,10 @@ impl ParallelIterator for ParallelRange {
         }
 
         let start = self.range.start;
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         schedule.dispatch(pool, len, move |mut prong| {
             let index = start + prong.task_index;
             prong.task_index = index;
-            let func = unsafe { &*consumer_ptr.as_ptr() };
-            func(index, prong);
+            consumer(index, prong);
         });
     }
 }
@@ -1222,16 +1174,11 @@ where
             return;
         }
 
-        let indexer_ptr = SyncConstPtr::new(&indexer as *const I);
-        let consumer_ptr = SyncConstPtr::new(consumer as *const F);
         schedule.dispatch_slices(pool, len, move |mut prong, count| {
             let mut current = prong.task_index;
-            let idx_fn = unsafe { &*indexer_ptr.as_ptr() };
-            let consumer_ref = unsafe { &*consumer_ptr.as_ptr() };
             for _ in 0..count {
                 prong.task_index = current;
-                let value = idx_fn(current);
-                consumer_ref(value, prong);
+                consumer(indexer(current), prong);
                 current += 1;
             }
         });
