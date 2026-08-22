@@ -885,8 +885,23 @@ where
 {
     pool: &'pool mut ThreadPool,
     function: &'fork F,
-    generation: Option<usize>, // ? Real tokens are odd; `None` means "not yet dispatched"
-    did_join: bool,
+    state: BroadcastState,
+}
+
+/// Where a broadcast stands in its dispatch-then-join lifecycle; tokens are always odd.
+enum BroadcastState {
+    Pending,
+    Dispatched(usize),
+    Joined(usize),
+}
+
+impl BroadcastState {
+    fn generation(&self) -> Option<usize> {
+        match *self {
+            Self::Pending => None,
+            Self::Dispatched(generation) | Self::Joined(generation) => Some(generation),
+        }
+    }
 }
 
 impl<'pool, 'fork, F> BroadcastJoin<'pool, 'fork, F>
@@ -898,8 +913,7 @@ where
         let mut operation = Self {
             pool,
             function,
-            generation: None,
-            did_join: false,
+            state: BroadcastState::Pending,
         };
         if operation.pool.caller_exclusivity() == CallerExclusivity::Exclusive {
             operation.dispatch();
@@ -907,9 +921,10 @@ where
         operation
     }
 
-    fn dispatch(&mut self) {
-        if self.generation.is_some() {
-            return; // No need to dispatch again
+    /// Dispatches if it has not already, and yields the generation token either way.
+    fn dispatch(&mut self) -> usize {
+        if let Some(generation) = self.state.generation() {
+            return generation;
         }
 
         extern "C" fn trampoline<F>(
@@ -923,16 +938,17 @@ where
             function(thread_index, compute_domain_index);
         }
 
-        unsafe {
+        let generation = unsafe {
             let context = self.function as *const F as *mut c_void;
-            let generation = fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, context);
-            self.generation = Some(generation);
-        }
+            fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, context)
+        };
+        self.state = BroadcastState::Dispatched(generation);
+        generation
     }
 
     /// The generation token of this broadcast; always odd once dispatched.
     pub fn generation(&self) -> Option<usize> {
-        self.generation
+        self.state.generation()
     }
 
     /// True once the dispatched generation has fully completed on all threads.
@@ -941,9 +957,12 @@ where
     /// `Inclusive` pools this can only turn `true` once `join` contributes the calling
     /// thread's slice, so the poll-then-join pattern is reserved for `Exclusive` pools.
     pub fn is_complete(&self) -> bool {
-        match self.generation {
-            Some(generation) => unsafe { fu_pool_is_complete(self.pool.inner, generation) != 0 },
-            None => false,
+        match self.state {
+            BroadcastState::Pending => false,
+            BroadcastState::Dispatched(generation) => unsafe {
+                fu_pool_is_complete(self.pool.inner, generation) != 0
+            },
+            BroadcastState::Joined(_) => true,
         }
     }
 
@@ -951,14 +970,12 @@ where
     /// On `Inclusive` pools this dispatches the work first and contributes the caller's slice.
     /// Idempotent - subsequent calls are no-ops.
     pub fn join(&mut self) {
-        self.dispatch();
-        if self.did_join {
-            return; // No need to join again
+        let generation = self.dispatch();
+        if matches!(self.state, BroadcastState::Joined(_)) {
+            return;
         }
-        unsafe {
-            fu_pool_unsafe_join(self.pool.inner, self.generation.unwrap());
-        }
-        self.did_join = true;
+        unsafe { fu_pool_unsafe_join(self.pool.inner, generation) };
+        self.state = BroadcastState::Joined(generation);
     }
 }
 
