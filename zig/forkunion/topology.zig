@@ -106,7 +106,17 @@ pub const Capabilities = packed struct(u32) {
     /// The domain-aware `colocated_pool` and `distributed_pool` are compiled in
     colocate_pools_on_domain: bool = false,
 
-    _unused: u17 = 0,
+    /// `CLDEMOTE` moves a just-written line toward the shared LLC and retains it. Reporting-only:
+    /// the emitter is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, never dispatched.
+    x86_cldemote: bool = false,
+    /// `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
+    /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+    arm64_dc_cvac: bool = false,
+    /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
+    /// the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+    risc5_zicbom: bool = false,
+
+    _unused: u14 = 0,
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub fn all() Capabilities {
@@ -260,6 +270,28 @@ test "version info" {
     // live in the build manifest and pinning them here would only duplicate it.
     const v = version();
     try std.testing.expect(v.major + v.minor + v.patch > 0);
+}
+
+test "capability bits match the C ABI numbering" {
+    // The packed struct's field order is the wire format, so a field inserted in the wrong place
+    // silently remaps every bit above it - and a field left out drops the core's answer into
+    // padding, unseen. Pin the boundaries of each group against the C header's `1 << n`.
+    const bit = struct {
+        fn at(position: u5) Capabilities {
+            return @bitCast(@as(u32, 1) << position);
+        }
+    }.at;
+    try std.testing.expect(bit(0).x86_pause);
+    try std.testing.expect(bit(5).risc5_wrs);
+    try std.testing.expect(bit(6).os_threads);
+    try std.testing.expect(bit(14).colocate_pools_on_domain);
+    try std.testing.expect(bit(15).x86_cldemote);
+    try std.testing.expect(bit(16).arm64_dc_cvac);
+    try std.testing.expect(bit(17).risc5_zicbom);
+
+    // Every bit the core defines must have a field; none may fall through to `_unused`.
+    const all_defined: Capabilities = @bitCast(@as(u32, (1 << 18) - 1));
+    try std.testing.expectEqual(0, all_defined._unused);
 }
 
 test "system capabilities" {

@@ -118,6 +118,16 @@ impl Capabilities {
     /// The domain-aware `colocated_pool` and `distributed_pool` are compiled in.
     pub const COLOCATE_POOLS_ON_DOMAIN: Capabilities = Capabilities(1 << 14);
 
+    /// `CLDEMOTE` moves a just-written line toward the shared LLC and retains it. Reporting-only:
+    /// the emitter is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, never dispatched.
+    pub const X86_CLDEMOTE: Capabilities = Capabilities(1 << 15);
+    /// `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
+    /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+    pub const ARM64_DC_CVAC: Capabilities = Capabilities(1 << 16);
+    /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
+    /// the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+    pub const RISC5_ZICBOM: Capabilities = Capabilities(1 << 17);
+
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub const ALL: Capabilities = Capabilities(u32::MAX);
 
