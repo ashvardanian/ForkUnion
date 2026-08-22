@@ -7,7 +7,7 @@ use crate::parallel::{ParallelIterator, ParallelSchedule};
 use crate::topology::{
     CallerExclusivity, Capabilities, ComputeDomain, Error, MemoryDomain, Topology,
 };
-use crate::types::{IndexedSplit, Prong, SafePtr, SyncMutPtr};
+use crate::types::{IndexedSplit, Prong, SyncMutPtr};
 use core::ffi::{c_char, c_int, c_void};
 
 extern "C" {
@@ -528,7 +528,7 @@ impl ThreadPool {
     ///
     /// The scope holds the pool by shared reference, so a worker closure can query it
     /// (`threads_count_in`, `locate_thread_in`) *and* borrow the same stack values the caller owns
-    /// - the borrow conflict that otherwise forces a [`SafePtr`] smuggle. Because each
+    /// - the borrow conflict that otherwise forces a [`crate::SafePtr`] smuggle. Because each
     /// [`Scope::broadcast`] blocks until it joins, those borrows can never outlive the work.
     ///
     /// # Examples
@@ -604,7 +604,10 @@ impl ThreadPool {
     /// Each thread receives an **exclusive** `&mut` sub-slice, so no interior mutability,
     /// `Mutex`, or raw pointers are needed at the call site: the chunks partition `data`
     /// and therefore never alias, and the synchronous join keeps every borrow inside
-    /// `data`'s lifetime. This is the safe replacement for hand-rolled [`SafePtr`] scatter.
+    /// `data`'s lifetime. This is the safe replacement for hand-rolled [`crate::SafePtr`] scatter.
+    ///
+    /// Built on [`for_threads`](Self::for_threads), so `function` runs once per thread even when
+    /// its chunk is empty - unlike [`for_slices`](Self::for_slices), which skips an empty range.
     ///
     /// # Examples
     ///
@@ -627,19 +630,14 @@ impl ThreadPool {
     {
         let threads = self.threads_count();
         let split = IndexedSplit::new(data.len(), threads);
-        let base = SafePtr::new(data.as_mut_ptr()); // ? `Sync` wrapper for the disjoint scatter
+        let base = SyncMutPtr::new(data.as_mut_ptr()); // ? `Sync` wrapper for the disjoint scatter
         let function = &function;
         let scatter = move |thread_index: usize, _compute_domain_index: usize| {
             let range = split.get(thread_index);
-            // SAFETY: `split.get` returns disjoint, in-bounds ranges per thread index, so
-            // no two threads observe overlapping elements; the pool joins before `data`'s
-            // borrow ends, keeping the sub-slice valid for the whole call.
-            let chunk = unsafe {
-                core::slice::from_raw_parts_mut(
-                    base.get_mut_at(range.start),
-                    range.end - range.start,
-                )
-            };
+            // SAFETY: disjoint in-bounds ranges per thread, joined before `data`'s borrow ends.
+            // `get` only offsets - an empty trailing range lands one past the end, never deref'd.
+            let chunk =
+                unsafe { core::slice::from_raw_parts_mut(base.get(range.start), range.len()) };
             function(thread_index, chunk);
         };
         BroadcastJoin::new(self, &scatter).join();
@@ -977,7 +975,7 @@ where
 ///
 /// Holding the pool by shared reference is what lets a worker closure both query the pool
 /// (`threads_count_in`, `locate_thread_in`) and borrow the caller's stack data at the same time -
-/// the borrow conflict that otherwise forces a [`SafePtr`] smuggle. Every [`Scope::broadcast`]
+/// the borrow conflict that otherwise forces a [`crate::SafePtr`] smuggle. Every [`Scope::broadcast`]
 /// joins before returning, so those borrows are always valid.
 pub struct Scope<'pool> {
     pool: &'pool ThreadPool,
@@ -1386,6 +1384,77 @@ mod tests {
                 index * index,
                 "element {index} not processed exactly once"
             );
+        }
+    }
+
+    /// `for_slices_mut`'s chunk arithmetic without a pool, so Miri reaches it.
+    #[test]
+    fn slice_chunks_stay_in_bounds_when_threads_outnumber_elements() {
+        for total in [0usize, 1, 2, 3] {
+            let mut data: Vec<u8> = (0..total as u8).collect();
+            let threads = 8usize;
+            let split = IndexedSplit::new(data.len(), threads);
+            let base = SyncMutPtr::new(data.as_mut_ptr());
+
+            let mut visited = 0usize;
+            for thread_index in 0..threads {
+                let range = split.get(thread_index);
+                // SAFETY: mirrors `for_slices_mut` - trailing empty ranges only offset.
+                let chunk =
+                    unsafe { core::slice::from_raw_parts_mut(base.get(range.start), range.len()) };
+                for value in chunk.iter_mut() {
+                    *value = value.wrapping_add(1);
+                }
+                visited += range.len();
+            }
+            assert_eq!(visited, total, "chunks must cover {total} elements");
+            assert!(
+                data.iter()
+                    .enumerate()
+                    .all(|(index, &value)| value == index as u8 + 1),
+                "every element visited once for {total} elements"
+            );
+        }
+    }
+
+    /// Once per thread even when a thread draws no elements.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn for_slices_mut_calls_every_thread_on_short_slices() {
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, hw_threads());
+        let threads = pool.threads_count();
+
+        for total in [0usize, 1, 2] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let covered = Arc::new(AtomicUsize::new(0));
+            let mut data: Vec<usize> = (0..total).collect();
+
+            {
+                let calls = Arc::clone(&calls);
+                let covered = Arc::clone(&covered);
+                pool.for_slices_mut(&mut data, move |_thread_index, chunk| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    covered.fetch_add(chunk.len(), Ordering::Relaxed);
+                    for value in chunk {
+                        *value += 100;
+                    }
+                });
+            }
+
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                threads,
+                "one call per thread"
+            );
+            assert_eq!(
+                covered.load(Ordering::Relaxed),
+                total,
+                "chunks cover the slice"
+            );
+            for (index, &value) in data.iter().enumerate() {
+                assert_eq!(value, index + 100, "element {index} not processed once");
+            }
         }
     }
 
