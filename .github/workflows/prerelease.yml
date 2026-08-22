@@ -154,6 +154,28 @@ jobs:
       - name: Test Zig
         run: zig build test
 
+      - name: Set up Pixi
+        uses: prefix-dev/setup-pixi@v0
+        with:
+          pixi-version: v0.62.1
+      # The binding loads the core with `dlopen`, so this both compiles the translation unit and
+      # proves a consumer needs no linker flag: the test build below passes none.
+      - name: Test Mojo
+        run: pixi run test
+      # Nothing else compiles the demo scripts, so both would go unbuilt.
+      - name: Build the Mojo benchmarks
+        run: pixi run -e benchmarks build-benchmarks
+      # The Mojo features are environment overrides rather than additive flags, so the
+      # contradiction is caught where it is actually expressed - by the `#error` in `types.hpp`.
+      - name: Reject a capability that outlives the discovery it needs
+        run: |
+          if FORKUNION_CXXFLAGS="-DFU_WITH_TOPOLOGY=0 -DFU_WITH_PLACE_MEMORY_ON_DOMAIN=1" \
+             pixi run build-native 2>/dev/null; then
+            echo "::error::place-memory-on-domain built without topology"
+            exit 1
+          fi
+          echo "rejected, as it should be"
+
   # Sanitizers get their own rows so the platform jobs stay on the critical path with one build
   # each. Restricted to the NUMA-free basic_pool, whose pinned NUMA path stalls under TSan.
   test_ubuntu_sanitizers:

@@ -297,6 +297,80 @@ A compute domain, a memory domain, and a memory domain's OS id are three distinc
 The Zig standard library no longer ships a fork-join pool at all; its replacement, `std.Io.Group`, allocates per task, grows its thread set lazily, runs work inline on the caller once saturated, and knows nothing about NUMA.
 ForkUnion is designed for __data parallelism__ and __tight parallel loops__ — think OpenMP's `#pragma omp parallel for` with zero allocations on the hot path.
 
+### Intro in Mojo
+
+To integrate into your Mojo project, let Pixi build the package from source — there is no channel to add and no linker flag to pass:
+
+```toml
+[workspace]
+preview = ["pixi-build"]
+
+[dependencies]
+forkunion = {git = "https://github.com/ashvardanian/ForkUnion", tag = "v3.0.3"}
+```
+
+Vendoring works too and needs no manifest: Mojo resolves a source package ahead of a compiled one, so `mojo run -I <path-to>/mojo` is enough once `libforkunion.so` is on the loader path.
+
+Then import and use in your code:
+
+```mojo
+from forkunion import ComputeDomain, Library, Pool, Prong, Topology
+
+@fieldwise_init
+struct Scratch(ImplicitlyCopyable, TrivialRegisterPassable):
+    var slots: Pointer[Int64, MutUntrackedOrigin]
+
+def double(prong: Prong, mut scratch: Scratch):
+    scratch.slots[unsafe_offset=prong.task_index] = Int64(prong.task_index * 2)
+
+def announce(thread_index: Int, compute_domain_index: Int, mut scratch: Scratch):
+    print("thread", thread_index, "on compute domain", compute_domain_index)
+
+def sweep(prong: Prong, count: Int, mut scratch: Scratch):
+    for index in range(prong.task_index, prong.task_index + count):
+        scratch.slots[unsafe_offset=index] += 1
+
+def main() raises:
+    var library = Library()
+    var topology = Topology(library)
+    var pool = Pool(topology, threads=4, name="demo")
+
+    var results = List[Int64](length=1000, fill=0)
+    var scratch = Scratch(results.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]())
+
+    pool.for_threads[announce](scratch)         # once per worker, OpenMP-style parallel
+    pool.for_n[double](1000, scratch)           # evenly split, OpenMP-style parallel for
+    pool.for_n_dynamic[double](1000, scratch)   # claimed as threads free up, for uneven work
+    pool.for_slices[sweep](1000, scratch)       # one contiguous run per worker
+```
+
+The callback is a compile-time parameter and the state it needs is a separate runtime argument.
+Mojo cannot hand a capturing closure to C at all, so a callback carries no captures — the scratch is the only channel, and its type and origin are inferred from the argument, leaving a call site to name only the work.
+Fallible calls raise `ForkUnionError` and nothing else; where the C API reports absence rather than failure, the answer is an `Optional`.
+
+The non-blocking dispatch is a context manager, so the join cannot be forgotten and the pool cannot be torn down while its workers are still running:
+
+```mojo
+with pool.unsafe_for_threads[work](scratch) as dispatch:
+    while not dispatch.is_complete(): # exclusive pools only
+        prepare_next_batch()
+```
+
+The `Topology` handle reports the [hardware topology](#hardware-topology), to size and place work:
+
+```mojo
+var topology = Topology(library)
+for index in range(topology.compute_domains_count()):
+    var domain = ComputeDomain(index)
+    var cores = topology.logical_cores_count_in(domain)
+    var level = topology.compute_level_in(domain)
+    print(t"domain {index}: {cores} cores, level {level}, allocate on {topology.local_memory_of(domain)}")
+```
+
+Handles release themselves, so there is no `defer` to forget — though Mojo destroys a value after its __last use__ rather than at the end of the scope, which is earlier than a Zig `defer` fires.
+
+Unlike `max.algorithm.parallelize`, which takes every hardware thread and offers no way to ask for fewer, ForkUnion's pool width is an argument.
+On a machine you are sharing, that is the difference between a speedup and a slowdown.
 
 ### Intro in C
 
@@ -572,6 +646,7 @@ A memory level is a property of the medium, independent of the querying core: it
 | Faster means      | __higher__              | __lower__              |
 
 Names are spelled here as in Rust; C prefixes them with `fu_`, and Zig spells them in camelCase.
+Rust, Zig, and Mojo all carry the domain coordinates as distinct types — `ComputeDomain`, `MemoryDomain`, and `MemoryDomainId` — while C passes plain indices.
 Domain counts and compute levels answer from the `Topology`; memory levels and the per-edge magnitudes answer from a harvested `Fabric`, which C prefixes with `fu_fabric_`.
 
 Beyond the level ordinals, two magnitudes describe a compute domain, both best-effort.
@@ -629,7 +704,8 @@ The primary `search` function, in ideal world would look like this:
 3. The main thread collects aggregates of partial results from all compute domains.
 
 That is, however, overly complicated to implement.
-Such tree-like hierarchical reductions are optimal in a theoretical sense. Still, assuming the relative cost of spin-locking once at the end of a thread scope and the complexity of organizing the code, the more straightforward path is better.
+Such tree-like hierarchical reductions are optimal in a theoretical sense.
+Still, assuming the relative cost of spin-locking once at the end of a thread scope and the complexity of organizing the code, the more straightforward path is better.
 A minimal example would look like this:
 
 ```cpp
@@ -818,6 +894,7 @@ let total = (&data[..])
 Beyond reductions, the iterators offer short-circuiting searches - `find_first` and `find_last` for the deterministic lowest- or highest-index match, `find_any` for the first match with cooperative cancellation, and `any` / `all` for boolean predicates that stop the moment the answer is known.
 Fallible bodies get `try_for_each` and `try_fold_with_scratch`, which propagate the first error and signal the other workers to stop.
 This Rayon-style layer is __Rust-only__; C, C++, and Zig expose the pool primitives `for_threads`, `for_n`, `for_n_dynamic`, and `for_slices` directly.
+Zig additionally mirrors Rust's `for_slices_mut` as `forSlicesMut`, which hands each thread a disjoint sub-slice instead of a start-and-count pair.
 
 ## Performance
 
@@ -917,7 +994,7 @@ Now, the Rust library is a wrapper over the C binding of the C++ core implementa
 
 Toolchain floors, never caps.
 The header needs __C++17__, and a C++20+ consumer keeps its own standard — gaining concepts, the `atomic_ref` waiter, and `std::popcount` — while the pre-compiled libraries build at C++20 regardless.
-The C ABI needs __C99__, and the build tooling __CMake 3.21__, __Rust 1.84__, and __Zig 0.16__.
+The C ABI needs __C99__, and the build tooling __CMake 3.21__, __Rust 1.84__, __Zig 0.16__, and __Mojo 1.0__.
 
 To run the C++ tests, use CMake:
 
@@ -925,7 +1002,7 @@ To run the C++ tests, use CMake:
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D BUILD_TESTING=ON
 cmake --build build_release --config Release -j
 ctest --test-dir build_release                  # run all tests
-build_release/forkunion_nbody                  # run the benchmarks
+build_release/forkunion_nbody                   # run the benchmarks
 ```
 
 For C++ debug builds, consider using the VS Code debugger presets or the following commands:
@@ -933,7 +1010,7 @@ For C++ debug builds, consider using the VS Code debugger presets or the followi
 ```bash
 cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D BUILD_TESTING=ON
 cmake --build build_debug --config Debug        # build with Debug symbols
-build_debug/forkunion_test_cpp20               # run a single test executable
+build_debug/forkunion_test_cpp20                # run a single test executable
 ```
 
 To run static analysis:
@@ -1017,6 +1094,33 @@ PROPAGATION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
 ```
 
 Check the `scripts/nbody.zig` and `scripts/propagation.zig` headers for additional benchmarking options.
+
+---
+
+For Mojo, every task compiles the C++ core first and installs it where `dlopen` will find it:
+
+```bash
+pixi run test                        # the binding's test suite, via `std.testing.TestSuite`
+pixi run -e benchmarks nbody         # dispatch overhead, all-to-all
+pixi run -e benchmarks propagation   # fork-join frequency, bit-identical to the sibling ports
+```
+
+The benchmarks sit in their own environment because their baseline needs `max`, which the binding itself never does.
+Both take the same environment variables as the other ports, the four `forkunion_{static,dynamic}_{shared,replicated}` cells, and a `max_parallelize` baseline:
+
+```bash
+NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated pixi run -e benchmarks nbody
+PROPAGATION_BACKEND=max_parallelize pixi run -e benchmarks propagation
+PROPAGATION_CHECK=1 pixi run -e benchmarks propagation   # converge serially too, and fail on any disagreement
+```
+
+The suite's own per-test durations are not wall clock — a pool's workers busy-wait, and the runner's clock counts that — so time the process rather than trusting them.
+
+```bash
+pixi run -e portable test   # the STL thread pool only
+pixi run -e numa test       # require NUMA-aware allocations
+mojo format mojo/forkunion/*.mojo scripts/*.mojo   # width pinned in pyproject.toml
+```
 
 ## Citation
 

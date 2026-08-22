@@ -44,3 +44,7 @@ target/
 zig-out/
 zig-cache/
 zig-pkg/
+
+# Pixi environments, created in the repository root by `pixi run`
+.pixi/
+.magic/
