@@ -4,9 +4,13 @@ message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
 version: 3.0.2
-doi: 10.5281/zenodo.21472186
+doi: 10.5281/zenodo.21472185
 repository-code: https://github.com/ashvardanian/ForkUnion
 url: https://github.com/ashvardanian/ForkUnion
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21473315
+    description: "v3.0.2 — version DOI"
 abstract: >-
   ForkUnion is a NUMA-aware fork-join thread-pool for systems languages, built for the tightest
   parallel-for loops rather than task queues. Its dispatch hot path makes no heap allocations, no

@@ -880,7 +880,7 @@ Now, the Rust library is a wrapper over the C binding of the C++ core implementa
 
 Toolchain floors, never caps.
 The header needs __C++17__, and a C++20+ consumer keeps its own standard — gaining concepts, the `atomic_ref` waiter, and `std::popcount` — while the pre-compiled libraries build at C++20 regardless.
-The C ABI needs __C99__, and the build tooling __CMake 3.21__, __Rust 1.64__, and __Zig 0.16__.
+The C ABI needs __C99__, and the build tooling __CMake 3.21__, __Rust 1.84__, and __Zig 0.16__.
 
 To run the C++ tests, use CMake:
 
@@ -989,7 +989,7 @@ If ForkUnion helps your research or product, please cite it:
 @software{Vardanian_ForkUnion,
   author = {Vardanian, Ash},
   title = {{ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path for C, C++, Rust, and Zig}},
-  doi = {10.5281/zenodo.21472186},
+  doi = {10.5281/zenodo.21472185},
   url = {https://github.com/ashvardanian/ForkUnion},
   license = {Apache-2.0}
 }
