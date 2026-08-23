@@ -4,15 +4,13 @@
 //! Owns the `fu_pool_*` and `fu_fabric_*` FFI; mirrors the C++ `flat`/`distributed` scheduling layer.
 
 use crate::parallel::{ParallelIterator, ParallelSchedule};
-use crate::topology::{
-    CallerExclusivity, Capabilities, ComputeDomain, Error, MemoryDomain, Topology,
-};
-use crate::types::{IndexedSplit, Prong, SyncMutPtr};
+use crate::topology::{CallerExclusivity, Capabilities, ComputeDomain, MemoryDomain, Topology};
+use crate::types::{Error, IndexedSplit, Prong, Result, Status, SyncMutPtr};
 use core::ffi::{c_char, c_int, c_void};
 use core::marker::PhantomData;
 
 extern "C" {
-    fn fu_pool_new(name: *const c_char, allowed: u32) -> *mut c_void;
+    fn fu_pool_new(name: *const c_char, allowed: u32, pool_out: *mut *mut c_void) -> c_int;
     fn fu_pool_delete(pool: *mut c_void);
     fn fu_pool_spawn(
         topology: *mut c_void,
@@ -27,15 +25,20 @@ extern "C" {
         threads: usize,
         exclusivity: c_int,
     ) -> c_int;
-    fn fu_pool_caller_exclusivity(pool: *mut c_void) -> c_int;
-    fn fu_pool_compute_domains_count(pool: *mut c_void) -> usize;
-    fn fu_pool_threads_count_in(pool: *mut c_void, compute_domain_index: usize) -> usize;
-    fn fu_pool_threads_count(pool: *mut c_void) -> usize;
+    fn fu_pool_caller_exclusivity(pool: *mut c_void, exclusivity_out: *mut c_int) -> c_int;
+    fn fu_pool_compute_domains_count(pool: *mut c_void, count_out: *mut usize) -> c_int;
+    fn fu_pool_threads_count_in(
+        pool: *mut c_void,
+        compute_domain_index: usize,
+        threads_out: *mut usize,
+    ) -> c_int;
+    fn fu_pool_threads_count(pool: *mut c_void, threads_out: *mut usize) -> c_int;
     fn fu_pool_locate_thread_in(
         pool: *mut c_void,
         global_thread_index: usize,
         compute_domain_index: usize,
-    ) -> usize;
+        local_index_out: *mut usize,
+    ) -> c_int;
     fn fu_pool_sleep(pool: *mut c_void, micros: usize);
     fn fu_pool_terminate(pool: *mut c_void);
 
@@ -44,55 +47,64 @@ extern "C" {
         pool: *mut c_void,
         callback: extern "C" fn(*mut c_void, usize, usize),
         context: *mut c_void,
-    );
+    ) -> c_int;
     fn fu_pool_for_slices(
         pool: *mut c_void,
         n: usize,
         callback: extern "C" fn(*mut c_void, usize, usize, usize, usize),
         context: *mut c_void,
-    );
+    ) -> c_int;
     fn fu_pool_for_n(
         pool: *mut c_void,
         n: usize,
         callback: extern "C" fn(*mut c_void, usize, usize, usize),
         context: *mut c_void,
-    );
+    ) -> c_int;
     fn fu_pool_for_n_dynamic(
         pool: *mut c_void,
         n: usize,
         callback: extern "C" fn(*mut c_void, usize, usize, usize),
         context: *mut c_void,
-    );
+    ) -> c_int;
 
     fn fu_pool_unsafe_for_threads(
         pool: *mut c_void,
         callback: extern "C" fn(*mut c_void, usize, usize),
         context: *mut c_void,
-    ) -> usize;
-    fn fu_pool_is_complete(pool: *mut c_void, generation: usize) -> c_int;
+        generation_out: *mut usize,
+    ) -> c_int;
+    fn fu_pool_is_complete(pool: *mut c_void, generation: usize, complete_out: *mut c_int)
+        -> c_int;
     fn fu_pool_unsafe_join(pool: *mut c_void, generation: usize);
-    fn fu_pool_capabilities(pool: *mut c_void) -> u32;
+    fn fu_pool_capabilities(pool: *mut c_void, capabilities_out: *mut u32) -> i32;
 
-    fn fu_fabric_new() -> *mut c_void;
+    fn fu_fabric_new(fabric_out: *mut *mut c_void) -> c_int;
     fn fu_fabric_delete(fabric: *mut c_void);
     fn fu_fabric_harvest(topology: *mut c_void, pool: *mut c_void, fabric: *mut c_void) -> c_int;
     fn fu_fabric_memory_latency(
         fabric: *mut c_void,
         compute_domain_index: usize,
         memory_domain_index: usize,
-    ) -> usize;
+        out: *mut usize,
+    ) -> c_int;
     fn fu_fabric_memory_bandwidth(
         fabric: *mut c_void,
         compute_domain_index: usize,
         memory_domain_index: usize,
-    ) -> usize;
+        out: *mut usize,
+    ) -> c_int;
     fn fu_fabric_memory_distance(
         fabric: *mut c_void,
         compute_domain_index: usize,
         memory_domain_index: usize,
-    ) -> usize;
-    fn fu_fabric_memory_level_in(fabric: *mut c_void, memory_domain_index: usize) -> usize;
-    fn fu_fabric_memory_levels_count(fabric: *mut c_void) -> usize;
+        out: *mut usize,
+    ) -> c_int;
+    fn fu_fabric_memory_level_in(
+        fabric: *mut c_void,
+        memory_domain_index: usize,
+        out: *mut usize,
+    ) -> c_int;
+    fn fu_fabric_memory_levels_count(fabric: *mut c_void, out: *mut usize) -> c_int;
 }
 
 /// Minimalistic, fixed-size thread-pool for blocking scoped parallelism.
@@ -155,41 +167,38 @@ unsafe impl Send for ThreadPool {}
 unsafe impl Sync for ThreadPool {}
 
 impl ThreadPool {
-    pub fn try_spawn_with_exclusivity(
+    pub fn spawn_with_exclusivity(
         topology: &Topology,
         threads: usize,
         exclusivity: CallerExclusivity,
-    ) -> Result<Self, Error> {
-        Self::try_named_spawn_with_exclusivity(topology, None, threads, exclusivity)
+    ) -> Result<Self> {
+        Self::named_spawn_with_exclusivity(topology, None, threads, exclusivity)
     }
 
-    pub fn try_named_spawn_with_exclusivity(
+    pub fn named_spawn_with_exclusivity(
         topology: &Topology,
         name: Option<&str>,
         threads: usize,
         exclusivity: CallerExclusivity,
-    ) -> Result<Self, Error> {
-        Self::try_named_spawn_with_capabilities(
-            topology,
-            name,
-            threads,
-            exclusivity,
-            Capabilities::ALL,
-        )
+    ) -> Result<Self> {
+        Self::named_spawn_with_capabilities(topology, name, threads, exclusivity, Capabilities::ALL)
     }
 
-    /// As [`try_named_spawn_with_exclusivity`](Self::try_named_spawn_with_exclusivity), but constrains
+    /// As [`named_spawn_with_exclusivity`](Self::named_spawn_with_exclusivity), but constrains
     /// the pool to `allowed`: clear a waiter bit to force a lower-priority busy-wait, or clear
     /// [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] to force the flat (non-NUMA) pool.
-    pub fn try_named_spawn_with_capabilities(
+    pub fn named_spawn_with_capabilities(
         topology: &Topology,
         name: Option<&str>,
         threads: usize,
         exclusivity: CallerExclusivity,
         allowed: Capabilities,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         if threads == 0 {
-            return Err(Error::InvalidParameter);
+            return Err(Error::new(
+                Status::InvalidArgument,
+                "a pool needs at least one thread",
+            ));
         }
 
         // The buffer must outlive the `fu_pool_new` call, so it is declared
@@ -206,15 +215,14 @@ impl ThreadPool {
         };
 
         unsafe {
-            let inner = fu_pool_new(name_ptr, allowed.0);
-            if inner.is_null() {
-                return Err(Error::CreationFailed);
-            }
+            let mut inner: *mut c_void = core::ptr::null_mut();
+            Error::check(fu_pool_new(name_ptr, allowed.0, &mut inner), "fu_pool_new")?;
 
-            let success = fu_pool_spawn(topology.raw(), inner, threads, exclusivity as c_int);
-            if success == 0 {
+            // ? A thread limit, a zero count, and an allocation failure now arrive apart.
+            let spawned = fu_pool_spawn(topology.raw(), inner, threads, exclusivity as c_int);
+            if let Err(error) = Error::check(spawned, "fu_pool_spawn") {
                 fu_pool_delete(inner);
-                return Err(Error::SpawnFailed);
+                return Err(error);
             }
 
             Ok(Self { inner })
@@ -235,18 +243,18 @@ impl ThreadPool {
     /// use forkunion::*;
     /// // One pool per compute domain, sized to that domain's core count.
     /// let topology = Topology::new().unwrap();
-    /// let pools: Vec<ThreadPool> = (0..topology.compute_domains_count())
-    ///     .map(|c| ThreadPool::try_spawn_on(&topology, c, topology.logical_cores_count_in(ComputeDomain(c)).max(1), CallerExclusivity::Exclusive).unwrap())
+    /// let pools: Vec<ThreadPool> = (0..topology.compute_domains_count().unwrap())
+    ///     .map(|c| ThreadPool::spawn_on(&topology, c, topology.logical_cores_count_in(ComputeDomain(c)).unwrap_or(1), CallerExclusivity::Exclusive).unwrap())
     ///     .collect();
-    /// assert_eq!(pools.len(), topology.compute_domains_count());
+    /// assert_eq!(pools.len(), topology.compute_domains_count().unwrap());
     /// ```
-    pub fn try_spawn_on(
+    pub fn spawn_on(
         topology: &Topology,
         compute_domain_index: usize,
         threads: usize,
         exclusivity: CallerExclusivity,
-    ) -> Result<Self, Error> {
-        Self::try_spawn_on_with_capabilities(
+    ) -> Result<Self> {
+        Self::spawn_on_with_capabilities(
             topology,
             compute_domain_index,
             threads,
@@ -255,32 +263,36 @@ impl ThreadPool {
         )
     }
 
-    /// As [`try_spawn_on`](Self::try_spawn_on), but constrains the colocated pool to `allowed`.
-    pub fn try_spawn_on_with_capabilities(
+    /// As [`spawn_on`](Self::spawn_on), but constrains the colocated pool to `allowed`.
+    pub fn spawn_on_with_capabilities(
         topology: &Topology,
         compute_domain_index: usize,
         threads: usize,
         exclusivity: CallerExclusivity,
         allowed: Capabilities,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         if threads == 0 {
-            return Err(Error::InvalidParameter);
+            return Err(Error::new(
+                Status::InvalidArgument,
+                "a pool needs at least one thread",
+            ));
         }
         unsafe {
-            let inner = fu_pool_new(core::ptr::null(), allowed.0);
-            if inner.is_null() {
-                return Err(Error::CreationFailed);
-            }
-            let success = fu_pool_spawn_on(
+            let mut inner: *mut c_void = core::ptr::null_mut();
+            Error::check(
+                fu_pool_new(core::ptr::null(), allowed.0, &mut inner),
+                "fu_pool_new",
+            )?;
+            let spawned = fu_pool_spawn_on(
                 topology.raw(),
                 inner,
                 compute_domain_index,
                 threads,
                 exclusivity as c_int,
             );
-            if success == 0 {
+            if let Err(error) = Error::check(spawned, "fu_pool_spawn_on") {
                 fu_pool_delete(inner);
-                return Err(Error::SpawnFailed);
+                return Err(error);
             }
             Ok(Self { inner })
         }
@@ -303,11 +315,11 @@ impl ThreadPool {
     ///
     /// // Create a pool that uses 4 threads total (3 spawned + caller)
     /// let topology = Topology::new().unwrap();
-    /// let pool = ThreadPool::try_spawn(&topology, 4).expect("Failed to create thread pool");
+    /// let pool = ThreadPool::spawn(&topology, 4).expect("Failed to create thread pool");
     /// assert_eq!(pool.threads_count(), 4);
     /// ```
-    pub fn try_spawn(topology: &Topology, threads: usize) -> Result<Self, Error> {
-        Self::try_spawn_with_exclusivity(topology, threads, CallerExclusivity::Inclusive)
+    pub fn spawn(topology: &Topology, threads: usize) -> Result<Self> {
+        Self::spawn_with_exclusivity(topology, threads, CallerExclusivity::Inclusive)
     }
 
     /// Creates a new named thread pool with the specified number of threads.
@@ -327,11 +339,11 @@ impl ThreadPool {
     /// use forkunion::*;
     ///
     /// let topology = Topology::new().unwrap();
-    /// let pool = ThreadPool::try_named_spawn(&topology, "worker_pool", 4).expect("Failed to create thread pool");
+    /// let pool = ThreadPool::named_spawn(&topology, "worker_pool", 4).expect("Failed to create thread pool");
     /// assert_eq!(pool.threads_count(), 4);
     /// ```
-    pub fn try_named_spawn(topology: &Topology, name: &str, threads: usize) -> Result<Self, Error> {
-        Self::try_named_spawn_with_exclusivity(
+    pub fn named_spawn(topology: &Topology, name: &str, threads: usize) -> Result<Self> {
+        Self::named_spawn_with_exclusivity(
             topology,
             Some(name),
             threads,
@@ -343,21 +355,30 @@ impl ThreadPool {
     ///
     /// Queries the pool directly rather than caching, so it stays correct across
     /// `terminate` and re-spawning with a different exclusivity.
-    #[must_use]
-    pub fn caller_exclusivity(&self) -> CallerExclusivity {
-        match unsafe { fu_pool_caller_exclusivity(self.inner) } {
-            0 => CallerExclusivity::Inclusive,
-            _ => CallerExclusivity::Exclusive,
-        }
+    pub fn caller_exclusivity(&self) -> Result<CallerExclusivity> {
+        let mut raw: c_int = 0;
+        Error::check(
+            unsafe { fu_pool_caller_exclusivity(self.inner, &mut raw) },
+            "fu_pool_caller_exclusivity",
+        )?;
+        Ok(if raw == 0 {
+            CallerExclusivity::Inclusive
+        } else {
+            CallerExclusivity::Exclusive
+        })
     }
 
     /// Returns the capabilities this pool was spawned with.
     ///
     /// Queries the pool directly rather than caching, so it reflects the allow-mask the
     /// pool actually honors - the intersection of the requested mask and what the machine offers.
-    #[must_use]
-    pub fn capabilities(&self) -> Capabilities {
-        Capabilities(unsafe { fu_pool_capabilities(self.inner) })
+    pub fn capabilities(&self) -> Result<Capabilities> {
+        let mut answer = 0u32;
+        Error::check(
+            unsafe { fu_pool_capabilities(self.inner, &mut answer) },
+            "fu_pool_capabilities",
+        )?;
+        Ok(Capabilities(answer))
     }
 
     /// Returns the number of thread compute_domains in the pool.
@@ -366,7 +387,13 @@ impl ThreadPool {
     /// This information is useful for NUMA-aware load balancing and memory allocation.
     #[must_use]
     pub fn compute_domains_count(&self) -> usize {
-        unsafe { fu_pool_compute_domains_count(self.inner) }
+        let mut answer = usize::MAX;
+        let status = unsafe { fu_pool_compute_domains_count(self.inner, &mut answer) };
+        if status == 0 {
+            answer
+        } else {
+            0
+        }
     }
 
     /// Returns the number of threads in a specific compute_domain.
@@ -394,13 +421,26 @@ impl ThreadPool {
     /// ```
     #[must_use]
     pub fn threads_count_in(&self, compute_domain_index: usize) -> usize {
-        unsafe { fu_pool_threads_count_in(self.inner, compute_domain_index) }
+        let mut answer = usize::MAX;
+        let status =
+            unsafe { fu_pool_threads_count_in(self.inner, compute_domain_index, &mut answer) };
+        if status == 0 {
+            answer
+        } else {
+            0
+        }
     }
 
     /// Returns the number of threads in the pool.
     #[must_use]
     pub fn threads_count(&self) -> usize {
-        unsafe { fu_pool_threads_count(self.inner) }
+        let mut answer = usize::MAX;
+        let status = unsafe { fu_pool_threads_count(self.inner, &mut answer) };
+        if status == 0 {
+            answer
+        } else {
+            0
+        }
     }
 
     /// Converts a global thread index to a local thread index within a compute_domain.
@@ -422,7 +462,20 @@ impl ThreadPool {
         global_thread_index: usize,
         compute_domain_index: usize,
     ) -> usize {
-        unsafe { fu_pool_locate_thread_in(self.inner, global_thread_index, compute_domain_index) }
+        let mut answer = usize::MAX;
+        let status = unsafe {
+            fu_pool_locate_thread_in(
+                self.inner,
+                global_thread_index,
+                compute_domain_index,
+                &mut answer,
+            )
+        };
+        if status == 0 {
+            answer
+        } else {
+            0
+        }
     }
 
     /// Transitions worker threads to a power-saving sleep state.
@@ -600,16 +653,11 @@ impl ThreadPool {
     ///              prong.thread_index, start_index, start_index + count);
     /// });
     /// ```
-    pub fn for_slices<F>(&mut self, n: usize, function: F) -> ForSlicesOperation<'_, F>
+    pub fn for_slices<F>(&mut self, n: usize, function: F) -> Result<()>
     where
         F: Fn(Prong, usize) + Sync,
     {
-        ForOperation {
-            pool: self,
-            tasks_count: n,
-            function,
-            _dispatch: PhantomData,
-        }
+        StaticSlices::dispatch(self, n, &function)
     }
 
     /// Splits `data` into one contiguous chunk per thread and runs `function` on each in
@@ -681,16 +729,11 @@ impl ThreadPool {
     ///     std::hint::black_box(result); // Prevent optimization
     /// });
     /// ```
-    pub fn for_n<F>(&mut self, n: usize, function: F) -> ForNOperation<'_, F>
+    pub fn for_n<F>(&mut self, n: usize, function: F) -> Result<()>
     where
         F: Fn(Prong) + Sync,
     {
-        ForOperation {
-            pool: self,
-            tasks_count: n,
-            function,
-            _dispatch: PhantomData,
-        }
+        StaticIndices::dispatch(self, n, &function)
     }
 
     /// Executes `n` uneven tasks on all threads, greedily stealing work.
@@ -720,16 +763,11 @@ impl ThreadPool {
     ///     }
     /// });
     /// ```
-    pub fn for_n_dynamic<F>(&mut self, n: usize, function: F) -> ForNDynamicOperation<'_, F>
+    pub fn for_n_dynamic<F>(&mut self, n: usize, function: F) -> Result<()>
     where
         F: Fn(Prong) + Sync,
     {
-        ForOperation {
-            pool: self,
-            tasks_count: n,
-            function,
-            _dispatch: PhantomData,
-        }
+        DynamicIndices::dispatch(self, n, &function)
     }
 
     /// Dispatches `callback` on every thread without blocking, returning the generation token.
@@ -746,8 +784,13 @@ impl ThreadPool {
         &self,
         callback: extern "C" fn(*mut c_void, usize, usize),
         context: *mut c_void,
-    ) -> usize {
-        fu_pool_unsafe_for_threads(self.inner, callback, context)
+    ) -> Result<usize> {
+        let mut generation = 0usize;
+        Error::check(
+            fu_pool_unsafe_for_threads(self.inner, callback, context, &mut generation),
+            "fu_pool_unsafe_for_threads",
+        )?;
+        Ok(generation)
     }
 
     /// Returns true if the given generation has completed on all threads.
@@ -756,9 +799,13 @@ impl ThreadPool {
     /// `Inclusive` pools this can only turn `true` once `unsafe_join` contributes the
     /// calling thread's slice, so the poll-then-join pattern is reserved for
     /// `Exclusive` pools.
-    #[must_use]
-    pub fn is_complete(&self, generation: usize) -> bool {
-        unsafe { fu_pool_is_complete(self.inner, generation) != 0 }
+    pub fn is_complete(&self, generation: usize) -> Result<bool> {
+        let mut complete: c_int = 0;
+        Error::check(
+            unsafe { fu_pool_is_complete(self.inner, generation, &mut complete) },
+            "fu_pool_is_complete",
+        )?;
+        Ok(complete != 0)
     }
 
     /// Blocks until the given generation completes; idempotent for joined generations.
@@ -788,7 +835,7 @@ impl Drop for ThreadPool {
 /// interconnect link; medium queries `(target)` describe the memory pool itself, independent of
 /// any initiator.
 ///
-/// Completes the `try_harvest` pipeline: a [`Topology`] is harvested first and stays immutable
+/// Completes the `harvest` pipeline: a [`Topology`] is harvested first and stays immutable
 /// (and shareable), a [`ThreadPool`] spawns on it, and the fabric then harvests through that
 /// pool's pinned workers, snapshotting what it needs so the topology may be dropped after.
 /// Before a harvest every query answers 0, and
@@ -801,9 +848,9 @@ impl Drop for ThreadPool {
 /// let topology = Topology::new().unwrap();
 /// let mut pool = spawn(&topology, 4);
 /// let mut fabric = Fabric::new().unwrap();
-/// if fabric.try_harvest(&topology, &mut pool) {
-///     let local = topology.local_memory_of(ComputeDomain(0));
-///     assert!(fabric.memory_latency(ComputeDomain(0), local) > 0);
+/// if fabric.harvest(&topology, &mut pool).is_ok() {
+///     let local = topology.local_memory_of(ComputeDomain(0)).unwrap();
+///     assert!(fabric.memory_latency(ComputeDomain(0), local).unwrap() > 0);
 /// }
 /// ```
 pub struct Fabric {
@@ -815,11 +862,9 @@ unsafe impl Sync for Fabric {}
 
 impl Fabric {
     /// Creates an empty, unharvested fabric.
-    pub fn new() -> Result<Fabric, Error> {
-        let inner = unsafe { fu_fabric_new() };
-        if inner.is_null() {
-            return Err(Error::CreationFailed);
-        }
+    pub fn new() -> Result<Fabric> {
+        let mut inner: *mut c_void = core::ptr::null_mut();
+        Error::check(unsafe { fu_fabric_new(&mut inner) }, "fu_fabric_new")?;
         Ok(Fabric { inner })
     }
 
@@ -828,12 +873,15 @@ impl Fabric {
     ///
     /// Returns `false` on allocation failure, or for a pool whose workers are not pinned per
     /// domain - one restricted below [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] or pinned via
-    /// [`ThreadPool::try_spawn_on`]; the fabric is then left empty, never half-written. Not
+    /// [`ThreadPool::spawn_on`]; the fabric is then left empty, never half-written. Not
     /// thread-safe: it dispatches on the pool and rebuilds `self`, so call it between task
     /// batches. Expect seconds of runtime on large fabrics.
-    #[must_use]
-    pub fn try_harvest(&mut self, topology: &Topology, pool: &mut ThreadPool) -> bool {
-        unsafe { fu_fabric_harvest(topology.raw(), pool.inner, self.inner) != 0 }
+    pub fn harvest(&mut self, topology: &Topology, pool: &mut ThreadPool) -> Result<()> {
+        // ? A flat pool now reports `ConfigMismatch`, not the same failure as an exhausted heap.
+        Error::check(
+            unsafe { fu_fabric_harvest(topology.raw(), pool.inner, self.inner) },
+            "fu_fabric_harvest",
+        )
     }
 
     /// Returns the measured dependent-load latency (nanoseconds) on an edge - the best recording;
@@ -842,8 +890,20 @@ impl Fabric {
         &self,
         compute_domain: ComputeDomain,
         memory_domain: MemoryDomain,
-    ) -> usize {
-        unsafe { fu_fabric_memory_latency(self.inner, compute_domain.get(), memory_domain.get()) }
+    ) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe {
+                fu_fabric_memory_latency(
+                    self.inner,
+                    compute_domain.get(),
+                    memory_domain.get(),
+                    &mut answer,
+                )
+            },
+            "fu_fabric_memory_latency",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the measured saturated read bandwidth (MB/s) on an edge, streamed by all the
@@ -852,8 +912,20 @@ impl Fabric {
         &self,
         compute_domain: ComputeDomain,
         memory_domain: MemoryDomain,
-    ) -> usize {
-        unsafe { fu_fabric_memory_bandwidth(self.inner, compute_domain.get(), memory_domain.get()) }
+    ) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe {
+                fu_fabric_memory_bandwidth(
+                    self.inner,
+                    compute_domain.get(),
+                    memory_domain.get(),
+                    &mut answer,
+                )
+            },
+            "fu_fabric_memory_bandwidth",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the relative access distance on an edge (10 = local, per the SLIT convention):
@@ -863,22 +935,44 @@ impl Fabric {
         &self,
         compute_domain: ComputeDomain,
         memory_domain: MemoryDomain,
-    ) -> usize {
-        unsafe { fu_fabric_memory_distance(self.inner, compute_domain.get(), memory_domain.get()) }
+    ) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe {
+                fu_fabric_memory_distance(
+                    self.inner,
+                    compute_domain.get(),
+                    memory_domain.get(),
+                    &mut answer,
+                )
+            },
+            "fu_fabric_memory_distance",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL),
     /// keyed by the best bandwidth any initiator sustains to it, ties split by the best latency.
-    #[must_use]
-    pub fn memory_level_in(&self, memory_domain: MemoryDomain) -> usize {
-        unsafe { fu_fabric_memory_level_in(self.inner, memory_domain.get()) }
+    pub fn memory_level_in(&self, memory_domain: MemoryDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_fabric_memory_level_in(self.inner, memory_domain.get(), &mut answer) },
+            "fu_fabric_memory_level_in",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the number of distinct derived memory tiers, the memory-axis twin of
     /// [`Topology::compute_levels_count`]; 1 on single-tier systems and before a harvest.
     #[must_use]
     pub fn memory_levels_count(&self) -> usize {
-        unsafe { fu_fabric_memory_levels_count(self.inner) }
+        let mut answer = usize::MAX;
+        let status = unsafe { fu_fabric_memory_levels_count(self.inner, &mut answer) };
+        if status == 0 {
+            answer
+        } else {
+            1
+        }
     }
 }
 
@@ -935,7 +1029,8 @@ where
             function,
             state: BroadcastState::Pending,
         };
-        if operation.pool.caller_exclusivity() == CallerExclusivity::Exclusive {
+        // ? A pool that cannot answer is not exclusive, so the dispatch simply defers to `join`.
+        if operation.pool.caller_exclusivity() == Ok(CallerExclusivity::Exclusive) {
             operation.dispatch();
         }
         operation
@@ -958,10 +1053,17 @@ where
             function(thread_index, compute_domain_index);
         }
 
-        let generation = unsafe {
+        let mut generation = 0usize;
+        unsafe {
             let context = self.function as *const F as *mut c_void;
-            fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, context)
-        };
+            // ? The guard's own construction already proved the pool spawned.
+            let _ = fu_pool_unsafe_for_threads(
+                self.pool.inner,
+                trampoline::<F>,
+                context,
+                &mut generation,
+            );
+        }
         self.state = BroadcastState::Dispatched(generation);
         generation
     }
@@ -980,9 +1082,11 @@ where
     pub fn is_complete(&self) -> bool {
         match self.state {
             BroadcastState::Pending => false,
-            BroadcastState::Dispatched(generation) => unsafe {
-                fu_pool_is_complete(self.pool.inner, generation) != 0
-            },
+            BroadcastState::Dispatched(generation) => {
+                let mut complete: c_int = 0;
+                unsafe { fu_pool_is_complete(self.pool.inner, generation, &mut complete) };
+                complete != 0
+            }
             BroadcastState::Joined(_) => true,
         }
     }
@@ -1134,8 +1238,9 @@ impl<'pool> Scope<'pool> {
         // is not `Sync`, so no worker can hold one and start an overlapping dispatch.
         unsafe {
             let context = &function as *const F as *mut c_void;
-            let generation = self.pool.unsafe_for_threads(trampoline::<F>, context);
-            self.pool.unsafe_join(generation);
+            if let Ok(generation) = self.pool.unsafe_for_threads(trampoline::<F>, context) {
+                self.pool.unsafe_join(generation);
+            }
         }
     }
 }
@@ -1146,7 +1251,7 @@ impl<'pool> Scope<'pool> {
 /// entry point calls back with.
 pub trait ForDispatch<F> {
     /// Runs `tasks_count` tasks through `function`, blocking until every thread finishes.
-    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F);
+    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) -> Result<()>;
 }
 
 /// One call per index, statically partitioned across threads.
@@ -1201,11 +1306,14 @@ impl<F> ForDispatch<F> for StaticIndices
 where
     F: Fn(Prong) + Sync,
 {
-    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) {
+    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) -> Result<()> {
         // SAFETY: the call blocks until every thread finishes, so `function` outlives the dispatch.
         unsafe {
             let context = function as *const F as *mut c_void;
-            fu_pool_for_n(pool.inner, tasks_count, indexed_trampoline::<F>, context);
+            Error::check(
+                fu_pool_for_n(pool.inner, tasks_count, indexed_trampoline::<F>, context),
+                "fu_pool_for_n",
+            )
         }
     }
 }
@@ -1214,11 +1322,14 @@ impl<F> ForDispatch<F> for DynamicIndices
 where
     F: Fn(Prong) + Sync,
 {
-    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) {
+    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) -> Result<()> {
         // SAFETY: as above - the dispatch is synchronous.
         unsafe {
             let context = function as *const F as *mut c_void;
-            fu_pool_for_n_dynamic(pool.inner, tasks_count, indexed_trampoline::<F>, context);
+            Error::check(
+                fu_pool_for_n_dynamic(pool.inner, tasks_count, indexed_trampoline::<F>, context),
+                "fu_pool_for_n_dynamic",
+            )
         }
     }
 }
@@ -1227,41 +1338,17 @@ impl<F> ForDispatch<F> for StaticSlices
 where
     F: Fn(Prong, usize) + Sync,
 {
-    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) {
+    fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) -> Result<()> {
         // SAFETY: as above - the dispatch is synchronous.
         unsafe {
             let context = function as *const F as *mut c_void;
-            fu_pool_for_slices(pool.inner, tasks_count, sliced_trampoline::<F>, context);
+            Error::check(
+                fu_pool_for_slices(pool.inner, tasks_count, sliced_trampoline::<F>, context),
+                "fu_pool_for_slices",
+            )
         }
     }
 }
-
-/// A dispatch staged at construction and run to completion when the guard drops.
-pub struct ForOperation<'pool, F, Dispatch>
-where
-    Dispatch: ForDispatch<F>,
-{
-    pool: &'pool mut ThreadPool,
-    tasks_count: usize,
-    function: F,
-    _dispatch: PhantomData<Dispatch>,
-}
-
-impl<F, Dispatch> Drop for ForOperation<'_, F, Dispatch>
-where
-    Dispatch: ForDispatch<F>,
-{
-    fn drop(&mut self) {
-        Dispatch::dispatch(self.pool, self.tasks_count, &self.function);
-    }
-}
-
-/// Operation object for parallel task execution with static load balancing.
-pub type ForNOperation<'pool, F> = ForOperation<'pool, F, StaticIndices>;
-/// Operation object for parallel task execution with dynamic work-stealing.
-pub type ForNDynamicOperation<'pool, F> = ForOperation<'pool, F, DynamicIndices>;
-/// Operation object for parallel slice execution.
-pub type ForSlicesOperation<'pool, F> = ForOperation<'pool, F, StaticSlices>;
 
 pub fn fold_with_scratch<I, S, T, F>(
     pool: &mut ThreadPool,
@@ -1269,7 +1356,8 @@ pub fn fold_with_scratch<I, S, T, F>(
     schedule: S,
     scratch: &mut [T],
     fold: F,
-) where
+) -> Result<()>
+where
     I: ParallelIterator,
     S: ParallelSchedule,
     T: Send,
@@ -1285,19 +1373,19 @@ pub fn fold_with_scratch<I, S, T, F>(
         debug_assert!(prong.thread_index < scratch_len);
         let slot = unsafe { &mut *scratch_ptr.get(prong.thread_index) };
         fold(slot, item, prong);
-    });
+    })
 }
 
 /// Spawns a pool with the specified number of threads.
 #[must_use]
 pub fn spawn(topology: &Topology, threads: usize) -> ThreadPool {
-    ThreadPool::try_spawn(topology, threads).expect("Failed to spawn ThreadPool")
+    ThreadPool::spawn(topology, threads).expect("Failed to spawn ThreadPool")
 }
 
 /// Spawns a named pool with the specified number of threads.
 #[must_use]
 pub fn named_spawn(topology: &Topology, name: &str, threads: usize) -> ThreadPool {
-    ThreadPool::try_named_spawn(topology, name, threads).expect("Failed to spawn named ThreadPool")
+    ThreadPool::named_spawn(topology, name, threads).expect("Failed to spawn named ThreadPool")
 }
 
 /// Standalone function to distribute `n` similar duration calls between threads.
@@ -1382,18 +1470,22 @@ mod tests {
         let topology = Topology::new().unwrap();
         // The pool is the single source of truth, queried live (not cached).
         let inclusive =
-            ThreadPool::try_spawn_with_exclusivity(&topology, 2, CallerExclusivity::Inclusive)
-                .unwrap();
-        assert_eq!(inclusive.caller_exclusivity(), CallerExclusivity::Inclusive);
+            ThreadPool::spawn_with_exclusivity(&topology, 2, CallerExclusivity::Inclusive).unwrap();
+        assert_eq!(
+            inclusive.caller_exclusivity().unwrap(),
+            CallerExclusivity::Inclusive
+        );
 
         let exclusive =
-            ThreadPool::try_spawn_with_exclusivity(&topology, 2, CallerExclusivity::Exclusive)
-                .unwrap();
-        assert_eq!(exclusive.caller_exclusivity(), CallerExclusivity::Exclusive);
+            ThreadPool::spawn_with_exclusivity(&topology, 2, CallerExclusivity::Exclusive).unwrap();
+        assert_eq!(
+            exclusive.caller_exclusivity().unwrap(),
+            CallerExclusivity::Exclusive
+        );
 
         // The default `spawn` is inclusive
         assert_eq!(
-            spawn(&topology, 2).caller_exclusivity(),
+            spawn(&topology, 2).caller_exclusivity().unwrap(),
             CallerExclusivity::Inclusive
         );
     }
@@ -1403,13 +1495,16 @@ mod tests {
     fn per_compute_domain_pools() {
         let topology = Topology::new().unwrap();
         // One pool per compute_domain, each pinned to its node; drive them from this thread.
-        let compute_domains = topology.compute_domains_count();
+        let compute_domains = topology.compute_domains_count().unwrap();
         assert!(compute_domains >= 1);
 
         let mut pools: Vec<ThreadPool> = (0..compute_domains)
             .map(|c| {
-                let cores = topology.logical_cores_count_in(ComputeDomain(c)).max(1);
-                ThreadPool::try_spawn_on(&topology, c, cores, CallerExclusivity::Exclusive)
+                let cores = topology
+                    .logical_cores_count_in(ComputeDomain(c))
+                    .unwrap_or(1)
+                    .max(1);
+                ThreadPool::spawn_on(&topology, c, cores, CallerExclusivity::Exclusive)
                     .expect("failed to spawn per-compute_domain pool")
             })
             .collect();
@@ -1424,7 +1519,7 @@ mod tests {
         }
 
         // Out-of-range compute_domain must fail cleanly, not panic.
-        assert!(ThreadPool::try_spawn_on(
+        assert!(ThreadPool::spawn_on(
             &topology,
             compute_domains + 100,
             2,
@@ -1675,13 +1770,13 @@ mod tests {
         let topology = Topology::new().unwrap();
         // Two independent exclusive pools run side by side; join both, then query each.
         let count_threads = hw_threads();
-        let mut pool_a = ThreadPool::try_spawn_with_exclusivity(
+        let mut pool_a = ThreadPool::spawn_with_exclusivity(
             &topology,
             count_threads,
             CallerExclusivity::Exclusive,
         )
         .expect("Failed to create pool_a");
-        let mut pool_b = ThreadPool::try_spawn_with_exclusivity(
+        let mut pool_b = ThreadPool::spawn_with_exclusivity(
             &topology,
             count_threads,
             CallerExclusivity::Exclusive,
@@ -1734,18 +1829,25 @@ mod tests {
         let mut fabric = Fabric::new().unwrap();
 
         // An unharvested fabric answers zeros and a single tier.
-        assert_eq!(fabric.memory_latency(ComputeDomain(0), MemoryDomain(0)), 0);
+        assert_eq!(
+            fabric
+                .memory_latency(ComputeDomain(0), MemoryDomain(0))
+                .unwrap(),
+            0
+        );
         assert_eq!(fabric.memory_levels_count(), 1);
 
-        if !fabric.try_harvest(&topology, &mut pool) {
+        if fabric.harvest(&topology, &mut pool).is_err() {
             return; // ? A flat pool without domain placement has no fabric to walk
         }
         // Every reachable edge must carry sane observations; emulated-NUMA guests may
         // measure equal local and remote costs, so nothing stronger is asserted.
-        let local = topology.local_memory_of(ComputeDomain(0));
-        assert!(fabric.memory_latency(ComputeDomain(0), local) > 0);
-        assert!(fabric.memory_bandwidth(ComputeDomain(0), local) > 0);
-        assert_eq!(fabric.memory_distance(ComputeDomain(0), local), 10);
+        let local = topology
+            .local_memory_of(ComputeDomain(0))
+            .expect("domain 0 exists");
+        assert!(fabric.memory_latency(ComputeDomain(0), local).unwrap() > 0);
+        assert!(fabric.memory_bandwidth(ComputeDomain(0), local).unwrap() > 0);
+        assert_eq!(fabric.memory_distance(ComputeDomain(0), local).unwrap(), 10);
         assert!(fabric.memory_levels_count() >= 1);
     }
 
@@ -1756,7 +1858,7 @@ mod tests {
         // The raw C-ABI mirror: an `unsafe_for_threads` dispatch returning an odd token,
         // polled with the safe `is_complete`, and joined with `unsafe_join`.
         let count_threads = hw_threads();
-        let pool = ThreadPool::try_spawn_with_exclusivity(
+        let pool = ThreadPool::spawn_with_exclusivity(
             &topology,
             count_threads,
             CallerExclusivity::Exclusive,
@@ -1776,13 +1878,14 @@ mod tests {
 
         let generation = unsafe {
             pool.unsafe_for_threads(trampoline, &counter as *const AtomicUsize as *mut c_void)
+                .unwrap()
         };
         assert_eq!(generation & 1, 1, "Generation tokens are always odd");
 
         // Join blocks on the workers; query completion only after.
         unsafe { pool.unsafe_join(generation) };
         assert!(
-            pool.is_complete(generation),
+            pool.is_complete(generation).unwrap(),
             "join must leave the generation complete"
         );
         assert_eq!(counter.load(Ordering::Relaxed), count_threads);

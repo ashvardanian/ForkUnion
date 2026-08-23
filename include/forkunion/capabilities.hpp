@@ -420,12 +420,11 @@ struct arm64_wfet_t {
                 __asm__ __volatile__("ldaxrb %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
             else if constexpr (sizeof(value_type_) == 2)
                 __asm__ __volatile__("ldaxrh %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
-            else
+            else //
                 __asm__ __volatile__("ldaxr %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
             current_bits = narrow;
         }
-        else
-            __asm__ __volatile__("ldaxr %0, [%1]" : "=r"(current_bits) : "r"(watched_address) : "memory");
+        else __asm__ __volatile__("ldaxr %0, [%1]" : "=r"(current_bits) : "r"(watched_address) : "memory");
 
         // The word moved between the caller's check and our load: drop the monitor and re-check.
         if (current_bits != observed_bits) {
@@ -786,16 +785,20 @@ inline capabilities_t cpu_capabilities() noexcept {
  *  @note Lives here, not beside its allocator callers, because this is the last header both
  *      `topology.hpp` and `allocators.hpp` see - so the `maxnode` quirk below is spelled once.
  */
-FU_MAYBE_UNUSED_ static inline bool linux_bind_range_to_domain(void *ptr, std::size_t size_bytes,
-                                                               memory_domain_id_t memory_domain_id, int mode) noexcept {
-    if (memory_domain_id < 0 || static_cast<std::size_t>(memory_domain_id) >= max_memory_domains_k) return false;
+FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t linux_bind_range_to_domain(void *ptr, std::size_t size_bytes,
+                                                                                 memory_domain_id_t memory_domain_id,
+                                                                                 int mode) noexcept {
+    if (memory_domain_id < 0 || static_cast<std::size_t>(memory_domain_id) >= max_memory_domains_k)
+        return status_t::invalid_argument_k;
     std::size_t const bit = static_cast<std::size_t>(memory_domain_id);
     std::size_t const bits_per_word = sizeof(unsigned long) * 8;
     unsigned long node_mask[nodemask_words_k] {};
     node_mask[bit / bits_per_word] = 1ul << (bit % bits_per_word);
     // ! `+ 1`: the manual says the mask holds "up to `maxnode`" bits, but the kernel decrements it
     // ! before sizing, so the exact width masks the top bit back off and the bind silently fails.
-    return ::syscall(SYS_mbind, ptr, size_bytes, mode, node_mask, max_memory_domains_k + 1, 0) == 0;
+    return ::syscall(SYS_mbind, ptr, size_bytes, mode, node_mask, max_memory_domains_k + 1, 0) == 0
+               ? status_t::success_k
+               : status_t::permission_denied_k;
 }
 
 /**
@@ -808,7 +811,7 @@ inline bool linux_can_place_memory_on_domain() noexcept {
     if (probe == MAP_FAILED) return false;
     // ? Node 0, always present where a topology exists. Bare `MPOL_BIND` - this asks only whether the
     // ? kernel will place at all, not about a mode flag no caller requested.
-    bool const bound = linux_bind_range_to_domain(probe, page_bytes, 0, mpol_bind_k);
+    bool const bound = succeeded(linux_bind_range_to_domain(probe, page_bytes, 0, mpol_bind_k));
     ::munmap(probe, page_bytes);
     return bound;
 }

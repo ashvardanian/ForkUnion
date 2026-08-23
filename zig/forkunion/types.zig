@@ -1,4 +1,5 @@
-//! Pure-logic value types mirroring the C++ `types` header - no FFI.
+//! Value types mirroring the C++ `types` header, and the `Status`/`Error` vocabulary every
+//! other module reports through.
 //!
 //! Holds the `ComputeDomain`/`MemoryDomain`/`MemoryDomainId` machine coordinates, the `Prong`
 //! execution-context descriptor, and the small parity primitives the parallel layer is built from:
@@ -6,6 +7,68 @@
 //! `SyncConstPtr`/`SyncMutPtr` raw-pointer views that let disjoint slices cross the FFI boundary.
 
 const std = @import("std");
+
+extern fn fu_status_to_string(status: c_int) [*:0]const u8;
+
+/// Why a call into the C core failed, mirroring `fu_status_t` value-for-value.
+///
+/// Non-exhaustive, so a status a newer core reports arrives intact rather than coerced.
+pub const Status = enum(c_int) {
+    success = 0,
+    unknown = -1,
+    bad_alloc = -2,
+    capacity_exhausted = -3,
+    invalid_argument = -4,
+    config_mismatch = -5,
+    already_spawned = -6,
+    not_spawned = -7,
+    thread_refused = -8,
+    topology_unavailable = -9,
+    permission_denied = -10,
+    unsupported = -11,
+    _,
+
+    /// Static, English description; mirrors `fu_status_to_string`.
+    pub fn describe(self: Status) [:0]const u8 {
+        return std.mem.span(fu_status_to_string(@intFromEnum(self)));
+    }
+};
+
+/// One error per status, so `@errorName` carries as much as the status itself does.
+///
+/// Zig error values hold no payload, so the symbol name that named which call failed cannot
+/// travel with the error. Reach for `Status` where that detail matters.
+pub const Error = error{
+    Unknown,
+    BadAlloc,
+    CapacityExhausted,
+    InvalidArgument,
+    ConfigMismatch,
+    AlreadySpawned,
+    NotSpawned,
+    ThreadRefused,
+    TopologyUnavailable,
+    PermissionDenied,
+    Unsupported,
+};
+
+/// Lifts a raw `fu_status_t` into the error set; `success` is the only non-error.
+pub fn check(raw: c_int) Error!void {
+    return switch (@as(Status, @enumFromInt(raw))) {
+        .success => {},
+        .bad_alloc => Error.BadAlloc,
+        .capacity_exhausted => Error.CapacityExhausted,
+        .invalid_argument => Error.InvalidArgument,
+        .config_mismatch => Error.ConfigMismatch,
+        .already_spawned => Error.AlreadySpawned,
+        .not_spawned => Error.NotSpawned,
+        .thread_refused => Error.ThreadRefused,
+        .topology_unavailable => Error.TopologyUnavailable,
+        .permission_denied => Error.PermissionDenied,
+        .unsupported => Error.Unsupported,
+        else => Error.Unknown,
+    };
+}
 
 /// The width the padding wrapper aligns to: two cache lines, because most x86 parts prefetch in
 /// pairs, so one line of separation still leaves two accumulators sharing a prefetch unit.

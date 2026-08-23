@@ -24,7 +24,7 @@ __`ForkUnion`__ is dead-simple to use!
 There is no nested parallelism, exception handling, or "future promises"; they are banned.
 The thread pool itself has a few core operations:
 
-- `try_spawn` to initialize worker threads, and
+- `spawn` to initialize worker threads, and
 - `for_threads` to launch a blocking callback on all threads.
 
 Higher-level APIs for index-addressable tasks are also available:
@@ -86,15 +86,15 @@ Higher-level APIs distribute index-addressable tasks across the threads in the p
 pool.for_n(100, |prong| {
     println!("Running task {} on thread # {}",
         prong.task_index + 1, prong.thread_index + 1);
-});
+})?;
 pool.for_slices(100, |prong, count| {
     println!("Running slice [{}, {}) on thread # {}",
         prong.task_index, prong.task_index + count, prong.thread_index + 1);
-});
+})?;
 pool.for_n_dynamic(100, |prong| {
     println!("Running task {} on thread # {}",
         prong.task_index + 1, prong.thread_index + 1);
-});
+})?;
 ```
 
 To let a worker closure borrow the caller's stack, reach for a scope.
@@ -125,10 +125,10 @@ fn heavy_math(_: usize) {}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let topology = fu::Topology::new()?;
-    let mut pool = fu::ThreadPool::try_named_spawn(&topology, "heavy-math", 4)?;
+    let mut pool = fu::ThreadPool::named_spawn(&topology, "heavy-math", 4)?;
     pool.for_n_dynamic(400, |prong| {
         heavy_math(prong.task_index);
-    });
+    })?;
     Ok(())
 }
 ```
@@ -181,7 +181,7 @@ namespace fu = ashvardanian::forkunion;
 
 int main() {
     alignas(fu::default_alignment_k) fu::flat_pool_t pool;
-    if (!pool.try_spawn(fu::allowed_cores_count())) {
+    if (!pool.spawn(fu::allowed_cores_count())) {
         std::fprintf(stderr, "Failed to fork the threads\n");
         return EXIT_FAILURE;
     }
@@ -635,7 +635,7 @@ The axes stay separate because they don't line up: performance and efficiency co
 Each axis carries a __level__, a dense ordinal grouping domains of like performance.
 Levels can be fewer than domains, since several domains may share one, and the two axes count in opposite directions: compute levels grow with performance, memory levels grow with _distance_, placing HBM below DDR and CXL above.
 Two objects split the answers by provenance, not by axis: a `Topology` holds what the platform __declares__ — domains, cores, QoS classes, volumes, on both axes — while a `Fabric` holds what ForkUnion __observes__: per-edge latencies, bandwidths, and distances, and the per-medium tiers derived from them.
-The pipeline is `try_harvest` all the way down: a `Topology` harvests the declared structure from the OS and stays immutable, a pool spawns on it, and a `Fabric` then harvests the observed performance from the silicon through that pool's pinned workers, pointer-chasing and streaming every reachable edge.
+The pipeline is `harvest` all the way down: a `Topology` harvests the declared structure from the OS and stays immutable, a pool spawns on it, and a `Fabric` then harvests the observed performance from the silicon through that pool's pinned workers, pointer-chasing and streaming every reachable edge.
 A memory level is a property of the medium, independent of the querying core: it keys on the best bandwidth any initiator sustains to the pool, ties split by the best latency, so a 3 TB/s HBM pool outranks DDR even at equal latency.
 
 |                   | Compute axis            | Memory axis            |
@@ -724,9 +724,9 @@ search_result_t search(std::span<float, dimensions> query) {
 
     bool const need_to_spawn_threads = distributed_pool.threads_count() == 0;
     if (need_to_spawn_threads) {
-        assert(machine_topology.try_harvest() && "Failed to harvest NUMA topology");
+        assert(succeeded(machine_topology.harvest()) && "Failed to harvest NUMA topology");
         assert(machine_topology.memory_domains_count() == 2 && "Expected exactly 2 NUMA nodes");
-        assert(distributed_pool.try_spawn(machine_topology) && "Failed to spawn NUMA pools");
+        assert(succeeded(distributed_pool.spawn(machine_topology)) && "Failed to spawn NUMA pools");
     }
 
     search_result_t result;
@@ -767,7 +767,7 @@ The `for_slices` helper provides `fu::local_prong` compute-domain metadata that 
 For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns an always-odd generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
 
 The manual two-vector sharding above is what the __symmetric allocators__ automate: `symmetric_memory_allocator_t` - `fu_allocate_symmetric` in C - maps one virtual range striped a slice per memory domain, and Rust and Zig wrap it as `ShardedArray<T>`, one shard per domain, and `ReplicatedArray<T>`, a full copy per domain for read-mostly data.
-To place and coordinate pools by hand, `try_spawn_on` - `fu_pool_spawn_on` in C - pins a pool to a single compute domain, while `locate_thread_in` and `threads_count_in` map a global thread index to its domain and count the workers living there.
+To place and coordinate pools by hand, `spawn_on` - `fu_pool_spawn_on` in C - pins a pool to a single compute domain, while `locate_thread_in` and `threads_count_in` map a global thread index to its domain and count the workers living there.
 
 ### Efficient Busy Waiting
 
@@ -818,7 +818,7 @@ let mut data: Vec<usize> = (0..1000).collect();
     .with_pool(&mut pool)
     .for_each(|value| {
         println!("Value: {}", value);
-    });
+    })?;
 ```
 
 For dynamic work-stealing, use `with_schedule` with `DynamicScheduler`:
@@ -829,7 +829,7 @@ For dynamic work-stealing, use `with_schedule` with `DynamicScheduler`:
     .with_schedule(&mut pool, DynamicScheduler)
     .for_each(|value| {
         *value *= 2;
-    });
+    })?;
 ```
 
 This easily composes with other iterator adaptors, like `map`, `filter`, and `zip`:
@@ -842,7 +842,7 @@ This easily composes with other iterator adaptors, like `map`, `filter`, and `zi
     .with_pool(&mut pool)
     .for_each(|value| {
         println!("Squared even: {}", value);
-    });
+    })?;
 ```
 
 For parallel reductions, ForkUnion provides Rayon-like convenience methods with automatic NUMA-aware cache-aligned scratch allocation:
@@ -854,14 +854,14 @@ let data: Vec<u64> = (0..1_000_000).map(|i| i as u64).collect();
 let total: u64 = (&data[..])
     .into_par_iter()
     .with_pool(&mut pool)
-    .sum();
+    .sum()?;
 
 // Count elements matching a predicate
 let evens = (&data[..])
     .into_par_iter()
     .filter(|&x| x % 2 == 0)
     .with_pool(&mut pool)
-    .count();
+    .count()?;
 
 // Custom reduction (product)
 let product = (&data[..])
@@ -871,7 +871,7 @@ let product = (&data[..])
         || 1u64,                        // initial value
         |acc, value, _| *acc *= *value, // fold function
         |a, b| a * b                    // combine function
-    );
+    )?;
 ```
 
 For manual control over scratch allocation, use `reduce_with_scratch`:
@@ -888,11 +888,12 @@ let total = (&data[..])
         scratch.as_mut_slice(),
         |acc, value, _| acc.0 += *value,  // fold
         |a, b| a.0 += b.0                 // combine in-place
-    );
+    )?;
 ```
 
 Beyond reductions, the iterators offer short-circuiting searches - `find_first` and `find_last` for the deterministic lowest- or highest-index match, `find_any` for the first match with cooperative cancellation, and `any` / `all` for boolean predicates that stop the moment the answer is known.
-Fallible bodies get `try_for_each` and `try_fold_with_scratch`, which propagate the first error and signal the other workers to stop.
+Fallible bodies get `for_each_fallible` and `fold_with_scratch_fallible`, which propagate the first error and signal the other workers to stop.
+Their two answers stay apart: the outer `Result` reports whether the dispatch ran, the inner one whether the caller's own work succeeded, so the caller's error type carries no constraint.
 This Rayon-style layer is __Rust-only__; C, C++, and Zig expose the pool primitives `for_threads`, `for_n`, `for_n_dynamic`, and `for_slices` directly.
 Zig additionally mirrors Rust's `for_slices_mut` as `forSlicesMut`, which hands each thread a disjoint sub-slice instead of a start-and-count pair.
 
@@ -968,7 +969,7 @@ The next task for `for_n_dynamic` calls is drained by neighbors from `claim.next
 
 ### Why don't we need atomics for "total_threads"?
 
-The only way to change the number of threads is to `terminate` the entire thread-pool and then `try_spawn` it again.
+The only way to change the number of threads is to `terminate` the entire thread-pool and then `spawn` it again.
 Either of those operations can only be called from one thread at a time and never coincide with any running tasks.
 That's ensured by the `stop`.
 

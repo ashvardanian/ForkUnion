@@ -5,18 +5,21 @@
 //! per domain, or one contiguous shard per domain.
 
 const std = @import("std");
-const Topology = @import("topology.zig").Topology;
+const topology_module = @import("topology.zig");
+const Topology = topology_module.Topology;
 const types = @import("types.zig");
+const Error = types.Error;
 const MemoryDomain = types.MemoryDomain;
 const MemoryDomainId = types.MemoryDomainId;
 
-extern fn fu_allocate_on_domain_id(memory_domain_id: i32, bytes: usize) ?*anyopaque;
+extern fn fu_allocate_on_domain_id(memory_domain_id: i32, bytes: usize, memory_out: *?*anyopaque) c_int;
 extern fn fu_allocate_at_least_on_domain_id(
     memory_domain_id: i32,
     minimum_bytes: usize,
     allocated_bytes: *usize,
     bytes_per_page: *usize,
-) ?*anyopaque;
+    memory_out: *?*anyopaque,
+) c_int;
 extern fn fu_free_on_domain_id(memory_domain_id: i32, pointer: *anyopaque, bytes: usize) void;
 extern fn fu_allocate_symmetric(
     topology: *anyopaque,
@@ -25,7 +28,8 @@ extern fn fu_allocate_symmetric(
     memory_domains_count: *usize,
     total_bytes: *usize,
     bytes_per_page: *usize,
-) ?*anyopaque;
+    memory_out: *?*anyopaque,
+) c_int;
 extern fn fu_free_symmetric(base: *anyopaque, total_bytes: usize) void;
 
 /// Result of a memory-domain allocation; carries only the OS id, so it can outlive the topology.
@@ -51,12 +55,15 @@ pub fn allocateAtLeast(memory_domain_id: MemoryDomainId, minimum_bytes: usize) ?
     var allocated_bytes: usize = undefined;
     var bytes_per_page: usize = undefined;
 
-    const ptr = fu_allocate_at_least_on_domain_id(
+    var raw: ?*anyopaque = null;
+    if (fu_allocate_at_least_on_domain_id(
         memory_domain_id.identifier(),
         minimum_bytes,
         &allocated_bytes,
         &bytes_per_page,
-    ) orelse return null;
+        &raw,
+    ) != 0) return null;
+    const ptr = raw orelse return null;
 
     return .{
         .memory_domain_id = memory_domain_id,
@@ -178,12 +185,15 @@ pub const DomainAllocator = struct {
 
         var allocated_bytes: usize = undefined;
         var bytes_per_page: usize = undefined;
-        const raw_ptr = fu_allocate_at_least_on_domain_id(
+        var raw: ?*anyopaque = null;
+        if (fu_allocate_at_least_on_domain_id(
             self.memory_domain_id.identifier(),
             request_bytes,
             &allocated_bytes,
             &bytes_per_page,
-        ) orelse return null;
+            &raw,
+        ) != 0) return null;
+        const raw_ptr = raw orelse return null;
 
         const base_addr = @intFromPtr(raw_ptr);
         const data_addr = alignment.forward(base_addr + header_size);
@@ -251,20 +261,23 @@ pub fn ReplicatedArray(comptime T: type) type {
         len: usize = 0,
 
         /// Allocates one uninitialized length-`n` replica per memory domain.
-        pub fn init(topology: Topology, n: usize) std.mem.Allocator.Error!Self {
+        pub fn init(topology: Topology, n: usize) Error!Self {
             if (n == 0) return Self{};
             var stride_bytes: usize = 0;
             var domains: usize = 0;
             var total_bytes: usize = 0;
             var bytes_per_page: usize = 0;
-            const base_bytes = fu_allocate_symmetric(
+            var raw: ?*anyopaque = null;
+            try types.check(fu_allocate_symmetric(
                 topology.handle,
                 n * @sizeOf(T),
                 &stride_bytes,
                 &domains,
                 &total_bytes,
                 &bytes_per_page,
-            ) orelse return error.OutOfMemory;
+                &raw,
+            ));
+            const base_bytes = raw orelse return Error.BadAlloc;
             return .{
                 .base_bytes = @ptrCast(@alignCast(base_bytes)),
                 .stride_bytes = stride_bytes,
@@ -332,23 +345,26 @@ pub fn ShardedArray(comptime T: type) type {
         segment: usize = 0,
 
         /// Allocates uninitialized storage for `n` elements partitioned round-robin across the domains.
-        pub fn init(topology: Topology, n: usize) std.mem.Allocator.Error!Self {
+        pub fn init(topology: Topology, n: usize) Error!Self {
             if (n == 0) return Self{};
-            const domains = topology.memoryDomainsCount();
-            if (domains == 0) return error.OutOfMemory;
+            const domains = try topology.memoryDomainsCount();
+            if (domains == 0) return Error.TopologyUnavailable;
             const segment = std.math.divCeil(usize, n, domains) catch unreachable;
             var stride_bytes: usize = 0;
             var domains_out: usize = 0;
             var total_bytes: usize = 0;
             var bytes_per_page: usize = 0;
-            const base_bytes = fu_allocate_symmetric(
+            var raw: ?*anyopaque = null;
+            try types.check(fu_allocate_symmetric(
                 topology.handle,
                 segment * @sizeOf(T),
                 &stride_bytes,
                 &domains_out,
                 &total_bytes,
                 &bytes_per_page,
-            ) orelse return error.OutOfMemory;
+                &raw,
+            ));
+            const base_bytes = raw orelse return Error.BadAlloc;
             return .{
                 .base_bytes = @ptrCast(@alignCast(base_bytes)),
                 .stride_bytes = stride_bytes,
@@ -427,7 +443,8 @@ test "NUMA allocation" {
     const first_domain = MemoryDomain.at(0);
     // The capability guard above already said this machine places pages on a domain, so a 1 KiB
     // request failing is a defect - skipping here would bury it.
-    const allocation = allocateAtLeast(topo.memoryDomainIdAtIndex(first_domain), 1024) orelse return error.OutOfMemory;
+    const allocation = allocateAtLeast(try topo.memoryDomainIdAtIndex(first_domain), 1024) orelse
+        return Error.BadAlloc;
     defer allocation.free();
 
     try std.testing.expect(allocation.allocated_bytes >= 1024);
@@ -445,7 +462,7 @@ test "NUMA allocator integrates with std collections" {
 
     const topo = try Topology.init();
     defer topo.deinit();
-    const memory_domain_id = topo.memoryDomainIdAtIndex(MemoryDomain.at(0));
+    const memory_domain_id = topo.memoryDomainIdAtIndex(MemoryDomain.at(0)) catch return error.SkipZigTest;
     if (!memory_domain_id.isValid()) return error.SkipZigTest;
     var domain_alloc = DomainAllocator.init(memory_domain_id);
     const allocator = domain_alloc.allocator();
@@ -483,7 +500,7 @@ test "ReplicatedArray per-domain buffer" {
     var replicas = try ReplicatedArray(u32).init(topo, n);
     defer replicas.deinit();
     try std.testing.expectEqual(n, replicas.len);
-    try std.testing.expectEqual(topo.memoryDomainsCount(), replicas.memoryDomainsCount());
+    try std.testing.expectEqual(try topo.memoryDomainsCount(), replicas.memoryDomainsCount());
 
     const domains = replicas.memoryDomainsCount();
     for (0..domains) |domain| {

@@ -299,14 +299,20 @@ fn replicate_into<T: Copy + Sync>(
     pool.scope(|scope| {
         let view = scope.view();
         scope.broadcast(|thread_index, compute_domain_index| {
-            let memory_domain = topology.local_memory_of(fu::ComputeDomain(compute_domain_index));
+            let memory_domain = topology
+                .local_memory_of(fu::ComputeDomain(compute_domain_index))
+                .expect("in-range domain");
 
             // Rank this thread among every thread on its memory domain, and count them, so the node's
             // whole team splits [0, n) without overlap even when several compute domains share the node.
             let mut threads_on_memory_domain = 0usize;
             let mut local_index_on_memory_domain = 0usize;
             for other in 0..view.compute_domains_count() {
-                if topology.local_memory_of(fu::ComputeDomain(other)) != memory_domain {
+                if topology
+                    .local_memory_of(fu::ComputeDomain(other))
+                    .expect("in-range domain")
+                    != memory_domain
+                {
                     continue;
                 }
                 if other < compute_domain_index {
@@ -389,7 +395,8 @@ fn csr_at<'a, P: Placement>(
     }
     let memory_domain = topology
         .expect("topology")
-        .local_memory_of(fu::ComputeDomain(compute_domain));
+        .local_memory_of(fu::ComputeDomain(compute_domain))
+        .expect("in-range domain");
     let replicas = replicas.expect("replicas");
     // SAFETY: every replica holds a full, initialized copy of both arrays, read-only for the whole
     // convergence pass, and `replicas` outlives the join.
@@ -601,7 +608,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // One pinned pool spawns for EVERY backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; Rayon drops it below.
     let probed = fu::Topology::new().expect("Failed to detect hardware topology");
-    let mut touch_pool = fu::ThreadPool::try_spawn(&probed, threads)?;
+    let mut touch_pool = fu::ThreadPool::spawn(&probed, threads)?;
     let mut labels_a = vec![0 as Label; vertices];
     let mut labels_b = vec![0 as Label; vertices];
     retouch_deterministically(&mut touch_pool, &mut host.row_offsets);
@@ -639,9 +646,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut pool = touch_pool; // ? The touch pool doubles as the benchmark pool
             if selected.engine == Engine::ForkUnionReplicated {
                 let csr = ReplicatedCsr {
-                    row_offsets: fu::ReplicatedArray::try_new(&probed, graph.row_offsets.len())
+                    row_offsets: fu::ReplicatedArray::new_in(&probed, graph.row_offsets.len())
                         .expect("Failed to allocate per-domain row-offset replicas"),
-                    column_indices: fu::ReplicatedArray::try_new(
+                    column_indices: fu::ReplicatedArray::new_in(
                         &probed,
                         graph.column_indices.len(),
                     )

@@ -343,7 +343,7 @@ def converge_on_pool[
     mut labels_b: List[UInt32],
     mut counters: List[CacheAligned[UInt64]],
     dynamic: Bool,
-) -> Int:
+) raises -> Int:
     """One convergence pass; every round is one fork-join dispatch."""
     for vertex in range(vertices):
         labels_a[vertex] = UInt32(vertex)
@@ -425,7 +425,7 @@ def main() raises:
         or backend == "max_parallelize"
     )
     if not known:
-        print("Unsupported backend: '", backend, "'", sep="")
+        print(t"Unsupported backend: '{backend}'")
         print("  forkunion_static_shared")
         print("  forkunion_dynamic_shared")
         print("  forkunion_static_replicated")
@@ -463,14 +463,17 @@ def main() raises:
     # Per-domain CSR replicas for the `_replicated` cells; only the immutable CSR replicates - the
     # label buffers stay shared by nature, since every round must see every neighbour's last label.
     var domains = topology.memory_domains_count()
-    var replica_offsets = ReplicatedArray[DType.uint64].try_new(topology, vertices + 1)
-    var replica_columns = ReplicatedArray[DType.uint32].try_new(topology, directed_edges)
+    var replica_offsets = Optional[ReplicatedArray[DType.uint64]](None)
+    var replica_columns = Optional[ReplicatedArray[DType.uint32]](None)
     var local_memory = List[Int32](length=max(topology.compute_domains_count(), 1), fill=0)
     for index in range(topology.compute_domains_count()):
         local_memory[index] = Int32(topology.local_memory_of(ComputeDomain(index)).index)
     if replicated:
-        if not replica_offsets or not replica_columns:
-            print("Unsupported backend: '", backend, "' - no symmetric mapping on this machine", sep="")
+        try:
+            replica_offsets = ReplicatedArray[DType.uint64].new(topology, vertices + 1)
+            replica_columns = ReplicatedArray[DType.uint32].new(topology, directed_edges)
+        except:
+            print(t"Unsupported backend: '{backend}' - no symmetric mapping on this machine")
             return
         for domain in range(domains):
             var offsets_replica = replica_offsets.value().replica(MemoryDomain(domain))

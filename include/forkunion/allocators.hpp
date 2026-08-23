@@ -17,8 +17,8 @@ namespace forkunion {
  *  @brief Tries binding the given address range to a specific NUMA @p `memory_domain_id`.
  *  @retval true if binding succeeded, false otherwise.
  */
-FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_bytes,
-                                                    memory_domain_id_t memory_domain_id) noexcept {
+FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t linux_numa_bind(void *ptr, std::size_t size_bytes,
+                                                                      memory_domain_id_t memory_domain_id) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     // ! `MPOL_F_STATIC_NODES` is a @b mode flag - it belongs OR-ed into the policy, not in the trailing
     // ! `flags` argument, which only accepts `MPOL_MF_*`. Those flags are 0: this memory is freshly mapped
@@ -29,7 +29,7 @@ FU_MAYBE_UNUSED_ static inline bool linux_numa_bind(void *ptr, std::size_t size_
     fu_unused_(ptr);
     fu_unused_(size_bytes);
     fu_unused_(memory_domain_id);
-    return false;
+    return status_t::unsupported_k;
 #endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
@@ -71,7 +71,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
     // qemu-user answers ENOSYS, a seccomp sandbox EPERM - still gave us memory, just placed by the
     // default policy rather than pinned to this domain. Discarding it would fail an allocation that in
     // fact succeeded; `runtime_capabilities()` is where a caller learns placement was unavailable.
-    linux_numa_bind(result_ptr, size_bytes, memory_domain_id);
+    [[maybe_unused]] status_t const placed = linux_numa_bind(result_ptr, size_bytes, memory_domain_id);
     return result_ptr;
 
 #else
@@ -263,7 +263,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_symmetric_allocate(machine_topology_t
             void *slice = static_cast<char *>(base) + domain * stride_bytes;
             // Best-effort, as in `linux_numa_allocate`: the slice is validly mapped, and a kernel that
             // refuses `mbind` still gave us distinct memory - default placement, not a failed allocation.
-            linux_numa_bind(slice, stride_bytes, memory_domain_id);
+            [[maybe_unused]] status_t const placed = linux_numa_bind(slice, stride_bytes, memory_domain_id);
         }
     return base;
 #else
@@ -318,7 +318,9 @@ struct linux_symmetric_allocator {
     /** @brief Allocates at least @p size elements @b per domain, page-aligning the per-slice stride. */
     allocation_type allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
         if (!topology_) return {}; // ! No topology to stripe across
-        size_type const stride_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {}; // ! Zero elements, or a byte count that would wrap
+        size_type const stride_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
         void *base = linux_symmetric_allocate(*topology_, stride_bytes, page_size_bytes);
         if (!base) return {}; // ! Allocation failed
         size_type const domains = topology_->memory_domains_count();
@@ -330,7 +332,8 @@ struct linux_symmetric_allocator {
     /** @brief Allocates at least @p size elements per domain, trying the largest huge page that fits. */
     allocation_type allocate_at_least(size_type size) noexcept {
         if (!topology_) return {};
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {}; // ! Zero elements, or a byte count that would wrap
         if (size_bytes >= (2u * page_size_1g_k))
             if (auto result = allocate_at_least(size, page_size_1g_k); result) return result;
         if (size_bytes >= (2u * page_size_2m_k))
@@ -387,9 +390,9 @@ FU_MAYBE_UNUSED_ static inline void freebsd_first_touch(FU_MAYBE_UNUSED_ void *p
  *  domain is a @b thread policy. The caller sets it, first-touches the region so its pages fault on the
  *  preferred domain, then restores the saved policy - the domainset analogue of Linux's per-mapping `mbind`.
  */
-FU_MAYBE_UNUSED_ static inline bool freebsd_domain_prefer(FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id,
-                                                          FU_MAYBE_UNUSED_ void *saved_set,
-                                                          FU_MAYBE_UNUSED_ int *saved_policy) noexcept {
+FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t freebsd_domain_prefer(
+    FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id, FU_MAYBE_UNUSED_ void *saved_set,
+    FU_MAYBE_UNUSED_ int *saved_policy) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     bool const have_saved = ::cpuset_getdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
                                                static_cast<domainset_t *>(saved_set), saved_policy) == 0;
@@ -402,7 +405,7 @@ FU_MAYBE_UNUSED_ static inline bool freebsd_domain_prefer(FU_MAYBE_UNUSED_ memor
     fu_unused_(memory_domain_id);
     fu_unused_(saved_set);
     fu_unused_(saved_policy);
-    return false;
+    return status_t::unsupported_k;
 #endif
 }
 
@@ -638,7 +641,9 @@ struct freebsd_symmetric_allocator {
 
     allocation_type allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
         if (!topology_) return {}; // ! No topology to stripe across
-        size_type const stride_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {}; // ! Zero elements, or a byte count that would wrap
+        size_type const stride_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
         void *base = freebsd_symmetric_allocate(*topology_, stride_bytes, page_size_bytes);
         if (!base) return {}; // ! Allocation failed
         size_type const domains = topology_->memory_domains_count();
@@ -649,7 +654,8 @@ struct freebsd_symmetric_allocator {
 
     allocation_type allocate_at_least(size_type size) noexcept {
         if (!topology_) return {};
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {}; // ! Zero elements, or a byte count that would wrap
         if (size_bytes >= (2u * page_size_1g_k))
             if (auto result = allocate_at_least(size, page_size_1g_k); result) return result;
         if (size_bytes >= (2u * page_size_2m_k))
@@ -671,10 +677,11 @@ using freebsd_symmetric_allocator_t = freebsd_symmetric_allocator<>;
  *      "Lock pages in memory" (Local Security Policy / `SeLockMemoryPrivilege`), typically by an admin.
  *      Call once at start-up, then construct a `windows_numa_allocator` with `large_pages = true`.
  */
-FU_MAYBE_UNUSED_ static inline bool windows_enable_lock_memory_privilege() noexcept {
+FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t windows_enable_lock_memory_privilege() noexcept {
 #if FU_ON_WINDOWS
     HANDLE token = nullptr;
-    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+        return status_t::permission_denied_k;
     TOKEN_PRIVILEGES privileges = {};
     privileges.PrivilegeCount = 1;
     privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
@@ -682,9 +689,9 @@ FU_MAYBE_UNUSED_ static inline bool windows_enable_lock_memory_privilege() noexc
                          ::AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr) &&
                          ::GetLastError() == ERROR_SUCCESS; // ! `AdjustTokenPrivileges` succeeds even when it did not
     ::CloseHandle(token);
-    return enabled;
+    return enabled ? status_t::success_k : status_t::permission_denied_k;
 #else
-    return false;
+    return status_t::unsupported_k;
 #endif
 }
 
@@ -883,8 +890,10 @@ struct windows_symmetric_allocator {
     /** @brief Allocates at least @p size elements @b per domain, page-aligning the per-slice stride. */
     allocation_type allocate_at_least(size_type size) noexcept {
         if (!topology_) return {}; // ! No topology to stripe across
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {}; // ! Zero elements, or a byte count that would wrap
         size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();
-        size_type const stride_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        size_type const stride_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
         void *base = windows_symmetric_allocate(*topology_, stride_bytes);
         if (!base) return {}; // ! Allocation failed
         size_type const domains = topology_->memory_domains_count();
@@ -1127,14 +1136,14 @@ struct replicated_array {
     }
 
     /** @brief Allocates one uninitialized length-@p n replica per memory domain; the caller first-touches them. */
-    bool try_resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
+    [[nodiscard]] status_t resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
         reset();
-        if (n == 0) return true;
+        if (n == 0) return status_t::success_k;
         symmetric_allocator_type allocator(topology);
         allocation_ = allocator.allocate_at_least(n);
-        if (!allocation_) return false; // ! Allocation failed
+        if (!allocation_) return status_t::bad_alloc_k;
         size_ = n;
-        return true;
+        return status_t::success_k;
     }
 
     std::size_t size() const noexcept { return size_; }
@@ -1220,16 +1229,16 @@ struct sharded_array {
     }
 
     /** @brief Allocates uninitialized storage for @p n elements in contiguous per-domain segments. */
-    bool try_resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
+    [[nodiscard]] status_t resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
         reset();
-        if (n == 0) return true;
+        if (n == 0) return status_t::success_k;
         std::size_t const domains = topology.memory_domains_count();
-        if (domains == 0) return false;
+        if (domains == 0) return status_t::topology_unavailable_k;
         symmetric_allocator_type allocator(topology);
         allocation_ = allocator.allocate_at_least(div_ceil(n, domains));
-        if (!allocation_) return false; // ! Allocation failed
+        if (!allocation_) return status_t::bad_alloc_k;
         size_ = n;
-        return true;
+        return status_t::success_k;
     }
 
     std::size_t size() const noexcept { return size_; }

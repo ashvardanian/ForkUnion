@@ -247,8 +247,7 @@ struct log_numa_topology_t {
                         colors.magenta(), /* "Pages:" */ colors.reset()));
                     first_page = false;
                 }
-                else
-                    pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " "));
+                else pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " "));
 
                 char page_size_str[32], page_volume_str[32];
                 std::size_t free_bytes = ps.free_pages * ps.bytes_per_page;

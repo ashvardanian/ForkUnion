@@ -29,7 +29,7 @@ from forkunion import (
     DomainAllocator,
     ErrorKind,
     Fabric,
-    ForkUnionError,
+    Error,
     IndexedSplit,
     Library,
     MemoryDomain,
@@ -157,7 +157,7 @@ def test_library_loads_and_reports_its_version() raises:
 def test_missing_library_raises() raises:
     """A stale or absent core must name itself, not abort the process."""
     with assert_raises(contains="ForkUnion"):
-        raise ForkUnionError(ErrorKind.LIBRARY_MISSING, "libforkunion_absent.so")
+        raise Error(ErrorKind.LIBRARY_MISSING, "libforkunion_absent.so")
 
 
 def test_capabilities_are_reported_and_nameable() raises:
@@ -171,8 +171,7 @@ def test_capabilities_are_reported_and_nameable() raises:
         "a build reports something",
     )
     var named = name_capabilities(library, runtime_capabilities(library))
-    assert_true(Bool(named), "the runtime mask renders as text")
-    assert_true(named.value().byte_length() > 0, "and the text is not empty")
+    assert_true(named.byte_length() > 0, "the runtime mask renders as non-empty text")
 
 
 def test_topology_counts_and_core_partition() raises:
@@ -207,19 +206,17 @@ def test_topology_memory_bounds() raises:
     for index in range(topology.memory_domains_count()):
         var domain = MemoryDomain(index)
         var identifier = topology.memory_domain_id_at_index(domain)
-        assert_true(Bool(identifier), "a real memory domain has an os id")
-        assert_true(
-            Int(identifier.value().identifier) >= 0,
-            "and the id is not the sentinel",
-        )
+        assert_true(Int(identifier.identifier) >= 0, "a real memory domain has an os id")
         assert_true(
             topology.volume_ram_in(domain) <= total,
             "a domain's RAM fits the machine's",
         )
-    assert_true(
-        not Bool(topology.memory_domain_id_at_index(MemoryDomain(1 << 20))),
-        "an index past the end answers None rather than a bogus id",
-    )
+    var refused = False
+    try:
+        _ = topology.memory_domain_id_at_index(MemoryDomain(1 << 20))
+    except:
+        refused = True
+    assert_true(refused, "an index past the end is refused rather than answering a bogus id")
 
 
 def test_local_memory_is_an_index_not_an_id() raises:
@@ -237,12 +234,10 @@ def test_local_memory_is_an_index_not_an_id() raises:
             "the answer indexes the memory domains",
         )
         var identifier = topology.memory_domain_id_at_index(local)
-        assert_true(Bool(identifier), "and that index resolves to an os id")
         var allocator = local_domain_allocator(topology, ComputeDomain(index))
-        assert_true(Bool(allocator), "which an allocator accepts")
         assert_equal(
-            Int(allocator.value().memory_domain_id.identifier),
-            Int(identifier.value().identifier),
+            Int(allocator.memory_domain_id.identifier),
+            Int(identifier.identifier),
             "the convenience pairing agrees with the two-step one",
         )
 
@@ -458,11 +453,9 @@ def test_allocations_on_every_memory_domain() raises:
     var sizes = [4096, 1 << 16, 1 << 20]
     for index in range(topology.memory_domains_count()):
         var allocator = DomainAllocator.at(library, topology.memory_domain_id_at_index(MemoryDomain(index)))
-        assert_true(Bool(allocator), "every real domain yields an allocator")
         for size in sizes:
-            var plain = allocator.value().allocate(size)
-            assert_true(Bool(plain), "the exact-size allocation succeeds")
-            var cells = plain.value().as_pointer[DType.uint8]()
+            var plain = allocator.allocate(size)
+            var cells = plain.as_pointer[DType.uint8]()
             cells[unsafe_offset=0] = 0x5A
             cells[unsafe_offset=size - 1] = 0x5A
             assert_equal(Int(cells[unsafe_offset=0]), 0x5A, "placed pages are writable")
@@ -472,40 +465,43 @@ def test_allocations_on_every_memory_domain() raises:
                 "to the very end of the block",
             )
 
-            var roomy = allocator.value().allocate_at_least(size)
-            assert_true(Bool(roomy), "the at-least allocation succeeds")
+            var roomy = allocator.allocate_at_least(size)
             assert_true(
-                roomy.value().allocated_bytes >= size,
+                roomy.allocated_bytes >= size,
                 "and reports at least what was asked",
             )
             assert_true(
-                roomy.value().bytes_per_page > 0,
+                roomy.bytes_per_page > 0,
                 "and names the page size it used",
             )
 
 
-def test_zero_byte_allocation_is_absence_not_failure() raises:
+def test_zero_byte_allocation_is_refused() raises:
     var library = Library()
     var topology = Topology(library)
     var allocator = default_domain_allocator(topology)
-    assert_true(Bool(allocator), "the first memory domain always exists")
-    assert_false(Bool(allocator.value().allocate(0)), "a zero-byte request answers None")
+    var refused = False
+    try:
+        _ = allocator.allocate(0)
+    except:
+        refused = True
+    assert_true(refused, "a zero-byte request is refused rather than answering an empty block")
 
 
 def test_invalid_domain_id_yields_no_allocator() raises:
     var library = Library()
-    assert_false(
-        Bool(DomainAllocator.at(library, Optional[MemoryDomainId](None))),
-        "an absent domain yields no allocator",
-    )
+    var refused = False
+    try:
+        _ = DomainAllocator.at(library, MemoryDomainId(-1))
+    except:
+        refused = True
+    assert_true(refused, "an id naming no domain yields no allocator")
 
 
 def test_replicated_array_gives_every_domain_a_copy() raises:
     var library = Library()
     var topology = Topology(library)
-    var attempt = ReplicatedArray[DType.int64].try_new(topology, 512)
-    assert_true(Bool(attempt), "a symmetric mapping is available on this machine")
-    var replicated = attempt.take()
+    var replicated = ReplicatedArray[DType.int64].new(topology, 512)
     assert_equal(
         replicated.memory_domains_count(),
         topology.memory_domains_count(),
@@ -528,9 +524,7 @@ def test_replicated_array_gives_every_domain_a_copy() raises:
 def test_sharded_array_round_trips_its_segments() raises:
     var library = Library()
     var topology = Topology(library)
-    var attempt = ShardedArray[DType.int64].try_new(topology, 1000)
-    assert_true(Bool(attempt), "a symmetric mapping is available on this machine")
-    var sharded = attempt.take()
+    var sharded = ShardedArray[DType.int64].new(topology, 1000)
     var covered = 0
     for index in range(sharded.memory_domains_count()):
         covered += sharded.length_on_memory_domain(MemoryDomain(index))
@@ -556,8 +550,10 @@ def test_fabric_harvest_fills_edges() raises:
     var topology = Topology(library)
     var pool = Pool(topology, threads=topology.logical_cores_count())
     var fabric = Fabric(library)
-    if not fabric.try_harvest(topology, pool):
-        return
+    try:
+        fabric.harvest(topology, pool)
+    except:
+        return  # ? A flat pool without domain placement has no fabric to walk
     assert_true(
         fabric.memory_levels_count() >= 1,
         "a harvested fabric has at least one tier",
@@ -609,7 +605,7 @@ def main() raises:
     suite.test[test_generation_polling_on_an_exclusive_pool]()
 
     suite.test[test_allocations_on_every_memory_domain]()
-    suite.test[test_zero_byte_allocation_is_absence_not_failure]()
+    suite.test[test_zero_byte_allocation_is_refused]()
     suite.test[test_invalid_domain_id_yields_no_allocator]()
     suite.test[test_replicated_array_gives_every_domain_a_copy]()
     suite.test[test_sharded_array_round_trips_its_segments]()

@@ -42,7 +42,7 @@ namespace forkunion {
  *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::flat_pool_t pool; // ? Alias to `fu::flat_pool<>` template
- *      if (!pool.try_spawn(allowed_cores_count())) return EXIT_FAILURE;
+ *      if (!pool.spawn(allowed_cores_count())) return EXIT_FAILURE;
  *      pool.for_threads([](std::size_t i) noexcept { std::printf("Hi from thread %zu\n", i); });
  *      return EXIT_SUCCESS;
  *  }
@@ -60,7 +60,7 @@ namespace forkunion {
  *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::flat_pool_t first_pool, second_pool;
- *      if (!first_pool.try_spawn(2) || !second_pool.try_spawn(2, fu::caller_exclusive_k)) return EXIT_FAILURE;
+ *      if (!first_pool.spawn(2) || !second_pool.spawn(2, fu::caller_exclusive_k)) return EXIT_FAILURE;
  *      auto broadcast = second_pool.for_threads([](std::size_t i) noexcept { poll_ssd(i); });
  *      first_pool.for_threads([](std::size_t i) noexcept { poll_nic(i); });
  *      broadcast.join(); // ! Wait for the second pool to finish
@@ -142,7 +142,7 @@ class flat_pool {
      *  The claim cursor must not share a line with anything, or the dynamic scheduler reintroduces
      *  the very coherence traffic that giving each thread a private cursor exists to remove. Rather
      *  than allocate a second array beside `std::thread`, both live in one padded cell, so the pool
-     *  still performs exactly one allocation - in `try_spawn`, never on a dispatch path.
+     *  still performs exactly one allocation - in `spawn`, never on a dispatch path.
      *
      *  Cells are indexed by @b thread @b index, so on inclusive pools cell 0 belongs to the caller
      *  and holds no `std::thread`. That costs one cell and buys `claim` and `worker` the same index.
@@ -251,24 +251,24 @@ class flat_pool {
      *  @retval true if the thread-pool was created successfully, started, and is ready to use.
      *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
      */
-    bool try_spawn(                   //
+    [[nodiscard]] status_t spawn(     //
         thread_index_t const threads, //
         caller_exclusivity_t const exclusivity = caller_inclusive_k) noexcept {
 
-        if (threads == 0) return false;        // ! Can't have zero threads working on something
-        if (threads_count_ != 0) return false; // ! Already initialized
+        if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
+        if (threads_count_ != 0) return status_t::already_spawned_k;
 
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (threads == 1 && use_caller_thread) {
             threads_count_ = 1;
-            return true; // ! The current thread will always be used, and allocates nothing
+            return status_t::success_k; // ! The caller is the pool, and allocates nothing
         }
 
         // Allocate the thread pool: one padded cell per thread, holding its worker and its cursor.
         // This is the pool's only allocation, and `for_n_dynamic` performs none of its own. Striding
         // by `alignment_k` is what keeps two threads' cursors off a shared cache line.
         worker_cells_t cells {worker_cell_allocator_t {allocator_}, alignment_k};
-        if (!cells.try_resize(threads)) return false; // ! Allocation failed
+        if (status_t const grew = cells.resize(threads); failed(grew)) return grew;
 
         // Before we start the threads, make sure we set some of the shared
         // state variables that will be used in the `_worker_loop` function.
@@ -308,10 +308,10 @@ class flat_pool {
             mood_.store(mood_t::die_k, std::memory_order_release);
             for (thread_index_t j = 0; j < i; ++j) workers_[j + use_caller_thread].worker.join();
             reset_on_failure();
-            return false;
+            return status_t::thread_refused_k;
         }
 
-        return true;
+        return status_t::success_k;
     }
 
     /**
@@ -334,7 +334,7 @@ class flat_pool {
     /**
      *  @brief Stops all threads and deallocates the thread-pool after the last call finishes.
      *  @note Can be called from @b any thread at any time.
-     *  @note Must `try_spawn` again to re-use the pool.
+     *  @note Must `spawn` again to re-use the pool.
      *
      *  When and how @b NOT to use this function:
      *  - as a synchronization point between concurrent tasks.

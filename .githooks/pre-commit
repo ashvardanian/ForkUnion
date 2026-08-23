@@ -57,6 +57,21 @@ check_trailing_docs() {
         "$file uses a /// doc-comment - this codebase documents with /** ... */ blocks:"
 }
 
+# `@section <id> <Title>` binds the FIRST token as the link target and the rest as the visible title, so
+# `@section Scheduling Logic` silently anchors "Scheduling" and titles the section "Logic" - the heading
+# reads wrong and nothing can link to it. The id is lowercase snake_case carrying its domain, since ids
+# share one namespace across the whole Doxygen project: `pool_concurrency_model`, as `flat.hpp` already
+# spells it. A Title-Case first token is the exact signature of a missing id, and an id with no title
+# renders an empty heading, so both arms are required.
+check_section_ids() {
+    local sections
+    sections=$(printf '%s\n' "$added" | grep -E '@(section|subsection|subsubsection|page)[[:space:]]' |
+        grep -vE '@(section|subsection|subsubsection|page)[[:space:]]+[a-z][a-z0-9_]*[[:space:]]+[^[:space:]]' || true)
+    [ -z "$sections" ] || fail "$sections" \
+        "$file adds a Doxygen section without a lowercase snake_case id, or with an id but" \
+        "            no title - Doxygen anchors the first token. Write @section domain_topic Title:"
+}
+
 # `@sa` cross-references an identifier, `@see` cross-references a URL. Both tags mean the same thing to
 # Doxygen, so nothing but this check keeps the distinction alive - and it is the distinction that makes
 # either one scannable.
@@ -86,8 +101,9 @@ check_hand_ceils() {
     hand_ceils=$(printf '%s\n' "$added" |
         grep -E '\+[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*-[[:space:]]*1\)[[:space:]]*/' || true)
     [ -z "$hand_ceils" ] || fail "$hand_ceils" \
-        "$file hand-rolls ceiling division - use fu::div_ceil (C++), .div_ceil() (Rust), or" \
-        "            std.math.divCeil (Zig). Not a bug, a symptom: the author didn't know the house" \
+        "$file hand-rolls ceiling division - use fu::div_ceil (C++), .div_ceil() (Rust)," \
+        "            std.math.divCeil (Zig), or std.math.ceildiv (Mojo). Not a bug, a symptom: the" \
+        "            author didn't know the house" \
         "            vocabulary, so re-validate the rest of this change against types.hpp helpers too:"
 }
 
@@ -160,13 +176,14 @@ while IFS= read -r -d '' file; do
     case "$file" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.inl)
         check_rulers
+        check_section_ids
         check_cross_refs
         check_deprecations
         check_hand_ceils
         check_region_dashes
         check_raw_macros
         ;;
-    *.rs | *.zig)
+    *.rs | *.zig | *.mojo)
         check_deprecations
         check_hand_ceils
         ;;
@@ -217,6 +234,22 @@ if command -v zig > /dev/null 2>&1; then
             failed=1
         fi
     fi
+fi
+
+# Mojo - `mojo format` is the law, but it has no --check mode, so format a copy and diff. The width
+# lives in `pyproject.toml`, which `mojo format` reads the way Black does; it is repeated here
+# because the copy sits outside the tree, where that discovery would not find it.
+if command -v mojo > /dev/null 2>&1; then
+    while IFS= read -r -d '' file; do
+        scratch=$(mktemp --suffix=.mojo)
+        git show ":$file" > "$scratch"
+        mojo format -q -l 120 "$scratch" > /dev/null 2>&1
+        if ! git show ":$file" | diff -q - "$scratch" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not mojo-format clean - run: mojo format -l 120 $file"
+            failed=1
+        fi
+        rm -f "$scratch"
+    done < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.mojo')
 fi
 
 # CMake - CMakeLists.txt / *.cmake must satisfy the checked-in .cmake-format.py profile.

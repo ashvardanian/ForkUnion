@@ -242,7 +242,7 @@ def main() raises:
         or backend == "max_parallelize"
     )
     if not known:
-        print("Unsupported backend: '", backend, "'", sep="")
+        print(t"Unsupported backend: '{backend}'")
         print("  forkunion_static_shared")
         print("  forkunion_dynamic_shared")
         print("  forkunion_static_replicated")
@@ -295,7 +295,9 @@ def main() raises:
 
     # The replicated cells copy the read side into every memory domain once per iteration; on a
     # single-domain machine that collapses to one replica, so the cell still runs.
-    var replicas = ReplicatedArray[DType.float32].try_new(topology, count * 3) if replicated else None
+    var replicas = Optional[ReplicatedArray[DType.float32]](None)
+    if replicated:
+        replicas = ReplicatedArray[DType.float32].new(topology, count * 3)
 
     # A fixed time budget beats a fixed iteration count: the window is long enough to amortize
     # scheduling noise, and reports the rate sustained. `NBODY_ITERATIONS` forces an exact count.
@@ -313,7 +315,7 @@ def main() raises:
         apply_prong(Prong(index, 0, 0), bodies)
 
     @parameter
-    def one_pass():
+    def one_pass() raises:
         if baseline:
             parallelize[baseline_force](count, threads)
             parallelize[baseline_apply](count, threads)

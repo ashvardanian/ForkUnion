@@ -3,8 +3,139 @@
 //! Pure logic with no FFI; mirrors the C++ `types` header.
 
 use core::cell::UnsafeCell;
+use core::ffi::c_int;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Why a call into the C core failed, in the vocabulary the core itself uses.
+///
+/// Mirrors `fu_status_t` value-for-value, so the FFI boundary only retypes. `Unrecognized` covers a
+/// status a newer core reports and this build has no name for.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum Status {
+    /// No reason was reported, or one this build does not name.
+    Unknown = -1,
+    /// An allocation or mapping failed; a smaller request may succeed.
+    BadAlloc = -2,
+    /// A fixed ceiling was reached, so a smaller request will not help either.
+    CapacityExhausted = -3,
+    /// An argument was malformed, out of range, or would overflow a byte count.
+    InvalidArgument = -4,
+    /// The handles or the pool kind cannot serve this call together.
+    ConfigMismatch = -5,
+    /// The pool is already spawned; terminate it first.
+    AlreadySpawned = -6,
+    /// The pool was never spawned.
+    NotSpawned = -7,
+    /// The OS declined to create a thread - a resource limit, or permissions.
+    ThreadRefused = -8,
+    /// The machine could not be described; transient if its CPU set changed mid-probe.
+    TopologyUnavailable = -9,
+    /// A privileged operation was declined.
+    PermissionDenied = -10,
+    /// This build or this machine has no such facility.
+    Unsupported = -11,
+    /// A status this binding has no name for.
+    Unrecognized = i32::MIN,
+}
+
+impl Status {
+    /// Maps a raw `fu_status_t`, keeping an unnamed one rather than guessing.
+    fn from_raw(raw: i32) -> Self {
+        match raw {
+            -1 => Self::Unknown,
+            -2 => Self::BadAlloc,
+            -3 => Self::CapacityExhausted,
+            -4 => Self::InvalidArgument,
+            -5 => Self::ConfigMismatch,
+            -6 => Self::AlreadySpawned,
+            -7 => Self::NotSpawned,
+            -8 => Self::ThreadRefused,
+            -9 => Self::TopologyUnavailable,
+            -10 => Self::PermissionDenied,
+            -11 => Self::Unsupported,
+            _ => Self::Unrecognized,
+        }
+    }
+
+    /// Static, English description; mirrors `fu_status_to_string`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Unknown => "the core reported no reason",
+            Self::BadAlloc => "an allocation failed",
+            Self::CapacityExhausted => "a fixed capacity was exhausted",
+            Self::InvalidArgument => "an argument was rejected",
+            Self::ConfigMismatch => "the handles cannot serve this call together",
+            Self::AlreadySpawned => "the pool is already spawned",
+            Self::NotSpawned => "the pool was never spawned",
+            Self::ThreadRefused => "the OS declined to create a thread",
+            Self::TopologyUnavailable => "the machine could not be described",
+            Self::PermissionDenied => "a privileged operation was declined",
+            Self::Unsupported => "this build has no such facility",
+            Self::Unrecognized => "an unrecognized status",
+        }
+    }
+}
+
+/// A failure, whether the core reported it or the binding caught it before the call.
+///
+/// `detail` names the symbol or the argument, which is what turns a status into a diagnosis.
+/// Both fields are plain data, so nothing allocates on the failure path - which is what lets this
+/// crate stay `no_std`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Error {
+    /// The identity of the failure, shared with the C interface.
+    pub status: Status,
+    /// The detail the status alone cannot carry.
+    pub detail: &'static str,
+}
+
+impl Error {
+    /// A failure the binding caught before the call crossed, under the status the core would use.
+    pub(crate) const fn new(status: Status, detail: &'static str) -> Self {
+        Self { status, detail }
+    }
+
+    /// Turns a raw status into a `Result`, naming `detail` on failure.
+    pub(crate) fn check(raw: c_int, detail: &'static str) -> Result<()> {
+        if raw == 0 {
+            return Ok(());
+        }
+        Err(Error::new(Status::from_raw(raw), detail))
+    }
+}
+
+impl core::fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "Error({:?}, {:?})", self.status, self.detail)
+    }
+}
+
+/// The result of every fallible call in this crate.
+pub type Result<T> = core::result::Result<T, Error>;
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{}: {}", self.detail, self.status.describe())
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
+
+/// Bytes occupied by `count` elements of `element_bytes` each, refusing a product that would wrap.
+pub fn bytes_for_elements(count: usize, element_bytes: usize) -> Result<usize> {
+    match count.checked_mul(element_bytes) {
+        Some(bytes) => Ok(bytes),
+        None => Err(Error::new(
+            Status::InvalidArgument,
+            "the element count times the element size would wrap",
+        )),
+    }
+}
 
 /// Default alignment for preventing false sharing between threads.
 ///
@@ -30,7 +161,7 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 /// use forkunion::{CacheAligned, ThreadPool, Topology};
 ///
 /// let topology = Topology::new().unwrap();
-/// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
+/// let mut pool = ThreadPool::spawn(&topology, 4).unwrap();
 /// let data: Vec<usize> = (0..1000).collect();
 ///
 /// // Each thread gets its own cache-aligned accumulator
@@ -155,14 +286,14 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     ///
-    /// if let Some(mut guard) = mutex.try_lock() {
+    /// if let Some(mut guard) = mutex.lock_if_free() {
     ///     *guard = 42;
     ///     println!("Lock acquired and value set");
     /// } else {
     ///     println!("Lock is currently held by another thread");
     /// };
     /// ```
-    pub fn try_lock(&self) -> Option<BasicSpinMutexGuard<'_, T, PAUSE>> {
+    pub fn lock_if_free(&self) -> Option<BasicSpinMutexGuard<'_, T, PAUSE>> {
         if !self.locked.swap(true, Ordering::Acquire) {
             Some(BasicSpinMutexGuard { mutex: self })
         } else {
@@ -492,7 +623,7 @@ mod tests {
         // On exclusive pools the work is dispatched at guard construction:
         // the caller can overlap its own work and poll `is_complete`.
         let mut pool =
-            ThreadPool::try_spawn_with_exclusivity(&topology, 4, CallerExclusivity::Exclusive)
+            ThreadPool::spawn_with_exclusivity(&topology, 4, CallerExclusivity::Exclusive)
                 .expect("Failed to create exclusive thread pool");
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);

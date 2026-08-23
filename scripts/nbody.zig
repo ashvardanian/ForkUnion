@@ -202,7 +202,8 @@ const Placement = enum { shared, replicated };
 const WorkContext = struct {
     bodies_ptr: [*]Body,
     forces_ptr: [*]Vector3,
-    topology: fu.Topology,
+    /// Each compute domain's nearest memory domain, probed once so the kernels never call the FFI.
+    local_memory: []const fu.MemoryDomain,
     replicas: ?*fu.ReplicatedArray(Body),
     n: usize,
 };
@@ -212,7 +213,7 @@ fn forceKernel(comptime placement: Placement) fn (*const WorkContext, fu.Prong) 
     return struct {
         fn calc(work: *const WorkContext, prong: fu.Prong) void {
             if (placement == .replicated) {
-                const local = work.replicas.?.onMemoryDomain(work.topology.localMemoryOf(prong.compute_domain));
+                const local = work.replicas.?.onMemoryDomain(work.local_memory[prong.compute_domain.index()]);
                 work.forces_ptr[prong.task_index] = netForce(&local[prong.task_index], local[0..work.n]);
             } else {
                 const bi = &work.bodies_ptr[prong.task_index];
@@ -228,8 +229,8 @@ fn applyKernel(work: *const WorkContext, prong: fu.Prong) void {
 }
 
 /// Dispatches `kernel` over `n` tasks on the chosen schedule: pre-divided static, or work-stolen dynamic.
-fn forNScheduled(comptime schedule: Schedule, pool: fu.Pool, n: usize, comptime kernel: anytype, work: *const WorkContext) void {
-    if (schedule == .static) pool.forN(n, work, kernel) else pool.forNDynamic(n, work, kernel);
+fn forNScheduled(comptime schedule: Schedule, pool: fu.Pool, n: usize, comptime kernel: anytype, work: *const WorkContext) !void {
+    if (schedule == .static) try pool.forN(n, work, kernel) else try pool.forNDynamic(n, work, kernel);
 }
 
 // ForkUnion replicated kernels
@@ -241,30 +242,31 @@ fn forNScheduled(comptime schedule: Schedule, pool: fu.Pool, n: usize, comptime 
 /// Copies canonical `bodies` into every per-domain replica, each written by the cores local to its node
 /// so the pages first-touch there. Every compute domain sharing a memory domain cooperates on that
 /// node's one replica, partitioned across all its threads so no element is copied twice.
-fn refreshReplicas(pool: fu.Pool, topology: fu.Topology, bodies: []const Body, replicas: *fu.ReplicatedArray(Body)) void {
+fn refreshReplicas(pool: fu.Pool, local_memory: []const fu.MemoryDomain, bodies: []const Body, replicas: *fu.ReplicatedArray(Body)) !void {
     const RefreshContext = struct {
         pool: fu.Pool,
-        topology: fu.Topology,
+        local_memory: []const fu.MemoryDomain,
         bodies: [*]const Body,
         replicas: *fu.ReplicatedArray(Body),
         n: usize,
     };
-    const context = RefreshContext{ .pool = pool, .topology = topology, .bodies = bodies.ptr, .replicas = replicas, .n = bodies.len };
-    pool.forThreads(&context, struct {
+    const context = RefreshContext{ .pool = pool, .local_memory = local_memory, .bodies = bodies.ptr, .replicas = replicas, .n = bodies.len };
+    try pool.forThreads(&context, struct {
         fn refresh(carried: *const RefreshContext, thread_index: usize, compute_domain: fu.ComputeDomain) void {
-            const memory_domain = carried.topology.localMemoryOf(compute_domain);
+            const memory_domain = carried.local_memory[compute_domain.index()];
 
             // Rank this thread among every thread on its memory domain, and count them, so the node's
             // whole team splits [0, n) without overlap even when several compute domains share the node.
             var threads_on_memory_domain: usize = 0;
             var local_index: usize = 0;
-            for (0..carried.pool.computeDomainsCount()) |index| {
+            for (0..carried.pool.computeDomainsCount() catch unreachable) |index| {
                 const other = fu.ComputeDomain.at(index);
-                if (carried.topology.localMemoryOf(other) != memory_domain) continue;
-                if (index < compute_domain.index()) local_index += carried.pool.threadsCountIn(other);
-                threads_on_memory_domain += carried.pool.threadsCountIn(other);
+                if (carried.local_memory[other.index()] != memory_domain) continue;
+                const in_other = carried.pool.threadsCountIn(other) catch unreachable;
+                if (index < compute_domain.index()) local_index += in_other;
+                threads_on_memory_domain += in_other;
             }
-            local_index += carried.pool.locateThreadIn(thread_index, compute_domain);
+            local_index += carried.pool.locateThreadIn(thread_index, compute_domain) catch unreachable;
             if (threads_on_memory_domain == 0) return;
 
             const chunk = std.math.divCeil(usize, carried.n, threads_on_memory_domain) catch unreachable;
@@ -284,23 +286,23 @@ fn iterationForkUnion(
     comptime schedule: Schedule,
     comptime placement: Placement,
     pool: fu.Pool,
-    topology: fu.Topology,
+    local_memory: []const fu.MemoryDomain,
     bodies: []Body,
     forces: []Vector3,
     replicas: ?*fu.ReplicatedArray(Body),
-) void {
+) !void {
     const n = bodies.len;
-    if (placement == .replicated) refreshReplicas(pool, topology, bodies, replicas.?);
+    if (placement == .replicated) try refreshReplicas(pool, local_memory, bodies, replicas.?);
 
     const work = WorkContext{
         .bodies_ptr = bodies.ptr,
         .forces_ptr = forces.ptr,
-        .topology = topology,
+        .local_memory = local_memory,
         .replicas = replicas,
         .n = n,
     };
-    forNScheduled(schedule, pool, n, forceKernel(placement), &work);
-    pool.forN(n, &work, applyKernel);
+    try forNScheduled(schedule, pool, n, forceKernel(placement), &work);
+    try pool.forN(n, &work, applyKernel);
 }
 
 // std.Io.Group backend (static work division)
@@ -429,7 +431,8 @@ const Engine = enum { forkunion, forkunion_replicated, std_io_group, libxev };
 const Context = struct {
     bodies: []Body,
     forces: []Vector3,
-    topology: fu.Topology,
+    /// Each compute domain's nearest memory domain, probed once at setup.
+    local_memory: []const fu.MemoryDomain,
     pool: ?fu.Pool,
     replicas: ?*fu.ReplicatedArray(Body),
     xev_pool: ?*xev.ThreadPool,
@@ -448,7 +451,8 @@ const Backend = struct {
 fn runForkUnion(comptime schedule: Schedule, comptime placement: Placement) fn (*Context) void {
     return struct {
         fn call(context: *Context) void {
-            iterationForkUnion(schedule, placement, context.pool.?, context.topology, context.bodies, context.forces, context.replicas);
+            iterationForkUnion(schedule, placement, context.pool.?, context.local_memory, context.bodies, context.forces, context.replicas) catch |e|
+                std.debug.panic("forkunion backend failed: {}", .{e});
         }
     }.call;
 }
@@ -482,7 +486,7 @@ pub fn main() !void {
     defer topology.deinit();
 
     var n_threads = envUsize("NBODY_THREADS", 0);
-    if (n_threads == 0) n_threads = topology.logicalCoresCount();
+    if (n_threads == 0) n_threads = try topology.logicalCoresCount();
 
     const budget_seconds = envF64("NBODY_SECONDS", 10); // The primary knob: a fixed window
     const n_iters = envUsize("NBODY_ITERATIONS", 0); // Overrides with an exact count when set
@@ -546,10 +550,16 @@ pub fn main() !void {
         .libxev => xev_pool = xev.ThreadPool.init(.{ .max_threads = @intCast(n_threads) }),
     }
 
+    // Probed once here, so the kernels index a slice instead of crossing the FFI per prong.
+    const local_memory = try allocator.alloc(fu.MemoryDomain, try topology.computeDomainsCount());
+    defer allocator.free(local_memory);
+    for (local_memory, 0..) |*slot, compute_domain|
+        slot.* = try topology.localMemoryOf(fu.ComputeDomain.at(compute_domain));
+
     var context = Context{
         .bodies = bodies,
         .forces = forces,
-        .topology = topology,
+        .local_memory = local_memory,
         .pool = pool,
         .replicas = if (replicas) |*r| r else null,
         .xev_pool = if (xev_pool) |*x| x else null,

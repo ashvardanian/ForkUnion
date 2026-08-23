@@ -174,13 +174,13 @@ class core_mask {
 #endif
     }
 
-    /** @retval false on allocation failure, leaving the mask unusable rather than half-sized. */
-    bool try_resize_for(std::size_t const cores) noexcept {
-        return words_.try_resize(div_ceil(cores, bits_per_word_k));
+    /** @retval bad_alloc_k on allocation failure, leaving the mask unusable rather than half-sized. */
+    [[nodiscard]] status_t resize_for(std::size_t const cores) noexcept {
+        return words_.resize(div_ceil(cores, bits_per_word_k));
     }
 
     /** @brief Sizes the mask to hold every id this machine can produce. @sa `id_space`. */
-    bool try_resize() noexcept { return try_resize_for(id_space()); }
+    [[nodiscard]] status_t resize() noexcept { return resize_for(id_space()); }
 
     void reset() noexcept { words_.reset(); }
     void clear() noexcept { std::memset(words_.data(), 0, bytes()); }
@@ -217,22 +217,24 @@ using core_mask_t = core_mask<>;
  *  @brief Reads the cores the calling thread may run on into @p cores.
  *  @retval false where the platform exposes no such mask, which is @b not an error.
  */
-FU_MAYBE_UNUSED_ static inline bool try_capture_thread_cores(FU_MAYBE_UNUSED_ core_mask_t &cores) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t capture_thread_cores(
+    FU_MAYBE_UNUSED_ core_mask_t &cores) noexcept {
 #if FU_ON_LINUX
     // A `cpu_set_t` is an array of `__cpu_mask`, which is exactly `core_mask_word_t` here. The kernel
     // rejects a buffer narrower than its own cpumask, so grow once rather than guess at `nr_cpu_ids`.
     std::size_t cores_to_fit = core_mask_t::id_space();
     for (int attempt = 0; attempt < 4; ++attempt, cores_to_fit *= 2) {
-        if (!cores.try_resize_for(cores_to_fit)) return false;
-        if (::sched_getaffinity(0, cores.bytes(), static_cast<cpu_set_t *>(cores.data())) == 0) return true;
+        if (status_t const grew = cores.resize_for(cores_to_fit); failed(grew)) return grew;
+        if (::sched_getaffinity(0, cores.bytes(), static_cast<cpu_set_t *>(cores.data())) == 0)
+            return status_t::success_k;
         if (errno != EINVAL) break; // ! Anything but "your buffer is too small" will not improve
     }
     cores.reset();
-    return false;
+    return status_t::unsupported_k;
 
 #elif FU_ON_WINDOWS
     // A thread lives in exactly one processor group at a time, so that group's mask is its allowed set.
-    if (!cores.try_resize()) return false;
+    if (status_t const grew = cores.resize(); failed(grew)) return grew;
     GROUP_AFFINITY affinity = {};
     if (!::GetThreadGroupAffinity(::GetCurrentThread(), &affinity)) return false;
     for (unsigned bit = 0; bit < win_processors_per_group_k; ++bit)
@@ -241,7 +243,7 @@ FU_MAYBE_UNUSED_ static inline bool try_capture_thread_cores(FU_MAYBE_UNUSED_ co
 
 #elif FU_ON_FREEBSD
     // ! Not `sched_getaffinity`: FreeBSD spells it `cpuset_getaffinity`, and `-1` means "this thread".
-    if (!cores.try_resize()) return false;
+    if (status_t const grew = cores.resize(); failed(grew)) return grew;
     if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, cores.bytes(),
                              static_cast<cpuset_t *>(cores.data())) == 0)
         return true;
@@ -263,7 +265,7 @@ FU_MAYBE_UNUSED_ static inline bool try_capture_thread_cores(FU_MAYBE_UNUSED_ co
  */
 FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
     core_mask_t allowed;
-    if (try_capture_thread_cores(allowed)) {
+    if (succeeded(capture_thread_cores(allowed))) {
         std::size_t const allowed_count = allowed.count();
         if (allowed_count > 0) return allowed_count;
     }
@@ -288,8 +290,8 @@ using native_thread_t = pthread_t;
  *  creation. So a pool there partitions the @b work by domain and lets the scheduler place the @b threads.
  *  @sa `try_pin_thread_to_cores`, the adaptor that builds a mask from a core list.
  */
-FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
-                                                           FU_MAYBE_UNUSED_ core_mask_t const &cores) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t apply_thread_cores(
+    FU_MAYBE_UNUSED_ native_thread_t thread, FU_MAYBE_UNUSED_ core_mask_t const &cores) noexcept {
 #if FU_ON_WINDOWS
     // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them,
     // and a thread cannot span groups. Cores from another group are a caller error, not a mask.
@@ -300,8 +302,7 @@ FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ nati
         if (!cores.contains(id)) continue;
         WORD const group = win_core_group(id);
         if (!group_chosen) affinity.Group = group, group_chosen = true;
-        else if (group != affinity.Group)
-            return false; // ! A thread lives in exactly one group
+        else if (group != affinity.Group) return false; // ! A thread lives in exactly one group
         affinity.Mask |= static_cast<KAFFINITY>(1) << win_core_index(id);
     }
     return group_chosen && ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0;
@@ -319,11 +320,13 @@ FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ nati
                                static_cast<cpu_set_t const *>(cores.data())) == 0;
 
 #elif FU_WITH_PLACE_THREADS_BY_AFFINITY
-    if (!cores.valid()) return false;
-    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpu_set_t const *>(cores.data())) == 0;
+    if (!cores.valid()) return status_t::invalid_argument_k;
+    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpu_set_t const *>(cores.data())) == 0
+               ? status_t::success_k
+               : status_t::permission_denied_k;
 
 #else
-    return false; // ? No placement here; the harvest still reports the domains
+    return status_t::unsupported_k; // ? No placement here; the harvest still reports the domains
 #endif
 }
 
@@ -333,18 +336,18 @@ FU_MAYBE_UNUSED_ static inline bool try_apply_thread_cores(FU_MAYBE_UNUSED_ nati
  *  @note A thin adaptor: it builds a `core_mask` and defers to `try_apply_thread_cores`, which is
  *      where the per-platform placement lives. It owns no platform logic of its own.
  */
-FU_MAYBE_UNUSED_ static inline bool try_pin_thread_to_cores(FU_MAYBE_UNUSED_ native_thread_t thread,
-                                                            FU_MAYBE_UNUSED_ core_id_t const *cores,
-                                                            FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t pin_thread_to_cores(
+    FU_MAYBE_UNUSED_ native_thread_t thread, FU_MAYBE_UNUSED_ core_id_t const *cores,
+    FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
 #if FU_WITH_PLACE_THREADS_BY_AFFINITY
-    if (count == 0) return false;
+    if (count == 0) return status_t::invalid_argument_k;
     core_mask_t mask;
-    if (!mask.try_resize()) return false;
+    if (status_t const grew = mask.resize(); failed(grew)) return grew;
     for (std::size_t i = 0; i < count; ++i) {
         assert(cores[i] >= 0 && "Invalid CPU core ID");
         mask.add(cores[i]);
     }
-    return try_apply_thread_cores(thread, mask);
+    return apply_thread_cores(thread, mask);
 #else
     return false; // ? No placement here; the harvest still reports the domains
 #endif
@@ -362,13 +365,14 @@ FU_MAYBE_UNUSED_ static inline bool try_pin_thread_to_cores(FU_MAYBE_UNUSED_ nat
  *  through `mbind` on the allocation, not through the calling thread's policy, and `numa_run_on_node`
  *  would rewrite the very CPU mask we just restored.
  */
-FU_MAYBE_UNUSED_ static inline bool try_restore_thread_cores(FU_MAYBE_UNUSED_ core_mask_t const &saved) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t restore_thread_cores(
+    FU_MAYBE_UNUSED_ core_mask_t const &saved) noexcept {
 #if FU_WITH_PLACE_THREADS_BY_AFFINITY
-    if (!saved.valid()) return false;
+    if (!saved.valid()) return status_t::invalid_argument_k;
 #if FU_ON_WINDOWS
-    return try_apply_thread_cores(::GetCurrentThread(), saved);
+    return apply_thread_cores(::GetCurrentThread(), saved);
 #else
-    return try_apply_thread_cores(::pthread_self(), saved);
+    return apply_thread_cores(::pthread_self(), saved);
 #endif
 #else
     return false;
@@ -380,14 +384,15 @@ FU_MAYBE_UNUSED_ static inline bool try_restore_thread_cores(FU_MAYBE_UNUSED_ co
  *  @brief Reads one unsigned integer out of a `/sys` or `/proc` file.
  *  @retval false where the file is absent or holds no number - @p value is then untouched.
  */
-FU_MAYBE_UNUSED_ static inline bool try_read_uint_at_path(char const *path, std::size_t &value) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t read_uint_at_path(char const *path, std::size_t &value) noexcept {
     FILE *file = ::fopen(path, "r");
-    if (!file) return false;
+    if (!file) return status_t::topology_unavailable_k;
     unsigned long long parsed = 0;
     bool const parsed_one = ::fscanf(file, "%llu", &parsed) == 1;
     ::fclose(file);
-    if (parsed_one) value = static_cast<std::size_t>(parsed);
-    return parsed_one;
+    if (!parsed_one) return status_t::topology_unavailable_k;
+    value = static_cast<std::size_t>(parsed);
+    return status_t::success_k;
 }
 
 /**
@@ -396,15 +401,17 @@ FU_MAYBE_UNUSED_ static inline bool try_read_uint_at_path(char const *path, std:
  *  @note Truncation is a failure, not a prefix: a clipped cpulist names fewer cores than the kernel
  *      does, and would read like a complete answer.
  */
-FU_MAYBE_UNUSED_ static inline bool try_read_line_at_path(char const *path, char *line,
-                                                          std::size_t const line_capacity) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t read_line_at_path(char const *path, char *line,
+                                                                        std::size_t const line_capacity) noexcept {
     FILE *file = ::fopen(path, "r");
-    if (!file) return false;
+    if (!file) return status_t::topology_unavailable_k;
     bool complete = ::fgets(line, static_cast<int>(line_capacity), file) != nullptr;
     ::fclose(file);
-    if (!complete) return false;
+    if (!complete) return status_t::topology_unavailable_k;
+    // Truncation is a failure, not a prefix: a clipped cpulist would read like a complete answer.
     std::size_t const length = std::strlen(line);
-    return !(length == line_capacity - 1 && line[line_capacity - 2] != '\n');
+    if (length == line_capacity - 1 && line[line_capacity - 2] != '\n') return status_t::topology_unavailable_k;
+    return status_t::success_k;
 }
 #endif // FU_ON_LINUX
 
@@ -554,7 +561,7 @@ class ram_page_settings {
      *  @brief Fetches all available huge page sizes for the given NUMA node.
      *  @note Kernel support doesn't mean that pages of that size have a valid mount point.
      */
-    bool try_harvest(FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id) noexcept {
+    [[nodiscard]] status_t harvest(FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id) noexcept {
         assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
 #if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
@@ -567,10 +574,10 @@ class ram_page_settings {
             hugepages_path, sizeof(hugepages_path), //
             "/sys/devices/system/node/node%d/hugepages", memory_domain_id);
         if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(hugepages_path))
-            return false; // ? Path too long
+            return status_t::topology_unavailable_k; // ? Path too long
 
         DIR *hugepages_dir = ::opendir(hugepages_path);
-        if (!hugepages_dir) return false; // ? Can't open NUMA node hugepages directory
+        if (!hugepages_dir) return status_t::topology_unavailable_k; // ? No hugepages directory
 
         struct dirent *entry;
         while ((entry = ::readdir(hugepages_dir)) != nullptr && !sizes_.full()) {
@@ -631,7 +638,7 @@ class ram_page_settings {
             setting.bytes_per_page = bytes_per_page;
             setting.available_pages = allocated_pages;
             setting.free_pages = free_pages;
-            sizes_.try_push_back(setting); // ? Guarded by `!sizes_.full()` above
+            [[maybe_unused]] status_t const added = sizes_.push_back(setting); // ? `!full()` above
         }
         ::closedir(hugepages_dir);
 
@@ -657,7 +664,7 @@ class ram_page_settings {
             }
         }
 
-        return true;
+        return status_t::success_k;
 
 #elif FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_WINDOWS
         // Windows exposes exactly one large-page size, and only when the caller holds the
@@ -671,7 +678,7 @@ class ram_page_settings {
         only.available_pages = 0;
         only.free_pages = 0;
         sizes_.clear();
-        sizes_.try_push_back(only);
+        [[maybe_unused]] status_t const added = sizes_.push_back(only);
         total_memory_bytes_ = 0;
         return true;
 #else
@@ -687,7 +694,8 @@ class ram_page_settings {
      *  @return true if reservation was successful, false otherwise
      *  @note Requires root privileges or appropriate capabilities
      */
-    bool try_change(memory_domain_id_t memory_domain_id, std::size_t page_size_bytes, std::size_t num_pages) noexcept {
+    [[nodiscard]] status_t change(memory_domain_id_t memory_domain_id, std::size_t page_size_bytes,
+                                  std::size_t num_pages) noexcept {
         assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
         // Find the matching page size entry
@@ -698,7 +706,7 @@ class ram_page_settings {
                 break;
             }
         }
-        if (page_index >= sizes_.size()) return false; // ? Page size not found
+        if (page_index >= sizes_.size()) return status_t::invalid_argument_k; // ? Page size not found
 
         // Calculate the page size in kB for the directory name
         std::size_t const page_size_kb = page_size_bytes / 1024;
@@ -711,18 +719,18 @@ class ram_page_settings {
             memory_domain_id, page_size_kb);
 
         if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(nr_hugepages_path))
-            return false; // ? Path too long
+            return status_t::topology_unavailable_k; // ? Path too long
 
         // Write the new reservation count
         FILE *nr_file = ::fopen(nr_hugepages_path, "w");
-        if (!nr_file) return false; // ? Can't open for writing (likely permissions issue)
+        if (!nr_file) return status_t::permission_denied_k;
 
         bool const update_success = (::fprintf(nr_file, "%zu", num_pages) > 0);
         ::fclose(nr_file);
-        if (!update_success) return false; // ? Failed to write the number of pages
+        if (!update_success) return status_t::permission_denied_k; // ? The write was refused
 
         // Refresh our internal state if write was successful
-        return try_harvest(memory_domain_id);
+        return harvest(memory_domain_id);
     }
 };
 
@@ -1018,7 +1026,7 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
     char path[256], line[256];
     int const path_result = std::snprintf(path, sizeof(path), "%s/online", sysfs_node_root_k);
     if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return -1; // ? Path too long
-    if (!try_read_line_at_path(path, line, sizeof(line))) return -1;
+    if (failed(read_line_at_path(path, line, sizeof(line)))) return -1;
 
     long highest = -1;
     for_each_id_list_range(line, [&](long, long const high) noexcept {
@@ -1029,19 +1037,20 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
 
 /**
  *  @brief Reads one memory domain's total RAM into @p bytes - what `numa_node_size64` returned.
- *  @retval false where the domain publishes no `meminfo` - offline, or absent from a gappy id space.
- *  @note Fallible rather than 0-sentinel because the distinction is load-bearing: false is that
- *      function's negative return, while true with zero @p bytes is a memoryless domain, still real.
+ *  @retval topology_unavailable_k where the domain publishes no `meminfo` - offline, or absent.
+ *  @note Fallible rather than 0-sentinel because the distinction is load-bearing: a failure is that
+ *      function's negative, while success with zero @p bytes is a memoryless domain, still real.
  *      Its `free` out-parameter is not mirrored - the only caller wrote it and never read it.
  */
-FU_MAYBE_UNUSED_ static inline bool try_read_ram_bytes_of_memory_domain(memory_domain_id_t const id,
-                                                                        std::size_t &bytes) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t read_ram_bytes_of_memory_domain(memory_domain_id_t const id,
+                                                                                      std::size_t &bytes) noexcept {
     char path[256], line[256];
     int const path_result = std::snprintf(path, sizeof(path), "%s/node%d/meminfo", sysfs_node_root_k, id);
-    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return false; // ? Path too long
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path))
+        return status_t::topology_unavailable_k; // ? Path too long
 
     FILE *meminfo_file = ::fopen(path, "r");
-    if (!meminfo_file) return false; // ? Offline domain, or one this kernel will not describe
+    if (!meminfo_file) return status_t::topology_unavailable_k; // ? Offline, or undescribed
     bytes = 0;
     while (::fgets(line, sizeof(line), meminfo_file)) {
         // ? "Node 0 MemTotal:       32768000 kB" - the id repeats on every line, so it is skipped
@@ -1053,28 +1062,30 @@ FU_MAYBE_UNUSED_ static inline bool try_read_ram_bytes_of_memory_domain(memory_d
         }
     }
     ::fclose(meminfo_file);
-    return true;
+    return status_t::success_k;
 }
 
 /**
  *  @brief Reads the cores of one memory domain into @p cores - what `numa_node_to_cpus` filled.
- *  @retval false where the domain names no cpulist, or the mask could not be sized to hold it.
+ *  @retval topology_unavailable_k where the domain names no cpulist, bad_alloc_k where the mask
+ *      could not be sized to hold it.
  *  @note A `core_mask`, so the harvest's own allocator owns it - `numa_allocate_cpumask` malloc'd
  *      behind its back, the very thing `core_mask` refuses `CPU_ALLOC` over.
  */
-FU_MAYBE_UNUSED_ static inline bool try_capture_memory_domain_cores(memory_domain_id_t const id,
-                                                                    core_mask_t &cores) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t capture_memory_domain_cores(memory_domain_id_t const id,
+                                                                                  core_mask_t &cores) noexcept {
     char path[256], line[1024];
     int const path_result = std::snprintf(path, sizeof(path), "%s/node%d/cpulist", sysfs_node_root_k, id);
-    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return false; // ? Path too long
-    if (!try_read_line_at_path(path, line, sizeof(line))) return false;
-    if (!cores.try_resize()) return false; // ! Allocation failed
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path))
+        return status_t::topology_unavailable_k; // ? Path too long
+    if (status_t const probed = read_line_at_path(path, line, sizeof(line)); failed(probed)) return probed;
+    if (status_t const grew = cores.resize(); failed(grew)) return grew; // ! Allocation failed
     cores.clear();
 
     for_each_id_list_range(line, [&](long const low, long const high) noexcept {
         for (long listed = low; listed <= high; ++listed) cores.add(static_cast<core_id_t>(listed));
     });
-    return true;
+    return status_t::success_k;
 }
 #endif // FU_WITH_TOPOLOGY && FU_ON_LINUX
 
@@ -1166,7 +1177,8 @@ FU_MAYBE_UNUSED_ static inline std::size_t apple_sysctl_uint(char const *name) n
  *  so it is gated on that capability: turning it off erases producer, field, and consumer together. */
 #if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
 /** @brief Reads a string `sysctl` by name into @p out (always NUL-terminated), returning success. */
-FU_MAYBE_UNUSED_ static inline bool apple_sysctl_string(char const *name, char *out, std::size_t cap) noexcept {
+[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t apple_sysctl_string(char const *name, char *out,
+                                                                          std::size_t cap) noexcept {
     if (cap == 0) return false;
     std::size_t length = cap;
     if (::sysctlbyname(name, out, &length, nullptr, 0) != 0) {
@@ -1300,19 +1312,21 @@ struct machine_topology {
      *
      *  @param other Source topology.
      *  @retval true  Success, the current instance now owns a deep copy.
-     *  @retval false Allocation failed, the current instance is unchanged.
+     *  @retval bad_alloc_k Allocation failed, the current instance is unchanged.
      */
-    bool try_assign(machine_topology const &other) noexcept {
-        if (this == &other) return true; // ? Self-assignment is a no-op
+    [[nodiscard]] status_t assign(machine_topology const &other) noexcept {
+        if (this == &other) return status_t::success_k; // ? Self-assignment is a no-op
 
-        // Prepare scratch. Any `try_resize` that fails frees whatever the others took, on the way out.
+        // Prepare scratch. Any `resize` that fails frees whatever the others took, on the way out.
         dynamic_array<memory_domain_t, memory_domains_allocator_t> scratch_nodes {
             memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> scratch_core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> scratch_domains {domains_allocator_t {allocator_}};
-        if (!scratch_nodes.try_resize(other.memory_domains_count_)) return false;   // ! OOM
-        if (!scratch_core_ids.try_resize(other.logical_cores_count_)) return false; // ! OOM
-        if (!scratch_domains.try_resize(other.logical_cores_count_)) return false;  // ! OOM
+        if (status_t const grew = scratch_nodes.resize(other.memory_domains_count_); failed(grew)) return grew; // ! OOM
+        if (status_t const grew = scratch_core_ids.resize(other.logical_cores_count_); failed(grew))
+            return grew; // ! OOM
+        if (status_t const grew = scratch_domains.resize(other.logical_cores_count_); failed(grew))
+            return grew; // ! OOM
 
         // Deep copy, re-basing every `first_core_id` into our own core-id block
         core_id_t const *const other_cores = other.domain_core_ids_.data();
@@ -1336,7 +1350,7 @@ struct machine_topology {
         logical_cores_count_ = other.logical_cores_count_;
         compute_domains_count_ = other.compute_domains_count_;
         compute_levels_count_ = other.compute_levels_count_;
-        return true;
+        return status_t::success_k;
     }
 
     /** @brief Number of memory domains, one per NUMA node. @sa `compute_domains_count`. */
@@ -1374,21 +1388,23 @@ struct machine_topology {
      *  or a machine the kernel reports no NUMA for. Every query then returns a sensible whole-machine
      *  answer and a `distributed_pool` degenerates to one domain, so `fu_topology_t` is usable anywhere.
      */
-    bool try_harvest_portable() noexcept {
+    [[nodiscard]] status_t harvest_portable() noexcept {
         reset();
 
         // Name the allowed cores, never just count them: a dense `0..n-1` iota over the count would
         // report ids 0-7 under `taskset -c 8-15` - eight cores we may not run on. Where no mask exists
         // the platform numbers them densely anyway, and the iota is then the honest answer.
         core_mask_t allowed;
-        bool const allowed_known = try_capture_thread_cores(allowed) && allowed.count() != 0;
+        bool const allowed_known = succeeded(capture_thread_cores(allowed)) && allowed.count() != 0;
         std::size_t const cores = allowed_known ? allowed.count() : possible_cores();
-        if (cores == 0) return false;
+        if (cores == 0) return status_t::topology_unavailable_k;
 
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
-        if (!nodes.try_resize(1) || !core_ids.try_resize(cores) || !domains.try_resize(1)) return false;
+        if (status_t const grew = nodes.resize(1); failed(grew)) return grew;
+        if (status_t const grew = core_ids.resize(cores); failed(grew)) return grew;
+        if (status_t const grew = domains.resize(1); failed(grew)) return grew;
 
         core_id_t *const core_ids_ptr = core_ids.data();
         if (allowed_known) {
@@ -1426,13 +1442,13 @@ struct machine_topology {
         logical_cores_count_ = cores;
         compute_domains_count_ = 1;
         compute_levels_count_ = 1;
-        return true;
+        return status_t::success_k;
     }
 
 #if FU_ON_FREEBSD
     /**
      *  @brief Harvests memory domains and their cores through the in-kernel `cpuset`/NUMA framework.
-     *  @sa `try_harvest` dispatches here; `try_harvest_portable` is the fallback when NUMA is absent.
+     *  @sa `harvest` dispatches here; `try_harvest_portable` is the fallback when NUMA is absent.
      *
      *  FreeBSD ships no `libnuma`. `sysctl vm.ndomains` counts the NUMA memory domains, and
      *  `cpuset_getaffinity(CPU_WHICH_DOMAIN)` reports the cores each one owns. Every domain's cores are
@@ -1441,21 +1457,21 @@ struct machine_topology {
      *  on. Cores are not ranked by class here - FreeBSD publishes no per-core capacity - so each memory
      *  domain yields exactly one compute domain.
      */
-    bool try_harvest_freebsd() noexcept {
+    [[nodiscard]] status_t harvest_freebsd() noexcept {
         reset();
 
         core_mask_t allowed;
-        bool const allowed_known = try_capture_thread_cores(allowed) && allowed.count() != 0;
+        bool const allowed_known = succeeded(capture_thread_cores(allowed)) && allowed.count() != 0;
 
         int domain_count = 0;
         std::size_t domain_count_size = sizeof(domain_count);
         if (::sysctlbyname("vm.ndomains", &domain_count, &domain_count_size, nullptr, 0) != 0 || domain_count < 1)
-            return try_harvest_portable(); // ? No NUMA report - one uniform domain
+            return harvest_portable(); // ? No NUMA report - one uniform domain
 
         // A scratch mask reused for each domain's core set. `try_capture_thread_cores` already proved a
         // `cpuset_t`-sized buffer round-trips through the kernel; the domain query fills the same shape.
         core_mask_t domain_mask;
-        if (!domain_mask.try_resize()) return false;
+        if (status_t const grew = domain_mask.resize(); failed(grew)) return grew;
 
         // First pass - measure. Only a domain that owns at least one runnable core becomes a memory
         // domain; one masked away entirely offers nothing to size the pool from.
@@ -1477,15 +1493,15 @@ struct machine_topology {
             fetched_memory_domains += 1;
             fetched_cores += node_cores;
         }
-        if (fetched_memory_domains == 0) return try_harvest_portable(); // ? Every domain masked away
+        if (fetched_memory_domains == 0) return harvest_portable(); // ? Every domain masked away
 
         // Second pass - allocate. One compute domain per memory domain, since cores are unranked here.
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
-        if (!nodes.try_resize(fetched_memory_domains)) return false;
-        if (!core_ids.try_resize(fetched_cores)) return false;
-        if (!domains.try_resize(fetched_memory_domains)) return false;
+        if (status_t const grew = nodes.resize(fetched_memory_domains); failed(grew)) return grew;
+        if (status_t const grew = core_ids.resize(fetched_cores); failed(grew)) return grew;
+        if (status_t const grew = domains.resize(fetched_memory_domains); failed(grew)) return grew;
         memory_domain_t *const nodes_ptr = nodes.data();
         core_id_t *const core_ids_ptr = core_ids.data();
         compute_domain_t *const domains_ptr = domains.data();
@@ -1518,7 +1534,8 @@ struct machine_topology {
             node.volume_ram = ram_per_domain;
             node.first_core_id = core_ids_ptr + core_begin;
             node.logical_cores_count = node_cores;
-            node.page_sizes.try_harvest(static_cast<memory_domain_id_t>(domain_id)); // ! Optional - not raised
+            [[maybe_unused]] status_t const pages = // ! Optional - huge pages are not required
+                node.page_sizes.harvest(static_cast<memory_domain_id_t>(domain_id));
 
             compute_domain_t &domain = domains_ptr[node_index];
             domain.memory_domain_id = static_cast<memory_domain_id_t>(domain_id);
@@ -1551,7 +1568,7 @@ struct machine_topology {
      *  Falls back to `try_harvest_portable` whenever no richer source is available, so a spawned pool
      *  always sees at least one compute and one memory domain.
      */
-    bool try_harvest() noexcept {
+    [[nodiscard]] status_t harvest() noexcept {
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
         reset();
 
@@ -1559,22 +1576,22 @@ struct machine_topology {
         // and a domain's CPU list must be intersected with it - otherwise we would size the pool
         // from the machine and pin workers onto cores the kernel will never schedule us on.
         core_mask_t allowed;
-        bool const allowed_known = try_capture_thread_cores(allowed) && allowed.count() != 0;
+        bool const allowed_known = succeeded(capture_thread_cores(allowed)) && allowed.count() != 0;
 
-        if (!linux_has_memory_domains()) return try_harvest_portable(); // ? No NUMA - one uniform domain
+        if (!linux_has_memory_domains()) return harvest_portable(); // ? No NUMA - one uniform domain
 
         // A scratch mask reused for each domain's core set - sized once, refilled per domain, and
         // owned by this harvest's allocator rather than by a `malloc` behind `numa_allocate_cpumask`.
         core_mask_t domain_mask;
-        if (!domain_mask.try_resize()) return false; // ! Allocation failed
+        if (status_t const grew = domain_mask.resize(); failed(grew)) return grew; // ! Allocation failed
 
         // First pass - measure
         std::size_t fetched_memory_domains = 0, fetched_cores = 0;
         memory_domain_id_t const max_numa_node_id = max_memory_domain_id();
         for (memory_domain_id_t memory_domain_id = 0; memory_domain_id <= max_numa_node_id; ++memory_domain_id) {
             std::size_t node_ram = 0;
-            if (!try_read_ram_bytes_of_memory_domain(memory_domain_id, node_ram)) continue; // ! Offline node
-            if (!try_capture_memory_domain_cores(memory_domain_id, domain_mask)) continue;  // ! Invalid CPU map
+            if (failed(read_ram_bytes_of_memory_domain(memory_domain_id, node_ram))) continue; // ! Offline
+            if (failed(capture_memory_domain_cores(memory_domain_id, domain_mask))) continue;  // ! No CPU map
             // A cpuless memory domain (HBM-flat, CXL expander, GPU HBM) reports zero cores, yet is a
             // valid memory domain - and so is one whose every core was masked away from us.
             std::size_t node_cores = 0;
@@ -1588,16 +1605,16 @@ struct machine_topology {
             fetched_memory_domains += 1;
             fetched_cores += node_cores;
         }
-        if (fetched_memory_domains == 0) return false; // ! Zero nodes is not a valid state
+        if (fetched_memory_domains == 0) return status_t::topology_unavailable_k; // ! Not a valid state
 
         // Second pass - allocate. At most one compute domain per core (fully heterogeneous node).
-        // A failed `try_resize` leaves its array empty, and every array frees itself on the way out.
+        // A failed `resize` leaves its array empty, and every array frees itself on the way out.
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
-        if (!nodes.try_resize(fetched_memory_domains)) return false;
-        if (!core_ids.try_resize(fetched_cores)) return false;
-        if (!domains.try_resize(fetched_cores)) return false;
+        if (status_t const grew = nodes.resize(fetched_memory_domains); failed(grew)) return grew;
+        if (status_t const grew = core_ids.resize(fetched_cores); failed(grew)) return grew;
+        if (status_t const grew = domains.resize(fetched_cores); failed(grew)) return grew;
         memory_domain_t *const domains_outb = nodes.data();
         core_id_t *const core_ids_ptr = core_ids.data();
         compute_domain_t *const domains_ptr = domains.data();
@@ -1605,17 +1622,17 @@ struct machine_topology {
         // A scratch table of every configured CPU's capacity, filled once below and read by the
         // per-node QoS split (which is O(n^2) in comparisons) instead of re-opening sysfs each time.
         std::size_t const configured_cores = possible_cores();
-        if (configured_cores == 0) return false; // ! No CPUs is not a valid state
+        if (configured_cores == 0) return status_t::topology_unavailable_k; // ! Not a valid state
         dynamic_array<std::size_t, capacities_allocator_t> capacities {capacities_allocator_t {allocator_}};
-        if (!capacities.try_resize(configured_cores)) return false;
+        if (status_t const grew = capacities.resize(configured_cores); failed(grew)) return grew;
         std::size_t *const core_capacities = capacities.data();
 
         // Populate
         for (memory_domain_id_t memory_domain_id = 0, core_index = 0, node_index = 0;
              memory_domain_id <= max_numa_node_id; ++memory_domain_id) {
             std::size_t node_ram = 0;
-            if (!try_read_ram_bytes_of_memory_domain(memory_domain_id, node_ram)) continue;
-            if (!try_capture_memory_domain_cores(memory_domain_id, domain_mask)) continue;
+            if (failed(read_ram_bytes_of_memory_domain(memory_domain_id, node_ram))) continue;
+            if (failed(capture_memory_domain_cores(memory_domain_id, domain_mask))) continue;
 
             memory_domain_t &node = domains_outb[node_index];
             node.memory_domain_id = memory_domain_id;
@@ -1639,7 +1656,8 @@ struct machine_topology {
             node.socket_id = node.logical_cores_count > 0 ? socket_id_of_core(node.first_core_id[0]) : -1;
 
             // Fetch Huge Page sizes for this NUMA node
-            node.page_sizes.try_harvest(memory_domain_id); // ! We are not raising the failure - Huge Pages are optional
+            [[maybe_unused]] status_t const pages = // ! Optional - huge pages are not required
+                node.page_sizes.harvest(memory_domain_id);
             node_index++;
         }
 
@@ -1732,16 +1750,16 @@ struct machine_topology {
         // dropped alongside ACPI HMAT - both are the platform's opinion of the fabric - and
         // `measured_fabric::try_harvest` in `distributed.hpp` derives real tiers from observed
         // bandwidths, latency splitting ties.
-        return true; // ? Every scratch array above frees itself here
-#endif               // FU_WITH_TOPOLOGY
+        return status_t::success_k; // ? Every scratch array above frees itself here
+#endif                              // FU_WITH_TOPOLOGY
 #if FU_ON_APPLE
-        return try_harvest_apple();
+        return harvest_apple();
 #elif FU_ON_WINDOWS
-        return try_harvest_windows();
+        return harvest_windows();
 #elif FU_ON_FREEBSD
-        return try_harvest_freebsd();
+        return harvest_freebsd();
 #else
-        return try_harvest_portable();
+        return harvest_portable();
 #endif
     }
 
@@ -1765,7 +1783,7 @@ struct machine_topology {
      *      `KERN_NOT_SUPPORTED` on arm64, and QoS classes are the only placement lever. These
      *      domains are therefore descriptive: `spawn_on` reports them, the kernel still migrates.
      */
-    bool try_harvest_apple() noexcept {
+    [[nodiscard]] status_t harvest_apple() noexcept {
         std::size_t const total_cores = apple_sysctl_uint("hw.logicalcpu");
         if (total_cores == 0) return false;
         std::size_t const memory_size = apple_sysctl_uint("hw.memsize");
@@ -1784,9 +1802,9 @@ struct machine_topology {
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
-        if (!nodes.try_resize(1)) return false;
-        if (!core_ids.try_resize(total_cores)) return false;
-        if (!domains.try_resize(total_cores)) return false;
+        if (status_t const grew = nodes.resize(1); failed(grew)) return grew;
+        if (status_t const grew = core_ids.resize(total_cores); failed(grew)) return grew;
+        if (status_t const grew = domains.resize(total_cores); failed(grew)) return grew;
         memory_domain_t *const domains_outb = nodes.data();
         core_id_t *const core_ids_ptr = core_ids.data();
         compute_domain_t *const domains_ptr = domains.data();
@@ -1900,7 +1918,7 @@ struct machine_topology {
      *  @note A NUMA node spanning several processor groups (the largest servers) is enumerated in full
      *      where the SDK exposes `GroupMasks[]`; @sa `win_numa_for_each_group`.
      */
-    bool try_harvest_windows() noexcept {
+    [[nodiscard]] status_t harvest_windows() noexcept {
         // Pull one relationship class into a heap buffer the caller frees. The record layout is
         // variable-length: every entry carries its own `Size`, and iteration advances by it.
         auto query = [](LOGICAL_PROCESSOR_RELATIONSHIP relationship, DWORD &out_len) -> BYTE * {
@@ -2026,11 +2044,11 @@ struct machine_topology {
         if (counted_nodes == 0 || counted_cores == 0) goto failed_harvest; // ! Nothing to spawn onto
 
         // Allocate the committed arrays. `compute_domains_` is sized to the core count - at most one
-        // domain per core. `try_resize` value-initializes, so the members the fill below does not touch
+        // domain per core. `resize` value-initializes, so the members the fill below does not touch
         // - the `page_sizes` inventory - hold their zeroed defaults rather than garbage.
-        if (!nodes.try_resize(counted_nodes)) goto failed_harvest;    // ! Out of memory
-        if (!core_ids.try_resize(counted_cores)) goto failed_harvest; // ! Out of memory
-        if (!domains.try_resize(counted_cores)) goto failed_harvest;  // ! Out of memory
+        if (!nodes.resize(counted_nodes)) goto failed_harvest;    // ! Out of memory
+        if (!core_ids.resize(counted_cores)) goto failed_harvest; // ! Out of memory
+        if (!domains.resize(counted_cores)) goto failed_harvest;  // ! Out of memory
         domains_outb = nodes.data();
         core_ids_ptr = core_ids.data();
         domains_ptr = domains.data();
@@ -2085,7 +2103,8 @@ struct machine_topology {
                 static_cast<std::size_t>(available_bytes); // ? Available, not installed - Windows has no per-node total
             node.first_core_id = core_ids_ptr + node_first_core;
             node.logical_cores_count = core_cursor - node_first_core;
-            node.page_sizes.try_harvest(node.memory_domain_id); // ! Optional: records the large-page size if available
+            [[maybe_unused]] status_t const pages = // ! Optional - records the large-page size if any
+                node.page_sizes.harvest(node.memory_domain_id);
             node_index += 1;
             if (record->Size == 0) break;
             offset += record->Size;

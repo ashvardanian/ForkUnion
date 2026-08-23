@@ -8,13 +8,140 @@ in C, works on every machine where the two happen to agree, and misplaces pages 
 The second half is pure logic with no FFI - the fair-chunk splitter, the cache-line padding
 wrapper, and the raw-pointer views that let disjoint slices cross a C callback boundary. Mojo
 cannot hand a capturing closure to C, so these are what a caller reaches for most.
+
+`Error` lives here too, and is the only error type the binding raises: Mojo 1.0 allows at most one
+per function and never widens a typed `raises` into a plain one, so a second would force every
+caller to catch and convert. A refusal is a failure, not an absence - a memory domain the machine
+does not have and a zero-byte allocation both raise rather than answering `Optional`.
 """
 
-from std.ffi import c_int
+from std.ffi import c_int, c_size_t
 from std.sys import size_of
+
+# region Pointers
+
+comptime Handle = Pointer[NoneType, MutUntrackedOrigin]
+"""An opaque `fu_topology_t`, `fu_pool_t`, or `fu_fabric_t`."""
+
+comptime Context = Pointer[NoneType, MutUntrackedOrigin]
+"""The type-punned callback context the C API carries through a dispatch."""
+
+comptime CString = Pointer[Int8, ImmUntrackedOrigin]
+"""A borrowed null-terminated C string."""
+
+comptime OutSize = Pointer[c_size_t, MutAnyOrigin]
+"""A `size_t *` the C API writes through.
+
+`MutAnyOrigin` rather than `MutUntrackedOrigin` is load-bearing: it is what tells the compiler the
+callee may write anywhere. With a narrower origin it folds a read of the slot back to whatever the
+caller last stored there, and every out-parameter reads back as zero.
+"""
+
+comptime OutHandle = Pointer[Int, MutAnyOrigin]
+"""A handle-sized slot the C API writes through, with the same aliasing caveat as `OutSize`."""
+
+comptime OutBytes = Pointer[Int8, MutAnyOrigin]
+"""A `char *` buffer the C API fills, with the same aliasing caveat as `OutSize`."""
+
+comptime OutAddress = Pointer[Int, MutAnyOrigin]
+"""A `void **` slot the C API writes an allocation into, with the same aliasing caveat as `OutSize`."""
+
+# endregion Pointers
+
+# region Errors
+
+
+@fieldwise_init
+struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writable):
+    """Why a call into the C core failed."""
+
+    var code: Int32
+    comptime SUCCESS = Self(0)
+    """The call completed."""
+    comptime UNKNOWN = Self(-1)
+    """No reason was reported, or one this build does not name."""
+    comptime BAD_ALLOC = Self(-2)
+    """An allocation or mapping failed; a smaller request may succeed."""
+    comptime CAPACITY_EXHAUSTED = Self(-3)
+    """A fixed ceiling was reached, so a smaller request will not help either."""
+    comptime INVALID_ARGUMENT = Self(-4)
+    """An argument was malformed, out of range, or would overflow a byte count."""
+    comptime CONFIG_MISMATCH = Self(-5)
+    """The handles or the pool kind cannot serve this call together."""
+    comptime ALREADY_SPAWNED = Self(-6)
+    """The pool is already spawned; terminate it first."""
+    comptime NOT_SPAWNED = Self(-7)
+    """The pool was never spawned."""
+    comptime THREAD_REFUSED = Self(-8)
+    """The OS declined to create a thread - a resource limit, or permissions."""
+    comptime TOPOLOGY_UNAVAILABLE = Self(-9)
+    """The machine could not be described."""
+    comptime PERMISSION_DENIED = Self(-10)
+    """A privileged operation was declined."""
+    comptime UNSUPPORTED = Self(-11)
+    """This build or this machine has no such facility."""
+    comptime LIBRARY_MISSING = Self(-12)
+    """Nothing to `dlopen`, or what loaded is a different major version."""
+    comptime SYMBOL_MISSING = Self(-13)
+    """The library loaded but does not export a symbol the binding needs."""
+
+    def write_to(self, mut writer: Some[Writer]):
+        if self == Self.LIBRARY_MISSING:
+            writer.write("the core is not on the loader path")
+        elif self == Self.SYMBOL_MISSING:
+            writer.write("the loaded core is missing a symbol")
+        elif self == Self.BAD_ALLOC:
+            writer.write("an allocation failed")
+        elif self == Self.CAPACITY_EXHAUSTED:
+            writer.write("a fixed capacity was exhausted")
+        elif self == Self.INVALID_ARGUMENT:
+            writer.write("an argument was rejected")
+        elif self == Self.CONFIG_MISMATCH:
+            writer.write("the handles cannot serve this call together")
+        elif self == Self.ALREADY_SPAWNED:
+            writer.write("the pool is already spawned")
+        elif self == Self.NOT_SPAWNED:
+            writer.write("the pool was never spawned")
+        elif self == Self.THREAD_REFUSED:
+            writer.write("the OS declined to create a thread")
+        elif self == Self.TOPOLOGY_UNAVAILABLE:
+            writer.write("the machine could not be described")
+        elif self == Self.PERMISSION_DENIED:
+            writer.write("a privileged operation was declined")
+        elif self == Self.UNSUPPORTED:
+            writer.write("this build has no such facility")
+        else:
+            writer.write("the core reported no reason")
+
+    @staticmethod
+    def of(status: c_int) -> Self:
+        """Lifts a raw `fu_status_t`, keeping an unnamed one rather than guessing."""
+        return Self(Int32(status))
+
+
+@fieldwise_init
+struct Error(Copyable, ImplicitlyCopyable, Writable):
+    """What went wrong reaching the C core, and which symbol or argument it was."""
+
+    var kind: ErrorKind
+    var detail: StaticString
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write("ForkUnion: ", self.kind, " [", self.detail, "]")
+
+
+# endregion Errors
 
 comptime DEFAULT_ALIGNMENT = 128
 """Two cache lines, because most x86 parts prefetch in pairs, matching the C++ `default_alignment_k`."""
+
+
+def bytes_for_elements(count: Int, element_bytes: Int) raises Error -> Int:
+    """Bytes occupied by `count` elements of `element_bytes` each, refusing a product that wraps."""
+    if element_bytes != 0 and count > Int.MAX // element_bytes:
+        raise Error(ErrorKind.INVALID_ARGUMENT, "the element count times the element size would wrap")
+    return count * element_bytes
+
 
 # region Dispatch
 

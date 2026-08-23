@@ -234,8 +234,7 @@ enum class placement_k : unsigned int { shared_k, replicated_k };
 template <schedule_k schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
     if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
-    else
-        pool.for_n_dynamic(n, body);
+    else pool.for_n_dynamic(n, body);
 }
 
 /**
@@ -394,7 +393,7 @@ int main() {
     // Prepare bodies and forces - 2 memory allocations
     fu::dynamic_array<body_t> bodies;
     fu::dynamic_array<vector3_t> forces;
-    if (!bodies.try_resize(n) || !forces.try_resize(n)) {
+    if (failed(bodies.resize(n)) || failed(forces.resize(n))) {
         std::fprintf(stderr, "Failed to allocate %zu bodies\n", n);
         return EXIT_FAILURE;
     }
@@ -435,16 +434,17 @@ int main() {
     std::optional<distributed_pool_t> pool; // ? Spawned for the ForkUnion backends
     std::optional<tf::Executor> taskflow;   // ? Spawned for the Taskflow backends
     if (needs_pool) {
-        if (!topology.try_harvest()) {
+        if (failed(topology.harvest())) {
             std::fprintf(stderr, "Failed to harvest the memory topology\n");
             return EXIT_FAILURE;
         }
         pool.emplace();
-        if (!pool->try_spawn(topology, threads)) {
+        if (failed(pool->spawn(topology, threads))) {
             std::fprintf(stderr, "Failed to spawn the thread pool\n");
             return EXIT_FAILURE;
         }
-        if (selected->engine == engine_t::forkunion_replicated_k && !replicas.try_resize_uninitialized(topology, n)) {
+        if (selected->engine == engine_t::forkunion_replicated_k &&
+            failed(replicas.resize_uninitialized(topology, n))) {
             std::fprintf(stderr, "Failed to allocate per-domain body replicas\n");
             return EXIT_FAILURE;
         }
@@ -464,8 +464,7 @@ int main() {
     std::size_t passes = 0;
     if (iterations > 0)
         for (; passes < iterations; ++passes) selected->run(context);
-    else
-        do {
+    else do {
             selected->run(context), ++passes;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
     double const total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();

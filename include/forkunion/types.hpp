@@ -24,17 +24,20 @@
 #endif
 #endif
 
+#include <cassert> // `assert`
+#include <cstddef> // `std::max_align_t`
+#include <cstdio>  // `std::snprintf`
+#include <cstdlib> // `std::strtoull`
+#include <cstring> // `std::strlen`
+
 #include <array>   // `std::array`
 #include <atomic>  // `std::atomic`
 #include <memory>  // `std::allocator`
 #include <new>     // `std::hardware_destructive_interference_size`
 #include <thread>  // `std::thread`
 #include <utility> // `std::exchange`, `std::addressof`
-#include <cassert> // `assert`
-#include <cstddef> // `std::max_align_t`
-#include <cstdio>  // `std::snprintf`
-#include <cstdlib> // `std::strtoull`
-#include <cstring> // `std::strlen`
+
+#include <forkunion.h> // `fu_status_t`, so the C++ mirror cannot drift from the ABI
 
 #define FORKUNION_VERSION_MAJOR 3
 #define FORKUNION_VERSION_MINOR 0
@@ -398,11 +401,12 @@
 #endif
 
 /** @brief Can we deterministically push a freshly-written cache line away from this core?
- *  @note x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the
- *      `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
- *      and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
- *      unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
- *      reached only through the runtime capability, never this gate. */
+ *
+ *  x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the
+ *  `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
+ *  and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
+ *  unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
+ *  reached only through the runtime capability, never this gate. */
 #if !defined(FU_WITH_DEMOTE_CACHE_LINES)
 #define FU_WITH_DEMOTE_CACHE_LINES                                    \
     ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
@@ -410,8 +414,9 @@
 #endif
 
 /** @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
- *  @note Every ISA here places its write-prefetch in hint space - x86 `PREFETCHW`, AArch64
- *      `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
+ *
+ *  Every ISA here places its write-prefetch in hint space - x86 `PREFETCHW`, AArch64
+ *  `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
 #if !defined(FU_WITH_PROMOTE_CACHE_LINES)
 #define FU_WITH_PROMOTE_CACHE_LINES                                   \
     ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
@@ -480,6 +485,84 @@ enum compute_domain_index_t : std::size_t {};
 
 /** @brief A position in `machine_topology`'s array of @b memory domains, in [0, memory_domains_count). */
 enum memory_domain_index_t : std::size_t {};
+
+/**
+ *  @brief Why a call failed. Success is `0`; every failure is negative.
+ *
+ *  Every enumerator takes its value from `fu_status_t` in `forkunion.h`, so the C++ mirror and
+ *  the ABI cannot drift - there is nothing to keep in step and nothing to assert.
+ *
+ *  Two causes are collapsed on purpose and two are split on purpose. Every argument fault -
+ *  a zero count, an out-of-range index, a byte count that would wrap - is one
+ *  `invalid_argument_k`, because the remedy is the same. `capacity_exhausted_k` is @b not
+ *  `bad_alloc_k`, because retrying smaller cannot help against a fixed ceiling, and
+ *  `already_spawned_k` is not `not_spawned_k`, because one says terminate first and the
+ *  other says spawn first.
+ *
+ *  @note A refused affinity is not here. The pool still partitions work by domain when the
+ *      kernel declines to pin; `all_threads_pinned()` is where that is reported.
+ */
+enum class status_t : int {
+    /** @brief The call completed and any output holds a meaningful value. */
+    success_k = fu_success_k,
+    /** @brief No reason was reported, or one this build does not name. */
+    unknown_k = fu_unknown_k,
+    /** @brief An allocation or mapping failed; a smaller request may succeed. */
+    bad_alloc_k = fu_bad_alloc_k,
+    /** @brief A fixed ceiling was reached, so a smaller request will not help either. */
+    capacity_exhausted_k = fu_capacity_exhausted_k,
+    /** @brief An argument was malformed, out of range, or would overflow a byte count. */
+    invalid_argument_k = fu_invalid_argument_k,
+    /** @brief The handles or the pool kind cannot serve this call together. */
+    config_mismatch_k = fu_config_mismatch_k,
+    /** @brief The pool is already spawned; terminate it first. */
+    already_spawned_k = fu_already_spawned_k,
+    /** @brief The pool was never spawned. */
+    not_spawned_k = fu_not_spawned_k,
+    /** @brief The OS declined to create a thread - a resource limit, or permissions. */
+    thread_refused_k = fu_thread_refused_k,
+    /** @brief The machine could not be described; transient if its CPU set changed mid-probe. */
+    topology_unavailable_k = fu_topology_unavailable_k,
+    /** @brief A privileged operation was declined. */
+    permission_denied_k = fu_permission_denied_k,
+    /** @brief This build or this machine has no such facility. */
+    unsupported_k = fu_unsupported_k,
+    /** @brief Binding-only: nothing to load, or a different major version. Never returned here. */
+    library_missing_k = fu_library_missing_k,
+    /** @brief Binding-only: the loaded core is missing a symbol. Never returned here. */
+    symbol_missing_k = fu_symbol_missing_k,
+};
+
+/** @brief Whether @p status reports success. */
+constexpr bool succeeded(status_t status) noexcept { return status == status_t::success_k; }
+
+/** @brief Whether @p status reports failure. */
+constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
+
+/**
+ *  @brief Static, English description of @p status. Never returns `nullptr`.
+ *  @note The fall-through sits after the `switch` rather than in a `default:` label, so adding
+ *      an enumerator without a text here is a `-Wswitch` warning instead of silent prose.
+ */
+constexpr char const *status_to_string(status_t status) noexcept {
+    switch (status) {
+    case status_t::success_k: return "success";
+    case status_t::unknown_k: return "the core reported no reason";
+    case status_t::bad_alloc_k: return "an allocation failed";
+    case status_t::capacity_exhausted_k: return "a fixed capacity was exhausted";
+    case status_t::invalid_argument_k: return "an argument was rejected";
+    case status_t::config_mismatch_k: return "the handles cannot serve this call together";
+    case status_t::already_spawned_k: return "the pool is already spawned";
+    case status_t::not_spawned_k: return "the pool was never spawned";
+    case status_t::thread_refused_k: return "the OS declined to create a thread";
+    case status_t::topology_unavailable_k: return "the machine could not be described";
+    case status_t::permission_denied_k: return "a privileged operation was declined";
+    case status_t::unsupported_k: return "this build has no such facility";
+    case status_t::library_missing_k: return "the core is not on the loader path";
+    case status_t::symbol_missing_k: return "the loaded core is missing a symbol";
+    }
+    return "an unrecognized status";
+}
 
 /**
  *  @brief Defines the in- and exclusivity of the calling thread in for the executing task.
@@ -700,17 +783,13 @@ inline capabilities_t capability_named(char const *name) noexcept {
 static constexpr std::size_t default_alignment_k = 128;
 
 /**
- *  @brief Defines saturated addition for a given unsigned integer type.
- *  @see https://en.cppreference.com/w/cpp/numeric/add_sat
+ *  @brief Bytes occupied by @p count elements of @p element_bytes each.
+ *  @retval 0 where the product would wrap, which every caller already refuses alongside a
+ *      zero-element request - so the guard and the arithmetic cannot drift apart.
  */
-template <typename scalar_type_>
-inline scalar_type_ add_sat(scalar_type_ a, scalar_type_ b) noexcept {
-    static_assert(std::is_unsigned<scalar_type_>::value, "Scalar type must be an unsigned integer");
-#if defined(__cpp_lib_saturation_arithmetic)
-    return std::add_sat(a, b); // In C++26
-#else
-    return (std::numeric_limits<scalar_type_>::max() - a < b) ? std::numeric_limits<scalar_type_>::max() : a + b;
-#endif
+constexpr std::size_t bytes_for_elements(std::size_t count, std::size_t element_bytes) noexcept {
+    if (element_bytes != 0 && count > (std::numeric_limits<std::size_t>::max)() / element_bytes) return 0;
+    return count * element_bytes;
 }
 
 /**
@@ -1034,11 +1113,11 @@ class limited_array {
 
     constexpr limited_array() noexcept = default;
 
-    /** @retval false when already at capacity; the value is not stored. */
-    bool try_push_back(value_t const &value) noexcept {
-        if (size_ == capacity_k) return false;
+    /** @retval capacity_exhausted_k when already at the fixed ceiling; the value is not stored. */
+    [[nodiscard]] status_t push_back(value_t const &value) noexcept {
+        if (size_ == capacity_k) return status_t::capacity_exhausted_k;
         values_[size_++] = value;
-        return true;
+        return status_t::success_k;
     }
 
     void clear() noexcept { size_ = 0; }
@@ -1057,7 +1136,7 @@ class limited_array {
 };
 
 /**
- *  @brief An owning, allocator-aware array whose size is fixed once, at `try_resize`.
+ *  @brief An owning, allocator-aware array whose size is fixed once, at `resize`.
  *  @sa `limited_array` for bounded counts, `dynamic_padded_array` when each element wants its own line.
  */
 template <typename value_type_, typename allocator_type_ = std::allocator<value_type_>>
@@ -1075,7 +1154,7 @@ class dynamic_array {
     value_t *data_ {nullptr};
     /** @brief Number of live elements. */
     std::size_t size_ {0};
-    /** @brief Allocated element slots; `>= size_`, doubled by `try_push_back` when full. */
+    /** @brief Allocated element slots; `>= size_`, doubled by `push_back` when full. */
     std::size_t capacity_ {0};
 
     void destroy_all() noexcept {
@@ -1120,11 +1199,11 @@ class dynamic_array {
 
     /** @brief Reallocates to exactly @p new_size value-initialized elements, discarding any prior contents.
      *  @retval false on allocation failure, leaving the array empty rather than half-built. */
-    bool try_resize(std::size_t const new_size) noexcept {
+    [[nodiscard]] status_t resize(std::size_t const new_size) noexcept {
         reset();
-        if (new_size == 0) return true;
+        if (new_size == 0) return status_t::success_k;
         value_t *fresh = allocator_.allocate(new_size);
-        if (!fresh) return false;
+        if (!fresh) return status_t::bad_alloc_k;
         // Value-initialization of a trivial type is a zero-fill; say so, rather than trusting the
         // optimizer to turn a placement-new loop back into one.
         if constexpr (std::is_trivially_default_constructible_v<value_t>)
@@ -1134,32 +1213,32 @@ class dynamic_array {
         data_ = fresh;
         size_ = new_size;
         capacity_ = new_size;
-        return true;
+        return status_t::success_k;
     }
 
-    /** @brief Like `try_resize`, but skips the zero-fill so the caller controls the first touch.
+    /** @brief Like `resize`, but skips the zero-fill so the caller controls the first touch.
      *  @note Trivial value types only - nothing is constructed, so every element must be written
-     *      before it is read. @sa `sharded_array::try_resize_uninitialized`, the same contract. */
-    bool try_resize_uninitialized(std::size_t const new_size) noexcept {
+     *      before it is read. @sa `sharded_array::resize_uninitialized`, the same contract. */
+    [[nodiscard]] status_t resize_uninitialized(std::size_t const new_size) noexcept {
         static_assert(std::is_trivially_default_constructible_v<value_t> && std::is_trivially_destructible_v<value_t>,
                       "Uninitialized storage is only safe for trivial value types");
         reset();
-        if (new_size == 0) return true;
+        if (new_size == 0) return status_t::success_k;
         value_t *fresh = allocator_.allocate(new_size);
-        if (!fresh) return false;
+        if (!fresh) return status_t::bad_alloc_k;
         data_ = fresh;
         size_ = new_size;
         capacity_ = new_size;
-        return true;
+        return status_t::success_k;
     }
 
     /** @brief Grows capacity to at least @p new_capacity, preserving the live elements. */
-    bool try_reserve(std::size_t const new_capacity) noexcept {
+    [[nodiscard]] status_t reserve(std::size_t const new_capacity) noexcept {
         static_assert(std::is_trivially_copyable_v<value_t> || std::is_nothrow_move_constructible_v<value_t>,
-                      "try_reserve moves elements; the value type must be trivially copyable or nothrow-movable");
-        if (new_capacity <= capacity_) return true;
+                      "reserve moves elements; the value type must be trivially copyable or nothrow-movable");
+        if (new_capacity <= capacity_) return status_t::success_k;
         value_t *fresh = allocator_.allocate(new_capacity);
-        if (!fresh) return false; // ! Allocation failed; the array is untouched
+        if (!fresh) return status_t::bad_alloc_k; // ! Allocation failed; the array is untouched
         if (size_ != 0) {
             if constexpr (std::is_trivially_copyable_v<value_t>) { std::memcpy(fresh, data_, size_ * sizeof(value_t)); }
             else
@@ -1171,17 +1250,20 @@ class dynamic_array {
         if (data_) allocator_.deallocate(data_, capacity_);
         data_ = fresh;
         capacity_ = new_capacity;
-        return true;
+        return status_t::success_k;
     }
 
-    /** @brief Appends @p value, doubling capacity when full. @retval false on allocation failure. */
-    bool try_push_back(value_t const &value) noexcept {
+    /** @brief Appends @p value, doubling capacity when full. */
+    [[nodiscard]] status_t push_back(value_t const &value) noexcept {
         static_assert(std::is_nothrow_copy_constructible_v<value_t>,
-                      "try_push_back copies the value; the value type must be nothrow-copy-constructible");
-        if (size_ == capacity_ && !try_reserve(capacity_ ? capacity_ * 2 : 4)) return false;
+                      "push_back copies the value; the value type must be nothrow-copy-constructible");
+        if (size_ == capacity_) {
+            if (capacity_ > (std::numeric_limits<std::size_t>::max)() / 2) return status_t::invalid_argument_k;
+            if (status_t const grown = reserve(capacity_ ? capacity_ * 2 : 4); failed(grown)) return grown;
+        }
         ::new (static_cast<void *>(data_ + size_)) value_t(value);
         ++size_;
-        return true;
+        return status_t::success_k;
     }
 
     std::size_t capacity() const noexcept { return capacity_; }
@@ -1284,11 +1366,11 @@ class dynamic_padded_array {
         deallocate();
     }
 
-    bool try_resize(std::size_t new_objects_count) noexcept {
+    [[nodiscard]] status_t resize(std::size_t new_objects_count) noexcept {
         destroy_all();
         deallocate();
 
-        if (new_objects_count == 0) return true;
+        if (new_objects_count == 0) return status_t::success_k;
 
         // An `alignas(128)` object placement-newed into 16-byte-aligned storage is undefined, and it
         // is exactly what happens when the object is a sub-pool and the allocator is `std::allocator`.
@@ -1304,13 +1386,13 @@ class dynamic_padded_array {
         std::size_t bytes = 0;
         if constexpr (has_sized_allocate_at_least<raw_allocator_t>::value) {
             auto new_result = allocator_.allocate_at_least(total);
-            if (!new_result) return false;
+            if (!new_result) return status_t::bad_alloc_k;
             raw = new_result.ptr;
             bytes = new_result.bytes;
         }
         else {
             raw = allocator_.allocate(total);
-            if (!raw) return false;
+            if (!raw) return status_t::bad_alloc_k;
             bytes = total;
         }
 
@@ -1327,7 +1409,7 @@ class dynamic_padded_array {
 
         for (std::size_t i = 0; i < objects_count_; ++i) ::new (static_cast<void *>(ptr(i))) object_t();
 
-        return true;
+        return status_t::success_k;
     }
 
     object_t &operator[](std::size_t i) noexcept { return *ptr(i); }
@@ -1466,7 +1548,8 @@ class spin_mutex {
             while (flag_.load(std::memory_order_relaxed)) micro_yield(flag_, true, static_cast<std::size_t>(0));
         }
     }
-    bool try_lock() noexcept { return !flag_.exchange(true, std::memory_order_acquire); }
+    /** @retval true when the lock was free and is now held; contention, never an error. */
+    bool lock_if_free() noexcept { return !flag_.exchange(true, std::memory_order_acquire); }
     void unlock() noexcept { flag_.store(false, std::memory_order_release); }
 };
 
@@ -1960,7 +2043,7 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *
  *  A drop-in @b serial executor - it satisfies `is_pool` and `is_unsafe_pool` and offers the same
  *  scheduling surface as `flat_pool` - `for_threads`, `for_n`, `for_n_dynamic`, `for_slices` - but with
- *  one thread on one compute domain, no `try_spawn`, and no allocation. `unsafe_for_threads` runs the
+ *  one thread on one compute domain, no `spawn`, and no allocation. `unsafe_for_threads` runs the
  *  fork synchronously as thread 0; everything else composes through `broadcast_join` exactly as the real
  *  pools do. Useful as a serial baseline and as the default executor for the domain-aware containers.
  */

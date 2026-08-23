@@ -30,16 +30,13 @@ The callback is a parameter rather than a value, because a closure that captured
 not be handed to C; the state it needs travels in the scratch instead. The scratch's type and
 origin are inferred from the argument, so a call site names only the work.
 
-Every fallible entry point raises `ForkUnionError` and nothing else, because Mojo allows one error
-type per function and never widens a typed `raises`. Where the C API reports absence rather than
-failure - a domain this machine lacks, a page the kernel refused - the answer is `Optional`.
+Every fallible entry point raises `Error` and nothing else, because Mojo allows one error
+type per function and never widens a typed `raises`. A function raises if and only if it can
+fail, so a refusal is never folded into an `Optional` a caller has to interpret.
 
 This package root re-exports every public symbol from the modules that mirror the C++ core, so
 `from forkunion import X` resolves whatever module X lives in.
 """
-
-# errors
-from .errors import ErrorKind, ForkUnionError
 
 # library
 from .library import Library, Symbols
@@ -47,10 +44,13 @@ from .library import Library, Symbols
 # types
 from .types import (
     DEFAULT_ALIGNMENT,
+    bytes_for_elements,
     CacheAligned,
     CallerExclusivity,
     Capabilities,
     ComputeDomain,
+    Error,
+    ErrorKind,
     IndexedRange,
     IndexedSplit,
     MemoryDomain,

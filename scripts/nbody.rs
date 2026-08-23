@@ -259,7 +259,8 @@ fn iteration_fu_iter_static(
             .for_each_with_prong(|force, prong| {
                 let bi = &bodies_ref[prong.task_index];
                 *force = net_force(bi, &bodies_ref[..n]);
-            });
+            })
+            .expect("force sweep");
     }
     {
         let forces_ref = &*forces;
@@ -267,7 +268,8 @@ fn iteration_fu_iter_static(
             .with_pool(pool)
             .for_each_with_prong(|body, prong| {
                 apply_force(body, &forces_ref[prong.task_index]);
-            });
+            })
+            .expect("apply sweep");
     }
 }
 
@@ -285,7 +287,8 @@ fn iteration_fu_iter_dynamic(
             .for_each_with_prong(|force, prong| {
                 let bi = &bodies_ref[prong.task_index];
                 *force = net_force(bi, &bodies_ref[..n]);
-            });
+            })
+            .expect("force sweep");
     }
     {
         let forces_ref = &*forces;
@@ -293,7 +296,8 @@ fn iteration_fu_iter_dynamic(
             .with_schedule(pool, fu::DynamicScheduler)
             .for_each_with_prong(|body, prong| {
                 apply_force(body, &forces_ref[prong.task_index]);
-            });
+            })
+            .expect("apply sweep");
     }
 }
 
@@ -311,14 +315,20 @@ fn refresh_replicas(
     pool.scope(|scope| {
         let view = scope.view();
         scope.broadcast(|thread_index, compute_domain_index| {
-            let memory_domain = topology.local_memory_of(fu::ComputeDomain(compute_domain_index));
+            let memory_domain = topology
+                .local_memory_of(fu::ComputeDomain(compute_domain_index))
+                .expect("in-range domain");
 
             // Rank this thread among every thread on its memory domain, and count them, so the node's
             // whole team splits [0, n) without overlap even when several compute domains share the node.
             let mut threads_on_memory_domain = 0usize;
             let mut local_index_on_memory_domain = 0usize;
             for other in 0..view.compute_domains_count() {
-                if topology.local_memory_of(fu::ComputeDomain(other)) != memory_domain {
+                if topology
+                    .local_memory_of(fu::ComputeDomain(other))
+                    .expect("in-range domain")
+                    != memory_domain
+                {
                     continue;
                 }
                 if other < compute_domain_index {
@@ -369,7 +379,8 @@ fn bodies_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> &'a 
         let memory_domain = work
             .topology
             .expect("topology")
-            .local_memory_of(fu::ComputeDomain(compute_domain));
+            .local_memory_of(fu::ComputeDomain(compute_domain))
+            .expect("in-range domain");
         work.replicas.expect("replicas").replica_ptr(memory_domain) as *const Body
     } else {
         work.bodies_ptr.as_ptr()
@@ -694,12 +705,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Engine::ForkUnion | Engine::ForkUnionReplicated => {
             let probed = fu::Topology::new().expect("Failed to detect hardware topology");
             fu_pool = Some(
-                fu::ThreadPool::try_spawn(&probed, threads)
+                fu::ThreadPool::spawn(&probed, threads)
                     .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}")),
             );
             if selected.engine == Engine::ForkUnionReplicated {
                 replicas = Some(
-                    fu::ReplicatedArray::<Body>::try_new(&probed, bodies_n)
+                    fu::ReplicatedArray::<Body>::new_in(&probed, bodies_n)
                         .expect("Failed to allocate per-domain body replicas"),
                 );
             }

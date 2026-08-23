@@ -14,7 +14,48 @@ from std.ffi import OwnedDLHandle, __fn_type_is_cabi, c_int, c_size_t
 from std.memory import ArcPointer
 from std.sys.info import CompilationTarget
 
-from forkunion.errors import ErrorKind, ForkUnionError
+from forkunion.allocators import (
+    AllocateAtLeastOnDomain,
+    AllocateOnDomain,
+    AllocateSymmetric,
+    FreeOnDomain,
+    FreeSymmetric,
+)
+from forkunion.scheduling import (
+    FabricDelete,
+    FabricEdge,
+    FabricHarvest,
+    FabricLevelIn,
+    FabricLevelsCount,
+    FabricNew,
+    PoolCapabilities,
+    PoolCount,
+    PoolCountIn,
+    PoolDelete,
+    PoolExclusivity,
+    PoolForN,
+    PoolForSlices,
+    PoolForThreads,
+    PoolIsComplete,
+    PoolLocateThreadIn,
+    PoolNew,
+    PoolSleep,
+    PoolSpawn,
+    PoolSpawnOn,
+    PoolTerminate,
+    PoolUnsafeForThreads,
+    PoolUnsafeJoin,
+)
+from forkunion.topology import (
+    Capabilities32,
+    MemoryDomainIdAt,
+    NameCapabilities,
+    TopologyCount,
+    TopologyCountIn,
+    TopologyDelete,
+    TopologyNew,
+)
+from forkunion.types import Error, ErrorKind
 
 comptime LIBRARY_FILE = StaticString("libforkunion.dylib" if CompilationTarget.is_macos() else "libforkunion.so")
 """The loader already searches the environment's library directory, because `mojo build` bakes it
@@ -25,73 +66,7 @@ comptime BINDING_MAJOR = 3
 
 # region Signatures
 
-comptime Handle = Pointer[NoneType, MutUntrackedOrigin]
-"""An opaque `fu_topology_t`, `fu_pool_t`, or `fu_fabric_t`."""
-
-comptime Context = Pointer[NoneType, MutUntrackedOrigin]
-"""The type-punned callback context the C API carries through a dispatch."""
-
-comptime CString = Pointer[Int8, ImmUntrackedOrigin]
-"""A borrowed null-terminated C string."""
-
-comptime OutSize = Pointer[c_size_t, MutAnyOrigin]
-"""A `size_t *` the C API writes through.
-
-`MutAnyOrigin` rather than `MutUntrackedOrigin` is load-bearing: it is what tells the compiler the
-callee may write anywhere. With a narrower origin it folds a read of the slot back to whatever the
-caller last stored there, and every out-parameter reads back as zero.
-"""
-
-comptime OutBytes = Pointer[Int8, MutAnyOrigin]
-"""A `char *` buffer the C API fills, with the same aliasing caveat as `OutSize`."""
-
-# Handles and buffers come back as addresses rather than `Pointer`s, because `Pointer` is
-# non-null by construction and every one of these can answer NULL.
 comptime VersionPart = def() thin abi("C") -> c_int
-comptime Capabilities32 = def() thin abi("C") -> c_int
-comptime NameCapabilities = def(c_int, OutBytes, c_size_t) thin abi("C") -> c_size_t
-
-comptime TopologyNew = def() thin abi("C") -> Int
-comptime TopologyDelete = def(Handle) thin abi("C") -> None
-comptime TopologyCount = def(Handle) thin abi("C") -> c_size_t
-comptime TopologyCountIn = def(Handle, c_size_t) thin abi("C") -> c_size_t
-comptime MemoryDomainIdAt = def(Handle, c_size_t) thin abi("C") -> c_int
-
-comptime AllocateOnDomain = def(c_int, c_size_t) thin abi("C") -> Int
-comptime AllocateAtLeastOnDomain = def(c_int, c_size_t, OutSize, OutSize) thin abi("C") -> Int
-comptime FreeOnDomain = def(c_int, Pointer[Int8, MutUntrackedOrigin], c_size_t) thin abi("C") -> None
-comptime AllocateSymmetric = def(Handle, c_size_t, OutSize, OutSize, OutSize, OutSize) thin abi("C") -> Int
-comptime FreeSymmetric = def(Pointer[Int8, MutUntrackedOrigin], c_size_t) thin abi("C") -> None
-
-comptime PoolNew = def(CString, c_int) thin abi("C") -> Int
-comptime PoolDelete = def(Handle) thin abi("C") -> None
-comptime PoolCapabilities = def(Handle) thin abi("C") -> c_int
-comptime PoolSpawn = def(Handle, Handle, c_size_t, c_int) thin abi("C") -> c_int
-comptime PoolSpawnOn = def(Handle, Handle, c_size_t, c_size_t, c_int) thin abi("C") -> c_int
-comptime PoolExclusivity = def(Handle) thin abi("C") -> c_int
-comptime PoolCount = def(Handle) thin abi("C") -> c_size_t
-comptime PoolCountIn = def(Handle, c_size_t) thin abi("C") -> c_size_t
-comptime PoolLocateThreadIn = def(Handle, c_size_t, c_size_t) thin abi("C") -> c_size_t
-comptime PoolSleep = def(Handle, c_size_t) thin abi("C") -> None
-comptime PoolTerminate = def(Handle) thin abi("C") -> None
-
-comptime FabricNew = def() thin abi("C") -> Int
-comptime FabricDelete = def(Handle) thin abi("C") -> None
-comptime FabricHarvest = def(Handle, Handle, Handle) thin abi("C") -> c_int
-comptime FabricEdge = def(Handle, c_size_t, c_size_t) thin abi("C") -> c_size_t
-comptime FabricLevelIn = def(Handle, c_size_t) thin abi("C") -> c_size_t
-comptime FabricLevelsCount = def(Handle) thin abi("C") -> c_size_t
-
-comptime ForThreads = def(Context, c_size_t, c_size_t) thin abi("C") -> None
-comptime ForProngs = def(Context, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
-comptime ForSlices = def(Context, c_size_t, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
-
-comptime PoolForThreads = def(Handle, ForThreads, Context) thin abi("C") -> None
-comptime PoolForN = def(Handle, c_size_t, ForProngs, Context) thin abi("C") -> None
-comptime PoolForSlices = def(Handle, c_size_t, ForSlices, Context) thin abi("C") -> None
-comptime PoolUnsafeForThreads = def(Handle, ForThreads, Context) thin abi("C") -> c_size_t
-comptime PoolIsComplete = def(Handle, c_size_t) thin abi("C") -> c_int
-comptime PoolUnsafeJoin = def(Handle, c_size_t) thin abi("C") -> None
 
 # endregion Signatures
 
@@ -99,7 +74,7 @@ comptime PoolUnsafeJoin = def(Handle, c_size_t) thin abi("C") -> None
 @always_inline
 def _resolve[
     Signature: TrivialRegisterPassable
-](ref handle: OwnedDLHandle, name: StaticString) raises ForkUnionError -> Signature:
+](ref handle: OwnedDLHandle, name: StaticString) raises Error -> Signature:
     """One `dlsym`, checked once, typed from here on.
 
     `get_symbol` answers `Optional` where `get_function` aborts the process, which is what lets a
@@ -108,7 +83,7 @@ def _resolve[
     comptime assert __fn_type_is_cabi[Signature](), 'the signature must carry abi("C")'
     var address = handle.get_symbol[NoneType](name)
     if not address:
-        raise ForkUnionError(ErrorKind.SYMBOL_MISSING, name)
+        raise Error(ErrorKind.SYMBOL_MISSING, name)
     return Pointer(to=address.value()).unsafe_bitcast[Signature]()[]
 
 
@@ -183,7 +158,7 @@ struct Symbols:
     var pool_is_complete: PoolIsComplete
     var pool_unsafe_join: PoolUnsafeJoin
 
-    def __init__(out self, ref handle: OwnedDLHandle) raises ForkUnionError:
+    def __init__(out self, ref handle: OwnedDLHandle) raises Error:
         self.version_major = _resolve[VersionPart](handle, "fu_version_major")
         self.version_minor = _resolve[VersionPart](handle, "fu_version_minor")
         self.version_patch = _resolve[VersionPart](handle, "fu_version_patch")
@@ -256,14 +231,14 @@ struct _Loaded:
     var handle: OwnedDLHandle
     var symbols: Symbols
 
-    def __init__(out self) raises ForkUnionError:
+    def __init__(out self) raises Error:
         try:
             self.handle = OwnedDLHandle(String(LIBRARY_FILE))
         except:
-            raise ForkUnionError(ErrorKind.LIBRARY_MISSING, LIBRARY_FILE)
+            raise Error(ErrorKind.LIBRARY_MISSING, LIBRARY_FILE)
         self.symbols = Symbols(self.handle)
         if Int(self.symbols.version_major()) != BINDING_MAJOR:
-            raise ForkUnionError(
+            raise Error(
                 ErrorKind.LIBRARY_MISSING,
                 "major version differs from the binding",
             )
@@ -279,7 +254,7 @@ struct Library(ImplicitlyCopyable):
 
     var shared: ArcPointer[_Loaded]
 
-    def __init__(out self) raises ForkUnionError:
+    def __init__(out self) raises Error:
         self.shared = ArcPointer(_Loaded())
 
     @always_inline

@@ -44,7 +44,6 @@ const allocators = @import("forkunion/allocators.zig");
 const scheduling = @import("forkunion/scheduling.zig");
 
 // topology
-pub const Error = topology.Error;
 pub const CallerExclusivity = topology.CallerExclusivity;
 pub const Capabilities = topology.Capabilities;
 pub const Topology = topology.Topology;
@@ -55,6 +54,8 @@ pub const runtimeCapabilities = topology.runtimeCapabilities;
 pub const runtimeCapabilitiesString = topology.runtimeCapabilitiesString;
 
 // types
+pub const Status = types.Status;
+pub const Error = types.Error;
 pub const ComputeDomain = types.ComputeDomain;
 pub const MemoryDomain = types.MemoryDomain;
 pub const MemoryDomainId = types.MemoryDomainId;

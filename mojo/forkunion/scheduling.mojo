@@ -12,10 +12,56 @@ pointer is what stops a caller from handing over storage that dies first.
 
 from std.ffi import c_int, c_size_t
 
-from forkunion.errors import ErrorKind, ForkUnionError
-from forkunion.library import Context, Handle, Library
+from std.memory import stack_allocation
+
+from forkunion.library import Library
 from forkunion.topology import Topology
-from forkunion.types import CallerExclusivity, Capabilities, ComputeDomain, MemoryDomain, Prong
+from forkunion.types import (
+    CallerExclusivity,
+    Capabilities,
+    ComputeDomain,
+    Context,
+    CString,
+    Error,
+    ErrorKind,
+    Handle,
+    MemoryDomain,
+    OutHandle,
+    OutSize,
+    Prong,
+)
+
+
+# region Signatures
+
+comptime PoolNew = def(CString, c_int, OutHandle) thin abi("C") -> c_int
+comptime PoolDelete = def(Handle) thin abi("C") -> None
+comptime PoolCapabilities = def(Handle, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+comptime PoolSpawn = def(Handle, Handle, c_size_t, c_int) thin abi("C") -> c_int
+comptime PoolSpawnOn = def(Handle, Handle, c_size_t, c_size_t, c_int) thin abi("C") -> c_int
+comptime PoolExclusivity = def(Handle, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+comptime PoolCount = def(Handle, OutSize) thin abi("C") -> c_int
+comptime PoolCountIn = def(Handle, c_size_t, OutSize) thin abi("C") -> c_int
+comptime PoolLocateThreadIn = def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int
+comptime PoolSleep = def(Handle, c_size_t) thin abi("C") -> None
+comptime PoolTerminate = def(Handle) thin abi("C") -> None
+comptime FabricNew = def(OutHandle) thin abi("C") -> c_int
+comptime FabricDelete = def(Handle) thin abi("C") -> None
+comptime FabricHarvest = def(Handle, Handle, Handle) thin abi("C") -> c_int
+comptime FabricEdge = def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int
+comptime FabricLevelIn = def(Handle, c_size_t, OutSize) thin abi("C") -> c_int
+comptime FabricLevelsCount = def(Handle, OutSize) thin abi("C") -> c_int
+comptime ForThreads = def(Context, c_size_t, c_size_t) thin abi("C") -> None
+comptime ForProngs = def(Context, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
+comptime ForSlices = def(Context, c_size_t, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
+comptime PoolForThreads = def(Handle, ForThreads, Context) thin abi("C") -> c_int
+comptime PoolForN = def(Handle, c_size_t, ForProngs, Context) thin abi("C") -> c_int
+comptime PoolForSlices = def(Handle, c_size_t, ForSlices, Context) thin abi("C") -> c_int
+comptime PoolUnsafeForThreads = def(Handle, ForThreads, Context, OutSize) thin abi("C") -> c_int
+comptime PoolIsComplete = def(Handle, c_size_t, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+comptime PoolUnsafeJoin = def(Handle, c_size_t) thin abi("C") -> None
+
+# endregion Signatures
 
 
 @always_inline
@@ -43,14 +89,14 @@ struct Pool:
         exclusivity: CallerExclusivity = CallerExclusivity.INCLUSIVE,
         name: StaticString = "",
         allowed: Capabilities = Capabilities.ALL,
-    ) raises ForkUnionError:
+    ) raises Error:
         """Spawns `threads` workers across the whole machine."""
         self.library = topology.library
         self.handle = Self._create(self.library, name, allowed)
         var spawned = self.library.symbols().pool_spawn(
             topology.handle, self.handle, c_size_t(threads), exclusivity.identifier
         )
-        Self._check_spawn(threads, spawned, "fu_pool_spawn")
+        Self._check_spawn(spawned, "fu_pool_spawn")
 
     @staticmethod
     def on(
@@ -60,7 +106,7 @@ struct Pool:
         exclusivity: CallerExclusivity = CallerExclusivity.INCLUSIVE,
         name: StaticString = "",
         allowed: Capabilities = Capabilities.ALL,
-    ) raises ForkUnionError -> Self:
+    ) raises Error -> Self:
         """Spawns `threads` workers pinned to one compute domain."""
         var library = topology.library
         var handle = Self._create(library, name, allowed)
@@ -71,7 +117,7 @@ struct Pool:
             c_size_t(threads),
             exclusivity.identifier,
         )
-        Self._check_spawn(threads, spawned, "fu_pool_spawn_on")
+        Self._check_spawn(spawned, "fu_pool_spawn_on")
         return Self(library=library, handle=handle)
 
     def __init__(out self, *, library: Library, handle: Handle):
@@ -79,23 +125,25 @@ struct Pool:
         self.handle = handle
 
     @staticmethod
-    def _create(library: Library, name: StaticString, allowed: Capabilities) raises ForkUnionError -> Handle:
+    def _create(library: Library, name: StaticString, allowed: Capabilities) raises Error -> Handle:
         """Allocates the pool object; placement is decided later, at the spawn."""
-        var address = library.symbols().pool_new(
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, Int]()
+        out[unsafe_offset=0] = 0
+        var status = library.symbols().pool_new(
             name.unsafe_ptr().unsafe_bitcast[Int8]().unsafe_origin_cast[ImmUntrackedOrigin](),
             c_int(Int(allowed.bits)),
+            out.unsafe_origin_cast[MutAnyOrigin](),
         )
-        if address == 0:
-            raise ForkUnionError(ErrorKind.CREATION_FAILED, "fu_pool_new")
-        return Handle(unsafe_from_address=address)
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_new")
+        return Handle(unsafe_from_address=out[unsafe_offset=0])
 
     @staticmethod
-    def _check_spawn(threads: Int, spawned: c_int, symbol: StaticString) raises ForkUnionError:
-        """Zero threads is not a pool, and is rejected here rather than blamed on the core."""
-        if threads == 0:
-            raise ForkUnionError(ErrorKind.INVALID_PARAMETER, "a pool needs at least one thread")
-        if spawned == 0:
-            raise ForkUnionError(ErrorKind.SPAWN_FAILED, symbol)
+    def _check_spawn(spawned: c_int, symbol: StaticString) raises Error:
+        """The core now names its own reason, so nothing is guessed here."""
+        if spawned != 0:
+            raise Error(ErrorKind.of(spawned), symbol)
 
     def __deinit__(deinit self):
         self.library.symbols().pool_terminate(self.handle)
@@ -105,33 +153,69 @@ struct Pool:
 
     # region Queries
 
-    def threads_count(self) -> Int:
+    @always_inline
+    def _count(self, symbol: def(Handle, OutSize) thin abi("C") -> c_int, detail: StaticString) raises Error -> Int:
+        """Runs a `(handle) -> status` query; an unspawned pool is a reported failure."""
+        var out = stack_allocation[1, c_size_t]()
+        out[unsafe_offset=0] = c_size_t(0)
+        var status = symbol(self.handle, out.unsafe_origin_cast[MutAnyOrigin]())
+        if status != 0:
+            raise Error(ErrorKind.of(status), detail)
+        return Int(out[unsafe_offset=0])
+
+    def threads_count(self) raises Error -> Int:
         """Workers in the pool, including the caller on an inclusive pool."""
-        return Int(self.library.symbols().pool_threads_count(self.handle))
+        return self._count(self.library.symbols().pool_threads_count, "fu_pool_threads_count")
 
-    def threads_count_in(self, domain: ComputeDomain) -> Int:
+    def threads_count_in(self, domain: ComputeDomain) raises Error -> Int:
         """Workers the pool placed in one compute domain."""
-        return Int(self.library.symbols().pool_threads_count_in(self.handle, c_size_t(domain.index)))
-
-    def compute_domains_count(self) -> Int:
-        """Compute domains this pool spans, which may be fewer than the machine's."""
-        return Int(self.library.symbols().pool_compute_domains_count(self.handle))
-
-    def locate_thread_in(self, global_thread_index: Int, domain: ComputeDomain) -> Int:
-        """A global thread index expressed as a local one inside a compute domain."""
-        return Int(
-            self.library.symbols().pool_locate_thread_in(
-                self.handle, c_size_t(global_thread_index), c_size_t(domain.index)
-            )
+        var out = stack_allocation[1, c_size_t]()
+        out[unsafe_offset=0] = c_size_t(0)
+        var status = self.library.symbols().pool_threads_count_in(
+            self.handle, c_size_t(domain.index), out.unsafe_origin_cast[MutAnyOrigin]()
         )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_threads_count_in")
+        return Int(out[unsafe_offset=0])
 
-    def caller_exclusivity(self) -> CallerExclusivity:
+    def compute_domains_count(self) raises Error -> Int:
+        """Compute domains this pool spans, which may be fewer than the machine's."""
+        return self._count(self.library.symbols().pool_compute_domains_count, "fu_pool_compute_domains_count")
+
+    def locate_thread_in(self, global_thread_index: Int, domain: ComputeDomain) raises Error -> Int:
+        """A global thread index expressed as a local one inside a compute domain."""
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, c_size_t]()
+        out[unsafe_offset=0] = c_size_t(0)
+        var status = self.library.symbols().pool_locate_thread_in(
+            self.handle,
+            c_size_t(global_thread_index),
+            c_size_t(domain.index),
+            out.unsafe_origin_cast[MutAnyOrigin](),
+        )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_locate_thread_in")
+        return Int(out[unsafe_offset=0])
+
+    def caller_exclusivity(self) raises Error -> CallerExclusivity:
         """Queried live, so it stays correct across a terminate and a re-spawn."""
-        return CallerExclusivity(self.library.symbols().pool_caller_exclusivity(self.handle))
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, Int32]()
+        out[unsafe_offset=0] = Int32(0)
+        var status = self.library.symbols().pool_caller_exclusivity(self.handle, out.unsafe_origin_cast[MutAnyOrigin]())
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_caller_exclusivity")
+        return CallerExclusivity(c_int(Int(out[unsafe_offset=0])))
 
-    def capabilities(self) -> Capabilities:
+    def capabilities(self) raises Error -> Capabilities:
         """The requested allow-mask narrowed by what the machine offers; masking never adds."""
-        return Capabilities(UInt32(Int(self.library.symbols().pool_capabilities(self.handle))))
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, Int32]()
+        out[unsafe_offset=0] = Int32(0)
+        var status = self.library.symbols().pool_capabilities(self.handle, out.unsafe_origin_cast[MutAnyOrigin]())
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_capabilities")
+        return Capabilities(UInt32(Int(out[unsafe_offset=0])))
 
     def sleep(self, microseconds: Int):
         """Parks the workers; the next dispatch wakes them."""
@@ -150,7 +234,7 @@ struct Pool:
         scratch_origin: MutOrigin,
         //,
         work: def(Int, Int, mut Scratch) thin -> None,
-    ](self, ref[scratch_origin] scratch: Scratch):
+    ](self, ref[scratch_origin] scratch: Scratch) raises Error:
         """One call per worker, which is where per-thread scratch is set up or torn down.
 
         The callback takes the thread and compute-domain indices; the C API supplies no task index
@@ -160,40 +244,46 @@ struct Pool:
         def trampoline(carried: Context, thread: c_size_t, domain: c_size_t) abi("C"):
             work(Int(thread), Int(domain), carried.unsafe_bitcast[Scratch]()[])
 
-        self.library.symbols().pool_for_threads(self.handle, trampoline, _erase(scratch))
+        var status = self.library.symbols().pool_for_threads(self.handle, trampoline, _erase(scratch))
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_for_threads")
 
     def for_n[
         Scratch: AnyType,
         scratch_origin: MutOrigin,
         //,
         work: def(Prong, mut Scratch) thin -> None,
-    ](self, n: Int, ref[scratch_origin] scratch: Scratch):
+    ](self, n: Int, ref[scratch_origin] scratch: Scratch) raises Error:
         """Splits `n` prongs into equal contiguous chunks and blocks until every one has finished."""
 
         def trampoline(carried: Context, task: c_size_t, thread: c_size_t, domain: c_size_t) abi("C"):
             work(Prong(Int(task), Int(thread), Int(domain)), carried.unsafe_bitcast[Scratch]()[])
 
-        self.library.symbols().pool_for_n(self.handle, c_size_t(n), trampoline, _erase(scratch))
+        var status = self.library.symbols().pool_for_n(self.handle, c_size_t(n), trampoline, _erase(scratch))
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_for_n")
 
     def for_n_dynamic[
         Scratch: AnyType,
         scratch_origin: MutOrigin,
         //,
         work: def(Prong, mut Scratch) thin -> None,
-    ](self, n: Int, ref[scratch_origin] scratch: Scratch):
+    ](self, n: Int, ref[scratch_origin] scratch: Scratch) raises Error:
         """The same, but prongs are claimed as threads free up, for work of uneven cost."""
 
         def trampoline(carried: Context, task: c_size_t, thread: c_size_t, domain: c_size_t) abi("C"):
             work(Prong(Int(task), Int(thread), Int(domain)), carried.unsafe_bitcast[Scratch]()[])
 
-        self.library.symbols().pool_for_n_dynamic(self.handle, c_size_t(n), trampoline, _erase(scratch))
+        var status = self.library.symbols().pool_for_n_dynamic(self.handle, c_size_t(n), trampoline, _erase(scratch))
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_for_n_dynamic")
 
     def for_slices[
         Scratch: AnyType,
         scratch_origin: MutOrigin,
         //,
         work: def(Prong, Int, mut Scratch) thin -> None,
-    ](self, n: Int, ref[scratch_origin] scratch: Scratch):
+    ](self, n: Int, ref[scratch_origin] scratch: Scratch) raises Error:
         """One contiguous run per worker, for vectorized or per-slice-setup work.
 
         The prong's `task_index` is the run's first index and the second argument is its length;
@@ -207,7 +297,9 @@ struct Pool:
                 carried.unsafe_bitcast[Scratch]()[],
             )
 
-        self.library.symbols().pool_for_slices(self.handle, c_size_t(n), trampoline, _erase(scratch))
+        var status = self.library.symbols().pool_for_slices(self.handle, c_size_t(n), trampoline, _erase(scratch))
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_for_slices")
 
     # endregion Blocking Dispatch
 
@@ -219,7 +311,9 @@ struct Pool:
         scratch_origin: MutOrigin,
         //,
         work: def(Int, Int, mut Scratch) thin -> None,
-    ](ref[pool_origin] self, ref[scratch_origin] scratch: Scratch) -> BroadcastJoin[pool_origin, scratch_origin]:
+    ](ref[pool_origin] self, ref[scratch_origin] scratch: Scratch) raises Error -> BroadcastJoin[
+        pool_origin, scratch_origin
+    ]:
         """Dispatches on every worker without blocking, returning a guard that joins on exit.
 
         Use it as a context manager. On an exclusive pool the work starts here and the generation
@@ -229,8 +323,15 @@ struct Pool:
         def trampoline(carried: Context, thread: c_size_t, domain: c_size_t) abi("C"):
             work(Int(thread), Int(domain), carried.unsafe_bitcast[Scratch]()[])
 
-        var generation = Int(self.library.symbols().pool_unsafe_for_threads(self.handle, trampoline, _erase(scratch)))
-        return BroadcastJoin[pool_origin, scratch_origin](Pointer(to=self), generation)
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, c_size_t]()
+        out[unsafe_offset=0] = c_size_t(0)
+        var status = self.library.symbols().pool_unsafe_for_threads(
+            self.handle, trampoline, _erase(scratch), out.unsafe_origin_cast[MutAnyOrigin]()
+        )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_unsafe_for_threads")
+        return BroadcastJoin[pool_origin, scratch_origin](Pointer(to=self), Int(out[unsafe_offset=0]))
 
     # endregion Non-Blocking Dispatch
 
@@ -256,9 +357,19 @@ struct BroadcastJoin[pool_origin: ImmOrigin, scratch_origin: MutOrigin](Implicit
     def __exit__(mut self):
         self.pool[].library.symbols().pool_unsafe_join(self.pool[].handle, c_size_t(self.generation))
 
-    def is_complete(self) -> Bool:
+    def is_complete(self) raises Error -> Bool:
         """A non-blocking poll; meaningful on exclusive pools, where the caller owes no slice."""
-        return self.pool[].library.symbols().pool_is_complete(self.pool[].handle, c_size_t(self.generation)) != 0
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, Int32]()
+        out[unsafe_offset=0] = Int32(0)
+        var status = (
+            self.pool[]
+            .library.symbols()
+            .pool_is_complete(self.pool[].handle, c_size_t(self.generation), out.unsafe_origin_cast[MutAnyOrigin]())
+        )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_pool_is_complete")
+        return out[unsafe_offset=0] != 0
 
 
 struct Fabric:
@@ -271,45 +382,74 @@ struct Fabric:
     var library: Library
     var handle: Handle
 
-    def __init__(out self, library: Library) raises ForkUnionError:
+    def __init__(out self, library: Library) raises Error:
         self.library = library
-        var address = library.symbols().fabric_new()
-        if address == 0:
-            raise ForkUnionError(ErrorKind.CREATION_FAILED, "fu_fabric_new")
-        self.handle = Handle(unsafe_from_address=address)
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, Int]()
+        out[unsafe_offset=0] = 0
+        var status = library.symbols().fabric_new(out.unsafe_origin_cast[MutAnyOrigin]())
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_fabric_new")
+        self.handle = Handle(unsafe_from_address=out[unsafe_offset=0])
 
     def __deinit__(deinit self):
         self.library.symbols().fabric_delete(self.handle)
 
-    def try_harvest(mut self, topology: Topology, pool: Pool) -> Bool:
+    def harvest(mut self, topology: Topology, pool: Pool) raises Error:
         """Measures every reachable edge, using the pool to drive the probes. Takes seconds."""
-        return self.library.symbols().fabric_harvest(topology.handle, pool.handle, self.handle) != 0
+        var status = self.library.symbols().fabric_harvest(topology.handle, pool.handle, self.handle)
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_fabric_harvest")
 
     @always_inline
     def _edge(
         self,
-        symbol: def(Handle, c_size_t, c_size_t) thin abi("C") -> c_size_t,
+        symbol: def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int,
         compute: ComputeDomain,
         memory: MemoryDomain,
-    ) -> Int:
-        return Int(symbol(self.handle, c_size_t(compute.index), c_size_t(memory.index)))
+    ) raises Error -> Int:
+        var out = stack_allocation[1, c_size_t]()
+        out[unsafe_offset=0] = c_size_t(0)
+        var status = symbol(
+            self.handle,
+            c_size_t(compute.index),
+            c_size_t(memory.index),
+            out.unsafe_origin_cast[MutAnyOrigin](),
+        )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "a fabric edge query was refused")
+        return Int(out[unsafe_offset=0])
 
-    def memory_latency(self, compute: ComputeDomain, memory: MemoryDomain) -> Int:
+    def memory_latency(self, compute: ComputeDomain, memory: MemoryDomain) raises Error -> Int:
         """Observed access latency from one compute domain to one memory domain."""
         return self._edge(self.library.symbols().fabric_memory_latency, compute, memory)
 
-    def memory_bandwidth(self, compute: ComputeDomain, memory: MemoryDomain) -> Int:
+    def memory_bandwidth(self, compute: ComputeDomain, memory: MemoryDomain) raises Error -> Int:
         """Observed bandwidth from one compute domain to one memory domain."""
         return self._edge(self.library.symbols().fabric_memory_bandwidth, compute, memory)
 
-    def memory_distance(self, compute: ComputeDomain, memory: MemoryDomain) -> Int:
+    def memory_distance(self, compute: ComputeDomain, memory: MemoryDomain) raises Error -> Int:
         """The SLIT-style distance, where a domain's distance to its own memory is 10."""
         return self._edge(self.library.symbols().fabric_memory_distance, compute, memory)
 
-    def memory_level_in(self, memory: MemoryDomain) -> Int:
+    def memory_level_in(self, memory: MemoryDomain) raises Error -> Int:
         """Which performance tier a memory domain landed in, counted from the fastest."""
-        return Int(self.library.symbols().fabric_memory_level_in(self.handle, c_size_t(memory.index)))
+        var out = stack_allocation[1, c_size_t]()
+        out[unsafe_offset=0] = c_size_t(0)
+        var status = self.library.symbols().fabric_memory_level_in(
+            self.handle, c_size_t(memory.index), out.unsafe_origin_cast[MutAnyOrigin]()
+        )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_fabric_memory_level_in")
+        return Int(out[unsafe_offset=0])
 
-    def memory_levels_count(self) -> Int:
+    def memory_levels_count(self) raises Error -> Int:
         """Distinct memory tiers this machine turned out to have."""
-        return Int(self.library.symbols().fabric_memory_levels_count(self.handle))
+        var out = stack_allocation[1, c_size_t]()
+        out[unsafe_offset=0] = c_size_t(0)
+        var status = self.library.symbols().fabric_memory_levels_count(
+            self.handle, out.unsafe_origin_cast[MutAnyOrigin]()
+        )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_fabric_memory_levels_count")
+        return Int(out[unsafe_offset=0])

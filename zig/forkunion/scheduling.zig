@@ -8,7 +8,7 @@
 const std = @import("std");
 const topology = @import("topology.zig");
 const Topology = topology.Topology;
-const Error = topology.Error;
+const Error = types.Error;
 const CallerExclusivity = topology.CallerExclusivity;
 const Capabilities = topology.Capabilities;
 const types = @import("types.zig");
@@ -17,59 +17,60 @@ const MemoryDomain = types.MemoryDomain;
 const IndexedSplit = types.IndexedSplit;
 const Prong = types.Prong;
 
-extern fn fu_pool_new(name: ?[*:0]const u8, allowed: u32) ?*anyopaque;
+extern fn fu_pool_new(name: ?[*:0]const u8, allowed: u32, pool_out: *?*anyopaque) c_int;
 extern fn fu_pool_delete(pool: *anyopaque) void;
 extern fn fu_pool_spawn(topology: *anyopaque, pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
 extern fn fu_pool_spawn_on(topology: *anyopaque, pool: *anyopaque, compute_domain_index: usize, threads: usize, exclusivity: c_int) c_int;
 extern fn fu_pool_terminate(pool: *anyopaque) void;
 extern fn fu_pool_sleep(pool: *anyopaque, micros: usize) void;
-extern fn fu_pool_caller_exclusivity(pool: *anyopaque) c_int;
-extern fn fu_pool_capabilities(pool: *anyopaque) u32;
-extern fn fu_pool_threads_count(pool: *anyopaque) usize;
-extern fn fu_pool_compute_domains_count(pool: *anyopaque) usize;
-extern fn fu_pool_threads_count_in(pool: *anyopaque, compute_domain_index: usize) usize;
-extern fn fu_pool_locate_thread_in(pool: *anyopaque, global_thread_index: usize, compute_domain_index: usize) usize;
+extern fn fu_pool_caller_exclusivity(pool: *anyopaque, exclusivity_out: *c_int) c_int;
+extern fn fu_pool_capabilities(pool: *anyopaque, capabilities_out: *u32) c_int;
+extern fn fu_pool_threads_count(pool: *anyopaque, out: *usize) c_int;
+extern fn fu_pool_compute_domains_count(pool: *anyopaque, out: *usize) c_int;
+extern fn fu_pool_threads_count_in(pool: *anyopaque, compute_domain_index: usize, out: *usize) c_int;
+extern fn fu_pool_locate_thread_in(pool: *anyopaque, global_thread_index: usize, compute_domain_index: usize, out: *usize) c_int;
 
 extern fn fu_pool_for_threads(
     pool: *anyopaque,
     callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
     context: ?*anyopaque,
-) void;
+) c_int;
 extern fn fu_pool_for_n(
     pool: *anyopaque,
     n: usize,
     callback: *const fn (?*anyopaque, usize, usize, usize) callconv(.c) void,
     context: ?*anyopaque,
-) void;
+) c_int;
 extern fn fu_pool_for_n_dynamic(
     pool: *anyopaque,
     n: usize,
     callback: *const fn (?*anyopaque, usize, usize, usize) callconv(.c) void,
     context: ?*anyopaque,
-) void;
+) c_int;
 extern fn fu_pool_for_slices(
     pool: *anyopaque,
     n: usize,
     callback: *const fn (?*anyopaque, usize, usize, usize, usize) callconv(.c) void,
     context: ?*anyopaque,
-) void;
+) c_int;
 
 extern fn fu_pool_unsafe_for_threads(
     pool: *anyopaque,
     callback: *const fn (?*anyopaque, usize, usize) callconv(.c) void,
     context: ?*anyopaque,
-) usize;
-extern fn fu_pool_is_complete(pool: *anyopaque, generation: usize) c_int;
+    generation_out: *usize,
+) c_int;
+extern fn fu_pool_is_complete(pool: *anyopaque, generation: usize, complete_out: *c_int) c_int;
 extern fn fu_pool_unsafe_join(pool: *anyopaque, generation: usize) void;
 
-extern fn fu_fabric_new() ?*anyopaque;
+extern fn fu_fabric_new(fabric_out: *?*anyopaque) c_int;
 extern fn fu_fabric_delete(fabric: *anyopaque) void;
 extern fn fu_fabric_harvest(topology: *anyopaque, pool: *anyopaque, fabric: *anyopaque) c_int;
-extern fn fu_fabric_memory_latency(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
-extern fn fu_fabric_memory_bandwidth(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
-extern fn fu_fabric_memory_distance(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize) usize;
-extern fn fu_fabric_memory_level_in(fabric: *anyopaque, memory_domain_index: usize) usize;
-extern fn fu_fabric_memory_levels_count(fabric: *anyopaque) usize;
+extern fn fu_fabric_memory_latency(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize, out: *usize) c_int;
+extern fn fu_fabric_memory_bandwidth(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize, out: *usize) c_int;
+extern fn fu_fabric_memory_distance(fabric: *anyopaque, compute_domain_index: usize, memory_domain_index: usize, out: *usize) c_int;
+extern fn fu_fabric_memory_level_in(fabric: *anyopaque, memory_domain_index: usize, out: *usize) c_int;
+extern fn fu_fabric_memory_levels_count(fabric: *anyopaque, out: *usize) c_int;
 
 /// Rejects a callback the trampoline cannot call, before instantiation buries the reason under a
 /// generic-expansion trace. Only the shape is checked - argument coercion is left to the call
@@ -151,13 +152,16 @@ pub const Pool = struct {
     pub fn init(topo: Topology, options: PoolOptions) Error!Pool {
         // SAFETY: the C library copies the name into an internal buffer immediately, then clips it
         // to whatever the platform's thread naming accepts - this only has to null-terminate a copy.
-        var name_buf: [64]u8 = undefined;
+        // `FU_POOL_NAME_CAPACITY`; the C side clips anything longer.
+        var name_buf: [16]u8 = undefined;
         const name_z: ?[*:0]const u8 = if (options.name) |given|
             std.fmt.bufPrintZ(&name_buf, "{s}", .{given[0..@min(given.len, name_buf.len - 1)]}) catch unreachable
         else
             null;
 
-        const handle = fu_pool_new(name_z, @bitCast(options.allowed)) orelse return Error.CreationFailed;
+        var new_handle: ?*anyopaque = null;
+        try types.check(fu_pool_new(name_z, @bitCast(options.allowed), &new_handle));
+        const handle = new_handle orelse return Error.BadAlloc;
         errdefer fu_pool_delete(handle);
 
         const exclusivity = @intFromEnum(options.exclusivity);
@@ -165,7 +169,8 @@ pub const Pool = struct {
             .everywhere => fu_pool_spawn(topo.handle, handle, options.threads, exclusivity),
             .on_compute_domain => |domain| fu_pool_spawn_on(topo.handle, handle, domain.index(), options.threads, exclusivity),
         };
-        if (spawned == 0) return Error.SpawnFailed;
+        // ? A thread limit, a zero count, and an out-of-range domain now arrive apart.
+        try types.check(spawned);
 
         return .{ .handle = handle };
     }
@@ -176,37 +181,49 @@ pub const Pool = struct {
     }
 
     /// Returns the number of threads in the pool
-    pub fn threadsCount(self: Pool) usize {
-        return fu_pool_threads_count(self.handle);
+    pub fn threadsCount(self: Pool) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_pool_threads_count(self.handle, &answer));
+        return answer;
     }
 
     /// Returns whether the calling thread participates in the workload.
     ///
     /// Queries the pool directly rather than caching, so it stays correct across
     /// `terminate` and re-spawning with a different exclusivity.
-    pub fn callerExclusivity(self: Pool) CallerExclusivity {
-        return @enumFromInt(fu_pool_caller_exclusivity(self.handle));
+    pub fn callerExclusivity(self: Pool) Error!CallerExclusivity {
+        var raw: c_int = 0;
+        try types.check(fu_pool_caller_exclusivity(self.handle, &raw));
+        return @enumFromInt(raw);
     }
 
     /// Returns the capabilities this pool actually spawned with - the allow-mask intersected with
     /// what the build compiled and the machine offers, so a NUMA-less box reports the flat pool.
-    pub fn capabilities(self: Pool) Capabilities {
-        return @bitCast(fu_pool_capabilities(self.handle));
+    pub fn capabilities(self: Pool) Error!Capabilities {
+        var bits: u32 = 0;
+        try types.check(fu_pool_capabilities(self.handle, &bits));
+        return @bitCast(bits);
     }
 
     /// Returns the number of compute domains the pool spans
-    pub fn computeDomainsCount(self: Pool) usize {
-        return fu_pool_compute_domains_count(self.handle);
+    pub fn computeDomainsCount(self: Pool) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_pool_compute_domains_count(self.handle, &answer));
+        return answer;
     }
 
     /// Returns the number of threads in a specific compute domain
-    pub fn threadsCountIn(self: Pool, compute_domain: ComputeDomain) usize {
-        return fu_pool_threads_count_in(self.handle, compute_domain.index());
+    pub fn threadsCountIn(self: Pool, compute_domain: ComputeDomain) Error!usize {
+        var answer: usize = 0;
+        try types.check(fu_pool_threads_count_in(self.handle, compute_domain.index(), &answer));
+        return answer;
     }
 
     /// Converts a global thread index to its local index within a compute domain
-    pub fn locateThreadIn(self: Pool, global_thread_index: usize, compute_domain: ComputeDomain) usize {
-        return fu_pool_locate_thread_in(self.handle, global_thread_index, compute_domain.index());
+    pub fn locateThreadIn(self: Pool, global_thread_index: usize, compute_domain: ComputeDomain) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_pool_locate_thread_in(self.handle, global_thread_index, compute_domain.index(), &answer));
+        return answer;
     }
 
     /// Terminates all worker threads (pool can be respawned)
@@ -229,7 +246,7 @@ pub const Pool = struct {
         self: Pool,
         context: anytype,
         comptime func: anytype,
-    ) void {
+    ) Error!void {
         const Context = @TypeOf(context);
         checkContext(Context);
         checkCallable(func, if (Context == void) 2 else 3);
@@ -243,7 +260,7 @@ pub const Pool = struct {
                     func(@as(Context, @ptrCast(@alignCast(raw))), thread_index, compute_domain);
             }
         };
-        fu_pool_for_threads(self.handle, Wrapper.callback, contextPointer(Context, context));
+        try types.check(fu_pool_for_threads(self.handle, Wrapper.callback, contextPointer(Context, context)));
     }
 
     /// Distributes N tasks across threads with static scheduling (blocking)
@@ -255,7 +272,7 @@ pub const Pool = struct {
         n: usize,
         context: anytype,
         comptime func: anytype,
-    ) void {
+    ) Error!void {
         const Context = @TypeOf(context);
         checkContext(Context);
         checkCallable(func, if (Context == void) 1 else 2);
@@ -278,7 +295,7 @@ pub const Pool = struct {
                     func(@as(Context, @ptrCast(@alignCast(raw))), prong);
             }
         };
-        fu_pool_for_n(self.handle, n, Wrapper.callback, contextPointer(Context, context));
+        try types.check(fu_pool_for_n(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
     }
 
     /// Distributes N tasks with dynamic work-stealing (blocking)
@@ -290,7 +307,7 @@ pub const Pool = struct {
         n: usize,
         context: anytype,
         comptime func: anytype,
-    ) void {
+    ) Error!void {
         const Context = @TypeOf(context);
         checkContext(Context);
         checkCallable(func, if (Context == void) 1 else 2);
@@ -313,7 +330,7 @@ pub const Pool = struct {
                     func(@as(Context, @ptrCast(@alignCast(raw))), prong);
             }
         };
-        fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, contextPointer(Context, context));
+        try types.check(fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
     }
 
     /// Distributes N tasks as slices (blocking)
@@ -326,7 +343,7 @@ pub const Pool = struct {
         n: usize,
         context: anytype,
         comptime func: anytype,
-    ) void {
+    ) Error!void {
         const Context = @TypeOf(context);
         checkContext(Context);
         checkCallable(func, if (Context == void) 2 else 3);
@@ -350,7 +367,7 @@ pub const Pool = struct {
                     func(@as(Context, @ptrCast(@alignCast(raw))), prong, count);
             }
         };
-        fu_pool_for_slices(self.handle, n, Wrapper.callback, contextPointer(Context, context));
+        try types.check(fu_pool_for_slices(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
     }
 
     /// Splits `data` into one contiguous chunk per thread and runs `func` on each (blocking).
@@ -365,14 +382,15 @@ pub const Pool = struct {
         data: []T,
         context: anytype,
         comptime func: anytype,
-    ) void {
+    ) Error!void {
         const Context = @TypeOf(context);
         checkContext(Context);
         checkCallable(func, if (Context == void) 2 else 3);
 
         const Scatter = struct { data: []T, context: Context, threads: usize };
-        var scatter = Scatter{ .data = data, .context = context, .threads = self.threadsCount() };
-        self.forThreads(&scatter, struct {
+        const threads = self.threadsCount() catch return;
+        var scatter = Scatter{ .data = data, .context = context, .threads = threads };
+        try self.forThreads(&scatter, struct {
             fn spread(carried: *const Scatter, thread_index: usize, compute_domain: ComputeDomain) void {
                 _ = compute_domain;
                 const range = IndexedSplit.init(carried.data.len, carried.threads).get(thread_index);
@@ -394,7 +412,7 @@ pub const Pool = struct {
         self: Pool,
         context: anytype,
         comptime func: anytype,
-    ) usize {
+    ) Error!usize {
         const Context = @TypeOf(context);
         checkContext(Context);
         checkCallable(func, if (Context == void) 2 else 3);
@@ -408,7 +426,9 @@ pub const Pool = struct {
                     func(@as(Context, @ptrCast(@alignCast(raw))), thread_index, compute_domain);
             }
         };
-        return fu_pool_unsafe_for_threads(self.handle, Wrapper.callback, contextPointer(Context, context));
+        var generation: usize = 0;
+        try types.check(fu_pool_unsafe_for_threads(self.handle, Wrapper.callback, contextPointer(Context, context), &generation));
+        return generation;
     }
 
     /// Returns true if the given generation has completed.
@@ -416,8 +436,10 @@ pub const Pool = struct {
     /// A `true` result also guarantees visibility of every contributor's writes. On
     /// caller-inclusive pools this can only turn `true` once `unsafeJoin` contributes
     /// the calling thread's slice, so poll-then-join is reserved for exclusive pools.
-    pub fn isComplete(self: Pool, generation: usize) bool {
-        return fu_pool_is_complete(self.handle, generation) != 0;
+    pub fn isComplete(self: Pool, generation: usize) Error!bool {
+        var complete: c_int = 0;
+        try types.check(fu_pool_is_complete(self.handle, generation, &complete));
+        return complete != 0;
     }
 
     /// Blocks until the given generation completes (unsafe).
@@ -433,7 +455,7 @@ pub const Pool = struct {
 /// interconnect link; medium queries `(target)` describe the memory pool itself, independent of
 /// any initiator.
 ///
-/// Completes the `tryHarvest` pipeline: a `Topology` is harvested first and stays immutable, a
+/// Completes the `harvest` pipeline: a `Topology` is harvested first and stays immutable, a
 /// `Pool` spawns on it, and the fabric then harvests through that pool's pinned workers,
 /// snapshotting what it needs so the topology may be freed after. Before a harvest every query
 /// answers 0, and `memoryLevelsCount` answers 1.
@@ -442,8 +464,9 @@ pub const Fabric = struct {
 
     /// Creates an empty, unharvested fabric.
     pub fn init() Error!Fabric {
-        const handle = fu_fabric_new() orelse return Error.CreationFailed;
-        return .{ .handle = handle };
+        var new_handle: ?*anyopaque = null;
+        try types.check(fu_fabric_new(&new_handle));
+        return .{ .handle = new_handle orelse return Error.BadAlloc };
     }
 
     /// Destroys the fabric and frees its observations.
@@ -458,39 +481,50 @@ pub const Fabric = struct {
     /// domain - flat pools and those pinned to one compute domain have no fabric to walk; it is left
     /// empty, never half-written. Not thread-safe: it dispatches on the pool and rebuilds the
     /// fabric, so call it between task batches. Expect seconds of runtime on large fabrics.
-    pub fn tryHarvest(self: Fabric, topo: Topology, pool: Pool) bool {
-        return fu_fabric_harvest(topo.handle, pool.handle, self.handle) != 0;
+    pub fn harvest(self: Fabric, topo: Topology, pool: Pool) Error!void {
+        // ? A flat pool now reports `ConfigMismatch`, not the same failure as an exhausted heap.
+        return types.check(fu_fabric_harvest(topo.handle, pool.handle, self.handle));
     }
 
     /// Returns the measured dependent-load latency (nanoseconds) on an edge - the best recording;
     /// 0 before a harvest, for an edge no worker could reach, or an out-of-range index.
-    pub fn memoryLatency(self: Fabric, compute_domain: ComputeDomain, memory_domain: MemoryDomain) usize {
-        return fu_fabric_memory_latency(self.handle, compute_domain.index(), memory_domain.index());
+    pub fn memoryLatency(self: Fabric, compute_domain: ComputeDomain, memory_domain: MemoryDomain) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_fabric_memory_latency(self.handle, compute_domain.index(), memory_domain.index(), &answer));
+        return answer;
     }
 
     /// Returns the measured saturated read bandwidth (MB/s) on an edge, streamed by all the
     /// initiator domain's workers at once - the best recording; 0 if unreached or out of range.
-    pub fn memoryBandwidth(self: Fabric, compute_domain: ComputeDomain, memory_domain: MemoryDomain) usize {
-        return fu_fabric_memory_bandwidth(self.handle, compute_domain.index(), memory_domain.index());
+    pub fn memoryBandwidth(self: Fabric, compute_domain: ComputeDomain, memory_domain: MemoryDomain) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_fabric_memory_bandwidth(self.handle, compute_domain.index(), memory_domain.index(), &answer));
+        return answer;
     }
 
     /// Returns the relative access distance on an edge (10 = local, per the SLIT convention):
     /// the measured latency ratio to the initiator's local domain, clamped so local carries the
     /// row's minimum; unwalked edges fall back to 10-local / 20-remote.
-    pub fn memoryDistance(self: Fabric, compute_domain: ComputeDomain, memory_domain: MemoryDomain) usize {
-        return fu_fabric_memory_distance(self.handle, compute_domain.index(), memory_domain.index());
+    pub fn memoryDistance(self: Fabric, compute_domain: ComputeDomain, memory_domain: MemoryDomain) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_fabric_memory_distance(self.handle, compute_domain.index(), memory_domain.index(), &answer));
+        return answer;
     }
 
     /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL),
     /// keyed by the best bandwidth any initiator sustains to it, ties split by the best latency.
-    pub fn memoryLevelIn(self: Fabric, memory_domain: MemoryDomain) usize {
-        return fu_fabric_memory_level_in(self.handle, memory_domain.index());
+    pub fn memoryLevelIn(self: Fabric, memory_domain: MemoryDomain) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_fabric_memory_level_in(self.handle, memory_domain.index(), &answer));
+        return answer;
     }
 
     /// Returns the number of distinct derived memory tiers, the memory-axis twin of
     /// `Topology.computeLevelsCount`; 1 on single-tier systems and before a harvest.
-    pub fn memoryLevelsCount(self: Fabric) usize {
-        return fu_fabric_memory_levels_count(self.handle);
+    pub fn memoryLevelsCount(self: Fabric) Error!usize {
+        var answer: usize = std.math.maxInt(usize);
+        try types.check(fu_fabric_memory_levels_count(self.handle, &answer));
+        return answer;
     }
 };
 
@@ -500,7 +534,7 @@ test "pool creation and destruction" {
     const pool = try Pool.init(topo, .{ .threads = 2 });
     defer pool.deinit();
 
-    try std.testing.expectEqual(2, pool.threadsCount());
+    try std.testing.expectEqual(2, try pool.threadsCount());
 }
 
 test "caller exclusivity query" {
@@ -521,7 +555,7 @@ test "pool capabilities reflect the build" {
     defer topo.deinit();
     const pool = try Pool.init(topo, .{ .threads = 2 });
     defer pool.deinit();
-    const full: u32 = @bitCast(pool.capabilities());
+    const full: u32 = @bitCast(try pool.capabilities());
 
     // Clearing a bit in the allow-mask must clear it in the effective set - the mask can
     // only subtract: forcing off `place_memory_on_domain` demotes a NUMA pool to the flat pool.
@@ -529,9 +563,9 @@ test "pool capabilities reflect the build" {
     flat_mask.place_memory_on_domain = false;
     const flat_pool = try Pool.init(topo, .{ .threads = 2, .allowed = flat_mask });
     defer flat_pool.deinit();
-    const flat: u32 = @bitCast(flat_pool.capabilities());
+    const flat: u32 = @bitCast(try flat_pool.capabilities());
 
-    try std.testing.expect(!flat_pool.capabilities().place_memory_on_domain);
+    try std.testing.expect(!(try flat_pool.capabilities()).place_memory_on_domain);
     // The masked pool is a subset of the unmasked one - masking never adds a facility.
     try std.testing.expectEqual(flat, flat & full);
 }
@@ -539,11 +573,11 @@ test "pool capabilities reflect the build" {
 test "per-compute_domain pool" {
     const topo = try Topology.init();
     defer topo.deinit();
-    const compute_domains = topo.computeDomainsCount();
+    const compute_domains = try topo.computeDomainsCount();
     try std.testing.expect(compute_domains >= 1);
 
     const first = ComputeDomain.at(0);
-    const cores = @max(topo.logicalCoresCountIn(first), 1);
+    const cores = @max(try topo.logicalCoresCountIn(first), 1);
     const pool = try Pool.init(topo, .{
         .threads = cores,
         .placement = .{ .on_compute_domain = first },
@@ -552,7 +586,7 @@ test "per-compute_domain pool" {
     defer pool.deinit();
 
     var counter = std.atomic.Value(usize).init(0);
-    const generation = pool.unsafeForThreads(&counter, struct {
+    const generation = try pool.unsafeForThreads(&counter, struct {
         fn worker(tally: *std.atomic.Value(usize), thread_index: usize, compute_domain: ComputeDomain) void {
             _ = thread_index;
             _ = compute_domain;
@@ -560,7 +594,7 @@ test "per-compute_domain pool" {
         }
     }.worker);
     pool.unsafeJoin(generation);
-    try std.testing.expectEqual(pool.threadsCount(), counter.load(.acquire));
+    try std.testing.expectEqual(try pool.threadsCount(), counter.load(.acquire));
 }
 
 test "fabric harvest fills edges" {
@@ -573,20 +607,20 @@ test "fabric harvest fills edges" {
 
     // An unharvested fabric answers zeros and a single tier.
     try std.testing.expectEqual(0, fabric.memoryLatency(ComputeDomain.at(0), MemoryDomain.at(0)));
-    try std.testing.expectEqual(1, fabric.memoryLevelsCount());
+    try std.testing.expectEqual(1, try fabric.memoryLevelsCount());
 
     // A flat pool without domain placement has no fabric to walk. Skip rather than return: a bare
     // return counts as a pass, so the summary would claim coverage this run never had.
-    if (!fabric.tryHarvest(topo, pool)) return error.SkipZigTest;
+    fabric.harvest(topo, pool) catch return error.SkipZigTest;
 
     // Every reachable edge must carry sane observations; emulated-NUMA guests may measure
     // equal local and remote costs, so nothing stronger is asserted.
     const first = ComputeDomain.at(0);
-    const local = topo.localMemoryOf(first);
-    try std.testing.expect(fabric.memoryLatency(first, local) > 0);
-    try std.testing.expect(fabric.memoryBandwidth(first, local) > 0);
-    try std.testing.expectEqual(10, fabric.memoryDistance(first, local));
-    try std.testing.expect(fabric.memoryLevelsCount() >= 1);
+    const local = try topo.localMemoryOf(first);
+    try std.testing.expect(try fabric.memoryLatency(first, local) > 0);
+    try std.testing.expect(try fabric.memoryBandwidth(first, local) > 0);
+    try std.testing.expectEqual(10, try fabric.memoryDistance(first, local));
+    try std.testing.expect(try fabric.memoryLevelsCount() >= 1);
 }
 
 test "named pool creation" {
@@ -598,7 +632,7 @@ test "named pool creation" {
     const long_name = "a-pool-name-far-longer-than-any-platform-thread-naming-accepts";
     const pool = try Pool.init(topo, .{ .threads = 2, .name = long_name });
     defer pool.deinit();
-    try std.testing.expectEqual(2, pool.threadsCount());
+    try std.testing.expectEqual(2, try pool.threadsCount());
 }
 
 test "for_threads execution" {
@@ -609,7 +643,7 @@ test "for_threads execution" {
 
     var visited = [_]std.atomic.Value(bool){std.atomic.Value(bool).init(false)} ** 4;
 
-    pool.forThreads(&visited, struct {
+    try pool.forThreads(&visited, struct {
         fn worker(seen: *[4]std.atomic.Value(bool), thread_index: usize, compute_domain: ComputeDomain) void {
             _ = compute_domain;
             if (thread_index < 4) seen[thread_index].store(true, .release);
@@ -627,7 +661,7 @@ test "for_n static scheduling" {
 
     var visited = [_]std.atomic.Value(bool){std.atomic.Value(bool).init(false)} ** 100;
 
-    pool.forN(100, &visited, struct {
+    try pool.forN(100, &visited, struct {
         fn worker(seen: *[100]std.atomic.Value(bool), prong: Prong) void {
             seen[prong.task_index].store(true, .release);
         }
@@ -644,7 +678,7 @@ test "for_n_dynamic work stealing" {
 
     var counter = std.atomic.Value(usize).init(0);
 
-    pool.forNDynamic(100, &counter, struct {
+    try pool.forNDynamic(100, &counter, struct {
         fn worker(tally: *std.atomic.Value(usize), prong: Prong) void {
             _ = prong;
             _ = tally.fetchAdd(1, .monotonic);
@@ -669,7 +703,7 @@ test "for_slices execution" {
     };
     var context = Context{ .data = &data, .total = &total };
 
-    pool.forSlices(1000, &context, struct {
+    try pool.forSlices(1000, &context, struct {
         fn worker(carried: *const Context, prong: Prong, count: usize) void {
             for (0..count) |offset| {
                 const index = prong.task_index + offset;
@@ -694,7 +728,7 @@ test "for_slices_mut hands each thread a disjoint chunk" {
     var data = [_]u64{0} ** 1000;
     var base: u64 = 7;
 
-    pool.forSlicesMut(u64, &data, &base, struct {
+    try pool.forSlicesMut(u64, &data, &base, struct {
         fn fill(offset: *const u64, thread_index: usize, chunk: []u64) void {
             _ = thread_index;
             for (chunk) |*slot| slot.* = offset.*;
@@ -713,7 +747,7 @@ test "for_n void context" {
     // A stateless kernel needs no context at all; anything it must reach travels in one. With no
     // context there is nothing to write to, so the callback can only check its own arguments -
     // that every prong actually runs is covered by the pointer-context tests above.
-    pool.forN(50, {}, struct {
+    try pool.forN(50, {}, struct {
         fn worker(prong: Prong) void {
             std.debug.assert(prong.task_index < 50);
             std.debug.assert(prong.compute_domain.index() < 1024);
@@ -730,7 +764,7 @@ test "unsafe_for_threads and join" {
     var counter = std.atomic.Value(usize).init(0);
 
     // The pointee must outlive `unsafeJoin`: the dispatch returns while workers still read it.
-    const generation = pool.unsafeForThreads(&counter, struct {
+    const generation = try pool.unsafeForThreads(&counter, struct {
         fn worker(tally: *std.atomic.Value(usize), thread_index: usize, compute_domain: ComputeDomain) void {
             _ = thread_index;
             _ = compute_domain;
@@ -740,7 +774,7 @@ test "unsafe_for_threads and join" {
 
     try std.testing.expect(generation & 1 == 1);
     pool.unsafeJoin(generation);
-    try std.testing.expect(pool.isComplete(generation));
+    try std.testing.expect(try pool.isComplete(generation));
     try std.testing.expectEqual(4, counter.load(.acquire));
 }
 
@@ -752,7 +786,7 @@ test "generation polling on exclusive pool" {
 
     var counter = std.atomic.Value(usize).init(0);
 
-    const generation = pool.unsafeForThreads(&counter, struct {
+    const generation = try pool.unsafeForThreads(&counter, struct {
         fn worker(tally: *std.atomic.Value(usize), thread_index: usize, compute_domain: ComputeDomain) void {
             _ = thread_index;
             _ = compute_domain;
@@ -765,7 +799,7 @@ test "generation polling on exclusive pool" {
     // What an exclusive pool is for: the caller owes no slice, so the generation completes without
     // it and can be polled first. On an inclusive pool this loop would never finish.
     var polls: usize = 0;
-    while (!pool.isComplete(generation)) : (polls += 1) {
+    while (!try pool.isComplete(generation)) : (polls += 1) {
         if (polls > 1_000_000) return error.GenerationNeverCompleted;
         std.Thread.yield() catch std.atomic.spinLoopHint();
     }
@@ -775,6 +809,6 @@ test "generation polling on exclusive pool" {
 
     // Joining an already-complete generation returns immediately and changes nothing.
     pool.unsafeJoin(generation);
-    try std.testing.expect(pool.isComplete(generation));
+    try std.testing.expect(try pool.isComplete(generation));
     try std.testing.expectEqual(4, counter.load(.acquire));
 }

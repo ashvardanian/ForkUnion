@@ -11,10 +11,32 @@ from std.math import ceildiv
 from std.memory import stack_allocation
 from std.sys import size_of
 
-from forkunion.errors import ErrorKind, ForkUnionError
-from forkunion.library import Library, OutSize
+from forkunion.library import Library
 from forkunion.topology import Topology
-from forkunion.types import ComputeDomain, MemoryDomain, MemoryDomainId
+from forkunion.types import (
+    bytes_for_elements,
+    ComputeDomain,
+    Error,
+    ErrorKind,
+    Handle,
+    MemoryDomain,
+    MemoryDomainId,
+    OutAddress,
+    OutSize,
+)
+
+# region Signatures
+
+comptime AllocateOnDomain = def(c_int, c_size_t, OutAddress) thin abi("C") -> c_int
+comptime AllocateAtLeastOnDomain = def(c_int, c_size_t, OutSize, OutSize, OutAddress) thin abi("C") -> c_int
+comptime FreeOnDomain = def(c_int, Pointer[Int8, MutUntrackedOrigin], c_size_t) thin abi("C") -> None
+comptime AllocateSymmetric = def(Handle, c_size_t, OutSize, OutSize, OutSize, OutSize, OutAddress) thin abi(
+    "C"
+) -> c_int
+comptime FreeSymmetric = def(Pointer[Int8, MutUntrackedOrigin], c_size_t) thin abi("C") -> None
+
+# endregion Signatures
+
 
 comptime Bytes = Pointer[Int8, MutUntrackedOrigin]
 """The raw storage a placement allocator hands back."""
@@ -77,66 +99,74 @@ struct DomainAllocator(Equatable, ImplicitlyCopyable):
     var memory_domain_id: MemoryDomainId
 
     @staticmethod
-    def at(library: Library, memory_domain_id: Optional[MemoryDomainId]) -> Optional[Self]:
-        """An allocator for a domain the machine actually has, or `None`."""
-        if not memory_domain_id:
-            return None
-        return Self(library, memory_domain_id.value())
+    def at(library: Library, memory_domain_id: MemoryDomainId) raises Error -> Self:
+        """An allocator for a domain the machine actually has."""
+        if Int(memory_domain_id.identifier) < 0:
+            raise Error(ErrorKind.INVALID_ARGUMENT, "the memory domain id names no domain")
+        return Self(library, memory_domain_id)
 
     def __eq__(self, other: Self) -> Bool:
         return self.memory_domain_id == other.memory_domain_id
 
-    def allocate(self, bytes: Int) -> Optional[AllocationResult]:
-        """Exactly `bytes` on this domain, or `None` where the build or the domain cannot.
+    def allocate(self, bytes: Int) raises Error -> AllocationResult:
+        """Exactly `bytes` on this domain.
 
         The page size is not reported by this entry point, so the result carries zero for it.
         """
         if bytes == 0:
-            return None
-        var address = self.library.symbols().allocate_on_domain_id(self.memory_domain_id.identifier, c_size_t(bytes))
-        if address == 0:
-            return None
-        return AllocationResult(self.library, self.memory_domain_id, address, bytes, 0)
+            raise Error(ErrorKind.INVALID_ARGUMENT, "an allocation needs bytes")
+        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        var out = stack_allocation[1, Int]()
+        out[unsafe_offset=0] = 0
+        var status = self.library.symbols().allocate_on_domain_id(
+            self.memory_domain_id.identifier, c_size_t(bytes), out.unsafe_origin_cast[MutAnyOrigin]()
+        )
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_allocate_on_domain_id")
+        return AllocationResult(self.library, self.memory_domain_id, out[unsafe_offset=0], bytes, 0)
 
-    def allocate_at_least(self, minimum_bytes: Int) -> Optional[AllocationResult]:
+    def allocate_at_least(self, minimum_bytes: Int) raises Error -> AllocationResult:
         """At least `minimum_bytes`, using the largest suitable page size, reporting both."""
         if minimum_bytes == 0:
-            return None
+            raise Error(ErrorKind.INVALID_ARGUMENT, "an allocation needs bytes")
         # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
         var out = stack_allocation[2, c_size_t]()
         out[unsafe_offset=0] = c_size_t(0)
         out[unsafe_offset=1] = c_size_t(0)
-        var address = self.library.symbols().allocate_at_least_on_domain_id(
+        var address = stack_allocation[1, Int]()
+        address[unsafe_offset=0] = 0
+        var status = self.library.symbols().allocate_at_least_on_domain_id(
             self.memory_domain_id.identifier,
             c_size_t(minimum_bytes),
             out.unsafe_origin_cast[MutAnyOrigin](),
             Pointer(to=out[unsafe_offset=1]).unsafe_origin_cast[MutAnyOrigin](),
+            address.unsafe_origin_cast[MutAnyOrigin](),
         )
-        if address == 0:
-            return None
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_allocate_at_least_on_domain_id")
         return AllocationResult(
             self.library,
             self.memory_domain_id,
-            address,
+            address[unsafe_offset=0],
             Int(out[unsafe_offset=0]),
             Int(out[unsafe_offset=1]),
         )
 
-    def allocate_for[dtype: DType](self, count: Int) -> Optional[AllocationResult]:
+    def allocate_for[dtype: DType](self, count: Int) raises Error -> AllocationResult:
         """Room for `count` elements of `dtype`."""
-        return self.allocate(count * size_of[Scalar[dtype]]())
+        return self.allocate(bytes_for_elements(count, size_of[Scalar[dtype]]()))
 
-    def allocate_for_at_least[dtype: DType](self, minimum_count: Int) -> Optional[AllocationResult]:
+    def allocate_for_at_least[dtype: DType](self, minimum_count: Int) raises Error -> AllocationResult:
         """Room for at least `minimum_count` elements of `dtype`, on the largest suitable page."""
-        return self.allocate_at_least(minimum_count * size_of[Scalar[dtype]]())
+        return self.allocate_at_least(bytes_for_elements(minimum_count, size_of[Scalar[dtype]]()))
 
 
-def default_domain_allocator(topology: Topology) -> Optional[DomainAllocator]:
+def default_domain_allocator(topology: Topology) raises Error -> DomainAllocator:
     """An allocator for the machine's first memory domain, which every machine has."""
     return DomainAllocator.at(topology.library, topology.memory_domain_id_at_index(MemoryDomain(0)))
 
 
-def local_domain_allocator(topology: Topology, domain: ComputeDomain) -> Optional[DomainAllocator]:
+def local_domain_allocator(topology: Topology, domain: ComputeDomain) raises Error -> DomainAllocator:
     """An allocator for the memory domain nearest a compute domain - "run here, allocate here".
 
     This is the pairing the index-versus-id distinction exists to protect: `local_memory_of`
@@ -162,25 +192,28 @@ struct SymmetricAllocation:
     var total_bytes: Int
     var bytes_per_page: Int
 
-    def __init__(out self, topology: Topology, bytes_per_domain: Int) raises ForkUnionError:
+    def __init__(out self, topology: Topology, bytes_per_domain: Int) raises Error:
         if bytes_per_domain == 0:
-            raise ForkUnionError(ErrorKind.INVALID_PARAMETER, "a symmetric mapping needs bytes")
+            raise Error(ErrorKind.INVALID_ARGUMENT, "a symmetric mapping needs bytes")
         # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
         var out = stack_allocation[4, c_size_t]()
         for slot in range(4):
             out[unsafe_offset=slot] = c_size_t(0)
-        var address = topology.library.symbols().allocate_symmetric(
+        var address = stack_allocation[1, Int]()
+        address[unsafe_offset=0] = 0
+        var status = topology.library.symbols().allocate_symmetric(
             topology.handle,
             c_size_t(bytes_per_domain),
             out.unsafe_origin_cast[MutAnyOrigin](),
             Pointer(to=out[unsafe_offset=1]).unsafe_origin_cast[MutAnyOrigin](),
             Pointer(to=out[unsafe_offset=2]).unsafe_origin_cast[MutAnyOrigin](),
             Pointer(to=out[unsafe_offset=3]).unsafe_origin_cast[MutAnyOrigin](),
+            address.unsafe_origin_cast[MutAnyOrigin](),
         )
-        if address == 0:
-            raise ForkUnionError(ErrorKind.CREATION_FAILED, "fu_allocate_symmetric")
+        if status != 0:
+            raise Error(ErrorKind.of(status), "fu_allocate_symmetric")
         self.library = topology.library
-        self.base = Bytes(unsafe_from_address=address)
+        self.base = Bytes(unsafe_from_address=address[unsafe_offset=0])
         self.stride_bytes = Int(out[unsafe_offset=0])
         self.memory_domains_count = Int(out[unsafe_offset=1])
         self.total_bytes = Int(out[unsafe_offset=2])
@@ -202,9 +235,7 @@ struct SymmetricAllocation:
 struct ReplicatedArray[dtype: DType]:
     """The same `length` elements held once per memory domain, so every reader is local.
 
-    Write each replica, then let every compute domain read the copy nearest to it. Construction
-    answers `Optional`, on the same tier as the allocators: a mapping this machine cannot provide
-    is an absence the caller chooses how to handle, not a failure.
+    Write each replica, then let every compute domain read the copy nearest to it.
     """
 
     var storage: SymmetricAllocation
@@ -215,17 +246,12 @@ struct ReplicatedArray[dtype: DType]:
         self.length = length
 
     @staticmethod
-    def try_new(topology: Topology, length: Int) -> Optional[Self]:
-        """A replica of `length` elements on every memory domain, or `None`."""
-        if length > Int.MAX // size_of[Scalar[Self.dtype]]():
-            return None
-        try:
-            return Self(
-                storage=SymmetricAllocation(topology, length * size_of[Scalar[Self.dtype]]()),
-                length=length,
-            )
-        except:
-            return None
+    def new(topology: Topology, length: Int) raises Error -> Self:
+        """A replica of `length` elements on every memory domain."""
+        return Self(
+            storage=SymmetricAllocation(topology, bytes_for_elements(length, size_of[Scalar[Self.dtype]]())),
+            length=length,
+        )
 
     def memory_domains_count(self) -> Int:
         """How many replicas the mapping produced."""
@@ -249,10 +275,7 @@ struct ShardLocation(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 struct ShardedArray[dtype: DType]:
-    """`length` elements split across the memory domains, each domain owning one contiguous run.
-
-    Construction answers `Optional`, for the same reason `ReplicatedArray` does.
-    """
+    """`length` elements split across the memory domains, each domain owning one contiguous run."""
 
     var storage: SymmetricAllocation
     var length: Int
@@ -264,20 +287,15 @@ struct ShardedArray[dtype: DType]:
         self.segment = segment
 
     @staticmethod
-    def try_new(topology: Topology, length: Int) -> Optional[Self]:
-        """`length` elements striped across every memory domain, or `None`."""
+    def new(topology: Topology, length: Int) raises Error -> Self:
+        """`length` elements striped across every memory domain."""
         var domains = topology.memory_domains_count()
         var segment = ceildiv(length, domains) if domains > 0 else length
-        if segment > Int.MAX // size_of[Scalar[Self.dtype]]():
-            return None
-        try:
-            return Self(
-                storage=SymmetricAllocation(topology, segment * size_of[Scalar[Self.dtype]]()),
-                length=length,
-                segment=segment,
-            )
-        except:
-            return None
+        return Self(
+            storage=SymmetricAllocation(topology, bytes_for_elements(segment, size_of[Scalar[Self.dtype]]())),
+            length=length,
+            segment=segment,
+        )
 
     def memory_domains_count(self) -> Int:
         """How many shards the mapping produced."""

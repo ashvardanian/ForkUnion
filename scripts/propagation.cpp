@@ -155,7 +155,7 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
     // the CSR build and never coexists with the work arrays at peak.
     {
         fu::dynamic_array<edge_t> edges;
-        if (!edges.try_resize(raw_edges * 2 + bridges * 2)) return false; // ? Slots `2e, 2e+1` belong to edge `e`
+        if (failed(edges.resize(raw_edges * 2 + bridges * 2))) return false; // ? Slots `2e, 2e+1` belong to edge `e`
 
         // Generation is the most expensive setup step - `scale` draws per edge, millions of edges - and
         // the counter-based draws make it embarrassingly parallel with no generator objects at all.
@@ -168,12 +168,9 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
                 unsigned const r = random_percent(e * 64 + static_cast<std::size_t>(bit)); // ? `a=57 b=19 c=19 d=5`
                 vertex_t const step = static_cast<vertex_t>(1u) << bit;
                 if (r < 57) continue; // ? Stay in the dense quadrant
-                else if (r < 76)
-                    column |= step;
-                else if (r < 95)
-                    row |= step;
-                else
-                    row |= step, column |= step;
+                else if (r < 76) column |= step;
+                else if (r < 95) row |= step;
+                else row |= step, column |= step;
             }
             vertex_t const base = static_cast<vertex_t>((e / raw_local) << scale);           // ? This community's range
             bool const self_loop = row == column;                                            // ? Dropped via sentinels
@@ -205,13 +202,13 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
         while (edge_count && edges[edge_count - 1] == sentinel_edge_k) --edge_count;
 
         // CSR: count the degrees into `row_offsets`, then prefix-sum them into row starts.
-        if (!graph.row_offsets.try_resize(vertices + 1)) return false; // ? Zero-filled
+        if (failed(graph.row_offsets.resize(vertices + 1))) return false; // ? Zero-filled
         for (std::size_t i = 0; i < edge_count; ++i) graph.row_offsets[edges[i].row + 1]++;
         for (vertex_t v = 0; v < vertices; ++v) graph.row_offsets[v + 1] += graph.row_offsets[v];
 
-        if (!graph.column_indices.try_resize(edge_count)) return false;
+        if (failed(graph.column_indices.resize(edge_count))) return false;
         fu::dynamic_array<edge_offset_t> cursor;
-        if (!cursor.try_resize(vertices)) return false;
+        if (failed(cursor.resize(vertices))) return false;
         for (vertex_t v = 0; v < vertices; ++v) cursor[v] = graph.row_offsets[v];
         for (std::size_t i = 0; i < edge_count; ++i) graph.column_indices[cursor[edges[i].row]++] = edges[i].column;
     }
@@ -285,7 +282,7 @@ struct replicated_csr_t {
     template <typename value_type_>
     static bool replicate(fu::replicated_array<value_type_> &destination, fu::dynamic_array<value_type_> const &host,
                           fu::machine_topology_t const &topology) noexcept {
-        if (!destination.try_resize_uninitialized(topology, host.size())) return false;
+        if (failed(destination.resize_uninitialized(topology, host.size()))) return false;
         for (std::size_t domain = 0; domain < destination.memory_domains_count(); ++domain) {
             fu::span<value_type_> const slice =
                 destination.on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
@@ -306,7 +303,7 @@ struct replicated_csr_t {
 template <typename value_type_>
 static bool retouch_deterministically(distributed_pool_t &pool, fu::dynamic_array<value_type_> &array) noexcept {
     fu::dynamic_array<value_type_> placed;
-    if (!placed.try_resize_uninitialized(array.size())) return false; // ? Pages stay unfaulted until the copy
+    if (failed(placed.resize_uninitialized(array.size()))) return false; // ? Pages stay unfaulted until the copy
     value_type_ const *source = array.data();
     value_type_ *destination = placed.data();
     pool.for_slices(array.size(), [=](distributed_pool_t::prong_t prong, std::size_t count) noexcept {
@@ -339,8 +336,7 @@ enum class placement_k : unsigned int { shared_k, replicated_k };
 template <schedule_k schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
     if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
-    else
-        pool.for_n_dynamic(n, body);
+    else pool.for_n_dynamic(n, body);
 }
 
 /** @brief Zeroes the per-thread tallies and sums them - the tiny serial bookends of every round. */
@@ -367,8 +363,7 @@ static void run(run_context_t &c) noexcept {
         if constexpr (placement_ == placement_k::replicated_k)
             return c.replicas.on_memory_domain(
                 c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain)));
-        else
-            return c.graph;
+        else return c.graph;
     };
 
     vertex_t const vertices = c.graph.vertices();
@@ -560,19 +555,19 @@ int main() {
     replicated_csr_t replicas;
     std::optional<distributed_pool_t> pool;
     std::optional<tf::Executor> taskflow; // ? Spawned for the Taskflow backends
-    if (!topology.try_harvest()) {
+    if (failed(topology.harvest())) {
         std::fprintf(stderr, "Failed to harvest the memory topology\n");
         return EXIT_FAILURE;
     }
     pool.emplace();
-    if (!pool->try_spawn(topology, threads)) {
+    if (failed(pool->spawn(topology, threads))) {
         std::fprintf(stderr, "Failed to spawn the thread pool\n");
         return EXIT_FAILURE;
     }
 
     fu::dynamic_array<counter_t> counters;
     fu::dynamic_array<label_t> labels_a, labels_b;
-    if (!counters.try_resize(threads) || !labels_a.try_resize(vertices) || !labels_b.try_resize(vertices)) {
+    if (failed(counters.resize(threads)) || failed(labels_a.resize(vertices)) || failed(labels_b.resize(vertices))) {
         std::fprintf(stderr, "Failed to allocate the labels\n");
         return EXIT_FAILURE;
     }
@@ -617,8 +612,7 @@ int main() {
     std::size_t passes = 0;
     if (iterations > 0)
         for (; passes < iterations; ++passes) selected->run(context);
-    else
-        do {
+    else do {
             selected->run(context), ++passes;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
     double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() //
@@ -639,7 +633,7 @@ int main() {
 
     if (check) {
         fu::dynamic_array<label_t> serial_a, serial_b;
-        if (!serial_a.try_resize(vertices) || !serial_b.try_resize(vertices)) {
+        if (failed(serial_a.resize(vertices)) || failed(serial_b.resize(vertices))) {
             std::fprintf(stderr, "Failed to allocate the reference labels\n");
             return EXIT_FAILURE;
         }
