@@ -5,7 +5,7 @@
 use crate::allocators::{DomainAllocator, PinnedVec};
 use crate::scheduling::{fold_with_scratch, ThreadPool};
 use crate::topology::{MemoryDomain, Topology};
-use crate::types::{CacheAligned, Prong, Result, SyncMutPtr};
+use crate::types::{CacheAligned, Result, SyncMutPtr, TasksRange, ThreadInDomain};
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 
@@ -51,19 +51,19 @@ pub struct DynamicScheduler;
 pub trait ParallelSchedule: Copy {
     fn dispatch<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong) + Sync;
+        F: Fn(usize, ThreadInDomain) + Sync;
 
     /// Runs `function` over contiguous runs. The count is a real run length under static
     /// scheduling and always 1 under dynamic, which has no batched entry point.
     fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong, usize) + Sync;
+        F: Fn(TasksRange, ThreadInDomain) + Sync;
 }
 
 impl ParallelSchedule for StaticScheduler {
     fn dispatch<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong) + Sync,
+        F: Fn(usize, ThreadInDomain) + Sync,
     {
         if tasks == 0 {
             return Ok(());
@@ -74,7 +74,7 @@ impl ParallelSchedule for StaticScheduler {
 
     fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong, usize) + Sync,
+        F: Fn(TasksRange, ThreadInDomain) + Sync,
     {
         if tasks == 0 {
             return Ok(());
@@ -87,7 +87,7 @@ impl ParallelSchedule for StaticScheduler {
 impl ParallelSchedule for DynamicScheduler {
     fn dispatch<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong) + Sync,
+        F: Fn(usize, ThreadInDomain) + Sync,
     {
         if tasks == 0 {
             return Ok(());
@@ -100,9 +100,17 @@ impl ParallelSchedule for DynamicScheduler {
     /// no batched dynamic entry point. Use [`StaticScheduler`] when the batching is what you want.
     fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong, usize) + Sync,
+        F: Fn(TasksRange, ThreadInDomain) + Sync,
     {
-        self.dispatch(pool, tasks, move |prong| function(prong, 1))
+        self.dispatch(pool, tasks, move |task, at| {
+            function(
+                TasksRange {
+                    first: task,
+                    count: 1,
+                },
+                at,
+            )
+        })
     }
 }
 
@@ -121,18 +129,18 @@ pub trait ParallelIterator: Sized {
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync;
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync;
 
     fn drive_static<F>(self, pool: &mut ThreadPool, consumer: F) -> Result<()>
     where
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         self.drive(pool, StaticScheduler, &consumer)
     }
 
     fn drive_dynamic<F>(self, pool: &mut ThreadPool, consumer: F) -> Result<()>
     where
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         self.drive(pool, DynamicScheduler, &consumer)
     }
@@ -211,32 +219,22 @@ where
 
     pub fn for_each<F>(self, function: F) -> Result<()>
     where
-        F: Fn(I::Item) + Sync,
+        F: Fn(I::Item, usize, ThreadInDomain) + Sync,
     {
         let ParallelRunner {
             pool,
             iterator,
             schedule,
         } = self;
-        iterator.drive(pool, schedule, &move |item, _| function(item))
-    }
-
-    pub fn for_each_with_prong<F>(self, function: F) -> Result<()>
-    where
-        F: Fn(I::Item, Prong) + Sync,
-    {
-        let ParallelRunner {
-            pool,
-            iterator,
-            schedule,
-        } = self;
-        iterator.drive(pool, schedule, &move |item, prong| function(item, prong))
+        iterator.drive(pool, schedule, &move |item, task, at| {
+            function(item, task, at)
+        })
     }
 
     pub fn fold_with_scratch<T, F>(self, scratch: &mut [T], fold: F) -> Result<()>
     where
         T: Send,
-        F: Fn(&mut T, I::Item, Prong) + Sync,
+        F: Fn(&mut T, I::Item, usize, ThreadInDomain) + Sync,
     {
         let ParallelRunner {
             pool,
@@ -254,7 +252,7 @@ where
     ///
     /// # Arguments
     /// * `scratch` - Per-thread accumulators (must be `>= pool.threads_count()`)
-    /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, Prong)`
+    /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, usize, ThreadInDomain)`
     /// * `combine` - Function to merge two accumulators: `fn(T, T) -> T`
     ///
     /// # Returns
@@ -272,14 +270,14 @@ where
     /// let total = (&data[..]).into_par_iter().with_pool(&mut pool)
     ///     .reduce_with_scratch(
     ///         scratch.as_mut_slice(),
-    ///         |acc, value, _| acc.0 += *value,
+    ///         |acc, value, _, _| acc.0 += *value,
     ///         |a, b| a.0 += b.0,
     ///     );
     /// ```
     pub fn reduce_with_scratch<T, F, C>(self, scratch: &mut [T], fold: F, combine: C) -> Result<T>
     where
         T: Send + Default,
-        F: Fn(&mut T, I::Item, Prong) + Sync,
+        F: Fn(&mut T, I::Item, usize, ThreadInDomain) + Sync,
         C: Fn(&mut T, T),
     {
         let ParallelRunner {
@@ -310,7 +308,7 @@ where
     /// # Arguments
     ///
     /// * `scratch` - Per-thread accumulators (must be `>= pool.threads_count()`)
-    /// * `fold` - Fallible fold function: `fn(&mut T, I::Item, Prong) -> core::result::Result<(), E>`
+    /// * `fold` - Fallible fold function: `fn(&mut T, I::Item, usize, ThreadInDomain) -> core::result::Result<(), E>`
     ///
     /// # Returns
     ///
@@ -336,7 +334,7 @@ where
     /// let result = (&data[..])
     ///     .into_par_iter()
     ///     .with_pool(&mut pool)
-    ///     .fold_with_scratch_fallible(scratch.as_mut_slice(), |acc, value, _| {
+    ///     .fold_with_scratch_fallible(scratch.as_mut_slice(), |acc, value, _, _| {
     ///         checked_add(&mut acc.0, value)
     ///     });
     ///
@@ -349,7 +347,7 @@ where
     ) -> Result<core::result::Result<(), E>>
     where
         T: Send,
-        F: Fn(&mut T, I::Item, Prong) -> core::result::Result<(), E> + Sync,
+        F: Fn(&mut T, I::Item, usize, ThreadInDomain) -> core::result::Result<(), E> + Sync,
         E: Send,
     {
         use core::sync::atomic::{AtomicBool, Ordering};
@@ -364,14 +362,14 @@ where
         let first_err = SyncOnceCell::new();
         let scratch_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
 
-        iterator.drive(pool, schedule, &|item, prong| {
+        iterator.drive(pool, schedule, &|item, task, at| {
             if stop.load(Ordering::Acquire) {
                 return;
             }
 
-            let slot = unsafe { &mut *scratch_ptr.get(prong.thread_index) };
+            let slot = unsafe { &mut *scratch_ptr.get(at.thread) };
 
-            if let Err(error) = fold(slot, item, prong) {
+            if let Err(error) = fold(slot, item, task, at) {
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
                     // SAFETY: Only one thread sets stop to true, so only one write
@@ -418,13 +416,13 @@ where
     /// let result = (&data[..])
     ///     .into_par_iter()
     ///     .with_pool(&mut pool)
-    ///     .for_each_fallible(|x, _| validate(x));
+    ///     .for_each_fallible(|x, _, _| validate(x));
     ///
     /// assert!(result.is_ok());
     /// ```
     pub fn for_each_fallible<F, E>(self, function: F) -> Result<core::result::Result<(), E>>
     where
-        F: Fn(I::Item, Prong) -> core::result::Result<(), E> + Sync,
+        F: Fn(I::Item, usize, ThreadInDomain) -> core::result::Result<(), E> + Sync,
         E: Send,
     {
         use core::sync::atomic::{AtomicBool, Ordering};
@@ -437,12 +435,12 @@ where
 
         let stop = AtomicBool::new(false);
         let first_err = SyncOnceCell::new();
-        iterator.drive(pool, schedule, &|item, prong| {
+        iterator.drive(pool, schedule, &|item, task, at| {
             if stop.load(Ordering::Acquire) {
                 return;
             }
 
-            if let Err(error) = function(item, prong) {
+            if let Err(error) = function(item, task, at) {
                 let already_stopped = stop.swap(true, Ordering::Release);
                 if !already_stopped {
                     // SAFETY: Only one thread sets stop to true, so only one write
@@ -523,11 +521,11 @@ where
 
         self.reduce_with_scratch(
             scratch.as_mut_slice(),
-            |slot, item, prong| {
+            |slot, item, task, _at| {
                 if !predicate(&item) {
                     return;
                 }
-                let index = prong.task_index;
+                let index = task;
                 match &slot.0 {
                     // ? Every task index is dispatched exactly once, so there are never ties
                     Some((best, _)) if *best <= index => {}
@@ -605,11 +603,11 @@ where
 
         self.reduce_with_scratch(
             scratch.as_mut_slice(),
-            |slot, item, prong| {
+            |slot, item, task, _at| {
                 if !predicate(&item) {
                     return;
                 }
-                let index = prong.task_index;
+                let index = task;
                 match &slot.0 {
                     Some((best, _)) if *best >= index => {}
                     _ => slot.0 = Some((index, item)),
@@ -671,7 +669,7 @@ where
 
         let stop = AtomicBool::new(false);
         let found = SyncOnceCell::new();
-        iterator.drive(pool, schedule, &|item, _prong| {
+        iterator.drive(pool, schedule, &|item, _task, _at| {
             if stop.load(Ordering::Acquire) {
                 return;
             }
@@ -756,7 +754,7 @@ where
     ///
     /// # Arguments
     /// * `init` - Function to create initial accumulator value
-    /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, Prong)`
+    /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, usize, ThreadInDomain)`
     /// * `combine` - Function to merge two accumulators: `fn(T, T) -> T`
     ///
     /// # Example
@@ -767,13 +765,13 @@ where
     /// let data: Vec<u64> = (0..1000).collect();
     ///
     /// let total = (&data[..]).into_par_iter().with_pool(&mut pool)
-    ///     .reduce(|| 0, |acc, value, _| *acc += *value, |a, b| a + b);
+    ///     .reduce(|| 0, |acc, value, _, _| *acc += *value, |a, b| a + b);
     /// ```
     pub fn reduce<T, Init, F, C>(self, init: Init, fold: F, combine: C) -> Result<T>
     where
         Init: Fn() -> T + Sync,
         T: Send + Sync + Default,
-        F: Fn(&mut T, I::Item, Prong) + Sync,
+        F: Fn(&mut T, I::Item, usize, ThreadInDomain) + Sync,
         C: Fn(T, T) -> T,
     {
         // Handle empty iterators early
@@ -808,7 +806,7 @@ where
         // Fold phase uses reduce_with_scratch which indexes by thread_index
         self.reduce_with_scratch(
             scratch.as_mut_slice(),
-            |acc, item, prong| fold(&mut acc.0, item, prong),
+            |acc, item, task, at| fold(&mut acc.0, item, task, at),
             |a, b| {
                 let old_a = core::mem::take(&mut a.0);
                 a.0 = combine(old_a, b.0);
@@ -839,7 +837,7 @@ where
             + core::ops::AddAssign<I::Item>
             + core::ops::Add<Output = T>,
     {
-        self.reduce(T::default, |acc, item, _| *acc += item, |a, b| a + b)
+        self.reduce(T::default, |acc, item, _, _| *acc += item, |a, b| a + b)
     }
 
     /// Count all items in parallel with NUMA-aware local counters.
@@ -853,7 +851,7 @@ where
     /// let count = (&data[..]).into_par_iter().with_pool(&mut pool).count();
     /// ```
     pub fn count(self) -> Result<usize> {
-        self.reduce(|| 0usize, |acc, _item, _| *acc += 1, |a, b| a + b)
+        self.reduce(|| 0usize, |acc, _item, _, _| *acc += 1, |a, b| a + b)
     }
 }
 
@@ -916,10 +914,11 @@ where
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         let Map { base, mapper } = self;
-        let mapped = move |item: I::Item, prong: Prong| consumer(mapper(item), prong);
+        let mapped =
+            move |item: I::Item, task: usize, at: ThreadInDomain| consumer(mapper(item), task, at);
 
         base.drive(pool, schedule, &mapped)
     }
@@ -944,12 +943,12 @@ where
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         let Filter { base, predicate } = self;
-        let filtered = move |item: I::Item, prong: Prong| {
+        let filtered = move |item: I::Item, task: usize, at: ThreadInDomain| {
             if predicate(&item) {
-                consumer(item, prong);
+                consumer(item, task, at);
             }
         };
 
@@ -971,7 +970,7 @@ impl<'a, T> ParallelSlice<'a, T> {
     pub fn for_each_static<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Sync,
-        F: Fn(&'a T, Prong) + Sync,
+        F: Fn(&'a T, usize, ThreadInDomain) + Sync,
     {
         self.drive_static(pool, function)
     }
@@ -979,7 +978,7 @@ impl<'a, T> ParallelSlice<'a, T> {
     pub fn for_each_dynamic<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Sync,
-        F: Fn(&'a T, Prong) + Sync,
+        F: Fn(&'a T, usize, ThreadInDomain) + Sync,
     {
         self.drive_dynamic(pool, function)
     }
@@ -1006,16 +1005,16 @@ where
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         if self.data.is_empty() {
             return Ok(());
         }
 
         let slice = self.data;
-        schedule.dispatch(pool, slice.len(), move |prong| {
-            let item = unsafe { slice.get_unchecked(prong.task_index) };
-            consumer(item, prong);
+        schedule.dispatch(pool, slice.len(), move |task, at| {
+            let item = unsafe { slice.get_unchecked(task) };
+            consumer(item, task, at);
         })
     }
 }
@@ -1041,7 +1040,7 @@ where
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         let len = self.left.data.len();
         assert_eq!(len, self.right.data.len(), "zip requires equal lengths");
@@ -1051,10 +1050,10 @@ where
 
         let left = self.left.data;
         let right = self.right.data;
-        schedule.dispatch(pool, len, move |prong| {
-            let lhs = unsafe { left.get_unchecked(prong.task_index) };
-            let rhs = unsafe { right.get_unchecked(prong.task_index) };
-            consumer((lhs, rhs), prong);
+        schedule.dispatch(pool, len, move |task, at| {
+            let lhs = unsafe { left.get_unchecked(task) };
+            let rhs = unsafe { right.get_unchecked(task) };
+            consumer((lhs, rhs), task, at);
         })
     }
 }
@@ -1078,7 +1077,7 @@ impl<'a, T> ParallelSliceMut<'a, T> {
     pub fn for_each_static<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Send,
-        F: Fn(&'a mut T, Prong) + Sync,
+        F: Fn(&'a mut T, usize, ThreadInDomain) + Sync,
     {
         self.drive_static(pool, function)
     }
@@ -1086,7 +1085,7 @@ impl<'a, T> ParallelSliceMut<'a, T> {
     pub fn for_each_dynamic<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Send,
-        F: Fn(&'a mut T, Prong) + Sync,
+        F: Fn(&'a mut T, usize, ThreadInDomain) + Sync,
     {
         self.drive_dynamic(pool, function)
     }
@@ -1105,16 +1104,16 @@ where
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         if self.len == 0 {
             return Ok(());
         }
 
         let ptr = self.ptr;
-        schedule.dispatch(pool, self.len, move |prong| {
-            let item = unsafe { &mut *ptr.get(prong.task_index) };
-            consumer(item, prong);
+        schedule.dispatch(pool, self.len, move |task, at| {
+            let item = unsafe { &mut *ptr.get(task) };
+            consumer(item, task, at);
         })
     }
 }
@@ -1141,7 +1140,7 @@ impl ParallelIterator for ParallelRange {
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         let len = self.range.len();
         if len == 0 {
@@ -1149,10 +1148,9 @@ impl ParallelIterator for ParallelRange {
         }
 
         let start = self.range.start;
-        schedule.dispatch(pool, len, move |mut prong| {
-            let index = start + prong.task_index;
-            prong.task_index = index;
-            consumer(index, prong);
+        schedule.dispatch(pool, len, move |task, at| {
+            let index = start + task;
+            consumer(index, index, at);
         })
     }
 }
@@ -1191,19 +1189,16 @@ where
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
-        F: Fn(Self::Item, Prong) + Sync,
+        F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         let ParallelExactIter { len, indexer, .. } = self;
         if len == 0 {
             return Ok(());
         }
 
-        schedule.dispatch_slices(pool, len, move |mut prong, count| {
-            let mut current = prong.task_index;
-            for _ in 0..count {
-                prong.task_index = current;
-                consumer(indexer(current), prong);
-                current += 1;
+        schedule.dispatch_slices(pool, len, move |range, at| {
+            for task in range {
+                consumer(indexer(task), task, at);
             }
         })
     }
@@ -1237,7 +1232,7 @@ mod tests {
         (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .for_each(|value| {
+            .for_each(|value, _task, _at| {
                 total.fetch_add(*value, Ordering::Relaxed);
             })
             .unwrap();
@@ -1255,7 +1250,7 @@ mod tests {
         (&mut data[..])
             .into_par_iter()
             .with_schedule(&mut pool, DynamicScheduler)
-            .for_each(|value| {
+            .for_each(|value, _task, _at| {
                 *value *= 2;
             })
             .unwrap();
@@ -1280,8 +1275,8 @@ mod tests {
             .into_par_iter()
             .zip((&b[..]).into_par_iter())
             .with_pool(&mut pool)
-            .for_each_with_prong(|(lhs, rhs), prong| {
-                shared[prong.thread_index % shared.len()].fetch_add(lhs + rhs, Ordering::Relaxed);
+            .for_each(|(lhs, rhs), _task, at| {
+                shared[at.thread % shared.len()].fetch_add(lhs + rhs, Ordering::Relaxed);
             })
             .unwrap();
 
@@ -1300,8 +1295,8 @@ mod tests {
         (0..values.len())
             .into_par_iter()
             .with_pool(&mut pool)
-            .for_each_with_prong(|index, prong| {
-                let slot = unsafe { &mut *ptr.get(prong.task_index) };
+            .for_each(|index, task, _at| {
+                let slot = unsafe { &mut *ptr.get(task) };
                 *slot = index * index;
             })
             .unwrap();
@@ -1322,7 +1317,7 @@ mod tests {
         (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .fold_with_scratch(scratch.as_mut_slice(), |slot, value, _| {
+            .fold_with_scratch(scratch.as_mut_slice(), |slot, value, _, _| {
                 *slot += *value;
             })
             .unwrap();
@@ -1346,7 +1341,7 @@ mod tests {
             .with_pool(&mut pool)
             .reduce_with_scratch(
                 scratch.as_mut_slice(),
-                |acc, value, _| acc.0 += *value,
+                |acc, value, _, _| acc.0 += *value,
                 |a, b| a.0 += b.0,
             )
             .unwrap();
@@ -1368,7 +1363,7 @@ mod tests {
             .with_schedule(&mut pool, DynamicScheduler)
             .reduce_with_scratch(
                 scratch.as_mut_slice(),
-                |a, v, _| a.0 += *v,
+                |a, v, _, _| a.0 += *v,
                 |x, y| x.0 += y.0,
             )
             .unwrap();
@@ -1413,7 +1408,7 @@ mod tests {
         let product = (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .reduce(|| 1u64, |a, v, _| *a *= *v, |x, y| x * y)
+            .reduce(|| 1u64, |a, v, _, _| *a *= *v, |x, y| x * y)
             .unwrap();
         assert_eq!(product, data.iter().product());
     }
@@ -1458,7 +1453,7 @@ mod tests {
         let result = (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .for_each_fallible(|&x, _| if x < 1000 { Ok(()) } else { Err("too large") })
+            .for_each_fallible(|&x, _, _| if x < 1000 { Ok(()) } else { Err("too large") })
             .unwrap();
         assert!(result.is_ok());
     }
@@ -1472,7 +1467,7 @@ mod tests {
         let result = (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .for_each_fallible(|&x, _| if x < 500 { Ok(()) } else { Err(x) })
+            .for_each_fallible(|&x, _, _| if x < 500 { Ok(()) } else { Err(x) })
             .unwrap();
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -1488,7 +1483,9 @@ mod tests {
         let result = (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .for_each_fallible(|&_x, _| -> core::result::Result<(), &str> { Err("should not run") })
+            .for_each_fallible(|&_x, _, _| -> core::result::Result<(), &str> {
+                Err("should not run")
+            })
             .unwrap();
         assert!(result.is_ok());
     }
@@ -1505,7 +1502,7 @@ mod tests {
         let result = (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .fold_with_scratch_fallible(scratch.as_mut_slice(), |acc, &value, _| {
+            .fold_with_scratch_fallible(scratch.as_mut_slice(), |acc, &value, _, _| {
                 acc.0 += value;
                 Ok::<(), &str>(())
             })
@@ -1528,7 +1525,7 @@ mod tests {
         let result = (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .fold_with_scratch_fallible(scratch.as_mut_slice(), |acc, &value, _| {
+            .fold_with_scratch_fallible(scratch.as_mut_slice(), |acc, &value, _, _| {
                 if value >= 500 {
                     Err(value)
                 } else {

@@ -5,7 +5,7 @@ plain C function pointer: it names only parameters, and parameters monomorphise.
 closure that captured anything would make the trampoline `capturing`, which cannot be handed to C
 at all, so the state a callback needs travels in an explicit scratch instead.
 
-The scratch travels by reference. A blocking dispatch does not return until every prong is done,
+The scratch travels by reference. A blocking dispatch does not return until every task is done,
 so the reference is alive for the whole call; taking it here rather than asking the caller for a
 pointer is what stops a caller from handing over storage that dies first.
 """
@@ -28,7 +28,8 @@ from forkunion.types import (
     MemoryDomain,
     OutHandle,
     OutSize,
-    Prong,
+    TasksRange,
+    ThreadInDomain,
 )
 
 
@@ -252,12 +253,12 @@ struct Pool:
         Scratch: AnyType,
         scratch_origin: MutOrigin,
         //,
-        work: def(Prong, mut Scratch) thin -> None,
+        work: def(Int, ThreadInDomain, mut Scratch) thin -> None,
     ](self, n: Int, ref[scratch_origin] scratch: Scratch) raises Error:
-        """Splits `n` prongs into equal contiguous chunks and blocks until every one has finished."""
+        """Splits `n` tasks into equal contiguous chunks and blocks until every one has finished."""
 
         def trampoline(carried: Context, task: c_size_t, thread: c_size_t, domain: c_size_t) abi("C"):
-            work(Prong(Int(task), Int(thread), Int(domain)), carried.unsafe_bitcast[Scratch]()[])
+            work(Int(task), ThreadInDomain(Int(thread), Int(domain)), carried.unsafe_bitcast[Scratch]()[])
 
         var status = self.library.symbols().pool_for_n(self.handle, c_size_t(n), trampoline, _erase(scratch))
         if status != 0:
@@ -267,12 +268,12 @@ struct Pool:
         Scratch: AnyType,
         scratch_origin: MutOrigin,
         //,
-        work: def(Prong, mut Scratch) thin -> None,
+        work: def(Int, ThreadInDomain, mut Scratch) thin -> None,
     ](self, n: Int, ref[scratch_origin] scratch: Scratch) raises Error:
-        """The same, but prongs are claimed as threads free up, for work of uneven cost."""
+        """The same, but tasks are claimed as threads free up, for work of uneven cost."""
 
         def trampoline(carried: Context, task: c_size_t, thread: c_size_t, domain: c_size_t) abi("C"):
-            work(Prong(Int(task), Int(thread), Int(domain)), carried.unsafe_bitcast[Scratch]()[])
+            work(Int(task), ThreadInDomain(Int(thread), Int(domain)), carried.unsafe_bitcast[Scratch]()[])
 
         var status = self.library.symbols().pool_for_n_dynamic(self.handle, c_size_t(n), trampoline, _erase(scratch))
         if status != 0:
@@ -282,18 +283,17 @@ struct Pool:
         Scratch: AnyType,
         scratch_origin: MutOrigin,
         //,
-        work: def(Prong, Int, mut Scratch) thin -> None,
+        work: def(TasksRange, ThreadInDomain, mut Scratch) thin -> None,
     ](self, n: Int, ref[scratch_origin] scratch: Scratch) raises Error:
         """One contiguous run per worker, for vectorized or per-slice-setup work.
 
-        The prong's `task_index` is the run's first index and the second argument is its length;
-        an idle worker receives a length of zero.
+        Every worker is called exactly once; an idle one receives a range with `count == 0`.
         """
 
         def trampoline(carried: Context, first: c_size_t, count: c_size_t, thread: c_size_t, domain: c_size_t) abi("C"):
             work(
-                Prong(Int(first), Int(thread), Int(domain)),
-                Int(count),
+                TasksRange(Int(first), Int(count)),
+                ThreadInDomain(Int(thread), Int(domain)),
                 carried.unsafe_bitcast[Scratch]()[],
             )
 

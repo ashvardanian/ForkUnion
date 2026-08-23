@@ -306,8 +306,8 @@ static bool retouch_deterministically(distributed_pool_t &pool, fu::dynamic_arra
     if (failed(placed.resize_uninitialized(array.size()))) return false; // ? Pages stay unfaulted until the copy
     value_type_ const *source = array.data();
     value_type_ *destination = placed.data();
-    pool.for_slices(array.size(), [=](distributed_pool_t::prong_t prong, std::size_t count) noexcept {
-        std::memcpy(destination + prong.task, source + prong.task, count * sizeof(value_type_));
+    pool.for_slices(array.size(), [=](fu::tasks_range_t range, fu::thread_in_domain_t) noexcept {
+        std::memcpy(destination + range.first, source + range.first, range.count * sizeof(value_type_));
     });
     array = std::move(placed);
     return true;
@@ -358,7 +358,6 @@ static std::uint64_t sum_counters(fu::span<counter_t> counters) noexcept {
  */
 template <schedule_k schedule_, placement_k placement_>
 static void run(run_context_t &c) noexcept {
-    using local_prong_t = typename distributed_pool_t::prong_t;
     auto graph_at = [&](std::size_t compute_domain) noexcept -> csr_view_t {
         if constexpr (placement_ == placement_k::replicated_k)
             return c.replicas.on_memory_domain(
@@ -373,11 +372,11 @@ static void run(run_context_t &c) noexcept {
     std::size_t rounds = 0;
     for (std::uint64_t changes = 1; changes != 0; ++rounds, std::swap(old_labels, new_labels)) {
         zero_counters(c.counters);
-        for_n_scheduled<schedule_>(*c.pool, vertices, [&](local_prong_t prong) noexcept {
-            vertex_t const v = static_cast<vertex_t>(prong.task);
-            label_t const next = min_label_of(graph_at(prong.compute_domain), old_labels, v);
+        for_n_scheduled<schedule_>(*c.pool, vertices, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
+            vertex_t const v = static_cast<vertex_t>(task);
+            label_t const next = min_label_of(graph_at(at.compute_domain), old_labels, v);
             new_labels[v] = next;
-            c.counters[prong.thread].value += next != old_labels[v];
+            c.counters[at.thread].value += next != old_labels[v];
         });
         changes = sum_counters(c.counters);
     }

@@ -434,14 +434,14 @@ fn run_forkunion<S: Schedule, P: Placement>(c: &mut Ctx) {
         let counters = SyncMutPtr::new(c.counters.as_mut_ptr());
         let old_labels: &[Label] = old_ref;
         let new_labels = SyncMutPtr::new(new_ref.as_mut_ptr());
-        let body = move |prong: fu::Prong| {
-            let v = prong.task_index as u32;
-            let local = csr_at::<P>(graph, topology, replicas, prong.compute_domain_index);
+        let body = move |task: usize, at: fu::ThreadInDomain| {
+            let v = task as u32;
+            let local = csr_at::<P>(graph, topology, replicas, at.compute_domain);
             let next = min_label_of(&local, old_labels, v);
             // SAFETY: each vertex writes only its own slot; each thread owns a unique counter.
             unsafe {
                 *new_labels.get(v as usize) = next;
-                (*counters.get(prong.thread_index)).0 += (next != old_labels[v as usize]) as u64;
+                (*counters.get(at.thread)).0 += (next != old_labels[v as usize]) as u64;
             }
         };
         if S::STATIC_SCHEDULE {

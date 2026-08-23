@@ -280,7 +280,7 @@ struct opaque_pool_t {
     }
 
     /** @brief A shim to redirect unsafe callbacks to the current context. */
-    void operator()(fu::local_thread_t pinned) const noexcept {
+    void operator()(fu::thread_in_domain_t pinned) const noexcept {
         current_callback(current_context, pinned.thread, pinned.compute_domain);
     }
 };
@@ -935,7 +935,7 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
     if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
-            variant.for_threads([=](fu::local_thread_t pinned) noexcept { //
+            variant.for_threads([=](fu::thread_in_domain_t pinned) noexcept { //
                 callback(context, pinned.thread, pinned.compute_domain);
             });
         },
@@ -943,7 +943,7 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
     return fu_success_k;
 }
 
-fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callback, fu_lambda_context_t context) {
+fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback, fu_lambda_context_t context) {
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
@@ -951,15 +951,15 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callbac
     if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
-            variant.for_slices(n, [=](fu::local_prong_t prong, std::size_t count) noexcept { //
-                callback(context, prong.task, count, prong.thread, prong.compute_domain);
+            variant.for_slices(n, [=](fu::tasks_range_t range, fu::thread_in_domain_t at) noexcept { //
+                callback(context, range.first, range.count, at.thread, at.compute_domain);
             });
         },
         opaque->variants);
     return fu_success_k;
 }
 
-fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context) {
+fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context) {
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
@@ -967,15 +967,15 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu
     if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
-            variant.for_n(n, [=](fu::local_prong_t prong) noexcept { //
-                callback(context, prong.task, prong.thread, prong.compute_domain);
+            variant.for_n(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
+                callback(context, task, at.thread, at.compute_domain);
             });
         },
         opaque->variants);
     return fu_success_k;
 }
 
-fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context) {
+fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context) {
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
@@ -983,8 +983,8 @@ fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_prongs_t call
     if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
-            variant.for_n_dynamic(n, [=](fu::local_prong_t prong) noexcept { //
-                callback(context, prong.task, prong.thread, prong.compute_domain);
+            variant.for_n_dynamic(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
+                callback(context, task, at.thread, at.compute_domain);
             });
         },
         opaque->variants);

@@ -209,23 +209,24 @@ const WorkContext = struct {
 };
 
 /// The all-to-all sweep: every body reads every other, from the shared array or its node-local replica.
-fn forceKernel(comptime placement: Placement) fn (*const WorkContext, fu.Prong) void {
+fn forceKernel(comptime placement: Placement) fn (*const WorkContext, usize, fu.ThreadInDomain) void {
     return struct {
-        fn calc(work: *const WorkContext, prong: fu.Prong) void {
+        fn calc(work: *const WorkContext, task: usize, at: fu.ThreadInDomain) void {
             if (placement == .replicated) {
-                const local = work.replicas.?.onMemoryDomain(work.local_memory[prong.compute_domain.index()]);
-                work.forces_ptr[prong.task_index] = netForce(&local[prong.task_index], local[0..work.n]);
+                const local = work.replicas.?.onMemoryDomain(work.local_memory[at.compute_domain.index()]);
+                work.forces_ptr[task] = netForce(&local[task], local[0..work.n]);
             } else {
-                const bi = &work.bodies_ptr[prong.task_index];
-                work.forces_ptr[prong.task_index] = netForce(bi, work.bodies_ptr[0..work.n]);
+                const bi = &work.bodies_ptr[task];
+                work.forces_ptr[task] = netForce(bi, work.bodies_ptr[0..work.n]);
             }
         }
     }.calc;
 }
 
 /// The second pass every ForkUnion backend shares: integrate each body by its accumulated force.
-fn applyKernel(work: *const WorkContext, prong: fu.Prong) void {
-    applyForce(&work.bodies_ptr[prong.task_index], &work.forces_ptr[prong.task_index]);
+fn applyKernel(work: *const WorkContext, task: usize, at: fu.ThreadInDomain) void {
+    _ = at;
+    applyForce(&work.bodies_ptr[task], &work.forces_ptr[task]);
 }
 
 /// Dispatches `kernel` over `n` tasks on the chosen schedule: pre-divided static, or work-stolen dynamic.
@@ -550,7 +551,7 @@ pub fn main() !void {
         .libxev => xev_pool = xev.ThreadPool.init(.{ .max_threads = @intCast(n_threads) }),
     }
 
-    // Probed once here, so the kernels index a slice instead of crossing the FFI per prong.
+    // Probed once here, so the kernels index a slice instead of crossing the FFI per task.
     const local_memory = try allocator.alloc(fu.MemoryDomain, try topology.computeDomainsCount());
     defer allocator.free(local_memory);
     for (local_memory, 0..) |*slot, compute_domain|

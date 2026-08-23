@@ -136,11 +136,10 @@ struct colocated_pool {
     using epoch_index_t = index_t;      // ? A.k.a. number of previous API calls in [0, UINT_MAX)
     using generation_t = epoch_index_t; // ? A.k.a. token returned from `unsafe_for_threads`
     using thread_index_t = index_t;     // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using local_thread_t = local_thread<thread_index_t>;
-    using prong_t = local_prong<index_t>;
+    using thread_in_domain_t = thread_in_domain<thread_index_t>;
 
-    using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
-    using trampoline_t = void (*)(punned_fork_context_t, local_thread_t); // ? Wraps lambda's `operator()`
+    using punned_fork_context_t = void *;                                     // ? Pointer to the on-stack lambda
+    using trampoline_t = void (*)(punned_fork_context_t, thread_in_domain_t); // ? Wraps lambda's `operator()`
 
     static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
                   "Yield must be callable as `yield(watched_atomic, observed_value, thread_index)`");
@@ -193,7 +192,7 @@ struct colocated_pool {
     // Task-specific variables:
     /** @brief Type-erased pointer to the caller's on-stack fork lambda. */
     punned_fork_context_t fork_state_ {nullptr};
-    /** @brief Invokes the punned fork lambda for a given `local_thread_t`. */
+    /** @brief Invokes the punned fork lambda for a given `thread_in_domain_t`. */
     trampoline_t fork_trampoline_ {nullptr};
     /** @brief Countdown of contributors still running; the one reaching zero signals completion. */
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
@@ -581,7 +580,7 @@ struct colocated_pool {
     /**
      *  @brief Distributes @p `n` similar duration calls between threads in slices, as opposed to individual indices.
      *  @param[in] n The total length of the range to split between threads.
-     *  @param[in] fork The callback object, receiving the first @b `prong_t` and the slice length.
+     *  @param[in] fork The callback object, receiving a @b `tasks_range_t` and a @b `thread_in_domain_t`.
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
@@ -594,7 +593,7 @@ struct colocated_pool {
     /**
      *  @brief Distributes @p `n` similar duration calls between threads.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving @b `prong_t` or a call index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b `thread_in_domain_t`.
      *
      *  Is designed for a "balanced" workload, where all threads have roughly the same amount of work.
      *  @sa `for_n_dynamic` for a more dynamic workload.
@@ -612,7 +611,7 @@ struct colocated_pool {
     /**
      *  @brief Executes uneven tasks on all threads, greedying for work.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving the `prong_t` or the task index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b `thread_in_domain_t`.
      *  @sa `for_n` for a more "balanced" evenly-splittable workload.
      */
     template <typename fork_type_ = dummy_lambda_t>
@@ -714,7 +713,7 @@ struct colocated_pool {
         // and count it down exactly like a worker thread would.
         bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
         if (use_caller_thread) {
-            fork_trampoline_(fork_state_, local_thread_t {static_cast<thread_index_t>(0), compute_domain_index_});
+            fork_trampoline_(fork_state_, thread_in_domain_t {static_cast<thread_index_t>(0), compute_domain_index_});
             thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
             assert(before_decrement > 0 && "The contributor count must include the caller");
 
@@ -784,12 +783,12 @@ struct colocated_pool {
     /**
      *  @brief A trampoline function that is used to call the user-defined lambda.
      *  @param[in] punned_lambda_pointer The pointer to the user-defined lambda.
-     *  @param[in] local_thread The thread index paired with this pool's compute domain.
+     *  @param[in] at The thread index paired with this pool's compute domain.
      */
     template <typename fork_type_>
-    static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, local_thread_t local_thread) noexcept {
+    static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, thread_in_domain_t at) noexcept {
         fork_type_ &lambda_object = *static_cast<fork_type_ *>(punned_lambda_pointer);
-        lambda_object(local_thread);
+        lambda_object(at);
     }
 
     /**
@@ -865,7 +864,7 @@ struct colocated_pool {
             // Odd epochs are dispatches, even epochs are completions — skip even
             if (new_epoch & 1) {
                 pool->fork_trampoline_(pool->fork_state_,
-                                       local_thread_t {global_thread_index, pool->compute_domain_index_});
+                                       thread_in_domain_t {global_thread_index, pool->compute_domain_index_});
 
                 // ! The decrement must come after the task is executed. The `acq_rel`
                 // ! ordering chains every contributor's writes into the last one, so the
@@ -968,10 +967,9 @@ class invoke_distributed_for_slices {
         : pool_(pool), split_(n, threads), fork_(std::forward<fork_type_>(fork)) {}
 
     void operator()(index_type_ const thread) const noexcept {
-        indexed_range<index_type_> const range = split_[thread];
-        if (range.count == 0) return; // ? No work for this thread
+        tasks_range<index_type_> const range = split_[thread];
         index_type_ const compute_domain = pool_.thread_compute_domain(thread);
-        fork_(local_prong<index_type_> {range.first, thread, compute_domain}, range.count);
+        fork_(range, thread_in_domain<index_type_> {thread, compute_domain});
     }
 };
 
@@ -990,10 +988,9 @@ class invoke_distributed_for_n {
         : pool_(pool), split_(n, threads), fork_(std::forward<fork_type_>(fork)) {}
 
     void operator()(index_type_ const thread) const noexcept {
-        indexed_range<index_type_> const range = split_[thread];
-        index_type_ const compute_domain = pool_.thread_compute_domain(thread);
-        for (index_type_ i = 0; i < range.count; ++i)
-            fork_(local_prong<index_type_> {static_cast<index_type_>(range.first + i), thread, compute_domain});
+        tasks_range<index_type_> const range = split_[thread];
+        thread_in_domain<index_type_> const at {thread, pool_.thread_compute_domain(thread)};
+        for (index_type_ const task : range) fork_(task, at);
     }
 };
 
@@ -1037,7 +1034,7 @@ class invoke_distributed_for_n_dynamic {
      *      static prong), so the two can never drift. */
     struct domain_layout_t {
         /** @brief This domain's task span inside `[0, n_)`. */
-        indexed_range<index_type_> range;
+        tasks_range<index_type_> range;
         /** @brief Workers pinned here; 0 for a domain the spawn skipped. */
         index_type_ threads;
         /** @brief Global index of this domain's first worker. */
@@ -1046,7 +1043,7 @@ class invoke_distributed_for_n_dynamic {
         index_type_ dynamic;
     };
 
-    domain_layout_t layout_of_(indexed_range<index_type_> const range, index_type_ const domain) const noexcept {
+    domain_layout_t layout_of_(tasks_range<index_type_> const range, index_type_ const domain) const noexcept {
         index_type_ const threads = pool_.threads_count(domain);
         index_type_ const dynamic = range.count > threads ? static_cast<index_type_>(range.count - threads) : 0;
         return {range, threads, pool_.first_thread(domain), dynamic};
@@ -1054,13 +1051,13 @@ class invoke_distributed_for_n_dynamic {
 
     /** @brief Helps every thread of @p compute_domain, in a coprime order seeded by the caller. */
     void drain_domain_(index_type_ const compute_domain, index_type_ const thread,
-                       local_prong<index_type_> &prong) noexcept {
+                       thread_in_domain<index_type_> const &at) noexcept {
         index_type_ const threads_local = pool_.threads_count(compute_domain);
         if (!threads_local) return; // ? A domain the spawn left empty owns no slices
         index_type_ const first_thread = pool_.first_thread(compute_domain);
         coprime_permutation_range<index_type_> victims(first_thread, threads_local, thread);
         for (auto victim = victims.begin(); victim != default_sentinel_t {}; ++victim)
-            if (*victim != thread) drain_claim(pool_, *victim, prong, fork_);
+            if (*victim != thread) drain_claim(pool_, *victim, at, fork_);
     }
 
   public:
@@ -1073,12 +1070,11 @@ class invoke_distributed_for_n_dynamic {
         index_type_ const compute_domains_count = pool_.compute_domains_count();
         assert(compute_domains_count > 0 && "There must be at least one compute_domain");
 
-        // The prong's compute_domain is INVARIANT across every steal: it names the domain THIS
+        // The locator's compute_domain is INVARIANT across every steal: it names the domain THIS
         // thread is pinned to, never the victim's - so a stolen task still reads the thief's
-        // node-local replica; replicas are identical, only their distances differ. The drain
-        // helpers mutate `.task` only.
+        // node-local replica; replicas are identical, only their distances differ.
         index_type_ const native_compute_domain = pool_.thread_compute_domain(thread);
-        local_prong<index_type_> prong(0, thread, native_compute_domain);
+        thread_in_domain<index_type_> const at {thread, native_compute_domain};
 
         // Run (up to) one static prong from the native domain's trailing reservation.
         indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
@@ -1086,16 +1082,14 @@ class invoke_distributed_for_n_dynamic {
                                                 native_compute_domain);
         index_type_ const local = pool_.thread_local_index(thread, native_compute_domain);
         index_type_ const static_index = static_cast<index_type_>(home.dynamic + local);
-        if (static_index < home.range.count) { // ? Fewer tasks than threads leaves the domain's tail idle
-            prong.task = static_cast<index_type_>(home.range.first + static_index);
-            fork_(prong);
-        }
+        if (static_index < home.range.count) // ? Fewer tasks than threads leaves the domain's tail idle
+            fork_(static_cast<index_type_>(home.range.first + static_index), at);
 
         // Home domain first: our own slice (still uncontended), then the same-domain neighbours -
         // the `!= thread` guard inside drain_domain_ keeps us from re-draining the slice we just
         // finished.
-        drain_claim(pool_, thread, prong, fork_);
-        drain_domain_(native_compute_domain, thread, prong);
+        drain_claim(pool_, thread, at, fork_);
+        drain_domain_(native_compute_domain, thread, at);
 
         // Only once the whole home domain is dry do we cross the interconnect, coprime over the
         // domains (the `!= native` guard skips the one we already drained) and coprime over each
@@ -1105,7 +1099,7 @@ class invoke_distributed_for_n_dynamic {
         // remote domain the coprime order exists to prevent.
         coprime_permutation_range<index_type_> other_domains(0, compute_domains_count, thread);
         for (auto domain = other_domains.begin(); domain != default_sentinel_t {}; ++domain)
-            if (*domain != native_compute_domain) drain_domain_(*domain, thread, prong);
+            if (*domain != native_compute_domain) drain_domain_(*domain, thread, at);
     }
 
   private:
@@ -1120,7 +1114,7 @@ class invoke_distributed_for_n_dynamic {
 
             indexed_split<index_type_> const split_local(layout.dynamic, layout.threads);
             for (index_type_ local = 0; local < layout.threads; ++local) {
-                indexed_range<index_type_> const slice = split_local[local];
+                tasks_range<index_type_> const slice = split_local[local];
                 auto &claim = pool_.unsafe_dynamic_claim_ref(static_cast<index_type_>(layout.first_thread + local));
                 claim.end = static_cast<index_type_>(layout.range.first + slice.first + slice.count);
                 claim.next.store(static_cast<index_type_>(layout.range.first + slice.first), std::memory_order_release);
@@ -1163,7 +1157,7 @@ struct distributed_pool {
     using generation_t = epoch_index_t;
     using thread_index_t = typename colocated_pool_t::thread_index_t;
     static constexpr std::size_t alignment_k = colocated_pool_t::alignment_k;
-    using prong_t = local_prong<index_t>;
+    using thread_in_domain_t = thread_in_domain<index_t>;
 
   private:
     using colocations_t = dynamic_padded_array<colocated_pool_t, allocator_t>;
@@ -1412,7 +1406,7 @@ struct distributed_pool {
     /**
      *  @brief Distributes @p `n` similar duration calls between threads in slices, as opposed to individual indices.
      *  @param[in] n The total length of the range to split between threads.
-     *  @param[in] fork The callback, receiving the first @b `prong_t` and the slice length.
+     *  @param[in] fork The callback, receiving a @b `tasks_range_t` and a @b `thread_in_domain_t`.
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
@@ -1425,7 +1419,7 @@ struct distributed_pool {
     /**
      *  @brief Distributes @p `n` similar duration calls between threads.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving @b `prong_t` or a call index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b `thread_in_domain_t`.
      *
      *  Is designed for a "balanced" workload, where all threads have roughly the same amount of work.
      *  @sa `for_n_dynamic` for a more dynamic workload.
@@ -1443,7 +1437,7 @@ struct distributed_pool {
     /**
      *  @brief Executes uneven tasks on all threads, greedying for work.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving the `prong_t` or the task index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b `thread_in_domain_t`.
      *  @sa `for_n` for a more "balanced" evenly-splittable workload.
      */
     template <typename fork_type_ = dummy_lambda_t>
@@ -1646,7 +1640,7 @@ inline std::size_t chase_ns_per_hop_(chase_slot_t const *slots, std::size_t cons
  *      workers pass through the broadcast untouched. */
 template <typename pool_type_, typename work_type_>
 static void run_on_worker_(pool_type_ &pool, std::size_t const thread, work_type_ &&work) noexcept {
-    // ? A `local_thread` argument converts to its global index, so this fits every pool's callback shape
+    // ? A `thread_in_domain_t` converts to its global index, so this fits every pool's callback shape
     pool.for_threads([&](std::size_t const local_thread_index) noexcept {
         if (local_thread_index == thread) work();
     });

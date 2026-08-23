@@ -40,7 +40,7 @@ from forkunion import (
     Library,
     MemoryDomain,
     Pool,
-    Prong,
+    ThreadInDomain,
     ReplicatedArray,
     Topology,
 )
@@ -103,9 +103,9 @@ struct FillScratch(ImplicitlyCopyable, TrivialRegisterPassable):
     var raw_local: Int
 
 
-def fill_edge(prong: Prong, mut scratch: FillScratch):
+def fill_edge(task: Int, at: ThreadInDomain, mut scratch: FillScratch):
     """Fills raw edge `e`'s pair of slots from its quadrant walk; self-loops stay sentinels."""
-    var edge = prong.task_index
+    var edge = task
     var row = UInt32(0)
     var column = UInt32(0)
     var bit = scratch.scale
@@ -174,23 +174,23 @@ def min_label_of(graph: Graph, labels: Pointer[UInt32, MutUntrackedOrigin], vert
     return best
 
 
-def label_vertex(prong: Prong, mut round: Round):
+def label_vertex(task: Int, at: ThreadInDomain, mut round: Round):
     """One vertex's update: read the immutable previous labels, write only your own slot."""
-    var vertex = prong.task_index
+    var vertex = task
     var next = min_label_of(round.graph, round.old_labels, vertex)
     round.new_labels[unsafe_offset=vertex] = next
     if next != round.old_labels[unsafe_offset=vertex]:
-        round.counters[unsafe_offset=prong.thread_index].value += 1
+        round.counters[unsafe_offset=at.thread].value += 1
 
 
-def label_vertex_replicated(prong: Prong, mut round: Round):
+def label_vertex_replicated(task: Int, at: ThreadInDomain, mut round: Round):
     """The same update, reading the CSR replica that lives on this thread's own memory domain.
 
     Only the immutable CSR replicates; the label buffers stay shared by nature, since every round
     must see every neighbour's last label.
     """
-    var vertex = prong.task_index
-    var domain = Int(round.local_memory[unsafe_offset=prong.compute_domain_index])
+    var vertex = task
+    var domain = Int(round.local_memory[unsafe_offset=at.compute_domain])
     var local = Graph(
         Pointer(to=round.replica_offsets[unsafe_offset=domain * round.replica_offsets_stride]),
         Pointer(to=round.replica_columns[unsafe_offset=domain * round.replica_columns_stride]),
@@ -200,7 +200,7 @@ def label_vertex_replicated(prong: Prong, mut round: Round):
     var next = min_label_of(local, round.old_labels, vertex)
     round.new_labels[unsafe_offset=vertex] = next
     if next != round.old_labels[unsafe_offset=vertex]:
-        round.counters[unsafe_offset=prong.thread_index].value += 1
+        round.counters[unsafe_offset=at.thread].value += 1
 
 
 def generate_necklace(
@@ -334,7 +334,7 @@ def converge_with_parallelize(
 
 
 def converge_on_pool[
-    work: def(Prong, mut Round) thin -> None
+    work: def(Int, ThreadInDomain, mut Round) thin -> None
 ](
     mut pool: Pool,
     template: Round,

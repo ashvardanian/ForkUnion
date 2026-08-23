@@ -4,12 +4,15 @@ on:
   push:
     branches: ["main-dev"]
   pull_request:
-    branches: ["main-dev"]
+    branches: ["main*"]
 
-# A superseded push needs no verdict; cancel its jobs and spend the runners on the new head.
+# One group per source branch, so a `main*` branch with an open PR is not built twice - `push` matches
+# only `main-dev`, and `head_ref` folds any number of PRs from that branch into the same group.
+# Superseded PR runs are cancelled; `main-dev` runs are not, so a build feeding the release pipeline
+# is never killed midway.
 concurrency:
-  group: pre-release-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:

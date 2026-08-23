@@ -153,8 +153,9 @@ const FillContext = struct {
 };
 
 /// Fills raw edge `e`'s pair of slots `2e, 2e+1` from its quadrant walk; self-loops stay sentinels.
-fn fillEdge(context: *const FillContext, prong: fu.Prong) void {
-    const e = prong.task_index;
+fn fillEdge(context: *const FillContext, task: usize, at: fu.ThreadInDomain) void {
+    _ = at;
+    const e = task;
     var row: u32 = 0;
     var column: u32 = 0;
     var bit: usize = context.scale;
@@ -262,9 +263,10 @@ fn retouchDeterministically(comptime T: type, pool: fu.Pool, values: *[]T) !void
     const Context = RetouchContext(T);
     const context = Context{ .source = values.ptr, .destination = placed.ptr };
     try pool.forSlices(values.len, &context, struct {
-        fn copy(carried: *const Context, prong: fu.Prong, count: usize) void {
-            const first = prong.task_index;
-            @memcpy(carried.destination[first .. first + count], carried.source[first .. first + count]);
+        fn copy(carried: *const Context, range: fu.TasksRange, at: fu.ThreadInDomain) void {
+            _ = at;
+            const first = range.first;
+            @memcpy(carried.destination[first..][0..range.count], carried.source[first..][0..range.count]);
         }
     }.copy);
     allocator.free(values.*);
@@ -304,20 +306,20 @@ const WorkContext = struct {
 };
 
 /// One vertex's update: read the immutable previous labels, write only your own slot.
-fn labelKernel(comptime placement: Placement) fn (*const WorkContext, fu.Prong) void {
+fn labelKernel(comptime placement: Placement) fn (*const WorkContext, usize, fu.ThreadInDomain) void {
     return struct {
-        fn update(work: *const WorkContext, prong: fu.Prong) void {
-            const v = prong.task_index;
+        fn update(work: *const WorkContext, task: usize, at: fu.ThreadInDomain) void {
+            const v = task;
             var row_offsets = work.row_offsets;
             var column_indices = work.column_indices;
             if (placement == .replicated) {
-                const memory_domain = work.local_memory[prong.compute_domain.index()];
+                const memory_domain = work.local_memory[at.compute_domain.index()];
                 row_offsets = work.replicas_offsets.?.onMemoryDomain(memory_domain).ptr;
                 column_indices = work.replicas_columns.?.onMemoryDomain(memory_domain).ptr;
             }
             const next = minLabelOf(row_offsets, column_indices, work.old_labels, v);
             work.new_labels[v] = next;
-            work.counters[prong.thread_index].value += @intFromBool(next != work.old_labels[v]);
+            work.counters[at.thread].value += @intFromBool(next != work.old_labels[v]);
         }
     }.update;
 }

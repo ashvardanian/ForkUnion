@@ -2,7 +2,7 @@
 
 [![`ForkUnion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
 
-__ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, and Zig — built for the tightest `#pragma omp parallel for`-style loops, not task queues. 🍴
+__ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, Zig, and Mojo — built for the tightest `#pragma omp parallel for`-style loops, not task queues. 🍴
 It already powers NUMA-sharded vector search with [USearch](https://github.com/unum-cloud/usearch), LLM KV-cache and attention kernels with [NumKong](https://github.com/ashvardanian/NumKong), and unbalanced bioinformatics workloads — thousands of combinatorial tasks per core — with [StringZilla](https://github.com/ashvardanian/StringZilla).
 
 On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks-and-mutexes), __zero__ [CAS operations](#atomics-and-cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
@@ -14,7 +14,7 @@ That bet compounds as sockets multiply: Intel Xeon Platinum and NVIDIA Vera pack
 > [Full tables ↓](#performance)
 
 It is exhaustively tested for boundary-condition scheduling with miniaturized `uint8_t` indices, even runs on your big-endian 32-bit IBM mainframe, and ships with `no_std` and Miri coverage.
-The core is a C++ 17 library; the C 99, Rust, and Zig APIs bind it, and all four can pin threads to [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual cores and allocate node-local memory.
+The core is a C++ 17 library; the C 99, Rust, Zig, and Mojo APIs bind it, and all five can pin threads to [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual cores and allocate node-local memory.
 Despite being far more deeply tied to hardware and the OS than most alternatives, ForkUnion runs on __six operating systems__ — Linux, FreeBSD, Windows, macOS, Android, and iOS — including asymmetric compute and memory topologies.
 Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux, FreeBSD, and Windows, and elsewhere allocation falls back to a single memory domain.
 
@@ -31,7 +31,7 @@ Higher-level APIs for index-addressable tasks are also available:
 
 - `for_n` - for individual evenly-sized tasks,
 - `for_n_dynamic` - for individual unevenly-sized tasks,
-- `for_slices` - for slices of evenly-sized tasks.
+- `for_slices` - for contiguous runs of evenly-sized tasks, one per worker.
 
 For additional flow control and tuning, following helpers are available:
 
@@ -83,17 +83,14 @@ pool.for_threads(&|thread_index, compute_domain_index| {
 Higher-level APIs distribute index-addressable tasks across the threads in the pool:
 
 ```rust
-pool.for_n(100, |prong| {
-    println!("Running task {} on thread # {}",
-        prong.task_index + 1, prong.thread_index + 1);
+pool.for_n(100, |task, at| {
+    println!("Running task {} on thread # {}", task + 1, at.thread + 1);
 })?;
-pool.for_slices(100, |prong, count| {
-    println!("Running slice [{}, {}) on thread # {}",
-        prong.task_index, prong.task_index + count, prong.thread_index + 1);
+pool.for_slices(100, |range, at| {
+    println!("Running run [{}, {}) on thread # {}", range.first, range.end(), at.thread + 1);
 })?;
-pool.for_n_dynamic(100, |prong| {
-    println!("Running task {} on thread # {}",
-        prong.task_index + 1, prong.thread_index + 1);
+pool.for_n_dynamic(100, |task, at| {
+    println!("Running task {} on thread # {}", task + 1, at.thread + 1);
 })?;
 ```
 
@@ -126,8 +123,8 @@ fn heavy_math(_: usize) {}
 fn main() -> Result<(), Box<dyn Error>> {
     let topology = fu::Topology::new()?;
     let mut pool = fu::ThreadPool::named_spawn(&topology, "heavy-math", 4)?;
-    pool.for_n_dynamic(400, |prong| {
-        heavy_math(prong.task_index);
+    pool.for_n_dynamic(400, |task, _at| {
+        heavy_math(task);
     })?;
     Ok(())
 }
@@ -181,7 +178,7 @@ namespace fu = ashvardanian::forkunion;
 
 int main() {
     alignas(fu::default_alignment_k) fu::flat_pool_t pool;
-    if (!pool.spawn(fu::allowed_cores_count())) {
+    if (fu::failed(pool.spawn(fu::allowed_cores_count()))) {
         std::fprintf(stderr, "Failed to fork the threads\n");
         return EXIT_FAILURE;
     }
@@ -198,11 +195,11 @@ int main() {
     //      for (int i = 0; i < 1000; ++i) { ... }
     //
     // You can also think about it as a shortcut for the `for_slices` + `for`.
-    pool.for_n(1000, [](std::size_t task_index) noexcept {
-        std::printf("Running task %zu of 1000\n", task_index + 1);
+    pool.for_n(1000, [](std::size_t task, fu::thread_in_domain_t) noexcept {
+        std::printf("Running task %zu of 1000\n", task + 1);
     });
-    pool.for_slices(1000, [](std::size_t first_index, std::size_t count) noexcept {
-        std::printf("Running slice [%zu, %zu)\n", first_index, first_index + count);
+    pool.for_slices(1000, [](fu::tasks_range_t range, fu::thread_in_domain_t) noexcept {
+        std::printf("Running run [%zu, %zu)\n", range.first, range.first + range.count);
     });
 
     // Like `for_n`, but each thread greedily steals tasks, without waiting for  
@@ -210,8 +207,8 @@ int main() {
     //
     //      #pragma omp parallel for schedule(dynamic, 1)
     //      for (int i = 0; i < 3; ++i) { ... }
-    pool.for_n_dynamic(3, [](std::size_t task_index) noexcept {
-        std::printf("Running dynamic task %zu of 3\n", task_index + 1);
+    pool.for_n_dynamic(3, [](std::size_t task, fu::thread_in_domain_t) noexcept {
+        std::printf("Running dynamic task %zu of 3\n", task + 1);
     });
     return EXIT_SUCCESS;
 }
@@ -221,7 +218,7 @@ For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access
 Every kernel and ISA facility the library uses is detected by default.
 CMake pins each with an `AUTO`/`ON`/`OFF` tri-state like `-D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON` or `-D FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=OFF`.
 Finer preprocessor gates - like the cache-line hints `FU_WITH_DEMOTE_CACHE_LINES` and `FU_WITH_PROMOTE_CACHE_LINES`, which push a just-written line toward the shared last-level cache via x86 `CLDEMOTE`, Arm `DC CVAC`, or RISC-V `Zicbom` so a consumer core finds it faster - accept the same overrides as compile definitions.
-Call `fu_comptime_capabilities()` to see what survived the build, `fu_runtime_capabilities()` to see what the machine underneath actually offers, and `fu_name_capabilities()` to render either mask as text - every binding exposes the same trio, Rust spelling it `runtime_capabilities()` and Zig `runtimeCapabilities`, alongside a version accessor: `fu_version_major`/`_minor`/`_patch` in C, `version()` in Rust and Zig, and the `FORKUNION_VERSION_*` macros in C++.
+Call `fu_comptime_capabilities()` to see what survived the build, `fu_runtime_capabilities()` to see what the machine underneath actually offers, and `fu_name_capabilities()` to render either mask as text - every binding exposes the same trio, Rust and Mojo spelling it `runtime_capabilities()` and Zig `runtimeCapabilities`, alongside a version accessor: `fu_version_major`/`_minor`/`_patch` in C, `version()` in Rust, Zig, and Mojo, and the `FORKUNION_VERSION_*` macros in C++.
 
 ### Intro in Zig
 
@@ -251,7 +248,7 @@ pub fn main() !void {
     defer pool.deinit();
 
     // Execute work on each thread (OpenMP-style parallel)
-    pool.forThreads({}, struct {
+    try pool.forThreads({}, struct {
         fn work(thread_index: usize, compute_domain: fu.ComputeDomain) void {
             _ = compute_domain;
             std.debug.print("Thread {}\n", .{thread_index});
@@ -260,16 +257,17 @@ pub fn main() !void {
 
     // Distribute 1000 tasks across threads (OpenMP-style parallel for)
     var results = [_]i32{0} ** 1000;
-    pool.forN(1000, &results, struct {
-        fn process(slots: *[1000]i32, prong: fu.Prong) void {
-            slots[prong.task_index] = @intCast(prong.task_index * 2);
+    try pool.forN(1000, &results, struct {
+        fn process(slots: *[1000]i32, task: usize, at: fu.ThreadInDomain) void {
+            _ = at;
+            slots[task] = @intCast(task * 2);
         }
     }.process);
 
     // Or let the pool hand each thread a disjoint sub-slice, with no index arithmetic
-    pool.forSlicesMut(i32, &results, {}, struct {
-        fn scale(thread_index: usize, chunk: []i32) void {
-            _ = thread_index;
+    try pool.forSlicesMut(i32, &results, {}, struct {
+        fn scale(chunk: []i32, at: fu.ThreadInDomain) void {
+            _ = at;
             for (chunk) |*slot| slot.* *= 2;
         }
     }.scale);
@@ -314,21 +312,23 @@ Vendoring works too and needs no manifest: Mojo resolves a source package ahead 
 Then import and use in your code:
 
 ```mojo
-from forkunion import ComputeDomain, Library, Pool, Prong, Topology
+from forkunion import ComputeDomain, Library, Pool, SyncMutPointer, TasksRange, ThreadInDomain, Topology
 
 @fieldwise_init
-struct Scratch(ImplicitlyCopyable, TrivialRegisterPassable):
-    var slots: Pointer[Int64, MutUntrackedOrigin]
+struct Output(ImplicitlyCopyable, TrivialRegisterPassable):
+    """The output array every kernel below writes into."""
 
-def double(prong: Prong, mut scratch: Scratch):
-    scratch.slots[unsafe_offset=prong.task_index] = Int64(prong.task_index * 2)
+    var values: SyncMutPointer[Int64]
 
-def announce(thread_index: Int, compute_domain_index: Int, mut scratch: Scratch):
-    print("thread", thread_index, "on compute domain", compute_domain_index)
+def double(task: Int, at: ThreadInDomain, mut output: Output):
+    output.values.at(task) = Int64(task * 2)
 
-def sweep(prong: Prong, count: Int, mut scratch: Scratch):
-    for index in range(prong.task_index, prong.task_index + count):
-        scratch.slots[unsafe_offset=index] += 1
+def announce(thread_index: Int, compute_domain_index: Int, mut output: Output):
+    print(t"thread {thread_index} on compute domain {compute_domain_index}")
+
+def sweep(tasks: TasksRange, at: ThreadInDomain, mut output: Output):
+    for task in tasks:
+        output.values.at(task) += 1
 
 def main() raises:
     var library = Library()
@@ -336,17 +336,18 @@ def main() raises:
     var pool = Pool(topology, threads=4, name="demo")
 
     var results = List[Int64](length=1000, fill=0)
-    var scratch = Scratch(results.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]())
+    var output = Output(SyncMutPointer(results.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()))
 
-    pool.for_threads[announce](scratch)         # once per worker, OpenMP-style parallel
-    pool.for_n[double](1000, scratch)           # evenly split, OpenMP-style parallel for
-    pool.for_n_dynamic[double](1000, scratch)   # claimed as threads free up, for uneven work
-    pool.for_slices[sweep](1000, scratch)       # one contiguous run per worker
+    pool.for_threads[announce](output)          # once per worker, OpenMP-style parallel
+    pool.for_n[double](1000, output)            # evenly split, OpenMP-style parallel for
+    pool.for_n_dynamic[double](1000, output)    # claimed as threads free up, for uneven work
+    pool.for_slices[sweep](1000, output)        # one contiguous run per worker
+    print(t"results[7] = {results[7]}")         # 15: doubled to 14, then swept once
 ```
 
 The callback is a compile-time parameter and the state it needs is a separate runtime argument.
 Mojo cannot hand a capturing closure to C at all, so a callback carries no captures — the scratch is the only channel, and its type and origin are inferred from the argument, leaving a call site to name only the work.
-Fallible calls raise `ForkUnionError` and nothing else; where the C API reports absence rather than failure, the answer is an `Optional`.
+Fallible calls raise `Error` and nothing else, and a call raises if and only if it can fail - a refusal is never folded into an `Optional` the caller has to interpret.
 
 The non-blocking dispatch is a context manager, so the join cannot be forgotten and the pool cannot be torn down while its workers are still running:
 
@@ -402,13 +403,15 @@ void hello_callback(void *context, size_t thread, size_t compute_domain) {
 }
 
 int main(void) {
-    fu_topology_t topology = fu_topology_new();
-    fu_pool_t pool = fu_pool_new("my_pool", fu_capabilities_all_k);
-    if (!topology || !pool ||
-        !fu_pool_spawn(topology, pool, fu_logical_cores_count(topology), fu_caller_inclusive_k))
-        return 1;
+    fu_topology_t topology;
+    fu_pool_t pool;
+    size_t cores;
+    if (fu_topology_new(&topology) != fu_success_k) return 1;
+    if (fu_pool_new("my_pool", fu_capabilities_all_k, &pool) != fu_success_k) return 1;
+    if (fu_logical_cores_count(topology, &cores) != fu_success_k) return 1;
+    if (fu_pool_spawn(topology, pool, cores, fu_caller_inclusive_k) != fu_success_k) return 1;
 
-    fu_pool_for_threads(pool, hello_callback, NULL);
+    if (fu_pool_for_threads(pool, hello_callback, NULL) != fu_success_k) return 1;
     fu_pool_delete(pool);
     fu_topology_delete(topology);
     return 0;
@@ -418,11 +421,15 @@ int main(void) {
 The `fu_`-prefixed functions report the [hardware topology](#hardware-topology), to size and place work:
 
 ```c
-fu_topology_t topology = fu_topology_new();
-for (size_t domain = 0; domain < fu_compute_domains_count(topology); ++domain) {
-    printf("domain %zu: %zu cores, level %zu, allocate on memory domain %zu\n",
-           domain, fu_logical_cores_count_in(topology, domain), fu_compute_level_in(topology, domain),
-           fu_local_memory_of(topology, domain));
+fu_topology_t topology;
+size_t domains, cores, level, memory;
+if (fu_topology_new(&topology) != fu_success_k) return 1;
+if (fu_compute_domains_count(topology, &domains) != fu_success_k) return 1;
+for (size_t domain = 0; domain < domains; ++domain) {
+    fu_logical_cores_count_in(topology, domain, &cores);
+    fu_compute_level_in(topology, domain, &level);
+    fu_local_memory_of(topology, domain, &memory);
+    printf("domain %zu: %zu cores, level %zu, allocate on memory domain %zu\n", domain, cores, level, memory);
 }
 fu_topology_delete(topology);
 ```
@@ -442,9 +449,11 @@ void process_task(void *ctx, size_t task, size_t thread, size_t compute_domain) 
 }
 
 int main(void) {
-    fu_topology_t topology = fu_topology_new();
-    fu_pool_t pool = fu_pool_new("tasks", fu_capabilities_all_k);
-    fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k);
+    fu_topology_t topology;
+    fu_pool_t pool;
+    if (fu_topology_new(&topology) != fu_success_k) return 1;
+    if (fu_pool_new("tasks", fu_capabilities_all_k, &pool) != fu_success_k) return 1;
+    if (fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k) != fu_success_k) return 1;
 
     int data[100] = {0};
     struct task_context ctx = { .data = data, .size = 100 };
@@ -467,9 +476,11 @@ GCC supports [nested functions](https://gcc.gnu.org/onlinedocs/gcc/Nested-Functi
 #include <forkunion.h>
 
 int main(void) {
-    fu_topology_t topology = fu_topology_new();
-    fu_pool_t pool = fu_pool_new("gcc_nested", fu_capabilities_all_k);
-    fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k);
+    fu_topology_t topology;
+    fu_pool_t pool;
+    if (fu_topology_new(&topology) != fu_success_k) return 1;
+    if (fu_pool_new("gcc_nested", fu_capabilities_all_k, &pool) != fu_success_k) return 1;
+    if (fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k) != fu_success_k) return 1;
 
     atomic_size_t counter = 0;
 
@@ -510,9 +521,11 @@ void block_wrapper_fn(void *ctx, size_t task, size_t thread, size_t compute_doma
 }
 
 int main(void) {
-    fu_topology_t topology = fu_topology_new();
-    fu_pool_t pool = fu_pool_new("clang_blocks", fu_capabilities_all_k);
-    fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k);
+    fu_topology_t topology;
+    fu_pool_t pool;
+    if (fu_topology_new(&topology) != fu_success_k) return 1;
+    if (fu_pool_new("clang_blocks", fu_capabilities_all_k, &pool) != fu_success_k) return 1;
+    if (fu_pool_spawn(topology, pool, 4, fu_caller_inclusive_k) != fu_success_k) return 1;
 
     __block atomic_size_t counter = 0;
 
@@ -552,15 +565,15 @@ __Reach for something else__ when you need task graphs, async I/O, futures and p
 
 The trade-offs line up like this, verified against each project's own source and documentation:
 
-| Property                        | ForkUnion               | OpenMP             | Rayon                      | Taskflow              | oneTBB                |
-| :------------------------------ | :---------------------- | :----------------- | :------------------------- | :-------------------- | :-------------------- |
-| Hot-path heap allocations       | __None__                | ≈ None ¹           | Per spawned task ²         | Per task node         | Per task, pooled      |
-| Syscalls to dispatch            | __None__                | Spin, then futex   | Spin/yield, then futex     | Spin, then futex      | Spin, then futex      |
-| Dynamic-schedule primitive      | __`fetch_add` cursors__ | CAS retry loop ³   | Chase-Lev CAS deque ⁴      | Chase-Lev CAS deque ⁴ | Chase-Lev CAS deque ⁴ |
-| NUMA pinning & local allocators | __Yes__                 | Yes ⁵              | No                         | No ⁶                  | Partial ⁷             |
-| Hardware timed-wait             | __Yes__                 | x86 only, opt-in ⁸ | No                         | No                    | No                    |
-| Languages                       | C++ · C · Rust · Zig    | C · C++ · Fortran  | Rust                       | C++                   | C++                   |
-| Design center                   | Fork-join loops         | Loops + tasks      | Stealing tasks + iterators | Task-graph DAG        | Stealing tasks        |
+| Property                        | ForkUnion                   | OpenMP             | Rayon                      | Taskflow              | oneTBB                |
+| :------------------------------ | :-------------------------- | :----------------- | :------------------------- | :-------------------- | :-------------------- |
+| Hot-path heap allocations       | __None__                    | ≈ None ¹           | Per spawned task ²         | Per task node         | Per task, pooled      |
+| Syscalls to dispatch            | __None__                    | Spin, then futex   | Spin/yield, then futex     | Spin, then futex      | Spin, then futex      |
+| Dynamic-schedule primitive      | __`fetch_add` cursors__     | CAS retry loop ³   | Chase-Lev CAS deque ⁴      | Chase-Lev CAS deque ⁴ | Chase-Lev CAS deque ⁴ |
+| NUMA pinning & local allocators | __Yes__                     | Yes ⁵              | No                         | No ⁶                  | Partial ⁷             |
+| Hardware timed-wait             | __Yes__                     | x86 only, opt-in ⁸ | No                         | No                    | No                    |
+| Languages                       | C++ · C · Rust · Zig · Mojo | C · C++ · Fortran  | Rust                       | C++                   | C++                   |
+| Design center                   | Fork-join loops             | Loops + tasks      | Stealing tasks + iterators | Task-graph DAG        | Stealing tasks        |
 
 > ¹ OpenMP reuses a persistent thread team, so a repeated `parallel for` over a fixed-size team does not re-create it; the per-region worksharing descriptor is reused but not provably allocation-free on every path.
 > ² Rayon keeps `join` and parallel-iterator jobs on the stack, but `scope`/`spawn` heap-allocate one job per task, and the Chase-Lev deque grows on the heap under deep nesting.
@@ -645,7 +658,7 @@ A memory level is a property of the medium, independent of the querying core: it
 | Level of a domain | `compute_level_in`      | `memory_level_in`      |
 | Faster means      | __higher__              | __lower__              |
 
-Names are spelled here as in Rust; C prefixes them with `fu_`, and Zig spells them in camelCase.
+Names are spelled here as in Rust, which Mojo matches; C prefixes them with `fu_`, and Zig spells them in camelCase.
 Rust, Zig, and Mojo all carry the domain coordinates as distinct types — `ComputeDomain`, `MemoryDomain`, and `MemoryDomainId` — while C passes plain indices.
 Domain counts and compute levels answer from the `Topology`; memory levels and the per-edge magnitudes answer from a harvested `Fabric`, which C prefixes with `fu_fabric_`.
 
@@ -736,17 +749,16 @@ search_result_t search(std::span<float, dimensions> query) {
         (first_half.size() + second_half.size()) / dimensions;
 
     auto slices = distributed_pool.for_slices(total_vectors,
-        [&](fu::local_prong<> first, std::size_t count) noexcept {
+        [&](fu::tasks_range_t tasks, fu::thread_in_domain_t at) noexcept {
 
-        bool const in_second = first.compute_domain != 0;
+        bool const in_second = at.compute_domain != 0;
         auto const &shard = in_second ? second_half : first_half;
         std::size_t const shard_base = in_second ? first_half.size() / dimensions : 0;
-        std::size_t const local_begin = first.task - shard_base;
 
         search_result_t thread_local_result;
-        for (std::size_t i = 0; i < count; ++i) {
-            std::size_t const local_index = local_begin + i;
-            std::size_t const global_index = shard_base + local_index;
+        for (std::size_t const task : tasks) {
+            std::size_t const local_index = task - shard_base;
+            std::size_t const global_index = task;
 
             nk_f64_t distance;
             nk_angular_f32(query.data(), shard.data() + local_index * dimensions, dimensions, &distance);
@@ -763,10 +775,10 @@ search_result_t search(std::span<float, dimensions> query) {
 ```
 
 In a dream world, we would call `distributed_pool.for_n`, but there is no clean way to make the scheduling processes aware of the data distribution in an arbitrary application, so that's left to the user.
-The `for_slices` helper provides `fu::local_prong` compute-domain metadata that lets you pick the right shard of data based on the compute domain, while keeping scheduling inside the distributed pool.
+The `for_slices` helper pairs each run with a `fu::thread_in_domain_t`, so a callback picks the right shard of data from its compute domain while scheduling stays inside the distributed pool.
 For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns an always-odd generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
 
-The manual two-vector sharding above is what the __symmetric allocators__ automate: `symmetric_memory_allocator_t` - `fu_allocate_symmetric` in C - maps one virtual range striped a slice per memory domain, and Rust and Zig wrap it as `ShardedArray<T>`, one shard per domain, and `ReplicatedArray<T>`, a full copy per domain for read-mostly data.
+The manual two-vector sharding above is what the __symmetric allocators__ automate: `symmetric_memory_allocator_t` - `fu_allocate_symmetric` in C - maps one virtual range striped a slice per memory domain, and Rust, Zig, and Mojo wrap it as `ShardedArray<T>`, one shard per domain, and `ReplicatedArray<T>`, a full copy per domain for read-mostly data.
 To place and coordinate pools by hand, `spawn_on` - `fu_pool_spawn_on` in C - pins a pool to a single compute domain, while `locate_thread_in` and `threads_count_in` map a global thread index to its domain and count the workers living there.
 
 ### Efficient Busy Waiting
@@ -816,7 +828,7 @@ let mut data: Vec<usize> = (0..1000).collect();
 (&data[..])
     .into_par_iter()
     .with_pool(&mut pool)
-    .for_each(|value| {
+    .for_each(|value, _task, _at| {
         println!("Value: {}", value);
     })?;
 ```
@@ -827,7 +839,7 @@ For dynamic work-stealing, use `with_schedule` with `DynamicScheduler`:
 (&mut data[..])
     .into_par_iter()
     .with_schedule(&mut pool, DynamicScheduler)
-    .for_each(|value| {
+    .for_each(|value, _task, _at| {
         *value *= 2;
     })?;
 ```
@@ -840,7 +852,7 @@ This easily composes with other iterator adaptors, like `map`, `filter`, and `zi
     .filter(|&x| x % 2 == 0)
     .map(|x| x * x)
     .with_pool(&mut pool)
-    .for_each(|value| {
+    .for_each(|value, _task, _at| {
         println!("Squared even: {}", value);
     })?;
 ```
@@ -869,7 +881,7 @@ let product = (&data[..])
     .with_pool(&mut pool)
     .reduce(
         || 1u64,                        // initial value
-        |acc, value, _| *acc *= *value, // fold function
+        |acc, value, _, _| *acc *= *value, // fold function
         |a, b| a * b                    // combine function
     )?;
 ```
@@ -886,7 +898,7 @@ let total = (&data[..])
     .with_pool(&mut pool)
     .reduce_with_scratch(
         scratch.as_mut_slice(),
-        |acc, value, _| acc.0 += *value,  // fold
+        |acc, value, _, _| acc.0 += *value,  // fold
         |a, b| a.0 += b.0                 // combine in-place
     )?;
 ```
@@ -894,15 +906,15 @@ let total = (&data[..])
 Beyond reductions, the iterators offer short-circuiting searches - `find_first` and `find_last` for the deterministic lowest- or highest-index match, `find_any` for the first match with cooperative cancellation, and `any` / `all` for boolean predicates that stop the moment the answer is known.
 Fallible bodies get `for_each_fallible` and `fold_with_scratch_fallible`, which propagate the first error and signal the other workers to stop.
 Their two answers stay apart: the outer `Result` reports whether the dispatch ran, the inner one whether the caller's own work succeeded, so the caller's error type carries no constraint.
-This Rayon-style layer is __Rust-only__; C, C++, and Zig expose the pool primitives `for_threads`, `for_n`, `for_n_dynamic`, and `for_slices` directly.
-Zig additionally mirrors Rust's `for_slices_mut` as `forSlicesMut`, which hands each thread a disjoint sub-slice instead of a start-and-count pair.
+This Rayon-style layer is __Rust-only__; C, C++, Zig, and Mojo expose the pool primitives `for_threads`, `for_n`, `for_n_dynamic`, and `for_slices` directly.
+Zig additionally mirrors Rust's `for_slices_mut` as `forSlicesMut`, which hands each thread a disjoint sub-slice rather than the `TasksRange` its indices would form.
 
 ## Performance
 
 Two benchmarks measure two different things, each against the same runtimes — __ForkUnion__, [__OpenMP__](https://www.openmp.org), [__Rayon__](https://github.com/rayon-rs/rayon), and [__Taskflow__](https://github.com/taskflow/taskflow) — on deliberately equal footing ¹.
 N-body stresses the __dispatch path__: every task costs the same, so what is left over is scheduling latency.
 Connected Components by label propagation stresses the __fork-join frequency__: one bandwidth-bound sweep per round until no label changes, so every round re-pays the dispatch-and-join tax.
-Implementations live in `scripts/nbody.{cpp,rs,zig}` and `scripts/propagation.{cpp,rs,zig}`, and every binary generates a __bit-identical graph__ from the same counter-based SplitMix64 generator, so cells compare exactly across languages.
+Implementations live in `scripts/nbody.{cpp,rs,zig,mojo}` and `scripts/propagation.{cpp,rs,zig,mojo}`, and every binary generates a __bit-identical graph__ from the same counter-based SplitMix64 generator, so cells compare exactly across languages.
 
 ### N-Body — Dispatch Latency
 
@@ -1130,7 +1142,7 @@ If ForkUnion helps your research or product, please cite it:
 ```bibtex
 @software{Vardanian_ForkUnion,
   author = {Vardanian, Ash},
-  title = {{ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path for C, C++, Rust, and Zig}},
+  title = {{ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path for C, C++, Rust, Zig, and Mojo}},
   doi = {10.5281/zenodo.21472185},
   url = {https://github.com/ashvardanian/ForkUnion},
   license = {Apache-2.0}

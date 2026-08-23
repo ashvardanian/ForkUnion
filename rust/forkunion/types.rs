@@ -1,4 +1,4 @@
-//! Portable building blocks - cache-line padding, spin mutexes, prongs, sync pointers, and splits.
+//! Portable building blocks - cache-line padding, spin mutexes, task ranges, sync pointers, and splits.
 //!
 //! Pure logic with no FFI; mirrors the C++ `types` header.
 
@@ -432,23 +432,58 @@ impl<'a, T, const PAUSE: bool> Drop for BasicSpinMutexGuard<'a, T, PAUSE> {
 /// ```
 pub type SpinMutex<T> = BasicSpinMutex<T, true>;
 
-/// A "prong" - the tip of a "fork" - pinning a "task" to a "thread" within a "compute domain".
+/// A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
 ///
-/// A `Prong` represents a single unit of work that connects:
-/// - A **task** (what work to do) - identified by `task_index`
-/// - A **thread** (which CPU thread is executing it) - identified by `thread_index`
-/// - A **compute domain** (the same-QoS core cluster it runs on) - identified by `compute_domain_index`
+/// Iterable, so a callback reads `for task in range` rather than rebuilding the bounds. An idle
+/// thread receives a range with `count == 0`, which every dispatch still calls exactly once.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TasksRange {
+    /// The first task index in the run.
+    pub first: usize,
+    /// How many tasks the run covers; zero means an idle thread.
+    pub count: usize,
+}
+
+impl TasksRange {
+    /// One past the last task index, so `first..end()` is the half-open span.
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.first + self.count
+    }
+
+    /// Whether the run covers no tasks at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The run as a `Range`, for indexing a slice or driving a `for` loop.
+    #[must_use]
+    pub fn range(&self) -> core::ops::Range<usize> {
+        self.first..self.end()
+    }
+}
+
+impl IntoIterator for TasksRange {
+    type Item = usize;
+    type IntoIter = core::ops::Range<usize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.range()
+    }
+}
+
+/// One thread, situated in one compute domain - the "where I am" every callback receives.
 ///
-/// This metadata is essential for topology-aware algorithms, debugging parallel execution,
-/// and understanding load distribution across the thread pool.
-#[derive(Copy, Clone, Debug)]
-pub struct Prong {
-    /// The logical index of the task being processed (0-based)
-    pub task_index: usize,
-    /// The physical thread executing this task (0-based)
-    pub thread_index: usize,
-    /// The compute domain this thread belongs to (a same-QoS core cluster within a memory domain)
-    pub compute_domain_index: usize,
+/// Every dispatch hands its callback two things: the work, and this. A callback placing memory
+/// reads `compute_domain` to find the node it runs on; one indexing per-thread scratch reads
+/// `thread`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ThreadInDomain {
+    /// The physical thread executing the work (0-based).
+    pub thread: usize,
+    /// The compute domain the thread is pinned to - a same-QoS core cluster within a memory domain.
+    pub compute_domain: usize,
 }
 
 /// A thread-safe wrapper around raw pointers for sharing read-only data across threads.
@@ -563,10 +598,10 @@ impl<T> SyncMutPtr<T> {
 unsafe impl<T> Send for SyncMutPtr<T> {}
 unsafe impl<T> Sync for SyncMutPtr<T> {}
 
-/// Splits a range of tasks into fair-sized chunks for parallel distribution.
+/// Splits a range of tasks into fair-sized runs for parallel distribution.
 ///
-/// The first `(tasks % threads)` chunks have size `ceil(tasks / threads)`.
-/// The remaining chunks have size `floor(tasks / threads)`.
+/// The first `(tasks % threads)` runs have size `ceil(tasks / threads)`.
+/// The remaining runs have size `floor(tasks / threads)`.
 ///
 /// This ensures optimal load balancing across threads with minimal size variance.
 /// See: <https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/>

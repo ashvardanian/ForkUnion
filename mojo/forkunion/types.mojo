@@ -147,18 +147,17 @@ def bytes_for_elements(count: Int, element_bytes: Int) raises Error -> Int:
 
 
 @fieldwise_init
-struct Prong(ImplicitlyCopyable, TrivialRegisterPassable):
-    """One unit of a dispatch: which task, on which thread, in which compute domain.
+struct ThreadInDomain(ImplicitlyCopyable, TrivialRegisterPassable):
+    """One thread, situated in one compute domain - the "where I am" every callback receives.
 
-    A slice dispatch reuses `task_index` for the first index of its run, and carries the length
-    alongside rather than inside, which is how the C callback delivers it.
+    Every dispatch hands its callback two things: the work, and this. A callback placing memory
+    reads `compute_domain` to find the node it runs on; one indexing per-thread scratch reads
+    `thread`.
     """
 
-    var task_index: Int
-    """The logical index of the task being processed."""
-    var thread_index: Int
-    """The physical thread executing this task."""
-    var compute_domain_index: Int
+    var thread: Int
+    """The physical thread executing the work."""
+    var compute_domain: Int
     """The compute domain - a same-QoS core cluster - the thread runs on."""
 
 
@@ -287,18 +286,42 @@ struct Capabilities(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 # region Pure Logic
 
 
-@fieldwise_init
-struct IndexedRange(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """A half-open `[start, start + length)` run of task indices."""
+comptime _TasksRangeIterator = type_of(range(0, 1))
+"""What `range(first, last)` returns, which is not otherwise nameable in a signature."""
 
-    var start: Int
-    var length: Int
+
+@fieldwise_init
+struct TasksRange(Equatable, ImplicitlyCopyable, SizedRaising, TrivialRegisterPassable):
+    """A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
+
+    Iterable, so a callback reads `for task in range` rather than rebuilding the bounds. An idle
+    thread receives a range with `count == 0`, which every dispatch still calls exactly once.
+    """
+
+    var first: Int
+    """The first task index in the run."""
+    var count: Int
+    """How many tasks the run covers; zero means an idle thread."""
+
+    def __len__(self) -> Int:
+        return self.count
+
+    def __iter__(self) -> _TasksRangeIterator:
+        return range(self.first, self.first + self.count)
+
+    def end(self) -> Int:
+        """One past the last task index, so `first..end()` is the half-open span."""
+        return self.first + self.count
+
+    def is_empty(self) -> Bool:
+        """Whether the run covers no tasks at all."""
+        return self.count == 0
 
 
 struct IndexedSplit(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Splits a range of tasks into fair-sized chunks, minimizing the spread across threads.
+    """Splits a range of tasks into fair-sized runs, minimizing the spread across threads.
 
-    The first `tasks % threads` chunks get one extra task; the rest get the floor. Mirrors the C++
+    The first `tasks % threads` runs get one extra task; the rest get the floor. Mirrors the C++
     `indexed_split`. See https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/
     """
 
@@ -310,11 +333,11 @@ struct IndexedSplit(ImplicitlyCopyable, TrivialRegisterPassable):
         self.quotient = tasks_count // threads_count
         self.remainder = tasks_count % threads_count
 
-    def get(self, thread_index: Int) -> IndexedRange:
-        """The chunk owned by `thread_index`."""
-        var start = self.quotient * thread_index + min(thread_index, self.remainder)
-        var length = self.quotient + (1 if thread_index < self.remainder else 0)
-        return IndexedRange(start, length)
+    def get(self, thread_index: Int) -> TasksRange:
+        """The run owned by `thread_index`."""
+        var first = self.quotient * thread_index + min(thread_index, self.remainder)
+        var count = self.quotient + (1 if thread_index < self.remainder else 0)
+        return TasksRange(first, count)
 
 
 struct CacheAligned[T: ImplicitlyCopyable & Deinitable](Copyable):

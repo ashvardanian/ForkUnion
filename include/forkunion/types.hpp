@@ -1,6 +1,6 @@
 /**
  *  @file types.hpp
- *  @brief Vocabulary and utilities: prongs, padded buffers, index splitting, claim cursors.
+ *  @brief Vocabulary and utilities: task ranges, padded buffers, index splitting, claim cursors.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
@@ -899,73 +899,14 @@ std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ con
 }
 
 /**
- *  @brief A "prong" - is a tip of a "fork" - pinning "task" to a "thread".
+ *  @brief One thread, situated in one compute domain - the "where I am" every callback receives.
+ *
+ *  Every dispatch hands its callback two things: the work, and this. A callback that only needs
+ *  the thread can take the implicit conversion to a bare index; one placing memory reads
+ *  `compute_domain` to find the node it runs on.
  */
 template <typename index_type_ = std::size_t>
-struct prong {
-    using index_t = index_type_;
-    using task_index_t = index_t;   // ? A.k.a. "task index" in [0, prongs_count)
-    using thread_index_t = index_t; // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-
-    /** @brief The task index, in [0, prongs_count). */
-    task_index_t task {0};
-    /** @brief The thread (core) index running the task, in [0, threads_count). */
-    thread_index_t thread {0};
-
-    constexpr prong() noexcept = default;
-    constexpr prong(prong &&) noexcept = default;
-    constexpr prong(prong const &) noexcept = default;
-    constexpr prong &operator=(prong const &) noexcept = default;
-    constexpr prong &operator=(prong &&) noexcept = default;
-
-    explicit prong(task_index_t task_index, thread_index_t thread_index) noexcept
-        : task(task_index), thread(thread_index) {}
-
-    inline operator task_index_t() const noexcept { return task; }
-};
-
-using prong_t = prong<>; // ? Default prong type with `std::size_t` indices
-
-/**
- *  @brief A "prong" - is a tip of a "fork" - pinning "task" to a "thread" and "memory" location.
- */
-template <typename index_type_ = std::size_t>
-struct local_prong {
-    using index_t = index_type_;
-    using task_index_t = index_t;           // ? A.k.a. "task index" in [0, prongs_count)
-    using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using compute_domain_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "compute_domain ID"
-
-    /** @brief The task index, in [0, prongs_count). */
-    task_index_t task {0};
-    /** @brief The thread (core) index running the task, in [0, threads_count). */
-    thread_index_t thread {0};
-    /** @brief The compute domain the thread is pinned to, in [0, compute_domains_count). */
-    compute_domain_index_t compute_domain {0};
-
-    constexpr local_prong() noexcept = default;
-    constexpr local_prong(local_prong &&) noexcept = default;
-    constexpr local_prong(local_prong const &) noexcept = default;
-    constexpr local_prong &operator=(local_prong const &) noexcept = default;
-    constexpr local_prong &operator=(local_prong &&) noexcept = default;
-
-    explicit local_prong(task_index_t task_index, thread_index_t thread_index,
-                         compute_domain_index_t compute_domain_index) noexcept
-        : task(task_index), thread(thread_index), compute_domain(compute_domain_index) {}
-
-    local_prong(prong<index_t> const &prong) noexcept : task(prong.task), thread(prong.thread), compute_domain(0) {}
-
-    inline operator task_index_t() const noexcept { return task; }
-    inline operator prong<index_t>() const noexcept { return prong<index_t> {task, thread}; }
-};
-
-using local_prong_t = local_prong<>; // ? Default prong type with `std::size_t` indices
-
-/**
- *  @brief Describes a thread ID pinned to a specific compute domain.
- */
-template <typename index_type_ = std::size_t>
-struct local_thread {
+struct thread_in_domain {
     using index_t = index_type_;
     using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
     using compute_domain_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "compute_domain ID"
@@ -975,19 +916,19 @@ struct local_thread {
     /** @brief The compute domain the thread is pinned to, in [0, compute_domains_count). */
     compute_domain_index_t compute_domain {0};
 
-    constexpr local_thread() noexcept = default;
-    constexpr local_thread(local_thread &&) noexcept = default;
-    constexpr local_thread(local_thread const &) noexcept = default;
-    constexpr local_thread &operator=(local_thread const &) noexcept = default;
-    constexpr local_thread &operator=(local_thread &&) noexcept = default;
+    constexpr thread_in_domain() noexcept = default;
+    constexpr thread_in_domain(thread_in_domain &&) noexcept = default;
+    constexpr thread_in_domain(thread_in_domain const &) noexcept = default;
+    constexpr thread_in_domain &operator=(thread_in_domain const &) noexcept = default;
+    constexpr thread_in_domain &operator=(thread_in_domain &&) noexcept = default;
 
-    local_thread(thread_index_t thread_index, compute_domain_index_t compute_domain_index = 0) noexcept
+    thread_in_domain(thread_index_t thread_index, compute_domain_index_t compute_domain_index = 0) noexcept
         : thread(thread_index), compute_domain(compute_domain_index) {}
 
     inline operator thread_index_t() const noexcept { return thread; }
 };
 
-using local_thread_t = local_thread<>; // ? Default thread-locator type with `std::size_t` indices
+using thread_in_domain_t = thread_in_domain<>; // ? Default locator type with `std::size_t` indices
 
 /**
  *  @brief Back-ports the C++ 23 `std::allocation_result`. Unlike STL, also contains the page size.
@@ -1555,37 +1496,58 @@ class spin_mutex {
 
 using spin_mutex_t = spin_mutex<>;
 
-/** @brief A half-open slice `[first, first + count)` of a task index space. */
+/**
+ *  @brief A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
+ *
+ *  Iterable, so a callback reads `for (auto task : range)` rather than rebuilding the bounds. The
+ *  exclusive end is `first + count`; an idle thread receives a range with `count == 0`.
+ */
 template <typename index_type_ = std::size_t>
-struct indexed_range {
+struct tasks_range {
     using index_t = index_type_;
 
-    /** @brief The first task index in the slice. */
+    /** @brief The first task index in the run. */
     index_t first {0};
-    /** @brief How many tasks the slice covers; zero means an empty slice. */
+    /** @brief How many tasks the run covers; zero means an idle thread. */
     index_t count {0};
+
+    /** @brief Whether the run covers no tasks at all. */
+    constexpr bool empty() const noexcept { return count == 0; }
+
+    /** @brief Walks the task indices one at a time, so a range-for reads them directly. */
+    struct iterator {
+        index_t task {0};
+
+        constexpr index_t operator*() const noexcept { return task; }
+        constexpr iterator &operator++() noexcept { return ++task, *this; }
+        constexpr bool operator!=(iterator const &other) const noexcept { return task != other.task; }
+        constexpr bool operator==(iterator const &other) const noexcept { return task == other.task; }
+    };
+
+    constexpr iterator begin() const noexcept { return iterator {first}; }
+    constexpr iterator end() const noexcept { return iterator {static_cast<index_t>(first + count)}; }
 };
 
-using indexed_range_t = indexed_range<>;
+using tasks_range_t = tasks_range<>;
 
 /**
- *  @brief Splits a range of tasks into fair-sized chunks for each thread.
+ *  @brief Splits a range of tasks into fair-sized runs for each thread.
  *  @see https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/
  *
- *  The first `(tasks % threads)` chunks have size `ceil(tasks / threads)`.
- *  The remaining `tasks - (tasks % threads)` chunks have size `floor(tasks / threads)`
+ *  The first `(tasks % threads)` runs have size `ceil(tasks / threads)`.
+ *  The remaining `tasks - (tasks % threads)` runs have size `floor(tasks / threads)`
  *  Has the convenient added property that the difference between the largest and smallest
- *  chunk size is at most 1, which can be used in some ordering algorithms.
+ *  run size is at most 1, which can be used in some ordering algorithms.
  */
 template <typename index_type_ = std::size_t>
 struct indexed_split {
     using index_t = index_type_;
-    using indexed_range_t = indexed_range<index_t>;
+    using tasks_range_t = tasks_range<index_t>;
 
   private:
-    /** @brief Floor of tasks divided by threads; the smaller chunk size. */
+    /** @brief Floor of tasks divided by threads; the smaller run size. */
     index_t quotient_ {0};
-    /** @brief Tasks left over; the first `remainder_` chunks get one extra task. */
+    /** @brief Tasks left over; the first `remainder_` runs get one extra task. */
     index_t remainder_ {0};
 
   public:
@@ -1601,7 +1563,7 @@ struct indexed_split {
         assert(threads_count > 0 && "Threads count must be greater than zero, or expect division by zero");
     }
 
-    inline indexed_range_t operator[](index_t const i) const noexcept {
+    inline tasks_range_t operator[](index_t const i) const noexcept {
         index_t const begin = static_cast<index_t>(quotient_ * i + (i < remainder_ ? i : remainder_));
         index_t const count = static_cast<index_t>(quotient_ + (i < remainder_ ? 1 : 0));
         return {begin, count};
@@ -1611,15 +1573,15 @@ struct indexed_split {
     inline index_t largest_size() const noexcept { return quotient_ + (remainder_ > 0); }
 
     /**
-     *  @brief The chunk owning task @p task - the inverse of `operator[]`, in closed form.
-     *  @note The first `remainder_` chunks are one task larger, so the boundary between the two
+     *  @brief The run owning task @p task - the inverse of `operator[]`, in closed form.
+     *  @note The first `remainder_` runs are one task larger, so the boundary between the two
      *      regimes sits at `remainder_ * (quotient_ + 1)`; a `quotient_` of zero puts every valid
      *      task in the first regime, so the division by `quotient_` below is never reached.
      */
     inline index_t index_of(index_t const task) const noexcept {
-        index_t const larger_chunks_end = static_cast<index_t>(remainder_ * (quotient_ + 1));
-        if (task < larger_chunks_end) return static_cast<index_t>(task / (quotient_ + 1));
-        return static_cast<index_t>(remainder_ + (task - larger_chunks_end) / quotient_);
+        index_t const larger_runs_end = static_cast<index_t>(remainder_ * (quotient_ + 1));
+        if (task < larger_runs_end) return static_cast<index_t>(task / (quotient_ + 1));
+        return static_cast<index_t>(remainder_ + (task - larger_runs_end) / quotient_);
     }
 };
 
@@ -1765,9 +1727,8 @@ class invoke_for_slices {
         : fork_(std::forward<fork_type_>(fork)), split_(n, threads) {}
 
     void operator()(index_type_ const thread) const noexcept {
-        indexed_range<index_type_> const range = split_[thread];
-        if (range.count == 0) return; // ? No work for this thread
-        fork_(prong<index_type_> {range.first, thread}, range.count);
+        tasks_range<index_type_> const range = split_[thread];
+        fork_(range, thread_in_domain<index_type_> {thread});
     }
 };
 
@@ -1782,9 +1743,9 @@ class invoke_for_n {
         : fork_(std::forward<fork_type_>(fork)), split_(n, threads) {}
 
     void operator()(index_type_ const thread) const noexcept {
-        indexed_range<index_type_> const range = split_[thread];
-        for (index_type_ i = 0; i < range.count; ++i)
-            fork_(prong<index_type_> {static_cast<index_type_>(range.first + i), thread});
+        tasks_range<index_type_> const range = split_[thread];
+        thread_in_domain<index_type_> const at {thread};
+        for (index_type_ const task : range) fork_(task, at);
     }
 };
 
@@ -1821,16 +1782,15 @@ using dynamic_claim_t = dynamic_claim<>;
  *  task at a time - the makespan guarantee of greedy list scheduling - and demoted once our
  *  overshooting add has dirtied it, so the next visitor snoops the LLC instead of this core.
  */
-template <typename index_type_, typename prong_type_, typename fork_type_, typename cache_hints_type_>
-inline void drain_claim(dynamic_claim<index_type_> &claim, prong_type_ &prong, fork_type_ &fork,
+template <typename index_type_, typename locator_type_, typename fork_type_, typename cache_hints_type_>
+inline void drain_claim(dynamic_claim<index_type_> &claim, locator_type_ const &at, fork_type_ &fork,
                         cache_hints_type_ cache_hints) noexcept {
     if (claim.next.load(std::memory_order_relaxed) >= claim.end) return;
     cache_hints(&claim, promote_line_k); // ? Overlap the exclusive-ownership fetch with the branch
     while (true) {
         index_type_ const task = claim.next.fetch_add(1, std::memory_order_relaxed);
         if (task >= claim.end) break; // ? Overshoots by one, and only once per thread
-        prong.task = task;
-        fork(prong);
+        fork(task, at);
     }
     cache_hints(&claim, demote_line_k); // ? Our overshooting add left the line dirty; hand it away
 }
@@ -1839,9 +1799,9 @@ inline void drain_claim(dynamic_claim<index_type_> &claim, prong_type_ &prong, f
  *  @brief Drains whatever is left of the @p slice thread's claim in @p pool, whether or not we own it.
  *  @sa The `dynamic_claim` overload above, where the probe and the overshoot invariants live.
  */
-template <typename pool_type_, typename index_type_, typename prong_type_, typename fork_type_>
-inline void drain_claim(pool_type_ &pool, index_type_ const slice, prong_type_ &prong, fork_type_ &fork) noexcept {
-    drain_claim(pool.unsafe_dynamic_claim_ref(slice), prong, fork, typename pool_type_::cache_hints_t {});
+template <typename pool_type_, typename index_type_, typename locator_type_, typename fork_type_>
+inline void drain_claim(pool_type_ &pool, index_type_ const slice, locator_type_ const &at, fork_type_ &fork) noexcept {
+    drain_claim(pool.unsafe_dynamic_claim_ref(slice), at, fork, typename pool_type_::cache_hints_t {});
 }
 
 /**
@@ -1863,7 +1823,7 @@ inline void drain_claim(pool_type_ &pool, index_type_ const slice, prong_type_ &
  *  @section Overflow Considerations
  *
  *  If we run a default for-loop at 1 Billion times per second on a 64-bit machine, then every 585 years
- *  of computational time we will wrap around the `std::size_t` capacity for the `prong.task` index.
+ *  of computational time we will wrap around the `std::size_t` capacity for the task index.
  *  In case we `n + thread >= std::size_t(-1)`, a simple condition won't be enough.
  *  Alternatively, we can make sure, that each thread can do at least one increment of a cursor
  *  without worrying about the overflow. The way to achieve that is to preprocess the trailing `threads`
@@ -1904,16 +1864,16 @@ class invoke_for_n_dynamic {
 
         // Run (up to) one static prong on the current thread
         index_type_ const n_dynamic = dynamic_count();
-        index_type_ const one_static_prong_index = static_cast<index_type_>(n_dynamic + thread);
-        prong<index_type_> prong(one_static_prong_index, thread);
-        if (one_static_prong_index < n_) fork_(prong);
+        index_type_ const one_static_task = static_cast<index_type_>(n_dynamic + thread);
+        thread_in_domain<index_type_> const at {thread};
+        if (one_static_task < n_) fork_(one_static_task, at);
 
         // Help everyone, in a coprime order so drained threads don't collide on one victim. The walk
         // starts at our own slice - `first_offset_ = seed % length` with `seed = thread < threads_` -
         // so the uncontended line is drained first and no self-guard is needed.
         coprime_permutation_range<index_type_> victims(0, threads_, thread);
         for (auto victim = victims.begin(); victim != default_sentinel_t {}; ++victim)
-            drain_claim(pool_, *victim, prong, fork_);
+            drain_claim(pool_, *victim, at, fork_);
     }
 
   private:
@@ -1923,7 +1883,7 @@ class invoke_for_n_dynamic {
         index_type_ const n_dynamic = dynamic_count();
         indexed_split<index_type_> const split(n_dynamic, threads_);
         for (index_type_ thread = 0; thread < threads_; ++thread) {
-            indexed_range<index_type_> const range = split[thread];
+            tasks_range<index_type_> const range = split[thread];
             dynamic_claim<index_type_> &claim = pool_.unsafe_dynamic_claim_ref(thread);
             claim.end = static_cast<index_type_>(range.first + range.count);
             claim.next.store(range.first, std::memory_order_release);
@@ -1997,7 +1957,7 @@ constexpr bool can_be_for_thread_callback() noexcept {
     using fork_t = fork_type_;
     using index_t = index_type_;
 #if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, local_thread<index_t>> ||
+    return std::is_nothrow_invocable_r_v<void, fork_t, thread_in_domain<index_t>> ||
            std::is_nothrow_invocable_r_v<void, fork_t, index_t>;
 #else
     return true;
@@ -2009,9 +1969,7 @@ constexpr bool can_be_for_task_callback() noexcept {
     using fork_t = fork_type_;
     using index_t = index_type_;
 #if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, local_prong<index_t>> ||
-           std::is_nothrow_invocable_r_v<void, fork_t, prong<index_t>> ||
-           std::is_nothrow_invocable_r_v<void, fork_t, index_t>;
+    return std::is_nothrow_invocable_r_v<void, fork_t, index_t, thread_in_domain<index_t>>;
 #else
     return true;
 #endif
@@ -2022,9 +1980,7 @@ constexpr bool can_be_for_slice_callback() noexcept {
     using fork_t = fork_type_;
     using index_t = index_type_;
 #if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, local_prong<index_t>, index_t> ||
-           std::is_nothrow_invocable_r_v<void, fork_t, prong<index_t>, index_t> ||
-           std::is_nothrow_invocable_r_v<void, fork_t, index_t, index_t>;
+    return std::is_nothrow_invocable_r_v<void, fork_t, tasks_range<index_t>, thread_in_domain<index_t>>;
 #else
     return true;
 #endif
@@ -2053,7 +2009,7 @@ struct dummy_pool_t {
     using compute_domain_index_t = index_t;
     using epoch_index_t = index_t;
     using generation_t = epoch_index_t;
-    using prong_t = prong<index_t>;
+    using thread_in_domain_t = thread_in_domain<index_t>;
     using indexed_split_t = indexed_split<index_t>;
 
     thread_index_t threads_count() const noexcept { return 1; }

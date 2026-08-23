@@ -5,7 +5,7 @@
 
 use crate::parallel::{ParallelIterator, ParallelSchedule};
 use crate::topology::{CallerExclusivity, Capabilities, ComputeDomain, MemoryDomain, Topology};
-use crate::types::{Error, IndexedSplit, Prong, Result, Status, SyncMutPtr};
+use crate::types::{Error, Result, Status, SyncMutPtr, TasksRange, ThreadInDomain};
 use core::ffi::{c_char, c_int, c_void};
 use core::marker::PhantomData;
 
@@ -143,14 +143,14 @@ extern "C" {
 /// });
 ///
 /// // Distribute 1000 tasks across threads
-/// pool.for_n(1000, |prong| {
-///     // Each task gets a unique index via prong.task_index
-///     let result = prong.task_index * prong.task_index;
+/// pool.for_n(1000, |task, _at| {
+///     // Each task gets a unique index via task
+///     let result = task * task;
 ///     std::hint::black_box(result); // Prevent optimization
 /// });
 /// ```
 ///
-/// See also helper functions like `for_each_prong_mut` for data processing.
+/// See also helper functions like `for_each_task_mut` for data processing.
 ///
 /// # Generation Tokens
 ///
@@ -502,9 +502,9 @@ impl ThreadPool {
     /// let mut pool = spawn(&topology, 4);
     ///
     /// // Process a batch of work
-    /// pool.for_n(1000, |prong| {
+    /// pool.for_n(1000, |task, _at| {
     ///     // Do some work...
-    ///     std::hint::black_box(prong.task_index * 2);
+    ///     std::hint::black_box(task * 2);
     /// });
     ///
     /// // Put threads to sleep between batches to save power
@@ -512,8 +512,8 @@ impl ThreadPool {
     /// pool.sleep(10_000); // 10,000 microseconds = 10ms
     ///
     /// // Process another batch
-    /// pool.for_n(500, |prong| {
-    ///     std::hint::black_box(prong.task_index * 3);
+    /// pool.for_n(500, |task, _at| {
+    ///     std::hint::black_box(task * 3);
     /// });
     /// ```
     pub fn sleep(&mut self, micros: usize) {
@@ -629,7 +629,7 @@ impl ThreadPool {
     /// # Arguments
     ///
     /// * `n` - Total number of tasks to distribute
-    /// * `function` - Closure executed for each slice, receiving a `Prong` (with first task index) and slice size
+    /// * `function` - Closure executed for each run, receiving a `TasksRange` and its `ThreadInDomain`
     ///
     /// # Examples
     ///
@@ -639,23 +639,18 @@ impl ThreadPool {
     /// let topology = Topology::new().unwrap();
     /// let mut pool = spawn(&topology, 4);
     ///
-    /// pool.for_slices(1000, |prong, count| {
-    ///     let start_index = prong.task_index;
-    ///     
-    ///     // Process the slice - each thread gets a contiguous range
-    ///     for i in 0..count {
-    ///         let global_index = start_index + i;
-    ///         let result = global_index * global_index;
-    ///         std::hint::black_box(result);
+    /// pool.for_slices(1000, |range, at| {
+    ///     // Each thread gets one contiguous run, which iterates directly
+    ///     for task in range {
+    ///         std::hint::black_box(task * task);
     ///     }
-    ///     
-    ///     println!("Thread {} processed slice [{}, {})",
-    ///              prong.thread_index, start_index, start_index + count);
+    ///
+    ///     println!("Thread {} processed run [{}, {})", at.thread, range.first, range.end());
     /// });
     /// ```
     pub fn for_slices<F>(&mut self, n: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong, usize) + Sync,
+        F: Fn(TasksRange, ThreadInDomain) + Sync,
     {
         StaticSlices::dispatch(self, n, &function)
     }
@@ -678,31 +673,28 @@ impl ThreadPool {
     /// let topology = Topology::new().unwrap();
     /// let mut pool = spawn(&topology, 4);
     /// let mut data = vec![0u64; 1000];
-    /// pool.for_slices_mut(&mut data, |_thread_index, chunk| {
+    /// pool.for_slices_mut(&mut data, |chunk, _at| {
     ///     for value in chunk {
     ///         *value += 1;
     ///     }
     /// });
     /// assert!(data.iter().all(|&value| value == 1));
     /// ```
-    pub fn for_slices_mut<T, F>(&mut self, data: &mut [T], function: F)
+    pub fn for_slices_mut<T, F>(&mut self, data: &mut [T], function: F) -> Result<()>
     where
         T: Send,
-        F: Fn(usize, &mut [T]) + Sync,
+        F: Fn(&mut [T], ThreadInDomain) + Sync,
     {
-        let threads = self.threads_count();
-        let split = IndexedSplit::new(data.len(), threads);
         let base = SyncMutPtr::new(data.as_mut_ptr()); // ? `Sync` wrapper for the disjoint scatter
-        let function = &function;
-        let scatter = move |thread_index: usize, _compute_domain_index: usize| {
-            let range = split.get(thread_index);
-            // SAFETY: disjoint in-bounds ranges per thread, joined before `data`'s borrow ends.
-            // `get` only offsets - an empty trailing range lands one past the end, never deref'd.
+        let length = data.len();
+        self.for_slices(length, move |range: TasksRange, at: ThreadInDomain| {
+            // SAFETY: the pool's own split hands each thread a disjoint in-bounds range, and the
+            // dispatch joins before `data`'s borrow ends. `get` only offsets, so an empty trailing
+            // range lands one past the end and is never dereferenced.
             let chunk =
-                unsafe { core::slice::from_raw_parts_mut(base.get(range.start), range.len()) };
-            function(thread_index, chunk);
-        };
-        BroadcastJoin::new(self, &scatter).join();
+                unsafe { core::slice::from_raw_parts_mut(base.get(range.first), range.count) };
+            function(chunk, at);
+        })
     }
 
     /// Distributes `n` similar duration calls between threads by individual indices.
@@ -713,7 +705,7 @@ impl ThreadPool {
     /// # Arguments
     ///
     /// * `n` - Total number of tasks to distribute
-    /// * `function` - Closure executed for each task, receiving a `Prong` with task metadata
+    /// * `function` - Closure executed for each task, receiving the task index and its `ThreadInDomain`
     ///
     /// # Examples
     ///
@@ -723,15 +715,15 @@ impl ThreadPool {
     /// let topology = Topology::new().unwrap();
     /// let mut pool = spawn(&topology, 4);
     ///
-    /// pool.for_n(1000, |prong| {
+    /// pool.for_n(1000, |task, _at| {
     ///     // Simulate computation based on task index
-    ///     let result = prong.task_index * prong.task_index;
+    ///     let result = task * task;
     ///     std::hint::black_box(result); // Prevent optimization
     /// });
     /// ```
     pub fn for_n<F>(&mut self, n: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong) + Sync,
+        F: Fn(usize, ThreadInDomain) + Sync,
     {
         StaticIndices::dispatch(self, n, &function)
     }
@@ -745,7 +737,7 @@ impl ThreadPool {
     /// # Arguments
     ///
     /// * `n` - Total number of tasks to distribute
-    /// * `function` - Closure executed for each task, receiving a `Prong` with task metadata
+    /// * `function` - Closure executed for each task, receiving the task index and its `ThreadInDomain`
     ///
     /// # Examples
     ///
@@ -755,17 +747,17 @@ impl ThreadPool {
     /// let topology = Topology::new().unwrap();
     /// let mut pool = spawn(&topology, 4);
     ///
-    /// pool.for_n_dynamic(100, |prong| {
+    /// pool.for_n_dynamic(100, |task, _at| {
     ///     // Simulate variable work duration - some tasks take longer
-    ///     let iterations = if prong.task_index % 10 == 0 { 10000 } else { 100 };
+    ///     let iterations = if task % 10 == 0 { 10000 } else { 100 };
     ///     for i in 0..iterations {
-    ///         std::hint::black_box(prong.task_index * i);
+    ///         std::hint::black_box(task * i);
     ///     }
     /// });
     /// ```
     pub fn for_n_dynamic<F>(&mut self, n: usize, function: F) -> Result<()>
     where
-        F: Fn(Prong) + Sync,
+        F: Fn(usize, ThreadInDomain) + Sync,
     {
         DynamicIndices::dispatch(self, n, &function)
     }
@@ -1272,14 +1264,16 @@ extern "C" fn indexed_trampoline<F>(
     thread_index: usize,
     compute_domain_index: usize,
 ) where
-    F: Fn(Prong) + Sync,
+    F: Fn(usize, ThreadInDomain) + Sync,
 {
     let function = unsafe { &*(context as *const F) };
-    function(Prong {
+    function(
         task_index,
-        thread_index,
-        compute_domain_index,
-    });
+        ThreadInDomain {
+            thread: thread_index,
+            compute_domain: compute_domain_index,
+        },
+    );
 }
 
 extern "C" fn sliced_trampoline<F>(
@@ -1289,22 +1283,24 @@ extern "C" fn sliced_trampoline<F>(
     thread_index: usize,
     compute_domain_index: usize,
 ) where
-    F: Fn(Prong, usize) + Sync,
+    F: Fn(TasksRange, ThreadInDomain) + Sync,
 {
     let function = unsafe { &*(context as *const F) };
     function(
-        Prong {
-            task_index: first_index,
-            thread_index,
-            compute_domain_index,
+        TasksRange {
+            first: first_index,
+            count,
         },
-        count,
+        ThreadInDomain {
+            thread: thread_index,
+            compute_domain: compute_domain_index,
+        },
     );
 }
 
 impl<F> ForDispatch<F> for StaticIndices
 where
-    F: Fn(Prong) + Sync,
+    F: Fn(usize, ThreadInDomain) + Sync,
 {
     fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) -> Result<()> {
         // SAFETY: the call blocks until every thread finishes, so `function` outlives the dispatch.
@@ -1320,7 +1316,7 @@ where
 
 impl<F> ForDispatch<F> for DynamicIndices
 where
-    F: Fn(Prong) + Sync,
+    F: Fn(usize, ThreadInDomain) + Sync,
 {
     fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) -> Result<()> {
         // SAFETY: as above - the dispatch is synchronous.
@@ -1336,7 +1332,7 @@ where
 
 impl<F> ForDispatch<F> for StaticSlices
 where
-    F: Fn(Prong, usize) + Sync,
+    F: Fn(TasksRange, ThreadInDomain) + Sync,
 {
     fn dispatch(pool: &mut ThreadPool, tasks_count: usize, function: &F) -> Result<()> {
         // SAFETY: as above - the dispatch is synchronous.
@@ -1361,7 +1357,7 @@ where
     I: ParallelIterator,
     S: ParallelSchedule,
     T: Send,
-    F: Fn(&mut T, I::Item, Prong) + Sync,
+    F: Fn(&mut T, I::Item, usize, ThreadInDomain) + Sync,
 {
     let scratch_len = scratch.len();
     assert!(
@@ -1369,10 +1365,10 @@ where
         "scratch space must cover all threads"
     );
     let scratch_ptr = SyncMutPtr::new(scratch.as_mut_ptr());
-    iterator.drive(pool, schedule, &move |item, prong| {
-        debug_assert!(prong.thread_index < scratch_len);
-        let slot = unsafe { &mut *scratch_ptr.get(prong.thread_index) };
-        fold(slot, item, prong);
+    iterator.drive(pool, schedule, &move |item, task, at| {
+        debug_assert!(at.thread < scratch_len);
+        let slot = unsafe { &mut *scratch_ptr.get(at.thread) };
+        fold(slot, item, task, at);
     })
 }
 
@@ -1391,7 +1387,7 @@ pub fn named_spawn(topology: &Topology, name: &str, threads: usize) -> ThreadPoo
 /// Standalone function to distribute `n` similar duration calls between threads.
 pub fn for_n<F>(pool: &mut ThreadPool, n: usize, function: F)
 where
-    F: Fn(Prong) + Sync,
+    F: Fn(usize, ThreadInDomain) + Sync,
 {
     let _operation = pool.for_n(n, function);
     // Operation executes and joins in its destructor
@@ -1400,7 +1396,7 @@ where
 /// Standalone function to execute `n` uneven tasks on all threads.
 pub fn for_n_dynamic<F>(pool: &mut ThreadPool, n: usize, function: F)
 where
-    F: Fn(Prong) + Sync,
+    F: Fn(usize, ThreadInDomain) + Sync,
 {
     let _operation = pool.for_n_dynamic(n, function);
     // Operation executes and joins in its destructor
@@ -1409,39 +1405,39 @@ where
 /// Standalone function to distribute `n` tasks in slices.
 pub fn for_slices<F>(pool: &mut ThreadPool, n: usize, function: F)
 where
-    F: Fn(Prong, usize) + Sync,
+    F: Fn(TasksRange, ThreadInDomain) + Sync,
 {
     let _operation = pool.for_slices(n, function);
     // Operation executes and joins in its destructor
 }
 
 /// Helper function to visit every element exactly once with mutable access.
-pub fn for_each_prong_mut<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F)
+pub fn for_each_task_mut<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F)
 where
     T: Send,
-    F: Fn(&mut T, Prong) + Sync,
+    F: Fn(&mut T, usize, ThreadInDomain) + Sync,
 {
     let ptr = SyncMutPtr::new(data.as_mut_ptr());
     let n = data.len();
 
-    let _operation = pool.for_n(n, move |prong| {
-        let item = unsafe { &mut *ptr.get(prong.task_index) };
-        function(item, prong);
+    let _operation = pool.for_n(n, move |task, at| {
+        let item = unsafe { &mut *ptr.get(task) };
+        function(item, task, at);
     });
 }
 
 /// Helper function to visit every element exactly once with dynamic work-stealing.
-pub fn for_each_prong_mut_dynamic<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F)
+pub fn for_each_task_mut_dynamic<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F)
 where
     T: Send,
-    F: Fn(&mut T, Prong) + Sync,
+    F: Fn(&mut T, usize, ThreadInDomain) + Sync,
 {
     let ptr = SyncMutPtr::new(data.as_mut_ptr());
     let n = data.len();
 
-    let _operation = pool.for_n_dynamic(n, move |prong| {
-        let item = unsafe { &mut *ptr.get(prong.task_index) };
-        function(item, prong);
+    let _operation = pool.for_n_dynamic(n, move |task, at| {
+        let item = unsafe { &mut *ptr.get(task) };
+        function(item, task, at);
     });
 }
 
@@ -1578,11 +1574,12 @@ mod tests {
         let mut data: Vec<usize> = (0..total).collect();
 
         // Each thread squares its own exclusive chunk - no raw pointers, no Mutex.
-        pool.for_slices_mut(&mut data, |_thread_index, chunk| {
+        pool.for_slices_mut(&mut data, |chunk, _at| {
             for value in chunk {
                 *value *= *value;
             }
-        });
+        })
+        .unwrap();
 
         for (index, &value) in data.iter().enumerate() {
             assert_eq!(
@@ -1639,13 +1636,14 @@ mod tests {
             {
                 let calls = Arc::clone(&calls);
                 let covered = Arc::clone(&covered);
-                pool.for_slices_mut(&mut data, move |_thread_index, chunk| {
+                pool.for_slices_mut(&mut data, move |chunk, _at| {
                     calls.fetch_add(1, Ordering::Relaxed);
                     covered.fetch_add(chunk.len(), Ordering::Relaxed);
                     for value in chunk {
                         *value += 100;
                     }
-                });
+                })
+                .unwrap();
             }
 
             assert_eq!(
@@ -1680,8 +1678,7 @@ mod tests {
         let visited_ref = Arc::clone(&visited);
         let duplicate_ref = Arc::clone(&duplicate);
 
-        for_n(&mut pool, EXPECTED_PARTS, move |prong| {
-            let task_index = prong.task_index;
+        for_n(&mut pool, EXPECTED_PARTS, move |task_index, _at| {
             if visited_ref[task_index].swap(true, Ordering::Relaxed) {
                 duplicate_ref.store(true, Ordering::Relaxed);
             }
@@ -1712,8 +1709,7 @@ mod tests {
         let visited_ref = Arc::clone(&visited);
         let duplicate_ref = Arc::clone(&duplicate);
 
-        for_n_dynamic(&mut pool, EXPECTED_PARTS, move |prong| {
-            let task_index = prong.task_index;
+        for_n_dynamic(&mut pool, EXPECTED_PARTS, move |task_index, _at| {
             if visited_ref[task_index].swap(true, Ordering::Relaxed) {
                 duplicate_ref.store(true, Ordering::Relaxed);
             }
@@ -1736,8 +1732,8 @@ mod tests {
         let mut pool = spawn(&topology, hw_threads());
         let mut data = std::vec![0u64; ELEMENTS];
 
-        for_each_prong_mut(&mut pool, &mut data, |x, prong| {
-            *x = prong.task_index as u64 * 2;
+        for_each_task_mut(&mut pool, &mut data, |x, task, _at| {
+            *x = task as u64 * 2;
         });
 
         for (i, &value) in data.iter().enumerate() {
@@ -1755,7 +1751,7 @@ mod tests {
 
         // Test that the operation object properly executes on drop
         {
-            let _op = pool.for_n(1000, move |_prong| {
+            let _op = pool.for_n(1000, move |_task, _at| {
                 counter_ref.fetch_add(1, Ordering::Relaxed);
             });
         } // Operation executes here in the destructor

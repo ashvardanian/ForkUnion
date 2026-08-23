@@ -19,14 +19,12 @@
  *  int main(int argc, char *argv[]) {
  *
  *      fu::flat_pool_t pool;
- *      if (!pool.try_spawn(fu::allowed_cores_count()))
- *          return EXIT_FAILURE;
+ *      if (fu::failed(pool.spawn(fu::allowed_cores_count()))) return EXIT_FAILURE;
  *
- *      pool.for_n(argc, [=](auto prong) noexcept {
- *          auto [task_index, thread_index, compute_domain_index] = prong;
+ *      pool.for_n(argc, [=](std::size_t task, fu::thread_in_domain_t at) noexcept {
  *          std::printf(
  *              "Printing argument # %zu (of %zu) from thread # %zu at compute_domain # %zu: %s\n",
- *              task_index, argc, thread_index, compute_domain_index, argv[task_index]);
+ *              task, argc, at.thread, at.compute_domain, argv[task]);
  *      });
  *      return EXIT_SUCCESS;
  *  }
@@ -69,7 +67,7 @@
 /*
  *  One header per concern. Include order is dependency order; none is meant to be included alone.
  */
-#include "forkunion/types.hpp"        // Vocabulary: prongs, buffers, index splitting, claim cursors
+#include "forkunion/types.hpp"        // Vocabulary: task ranges, buffers, index splitting, claim cursors
 #include "forkunion/capabilities.hpp" // Yields, `cpu_capabilities`, `ram_capabilities`
 #include "forkunion/topology.hpp"     // `memory_domain`, `compute_domain_t`, `machine_topology`, the harvests
 #include "forkunion/allocators.hpp"   // NUMA allocators, `replicated_array`, `sharded_array`

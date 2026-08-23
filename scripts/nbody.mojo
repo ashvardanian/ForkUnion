@@ -42,7 +42,7 @@ from forkunion import (
     Library,
     MemoryDomain,
     Pool,
-    Prong,
+    ThreadInDomain,
     ReplicatedArray,
     Topology,
 )
@@ -191,21 +191,21 @@ def net_force(bodies: Bodies, index: Int) -> Tuple[Float32, Float32, Float32]:
     )
 
 
-def force_prong(prong: Prong, mut bodies: Bodies):
+def force_prong(task: Int, at: ThreadInDomain, mut bodies: Bodies):
     """The first pass: accumulate every body's force over every other."""
-    var force = net_force(bodies, prong.task_index)
-    bodies.force_x[unsafe_offset=prong.task_index] = force[0]
-    bodies.force_y[unsafe_offset=prong.task_index] = force[1]
-    bodies.force_z[unsafe_offset=prong.task_index] = force[2]
+    var force = net_force(bodies, task)
+    bodies.force_x[unsafe_offset=task] = force[0]
+    bodies.force_y[unsafe_offset=task] = force[1]
+    bodies.force_z[unsafe_offset=task] = force[2]
 
 
-def apply_prong(prong: Prong, mut bodies: Bodies):
+def apply_prong(task: Int, at: ThreadInDomain, mut bodies: Bodies):
     """The second pass: integrate each body by its accumulated force.
 
     Positions wrap into the unit box so every distance - and so every force - stays in the normal
     `Float32` range forever: no overflow into NaN, and no denormals for x86 to stall on.
     """
-    var index = prong.task_index
+    var index = task
     var mass_here = bodies.mass[unsafe_offset=index]
     bodies.velocity_x[unsafe_offset=index] += bodies.force_x[unsafe_offset=index] / mass_here * DT
     bodies.velocity_y[unsafe_offset=index] += bodies.force_y[unsafe_offset=index] / mass_here * DT
@@ -312,7 +312,7 @@ def main() raises:
 
     @parameter
     def baseline_apply(index: Int):
-        apply_prong(Prong(index, 0, 0), bodies)
+        apply_prong(index, ThreadInDomain(0, 0), bodies)
 
     @parameter
     def one_pass() raises:

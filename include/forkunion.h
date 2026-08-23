@@ -24,7 +24,7 @@
  *      print_args_context_t *context = (print_args_context_t *)context_punned;
  *      printf(
  *          "Printing argument # %zu from thread # %zu at compute_domain # %zu: %s\n",
- *          task_index, context->argc, thread_index, compute_domain_index, context->argv[task_index]);
+ *          task_index, thread_index, compute_domain_index, context->argv[task_index]);
  *  }
  *
  *  int main(int argc, char *argv[]) {
@@ -186,7 +186,7 @@ typedef void (*fu_for_threads_t)(fu_lambda_context_t context, size_t thread, siz
  *  @param[in] thread The thread index in [0, threads_count).
  *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
  */
-typedef void (*fu_for_prongs_t)(fu_lambda_context_t context, size_t task, size_t thread, size_t compute_domain);
+typedef void (*fu_for_task_t)(fu_lambda_context_t context, size_t task, size_t thread, size_t compute_domain);
 
 /**
  *  @brief Callback type for slice-level operations receiving ranges of tasks.
@@ -196,8 +196,8 @@ typedef void (*fu_for_prongs_t)(fu_lambda_context_t context, size_t task, size_t
  *  @param[in] thread The thread index in [0, threads_count).
  *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
  */
-typedef void (*fu_for_slices_t)(fu_lambda_context_t context, size_t first, size_t count, size_t thread,
-                                size_t compute_domain);
+typedef void (*fu_for_range_t)(fu_lambda_context_t context, size_t first, size_t count, size_t thread,
+                               size_t compute_domain);
 
 /**
  *  @brief Defines the in- and exclusivity of the calling thread for the executing task.
@@ -837,9 +837,9 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
  *  @param[in] context Shared context, may be NULL.
  *
  *  One contiguous range per worker - ideal for @b vectorized or per-slice-setup work where sequential
- *  access matters, since each worker touches its data in order and only sets up once. Idle workers
- *  receive an empty slice with `count` == 0. The callback receives @p context, the slice's `first`
- *  index and its `count` of tasks, its `thread` index, and its `compute_domain`.
+ *  access matters, since each worker touches its data in order and only sets up once. Every worker
+ *  is called exactly once, an idle one with `count` == 0. The callback receives @p context, the
+ *  run's `first` index and its `count` of tasks, its `thread` index, and its `compute_domain`.
  *  @code{.c}
  *  void normalize(void *array, size_t first, size_t count, size_t thread, size_t compute_domain) {
  *      float *data = (float *)array;
@@ -849,7 +849,7 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
  *  @endcode
  *  @sa `fu_pool_for_n` for per-index dispatch.
  */
-fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callback, fu_lambda_context_t context);
+fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback, fu_lambda_context_t context);
 
 /**
  *  @brief Runs @p callback for each of @p n @b similar-cost tasks, blocking until done.
@@ -870,7 +870,7 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_slices_t callbac
  *  @endcode
  *  @sa `fu_pool_for_n_dynamic` for uneven workloads, `fu_pool_for_slices` for range callbacks.
  */
-fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context);
+fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context);
 
 /**
  *  @brief Runs @p callback for each of @p n @b uneven-cost tasks via work-stealing, blocking until done.
@@ -891,7 +891,7 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu
  *  @endcode
  *  @sa `fu_pool_for_n` for balanced workloads.
  */
-fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_prongs_t callback, fu_lambda_context_t context);
+fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context);
 
 #pragma endregion Primary API
 

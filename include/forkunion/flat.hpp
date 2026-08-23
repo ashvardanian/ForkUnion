@@ -132,8 +132,7 @@ class flat_pool {
     using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
     using compute_domain_index_t = index_t; // ? Dense index in [0, compute_domains_count)
     using indexed_split_t = indexed_split<index_t>;
-    using local_thread_t = local_thread<index_t>;
-    using prong_t = prong<index_t>;
+    using thread_in_domain_t = thread_in_domain<index_t>;
     using claim_t = dynamic_claim<index_t>; // ? One private cursor per thread
 
     /**
@@ -400,7 +399,7 @@ class flat_pool {
     /**
      *  @brief Distributes @p `n` similar duration calls between threads in slices, as opposed to individual indices.
      *  @param[in] n The total length of the range to split between threads.
-     *  @param[in] fork The callback object, receiving the first @b `prong_t` and the slice length.
+     *  @param[in] fork The callback object, receiving a @b `tasks_range_t` and a @b `thread_in_domain_t`.
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
@@ -413,7 +412,7 @@ class flat_pool {
     /**
      *  @brief Distributes @p `n` similar duration calls between threads.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving @b `prong_t` or a call index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b `thread_in_domain_t`.
      *
      *  Is designed for a "balanced" workload, where all threads have roughly the same amount of work.
      *  @sa `for_n_dynamic` for a more dynamic workload.
@@ -431,7 +430,7 @@ class flat_pool {
     /**
      *  @brief Executes uneven tasks on all threads, greedying for work.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving the `prong_t` or the task index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b `thread_in_domain_t`.
      *  @sa `for_n` for a more "balanced" evenly-splittable workload.
      */
     template <typename fork_type_ = dummy_lambda_t>
@@ -578,7 +577,7 @@ class flat_pool {
     template <typename fork_type_>
     static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, thread_index_t thread_index) noexcept {
         fork_type_ &lambda_object = *static_cast<fork_type_ *>(punned_lambda_pointer);
-        lambda_object(local_thread_t {thread_index, 0});
+        lambda_object(thread_in_domain_t {thread_index, 0});
     }
 
     /**

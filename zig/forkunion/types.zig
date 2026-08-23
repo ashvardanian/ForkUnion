@@ -1,9 +1,10 @@
 //! Value types mirroring the C++ `types` header, and the `Status`/`Error` vocabulary every
 //! other module reports through.
 //!
-//! Holds the `ComputeDomain`/`MemoryDomain`/`MemoryDomainId` machine coordinates, the `Prong`
-//! execution-context descriptor, and the small parity primitives the parallel layer is built from:
-//! the `IndexedSplit` fair-chunk splitter, the `CacheAligned` padding wrapper, and the
+//! Holds the `ComputeDomain`/`MemoryDomain`/`MemoryDomainId` machine coordinates, the `TasksRange`
+//! work descriptor and its `ThreadInDomain` locator, and the small parity primitives the parallel
+//! layer is built from:
+//! the `IndexedSplit` fair-run splitter, the `CacheAligned` padding wrapper, and the
 //! `SyncConstPtr`/`SyncMutPtr` raw-pointer views that let disjoint slices cross the FFI boundary.
 
 const std = @import("std");
@@ -130,29 +131,51 @@ pub const MemoryDomainId = enum(i32) {
     }
 };
 
-/// A "prong" - metadata about a task's execution context
-pub const Prong = struct {
-    /// The logical index of the task being processed
-    task_index: usize,
-    /// The physical thread executing this task
-    thread_index: usize,
-    /// The compute domain (a same-QoS core cluster)
+/// One thread, situated in one compute domain - the "where I am" every callback receives.
+///
+/// Every dispatch hands its callback two things: the work, and this. A callback placing memory
+/// reads `compute_domain` to find the node it runs on; one indexing per-thread scratch reads
+/// `thread`.
+pub const ThreadInDomain = struct {
+    /// The physical thread executing the work.
+    thread: usize,
+    /// The compute domain the thread is pinned to - a same-QoS core cluster.
     compute_domain: ComputeDomain,
 };
 
 /// A half-open `[start, start + len)` slice of a task range, as handed out by `IndexedSplit.get`.
-pub const IndexedRange = struct {
-    /// The first task index in the chunk.
-    start: usize,
-    /// The number of tasks in the chunk.
-    len: usize,
+/// A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
+///
+/// Zig has no first-class range value, so `first` and `count` feed the language's own `for`
+/// syntax: `for (range.first..range.end()) |task|`. An idle thread receives `count == 0`, and
+/// every dispatch still calls it exactly once.
+pub const TasksRange = struct {
+    /// The first task index in the run.
+    first: usize,
+    /// How many tasks the run covers; zero means an idle thread.
+    count: usize,
+
+    /// One past the last task index, so `first..end()` is the half-open span.
+    pub fn end(self: TasksRange) usize {
+        return self.first + self.count;
+    }
+
+    /// Whether the run covers no tasks at all.
+    pub fn isEmpty(self: TasksRange) bool {
+        return self.count == 0;
+    }
+
+    /// The run's slice of `data`, which must be at least `end()` long.
+    pub fn of(self: TasksRange, comptime T: type, data: []T) []T {
+        return data[self.first..][0..self.count];
+    }
 };
 
-/// Splits a range of tasks into fair-sized chunks for parallel distribution.
+/// Splits a range of tasks into fair-sized runs for parallel distribution.
 ///
-/// The first `tasks % threads` chunks get `ceil(tasks / threads)` tasks; the rest get
+/// The first `tasks % threads` runs get `ceil(tasks / threads)` tasks; the rest get
 /// `floor(tasks / threads)`. This minimizes size variance across threads. Mirrors the C++
-/// `indexed_split` and Lemire's fair-chunk scheme.
+/// `indexed_split` and Lemire's fair-run scheme.
 /// See: https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/
 pub const IndexedSplit = struct {
     quotient: usize,
@@ -167,11 +190,11 @@ pub const IndexedSplit = struct {
         };
     }
 
-    /// Returns the `{ start, len }` chunk owned by thread `thread_index`.
-    pub fn get(self: IndexedSplit, thread_index: usize) IndexedRange {
-        const start = self.quotient * thread_index + @min(thread_index, self.remainder);
-        const len = self.quotient + @as(usize, if (thread_index < self.remainder) 1 else 0);
-        return .{ .start = start, .len = len };
+    /// Returns the `{ first, count }` run owned by thread `thread_index`.
+    pub fn get(self: IndexedSplit, thread_index: usize) TasksRange {
+        const first = self.quotient * thread_index + @min(thread_index, self.remainder);
+        const count = self.quotient + @as(usize, if (thread_index < self.remainder) 1 else 0);
+        return .{ .first = first, .count = count };
     }
 };
 
@@ -240,8 +263,8 @@ pub fn SyncMutPtr(comptime T: type) type {
     };
 }
 
-test "IndexedSplit fair chunks tile the range" {
-    // The chunks must cover [0, tasks) exactly once, be contiguous, and differ in size by at most one.
+test "IndexedSplit fair runs tile the range" {
+    // The runs must cover [0, tasks) exactly once, be contiguous, and differ in size by at most one.
     const cases = [_]struct { tasks: usize, threads: usize }{
         .{ .tasks = 0, .threads = 4 },
         .{ .tasks = 1, .threads = 4 },
@@ -257,10 +280,10 @@ test "IndexedSplit fair chunks tile the range" {
         var max_len: usize = 0;
         for (0..case.threads) |thread| {
             const range = split.get(thread);
-            try std.testing.expectEqual(expected_start, range.start);
-            expected_start += range.len;
-            min_len = @min(min_len, range.len);
-            max_len = @max(max_len, range.len);
+            try std.testing.expectEqual(expected_start, range.first);
+            expected_start += range.count;
+            min_len = @min(min_len, range.count);
+            max_len = @max(max_len, range.count);
         }
         try std.testing.expectEqual(case.tasks, expected_start);
         try std.testing.expect(max_len - min_len <= 1);

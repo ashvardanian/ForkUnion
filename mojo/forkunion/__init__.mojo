@@ -8,22 +8,23 @@ argument, which is what makes it usable on a machine you are sharing.
 The library is reached by `dlopen`, so a consumer builds with no linker flags at all:
 
 ```mojo
-from forkunion import Library, Pool, Prong, Topology
+from forkunion import Library, Pool, SyncMutPointer, ThreadInDomain, Topology
 
 @fieldwise_init
-struct Scratch(ImplicitlyCopyable, TrivialRegisterPassable):
-    var out: Pointer[Int64, MutUntrackedOrigin]
+struct Squares(ImplicitlyCopyable, TrivialRegisterPassable): # the output array
+    var values: SyncMutPointer[Int64]
 
-def square(prong: Prong, mut scratch: Scratch):
-    scratch.out[unsafe_offset=prong.task_index] = Int64(prong.task_index * prong.task_index)
+def square(task: Int, at: ThreadInDomain, mut squares: Squares):
+    squares.values.at(task) = Int64(task * task)
 
 def main() raises:
     var library = Library()
     var topology = Topology(library)
     var pool = Pool(topology, threads=4)
     var values = List[Int64](length=64, fill=0)
-    var scratch = Scratch(values.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]())
-    pool.for_n[square](64, scratch)
+    var squares = Squares(SyncMutPointer(values.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()))
+    pool.for_n[square](64, squares)
+    print(t"values[7] = {values[7]}") # 49
 ```
 
 The callback is a parameter rather than a value, because a closure that captured anything could
@@ -51,11 +52,11 @@ from .types import (
     ComputeDomain,
     Error,
     ErrorKind,
-    IndexedRange,
+    TasksRange,
     IndexedSplit,
     MemoryDomain,
     MemoryDomainId,
-    Prong,
+    ThreadInDomain,
     SyncConstPointer,
     SyncMutPointer,
 )

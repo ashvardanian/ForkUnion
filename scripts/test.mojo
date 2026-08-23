@@ -35,7 +35,8 @@ from forkunion import (
     MemoryDomain,
     MemoryDomainId,
     Pool,
-    Prong,
+    TasksRange,
+    ThreadInDomain,
     ReplicatedArray,
     ShardedArray,
     SyncMutPointer,
@@ -56,29 +57,29 @@ struct Visits(ImplicitlyCopyable, TrivialRegisterPassable):
     var count: Int
 
 
-def _record_task(prong: Prong, mut visits: Visits):
-    visits.slots.at(prong.task_index) += 1
+def _record_task(task: Int, at: ThreadInDomain, mut visits: Visits):
+    visits.slots.at(task) += 1
 
 
 def _record_thread(thread_index: Int, domain_index: Int, mut visits: Visits):
     visits.slots.at(thread_index) += 1
 
 
-def _record_slice(prong: Prong, count: Int, mut visits: Visits):
-    for index in range(prong.task_index, prong.task_index + count):
-        visits.slots.at(index) += 1
+def _record_slice(range_of_tasks: TasksRange, at: ThreadInDomain, mut visits: Visits):
+    for task in range_of_tasks:
+        visits.slots.at(task) += 1
 
 
-def _square(prong: Prong, mut visits: Visits):
-    visits.slots.at(prong.task_index) = Int64(prong.task_index) * Int64(prong.task_index)
+def _square(task: Int, at: ThreadInDomain, mut visits: Visits):
+    visits.slots.at(task) = Int64(task) * Int64(task)
 
 
-def _uneven(prong: Prong, mut visits: Visits):
+def _uneven(task: Int, at: ThreadInDomain, mut visits: Visits):
     """A deliberately skewed cost, so work-stealing has something to steal."""
     var accumulated = Int64(0)
-    for step in range((prong.task_index % 7) * 128):
+    for step in range((task % 7) * 128):
         accumulated += Int64(step)
-    visits.slots.at(prong.task_index) += Int64(1) if accumulated >= 0 else Int64(0)
+    visits.slots.at(task) += Int64(1) if accumulated >= 0 else Int64(0)
 
 
 def _visits_over(mut log: List[Int64]) -> Visits:
@@ -103,10 +104,10 @@ def test_indexed_split_tiles_the_range() raises:
         var longest = -1
         for thread in range(threads):
             var chunk = split.get(thread)
-            assert_equal(chunk.start, expected_start, "chunks are contiguous")
-            expected_start += chunk.length
-            shortest = min(shortest, chunk.length)
-            longest = max(longest, chunk.length)
+            assert_equal(chunk.first, expected_start, "runs are contiguous")
+            expected_start += chunk.count
+            shortest = min(shortest, chunk.count)
+            longest = max(longest, chunk.count)
         assert_equal(expected_start, tasks, "chunks tile the whole range")
         assert_true(longest - shortest <= 1, "chunk sizes differ by at most one")
 
@@ -369,7 +370,7 @@ def test_for_n_visits_each_task_once_and_again() raises:
     pool.for_n[_record_task](97, visits)
     pool.for_n[_record_task](97, visits)
     for index in range(97):
-        assert_equal(log[index], 2, "for_n visits every prong exactly once per dispatch")
+        assert_equal(log[index], 2, "for_n visits every task exactly once per dispatch")
 
 
 def test_for_n_across_uncomfortable_sizes() raises:

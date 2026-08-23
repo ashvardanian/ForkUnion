@@ -236,25 +236,25 @@ using core_mask_t = core_mask<>;
     // A thread lives in exactly one processor group at a time, so that group's mask is its allowed set.
     if (status_t const grew = cores.resize(); failed(grew)) return grew;
     GROUP_AFFINITY affinity = {};
-    if (!::GetThreadGroupAffinity(::GetCurrentThread(), &affinity)) return false;
+    if (!::GetThreadGroupAffinity(::GetCurrentThread(), &affinity)) return status_t::unknown_k;
     for (unsigned bit = 0; bit < win_processors_per_group_k; ++bit)
         if (affinity.Mask & (static_cast<KAFFINITY>(1) << bit)) cores.add(win_encode_core_id(affinity.Group, bit));
-    return true;
+    return status_t::success_k;
 
 #elif FU_ON_FREEBSD
     // ! Not `sched_getaffinity`: FreeBSD spells it `cpuset_getaffinity`, and `-1` means "this thread".
     if (status_t const grew = cores.resize(); failed(grew)) return grew;
     if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, cores.bytes(),
                              static_cast<cpuset_t *>(cores.data())) == 0)
-        return true;
+        return status_t::success_k;
     cores.reset();
-    return false;
+    return status_t::unknown_k;
 
 #else
     // Darwin exposes no CPU mask at all. `thread_policy_set(THREAD_AFFINITY_POLICY)` sets an affinity
     // @b tag - a hint that threads want to share an L2 - not a set of cores, and Apple Silicon answers
     // `KERN_NOT_SUPPORTED`. A pool there partitions the work by domain and lets the scheduler place it.
-    return false;
+    return status_t::unsupported_k;
 #endif
 }
 
@@ -302,22 +302,28 @@ using native_thread_t = pthread_t;
         if (!cores.contains(id)) continue;
         WORD const group = win_core_group(id);
         if (!group_chosen) affinity.Group = group, group_chosen = true;
-        else if (group != affinity.Group) return false; // ! A thread lives in exactly one group
+        else if (group != affinity.Group) return status_t::invalid_argument_k; // ! A thread lives in exactly one group
         affinity.Mask |= static_cast<KAFFINITY>(1) << win_core_index(id);
     }
-    return group_chosen && ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0;
+    if (!group_chosen) return status_t::invalid_argument_k;
+    return ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0 ? status_t::success_k
+                                                                     : status_t::permission_denied_k;
 
 #elif FU_ON_FREEBSD
-    if (!cores.valid()) return false;
-    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpuset_t const *>(cores.data())) == 0;
+    if (!cores.valid()) return status_t::invalid_argument_k;
+    return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpuset_t const *>(cores.data())) == 0
+               ? status_t::success_k
+               : status_t::permission_denied_k;
 
 #elif FU_ON_ANDROID
     // Bionic gained `pthread_setaffinity_np` only at NDK API 36, so pin through `sched_setaffinity` on
     // the thread's tid instead - it works at every level, with `pthread_gettid_np` from API 21 mapping
     // the handle to that tid.
-    if (!cores.valid()) return false;
+    if (!cores.valid()) return status_t::invalid_argument_k;
     return ::sched_setaffinity(::pthread_gettid_np(thread), cores.bytes(),
-                               static_cast<cpu_set_t const *>(cores.data())) == 0;
+                               static_cast<cpu_set_t const *>(cores.data())) == 0
+               ? status_t::success_k
+               : status_t::permission_denied_k;
 
 #elif FU_WITH_PLACE_THREADS_BY_AFFINITY
     if (!cores.valid()) return status_t::invalid_argument_k;
@@ -349,7 +355,7 @@ using native_thread_t = pthread_t;
     }
     return apply_thread_cores(thread, mask);
 #else
-    return false; // ? No placement here; the harvest still reports the domains
+    return status_t::unsupported_k; // ? No placement here; the harvest still reports the domains
 #endif
 }
 
@@ -375,7 +381,7 @@ using native_thread_t = pthread_t;
     return apply_thread_cores(::pthread_self(), saved);
 #endif
 #else
-    return false;
+    return status_t::unsupported_k;
 #endif
 }
 
@@ -671,7 +677,7 @@ class ram_page_settings {
         // `SeLockMemoryPrivilege`; there is no per-node pool to enumerate or reserve.
         fu_unused_(memory_domain_id);
         SIZE_T const large_page_bytes = ::GetLargePageMinimum();
-        if (large_page_bytes == 0) return false; // ? Large pages unavailable on this system
+        if (large_page_bytes == 0) return status_t::unsupported_k; // ? Large pages unavailable here
         // ? Windows commits large pages on demand, with no reserved pool to report
         ram_page_setting_t only {};
         only.bytes_per_page = static_cast<std::size_t>(large_page_bytes);
@@ -680,10 +686,10 @@ class ram_page_settings {
         sizes_.clear();
         [[maybe_unused]] status_t const added = sizes_.push_back(only);
         total_memory_bytes_ = 0;
-        return true;
+        return status_t::success_k;
 #else
         fu_unused_(memory_domain_id);
-        return false;
+        return status_t::unsupported_k;
 #endif
     }
 
@@ -1179,15 +1185,15 @@ FU_MAYBE_UNUSED_ static inline std::size_t apple_sysctl_uint(char const *name) n
 /** @brief Reads a string `sysctl` by name into @p out (always NUL-terminated), returning success. */
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t apple_sysctl_string(char const *name, char *out,
                                                                           std::size_t cap) noexcept {
-    if (cap == 0) return false;
+    if (cap == 0) return status_t::invalid_argument_k;
     std::size_t length = cap;
     if (::sysctlbyname(name, out, &length, nullptr, 0) != 0) {
         out[0] = '\0';
-        return false;
+        return status_t::topology_unavailable_k;
     }
     // ? A value that exactly filled the buffer arrives unterminated
     out[cap - 1] = '\0';
-    return true;
+    return status_t::success_k;
 }
 
 /**
@@ -1556,7 +1562,7 @@ struct machine_topology {
         logical_cores_count_ = fetched_cores;
         compute_domains_count_ = fetched_memory_domains;
         compute_levels_count_ = 1;
-        return true;
+        return status_t::success_k;
     }
 #endif // FU_ON_FREEBSD
 
@@ -1748,7 +1754,7 @@ struct machine_topology {
 
         // Memory tiers are not the harvest's to declare: the kernel's memory-tiering ranking was
         // dropped alongside ACPI HMAT - both are the platform's opinion of the fabric - and
-        // `measured_fabric::try_harvest` in `distributed.hpp` derives real tiers from observed
+        // `measured_fabric::harvest` in `distributed.hpp` derives real tiers from observed
         // bandwidths, latency splitting ties.
         return status_t::success_k; // ? Every scratch array above frees itself here
 #endif                              // FU_WITH_TOPOLOGY
@@ -1785,7 +1791,7 @@ struct machine_topology {
      */
     [[nodiscard]] status_t harvest_apple() noexcept {
         std::size_t const total_cores = apple_sysctl_uint("hw.logicalcpu");
-        if (total_cores == 0) return false;
+        if (total_cores == 0) return status_t::topology_unavailable_k;
         std::size_t const memory_size = apple_sysctl_uint("hw.memsize");
         std::size_t const levels = apple_sysctl_uint("hw.nperflevels");
 
@@ -1888,7 +1894,7 @@ struct machine_topology {
         logical_cores_count_ = total_cores;
         compute_domains_count_ = domains_written;
         compute_levels_count_ = levels_written; // ! Several clusters may share one level - not `domains_written`
-        return true;
+        return status_t::success_k;
     }
 #endif // FU_ON_APPLE
 
@@ -2134,13 +2140,13 @@ struct machine_topology {
         logical_cores_count_ = core_cursor;
         compute_domains_count_ = domain_cursor;
         compute_levels_count_ = levels;
-        return true;
+        return status_t::success_k;
 
     failed_harvest: // ? Only the Win32 buffers are ours to free; the arrays unwind themselves
         if (cells) cell_alloc.deallocate(cells, cell_count);
         std::free(numa_buf);
         std::free(package_buf);
-        return false;
+        return status_t::topology_unavailable_k;
     }
 #endif // FU_ON_WINDOWS
 };

@@ -26,7 +26,7 @@ static fu_pool_t spawn_default_pool(char const *name, fu_capabilities_t mask, fu
 }
 
 /** @brief Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
-static bool test_try_spawn_zero(fu_capabilities_t mask) {
+static bool test_spawn_zero(fu_capabilities_t mask) {
     fu_pool_t pool = NULL;
     if (fu_pool_new("test_zero", mask, &pool) != fu_success_k) return false;
     bool result = fu_pool_spawn(machine_topology, pool, 0u, fu_caller_inclusive_k) == fu_invalid_argument_k;
@@ -35,7 +35,7 @@ static bool test_try_spawn_zero(fu_capabilities_t mask) {
 }
 
 /** @brief The default spawn - one thread per logical core - must succeed and tear down cleanly. */
-static bool test_try_spawn_success(fu_capabilities_t mask) {
+static bool test_spawn_success(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_spawn", mask, fu_caller_inclusive_k);
     if (!pool) return false;
     fu_pool_delete(pool);
@@ -384,17 +384,17 @@ static bool test_oversubscribed_threads(fu_capabilities_t mask) {
 struct for_slices_context_t {
     atomic_uint *executions;
     size_t n;
+    atomic_size_t calls;
     atomic_bool bounds_violated;
-    atomic_bool empty_slice;
 };
 
-/** @brief Bumps a per-index execution counter for the slice, flagging empty or out-of-bounds ones. */
+/** @brief Bumps a per-index execution counter for the run, flagging out-of-bounds ones. */
 static void for_slices_callback(void *context_punned, size_t first, size_t count, size_t thread,
                                 size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
     struct for_slices_context_t *context = (struct for_slices_context_t *)context_punned;
-    if (count == 0) atomic_store(&context->empty_slice, true);
+    atomic_fetch_add(&context->calls, 1);
     if (first + count > context->n) {
         atomic_store(&context->bounds_violated, true);
         return;
@@ -402,7 +402,7 @@ static void for_slices_callback(void *context_punned, size_t first, size_t count
     for (size_t i = 0; i != count; ++i) atomic_fetch_add(&context->executions[first + i], 1);
 }
 
-/** @brief `for_slices` must partition [0, N) into non-empty, in-bounds slices covering each index once. */
+/** @brief `for_slices` partitions [0, N) into in-bounds runs, calling every thread exactly once. */
 static bool test_for_slices(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_slices", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -411,9 +411,12 @@ static bool test_for_slices(fu_capabilities_t mask) {
     atomic_uint *executions = calloc(n, sizeof(atomic_uint));
     struct for_slices_context_t context = {.executions = executions, .n = n};
 
-    fu_pool_for_slices(pool, n, for_slices_callback, &context);
+    size_t threads = 0;
+    bool result = fu_pool_for_slices(pool, n, for_slices_callback, &context) == fu_success_k &&
+                  fu_pool_threads_count(pool, &threads) == fu_success_k;
 
-    bool result = !atomic_load(&context.bounds_violated) && !atomic_load(&context.empty_slice);
+    // Every thread is dispatched exactly once, whether or not it drew any tasks.
+    result = result && !atomic_load(&context.bounds_violated) && atomic_load(&context.calls) == threads;
     for (size_t i = 0; i < n && result; ++i) result = atomic_load(&executions[i]) == 1;
 
     free(executions);
@@ -768,8 +771,8 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
         char const *name;
         bool (*function)(fu_capabilities_t);
     } const unit_tests[] = {
-        {"`try_spawn` zero threads", test_try_spawn_zero},
-        {"`try_spawn` normal", test_try_spawn_success},
+        {"`spawn` zero threads", test_spawn_zero},
+        {"`spawn` normal", test_spawn_success},
         {"`caller_exclusivity` query", test_caller_exclusivity_query},
         {"`fu_pool_spawn_on` per-compute-domain", test_per_compute_domain_pool},
         {"`for_threads` dispatch", test_for_threads},

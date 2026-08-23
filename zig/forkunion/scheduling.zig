@@ -15,7 +15,8 @@ const types = @import("types.zig");
 const ComputeDomain = types.ComputeDomain;
 const MemoryDomain = types.MemoryDomain;
 const IndexedSplit = types.IndexedSplit;
-const Prong = types.Prong;
+const ThreadInDomain = types.ThreadInDomain;
+const TasksRange = types.TasksRange;
 
 extern fn fu_pool_new(name: ?[*:0]const u8, allowed: u32, pool_out: *?*anyopaque) c_int;
 extern fn fu_pool_delete(pool: *anyopaque) void;
@@ -265,8 +266,8 @@ pub const Pool = struct {
 
     /// Distributes N tasks across threads with static scheduling (blocking)
     ///
-    /// - If context is `void`: `fn (Prong) void`
-    /// - Otherwise: `fn (@TypeOf(context), Prong) void`
+    /// - If context is `void`: `fn (usize, ThreadInDomain) void`
+    /// - Otherwise: `fn (@TypeOf(context), usize, ThreadInDomain) void`
     pub fn forN(
         self: Pool,
         n: usize,
@@ -275,7 +276,7 @@ pub const Pool = struct {
     ) Error!void {
         const Context = @TypeOf(context);
         checkContext(Context);
-        checkCallable(func, if (Context == void) 1 else 2);
+        checkCallable(func, if (Context == void) 2 else 3);
 
         const Wrapper = struct {
             fn callback(
@@ -284,15 +285,14 @@ pub const Pool = struct {
                 thread_index: usize,
                 compute_domain_index: usize,
             ) callconv(.c) void {
-                const prong = Prong{
-                    .task_index = task_index,
-                    .thread_index = thread_index,
+                const at = ThreadInDomain{
+                    .thread = thread_index,
                     .compute_domain = ComputeDomain.at(compute_domain_index),
                 };
                 if (Context == void)
-                    func(prong)
+                    func(task_index, at)
                 else
-                    func(@as(Context, @ptrCast(@alignCast(raw))), prong);
+                    func(@as(Context, @ptrCast(@alignCast(raw))), task_index, at);
             }
         };
         try types.check(fu_pool_for_n(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
@@ -300,8 +300,8 @@ pub const Pool = struct {
 
     /// Distributes N tasks with dynamic work-stealing (blocking)
     ///
-    /// - If context is `void`: `fn (Prong) void`
-    /// - Otherwise: `fn (@TypeOf(context), Prong) void`
+    /// - If context is `void`: `fn (usize, ThreadInDomain) void`
+    /// - Otherwise: `fn (@TypeOf(context), usize, ThreadInDomain) void`
     pub fn forNDynamic(
         self: Pool,
         n: usize,
@@ -310,7 +310,7 @@ pub const Pool = struct {
     ) Error!void {
         const Context = @TypeOf(context);
         checkContext(Context);
-        checkCallable(func, if (Context == void) 1 else 2);
+        checkCallable(func, if (Context == void) 2 else 3);
 
         const Wrapper = struct {
             fn callback(
@@ -319,15 +319,14 @@ pub const Pool = struct {
                 thread_index: usize,
                 compute_domain_index: usize,
             ) callconv(.c) void {
-                const prong = Prong{
-                    .task_index = task_index,
-                    .thread_index = thread_index,
+                const at = ThreadInDomain{
+                    .thread = thread_index,
                     .compute_domain = ComputeDomain.at(compute_domain_index),
                 };
                 if (Context == void)
-                    func(prong)
+                    func(task_index, at)
                 else
-                    func(@as(Context, @ptrCast(@alignCast(raw))), prong);
+                    func(@as(Context, @ptrCast(@alignCast(raw))), task_index, at);
             }
         };
         try types.check(fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
@@ -335,9 +334,9 @@ pub const Pool = struct {
 
     /// Distributes N tasks as slices (blocking)
     ///
-    /// The trailing `usize` is how many tasks this chunk covers, starting at `prong.task_index`.
-    /// - If context is `void`: `fn (Prong, usize) void`
-    /// - Otherwise: `fn (@TypeOf(context), Prong, usize) void`
+    /// The `TasksRange` names the half-open run of task indices this worker drew.
+    /// - If context is `void`: `fn (TasksRange, ThreadInDomain) void`
+    /// - Otherwise: `fn (@TypeOf(context), TasksRange, ThreadInDomain) void`
     pub fn forSlices(
         self: Pool,
         n: usize,
@@ -356,15 +355,15 @@ pub const Pool = struct {
                 thread_index: usize,
                 compute_domain_index: usize,
             ) callconv(.c) void {
-                const prong = Prong{
-                    .task_index = first_index,
-                    .thread_index = thread_index,
+                const range = TasksRange{ .first = first_index, .count = count };
+                const at = ThreadInDomain{
+                    .thread = thread_index,
                     .compute_domain = ComputeDomain.at(compute_domain_index),
                 };
                 if (Context == void)
-                    func(prong, count)
+                    func(range, at)
                 else
-                    func(@as(Context, @ptrCast(@alignCast(raw))), prong, count);
+                    func(@as(Context, @ptrCast(@alignCast(raw))), range, at);
             }
         };
         try types.check(fu_pool_for_slices(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
@@ -374,8 +373,8 @@ pub const Pool = struct {
     ///
     /// The chunks partition `data`, so no two threads observe overlapping elements and the
     /// callback can write its own slice with no atomics and no index arithmetic.
-    /// - If context is `void`: `fn (usize, []T) void`
-    /// - Otherwise: `fn (@TypeOf(context), usize, []T) void`
+    /// - If context is `void`: `fn ([]T, ThreadInDomain) void`
+    /// - Otherwise: `fn (@TypeOf(context), []T, ThreadInDomain) void`
     pub fn forSlicesMut(
         self: Pool,
         comptime T: type,
@@ -387,15 +386,14 @@ pub const Pool = struct {
         checkContext(Context);
         checkCallable(func, if (Context == void) 2 else 3);
 
-        const Scatter = struct { data: []T, context: Context, threads: usize };
-        const threads = self.threadsCount() catch return;
-        var scatter = Scatter{ .data = data, .context = context, .threads = threads };
-        try self.forThreads(&scatter, struct {
-            fn spread(carried: *const Scatter, thread_index: usize, compute_domain: ComputeDomain) void {
-                _ = compute_domain;
-                const range = IndexedSplit.init(carried.data.len, carried.threads).get(thread_index);
-                const chunk = carried.data[range.start..][0..range.len];
-                if (Context == void) func(thread_index, chunk) else func(carried.context, thread_index, chunk);
+        // Rides on `forSlices` rather than re-deriving the split: every thread is dispatched
+        // exactly once, an idle one with an empty range, so the partitions cannot drift apart.
+        const Scatter = struct { data: []T, context: Context };
+        var scatter = Scatter{ .data = data, .context = context };
+        try self.forSlices(data.len, &scatter, struct {
+            fn spread(carried: *const Scatter, range: TasksRange, at: ThreadInDomain) void {
+                const chunk = range.of(T, carried.data);
+                if (Context == void) func(chunk, at) else func(carried.context, chunk, at);
             }
         }.spread);
     }
@@ -662,8 +660,9 @@ test "for_n static scheduling" {
     var visited = [_]std.atomic.Value(bool){std.atomic.Value(bool).init(false)} ** 100;
 
     try pool.forN(100, &visited, struct {
-        fn worker(seen: *[100]std.atomic.Value(bool), prong: Prong) void {
-            seen[prong.task_index].store(true, .release);
+        fn worker(seen: *[100]std.atomic.Value(bool), task: usize, at: ThreadInDomain) void {
+            _ = at;
+            seen[task].store(true, .release);
         }
     }.worker);
 
@@ -679,8 +678,9 @@ test "for_n_dynamic work stealing" {
     var counter = std.atomic.Value(usize).init(0);
 
     try pool.forNDynamic(100, &counter, struct {
-        fn worker(tally: *std.atomic.Value(usize), prong: Prong) void {
-            _ = prong;
+        fn worker(tally: *std.atomic.Value(usize), task: usize, at: ThreadInDomain) void {
+            _ = task;
+            _ = at;
             _ = tally.fetchAdd(1, .monotonic);
         }
     }.worker);
@@ -704,12 +704,10 @@ test "for_slices execution" {
     var context = Context{ .data = &data, .total = &total };
 
     try pool.forSlices(1000, &context, struct {
-        fn worker(carried: *const Context, prong: Prong, count: usize) void {
-            for (0..count) |offset| {
-                const index = prong.task_index + offset;
-                carried.data[index] = @intCast(index);
-            }
-            _ = carried.total.fetchAdd(count, .monotonic);
+        fn worker(carried: *const Context, range: TasksRange, at: ThreadInDomain) void {
+            _ = at;
+            for (range.first..range.end()) |task| carried.data[task] = @intCast(task);
+            _ = carried.total.fetchAdd(range.count, .monotonic);
         }
     }.worker);
 
@@ -729,8 +727,8 @@ test "for_slices_mut hands each thread a disjoint chunk" {
     var base: u64 = 7;
 
     try pool.forSlicesMut(u64, &data, &base, struct {
-        fn fill(offset: *const u64, thread_index: usize, chunk: []u64) void {
-            _ = thread_index;
+        fn fill(offset: *const u64, chunk: []u64, at: ThreadInDomain) void {
+            _ = at;
             for (chunk) |*slot| slot.* = offset.*;
         }
     }.fill);
@@ -746,11 +744,11 @@ test "for_n void context" {
 
     // A stateless kernel needs no context at all; anything it must reach travels in one. With no
     // context there is nothing to write to, so the callback can only check its own arguments -
-    // that every prong actually runs is covered by the pointer-context tests above.
+    // that every task actually runs is covered by the pointer-context tests above.
     try pool.forN(50, {}, struct {
-        fn worker(prong: Prong) void {
-            std.debug.assert(prong.task_index < 50);
-            std.debug.assert(prong.compute_domain.index() < 1024);
+        fn worker(task: usize, at: ThreadInDomain) void {
+            std.debug.assert(task < 50);
+            std.debug.assert(at.compute_domain.index() < 1024);
         }
     }.worker);
 }
