@@ -1,10 +1,21 @@
+/**
+ *  @brief Unit and stress tests for the pools, the harvested topology, and the parallel algorithms.
+ *  @author Ash Vardanian
+ *  @file scripts/test.cpp
+ *  @date May 2, 2025
+ *
+ *  Every test is a `static void test_*` reached through the `unit_tests` and `stress_tests` tables in
+ *  `main`, so a test absent from its table does not run - the tables are the only index that cannot
+ *  drift from what executes. Asserts stay live whatever the build type, which is what the `#undef
+ *  NDEBUG` below buys: a failure that only reproduces in Release is the one worth catching.
+ */
 #include <cstdio>  // `std::printf`, `std::fprintf`
 #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
 #include <cstring> // `std::strrchr`
 
-#include <vector>      // `std::vector`
 #include <algorithm>   // `std::sort`
 #include <type_traits> // `std::is_integral`, `std::is_enum`
+#include <vector>      // `std::vector`
 
 #include <forkunion.hpp>
 
@@ -29,7 +40,7 @@ namespace fu = ashvardanian::forkunion;
 #define FU_TEST_SKIP_STRESS_ 0
 #endif
 
-/** @brief Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
+/** Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
 template <typename value_type_>
 static void format_value_(char *buffer, std::size_t capacity, value_type_ const &value) noexcept {
     if constexpr (std::is_same<value_type_, bool>::value)
@@ -45,7 +56,7 @@ static void format_value_(char *buffer, std::size_t capacity, value_type_ const 
     else std::snprintf(buffer, capacity, "?");
 }
 
-/** @brief Prints a located `FAIL` and exits; the preceding `Running ...` line already names the test. */
+/** Prints a located `FAIL` and exits; the preceding `Running ...` line already names the test. */
 [[noreturn]] static void report_failure_(char const *file, int line, char const *expr, char const *detail) noexcept {
     fu::logging_colors_t colors;
     char const *slash = std::strrchr(file, '/');
@@ -60,7 +71,7 @@ static void expect_(bool condition, char const *expr, char const *file, int line
     if (!condition) report_failure_(file, line, expr, "");
 }
 
-/** @brief Compares two values, printing both sides on mismatch; `==` and `!=` share this path. */
+/** Compares two values, printing both sides on mismatch; `==` and `!=` share this path. */
 template <typename a_type_, typename b_type_>
 static void expect_cmp_(bool ok, a_type_ const &a, b_type_ const &b, char const *expr, char const *file,
                         int line) noexcept {
@@ -72,7 +83,7 @@ static void expect_cmp_(bool ok, a_type_ const &a, b_type_ const &b, char const 
     report_failure_(file, line, expr, detail);
 }
 
-/** @brief Notes a skipped test inline; the runner still prints `PASS` after the test returns. */
+/** Notes a skipped test inline; the runner still prints `PASS` after the test returns. */
 static void skip_(char const *reason) noexcept {
     fu::logging_colors_t colors;
     std::printf("%s(skip: %s)%s ", colors.dim(), reason, colors.reset());
@@ -89,7 +100,7 @@ static void skip_(char const *reason) noexcept {
     } while (0)
 
 #if FU_ON_POSIX
-/** @brief Adds a backtrace to a fatal signal; the flushed `Running ...` line names the test. */
+/** Adds a backtrace to a fatal signal; the flushed `Running ...` line names the test. */
 extern "C" void on_fatal_signal_(int signal_number) noexcept {
     ssize_t const written = ::write(STDERR_FILENO, "\nCRASH - backtrace:\n", 20);
     (void)written; // ? Best-effort in a handler; still re-raise below
@@ -133,7 +144,7 @@ template struct fu::distributed_pool<>;
 #endif
 
 /**
- *  @brief Exhausts every (tasks, threads) pair in the index space, checking the split is a partition.
+ *  @brief Exhausts every tasks-and-threads pair in the index space, checking the split is a partition.
  *
  *  Every task index must fall in bounds and be visited exactly once across the per-thread subranges;
  *  a gap or an overlap here would mean lost or double-dispatched work in every static scheduler.
@@ -164,7 +175,7 @@ void test_indexed_split() noexcept {
 }
 
 /**
- *  @brief Exhausts every (start, end, seed) triple in the index space, checking each walk permutes.
+ *  @brief Exhausts every start-end-seed triple in the index space, checking each walk permutes.
  *
  *  Counting alone can't tell a permutation from a walk that revisits some values and skips others,
  *  so each value's first visit is recorded - a revisit makes a stealing thread drain a victim twice.
@@ -255,7 +266,7 @@ constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
  *  its pool through a maker and spawns it on `maker.scope()`, so the same body runs against the
  *  flat, colocated, and distributed pools without knowing which one it drives.  */
 
-/** @brief Makes `flat_pool_t`s scoped to a thread count - the allowed cores, times oversubscription. */
+/** Makes `flat_pool_t`s scoped to a thread count - the allowed cores, times oversubscription. */
 struct make_pool_t {
     fu::flat_pool_t construct() const noexcept { return fu::flat_pool_t(); }
     std::size_t scope(std::size_t oversubscription = 1) const noexcept {
@@ -266,7 +277,7 @@ struct make_pool_t {
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 static fu::machine_topology_t machine_topology;
 
-/** @brief Makes `colocated_pool_t`s scoped to the machine's first compute domain. */
+/** Makes `colocated_pool_t`s scoped to the machine's first compute domain. */
 struct make_colocated_pool_t {
     fu::colocated_pool_t construct() const noexcept { return fu::colocated_pool_t("forkunion"); }
     fu::compute_domain_t scope(std::size_t = 0) const noexcept {
@@ -274,7 +285,7 @@ struct make_colocated_pool_t {
     }
 };
 
-/** @brief Makes `distributed_pool_t`s scoped to the whole harvested topology. */
+/** Makes `distributed_pool_t`s scoped to the whole harvested topology. */
 struct make_distributed_pool_t {
     fu::distributed_pool_t construct() const noexcept { return fu::distributed_pool_t("forkunion"); }
     fu::machine_topology_t const &scope(std::size_t = 0) const noexcept { return machine_topology; }
@@ -315,9 +326,9 @@ static void test_fabric_level_derivation() noexcept {
 }
 
 /**
- *  @brief A harvested fabric must cover every reachable edge with sane bounds and leave
- *      unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
- *      guests legitimately measure every edge the same.
+ *  A harvested fabric must cover every reachable edge with sane bounds and leave
+ *  unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
+ *  guests legitimately measure every edge the same.
  */
 static void test_measured_fabric() noexcept {
     fu::machine_topology_t const &topology = machine_topology;
@@ -381,13 +392,13 @@ static void test_measured_fabric() noexcept {
 }
 #endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 
-/** @brief Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
+/** Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
 static void test_spawn_zero() noexcept {
     fu::flat_pool_t pool;
     expect(fu::failed(pool.spawn(0u)));
 }
 
-/** @brief The default spawn - one thread per allowed core - must succeed on every pool type. */
+/** The default spawn - one thread per allowed core - must succeed on every pool type. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_spawn_success() noexcept {
     auto maker = make_pool_type_ {};
@@ -395,7 +406,7 @@ static void test_spawn_success() noexcept {
     expect(fu::succeeded(pool.spawn(maker.scope())));
 }
 
-/** @brief The pool is the single source of truth for exclusivity, even across re-spawns. */
+/** The pool is the single source of truth for exclusivity, even across re-spawns. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_caller_exclusivity_query() noexcept {
     auto maker = make_pool_type_ {};
@@ -410,7 +421,7 @@ static void test_caller_exclusivity_query() noexcept {
     expect_eq(pool.caller_exclusivity(), fu::caller_exclusive_k);
 }
 
-/** @brief Make sure that `for_threads` is called from each thread. */
+/** Make sure that `for_threads` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_threads() noexcept {
 
@@ -426,7 +437,7 @@ static void test_for_threads() noexcept {
     for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
 }
 
-/** @brief Make sure that `unsafe_for_threads` is called from each thread. */
+/** Make sure that `unsafe_for_threads` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_unsafe_for_threads() noexcept {
 
@@ -444,7 +455,7 @@ static void test_unsafe_for_threads() noexcept {
     for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
 }
 
-/** @brief Tests generation token polling with two caller-exclusive pools. */
+/** Tests generation token polling with two caller-exclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_generation_polling() noexcept {
 
@@ -487,7 +498,7 @@ static void test_generation_polling() noexcept {
     for (std::size_t i = 0; i < pool_b.threads_count(); ++i) expect(visited_b[i]);
 }
 
-/** @brief Verifies guard timing: dispatch at construction on exclusive pools, at join on inclusive. */
+/** Verifies guard timing: dispatch at construction on exclusive pools, at join on inclusive. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_guard_lifecycle() noexcept {
 
@@ -525,7 +536,7 @@ static void test_guard_lifecycle() noexcept {
     }
 }
 
-/** @brief Dropping the guard without an explicit `join` must still join in the destructor. */
+/** Dropping the guard without an explicit `join` must still join in the destructor. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_guard_destructor_joins() noexcept {
 
@@ -541,7 +552,7 @@ static void test_guard_destructor_joins() noexcept {
     }
 }
 
-/** @brief Covers the caller-as-contributor protocol on inclusive pools. */
+/** Covers the caller-as-contributor protocol on inclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_generation_inclusive() noexcept {
 
@@ -563,7 +574,7 @@ static void test_generation_inclusive() noexcept {
     pool.unsafe_join(generation); // ? Idempotent: double-join must be a no-op
 }
 
-/** @brief Degenerate single-thread inclusive pool: the caller is the only contributor. */
+/** Degenerate single-thread inclusive pool: the caller is the only contributor. */
 static void test_generation_single_thread() noexcept {
     fu::flat_pool_t pool;
     expect(fu::succeeded(pool.spawn(1))); // ? Default is caller-inclusive: zero workers
@@ -579,7 +590,7 @@ static void test_generation_single_thread() noexcept {
     expect(visited.load(std::memory_order_relaxed));
 }
 
-/** @brief The exclusive mirror: one lone worker, while the caller only polls and never contributes. */
+/** The exclusive mirror: one lone worker, while the caller only polls and never contributes. */
 static void test_generation_single_thread_exclusive() noexcept {
     fu::flat_pool_t pool;
     expect(fu::succeeded(pool.spawn(1, fu::caller_exclusive_k)));
@@ -594,7 +605,7 @@ static void test_generation_single_thread_exclusive() noexcept {
     expect(visited.load(std::memory_order_relaxed));
 }
 
-/** @brief Hammers the dispatch/join race window with tight iterations on exclusive pools. */
+/** Hammers the dispatch/join race window with tight iterations on exclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_generation_stress() noexcept {
 
@@ -624,7 +635,7 @@ static void test_generation_stress() noexcept {
     expect_eq(counter.load(std::memory_order_relaxed), expected);
 }
 
-/** @brief Overlaps an inclusive and an exclusive pool from one caller, through the raw token API. */
+/** Overlaps an inclusive and an exclusive pool from one caller, through the raw token API. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_exclusivity() noexcept {
 
@@ -658,7 +669,7 @@ static void test_exclusivity() noexcept {
     }
 }
 
-/** @brief The same overlap through the guard API: inline lambdas re-packaged into returned objects. */
+/** The same overlap through the guard API: inline lambdas re-packaged into returned objects. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_exclusivity_inline_guards() noexcept {
 
@@ -683,7 +694,7 @@ static void test_exclusivity_inline_guards() noexcept {
     for (std::size_t i = 0; i < total_size; ++i) expect(visited[i]);
 }
 
-/** @brief Make sure that `for_n` is called from each thread. */
+/** Make sure that `for_n` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_uncomfortable_input_size() noexcept {
 
@@ -740,7 +751,7 @@ static void expect_for_slices_cover_(pool_type_ &pool, std::size_t const n) noex
     for (std::size_t i = 0; i < n; ++i) expect_eq(executions[i].load(std::memory_order_relaxed), 1u);
 }
 
-/** @brief Sweeps `for_slices` through the awkward sizes around the thread count and one large run. */
+/** Sweeps `for_slices` through the awkward sizes around the thread count and one large run. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_slices() noexcept {
     auto maker = make_pool_type_ {};
@@ -752,7 +763,7 @@ static void test_for_slices() noexcept {
     for (std::size_t const n : sizes) expect_for_slices_cover_(pool, n);
 }
 
-/** @brief A joined token must stay complete even while a newer fork is in flight. */
+/** A joined token must stay complete even while a newer fork is in flight. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_stale_generation_completes() noexcept {
     auto maker = make_pool_type_ {};
@@ -798,7 +809,7 @@ static void test_spawn_terminate_churn() noexcept {
     }
 }
 
-/** @brief Two caller threads drive two independent pools at once; no cross-pool state may bleed. */
+/** Two caller threads drive two independent pools at once; no cross-pool state may bleed. */
 static void test_concurrent_caller_threads() noexcept {
     constexpr std::size_t tasks_k = 4096;
     std::atomic<bool> first_ok {true}, second_ok {true};
@@ -830,7 +841,7 @@ static void test_concurrent_caller_threads() noexcept {
     expect(second_ok.load(std::memory_order_relaxed));
 }
 
-/** @brief Convenience structure to ensure we output match locations to independent cache lines. */
+/** Convenience structure to ensure we output match locations to independent cache lines. */
 struct alignas(fu::default_alignment_k) aligned_visit_t {
     std::size_t task = 0;
     bool operator<(aligned_visit_t const &other) const noexcept { return task < other.task; }
@@ -839,7 +850,7 @@ struct alignas(fu::default_alignment_k) aligned_visit_t {
     bool operator==(std::size_t other_index) const noexcept { return task == other_index; }
 };
 
-/** @brief Sorts the visit records in place and checks they cover [0, size) exactly once. */
+/** Sorts the visit records in place and checks they cover [0, size) exactly once. */
 bool contains_iota(std::vector<aligned_visit_t> &visited) noexcept {
     std::sort(visited.begin(), visited.end());
     std::size_t visited_progress = 0;
@@ -851,7 +862,7 @@ bool contains_iota(std::vector<aligned_visit_t> &visited) noexcept {
     return true;
 }
 
-/** @brief Make sure that `for_n` is called the right number of times with the right task indices. */
+/** Make sure that `for_n` is called the right number of times with the right task indices. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_n() noexcept {
 
@@ -897,7 +908,7 @@ static void test_for_n() noexcept {
     expect(contains_iota(visited_threads));
 }
 
-/** @brief Make sure that `for_n_dynamic` is called the right number of times with the right task indices. */
+/** Make sure that `for_n_dynamic` is called the right number of times with the right task indices. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_n_dynamic() noexcept {
 
@@ -1041,7 +1052,7 @@ static void test_distributed_for_n_dynamic_exhaustive() noexcept {
     }
 }
 
-/** @brief Stress-tests the implementation by oversubscribing the number of threads. */
+/** Stress-tests the implementation by oversubscribing the number of threads. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_oversubscribed_threads() noexcept {
     constexpr std::size_t oversubscription = 3;
@@ -1094,7 +1105,7 @@ static void test_sleep_wake() noexcept {
     }
 }
 
-/** @brief Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
+/** Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
 template <bool should_restart_, typename make_pool_type_ = make_pool_t>
 static void test_mixed_restart() noexcept {
 
@@ -1170,7 +1181,7 @@ static void stress_test_composite(std::size_t const threads_count, std::size_t c
     }
 }
 
-/** @brief `replicated_array` is one uninitialized per-domain buffer; the caller fills and reads its slices. */
+/** `replicated_array` is one uninitialized per-domain buffer; the caller fills and reads its slices. */
 static void test_replicated_array() noexcept {
     fu::machine_topology_t topology;
     if (fu::failed(topology.harvest())) skip("no topology"); // ? No topology here; nothing to check
@@ -1202,7 +1213,7 @@ static void test_replicated_array() noexcept {
         expect_eq(tiny.at(static_cast<fu::memory_domain_index_t>(domain), 0), domain);
 }
 
-/** @brief `sharded_array` stores each element once; `location_of`/`logical_index_of` round-trip the segment map. */
+/** `sharded_array` stores each element once; `location_of`/`logical_index_of` round-trip the segment map. */
 static void test_sharded_array() noexcept {
     fu::machine_topology_t topology;
     if (fu::failed(topology.harvest())) skip("no topology");
@@ -1243,7 +1254,7 @@ static void test_sharded_array() noexcept {
 }
 
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
-/** @brief One distributed pool of exactly @p threads workers must dispatch every task exactly once. */
+/** One distributed pool of exactly @p threads workers must dispatch every task exactly once. */
 static void expect_spawn_shape_dispatches_(std::size_t const threads) noexcept {
     constexpr std::size_t tasks_k = 4096;
     std::vector<aligned_visit_t> visited(tasks_k);
@@ -1275,9 +1286,7 @@ static void test_distributed_spawn_shapes() noexcept {
 }
 #endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 
-/**
- *  @brief Enhanced NUMA topology logging function using the logger class.
- */
+/** Enhanced NUMA topology logging function using the logger class. */
 void log_numa_topology() noexcept {
     fu::logging_colors_t colors;
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN

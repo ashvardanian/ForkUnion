@@ -1,6 +1,8 @@
 /**
- *  @file capabilities.hpp
  *  @brief CPU/RAM capability probing and the hardware-friendly busy-wait yields.
+ *  @author Ash Vardanian
+ *  @file include/forkunion/capabilities.hpp
+ *  @date July 10, 2026
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
@@ -32,8 +34,8 @@
 namespace ashvardanian {
 namespace forkunion {
 
-/** @brief The address of a waited word - a `std::atomic` object or a bare `std::atomic_ref`-owned slot.
- *      A monitored waiter needs only the address and the observed bit pattern, so both forms route here. */
+/** The address of a waited word - a `std::atomic` object or a bare `std::atomic_ref`-owned slot.
+ *  A monitored waiter needs only the address and the observed bit pattern, so both forms route here. */
 template <typename value_type_>
 inline void const *watched_address(std::atomic<value_type_> const &watched) noexcept {
     return &watched;
@@ -45,10 +47,10 @@ inline void const *watched_address(value_type_ const *watched) noexcept {
 
 #if FU_DETECT_ARCH_X86_64_
 
-/** @brief On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
+/** On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
 struct x86_pause_t {
     static constexpr capabilities_t capability_k = capability_x86_pause_k;
-    /** @brief Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
+    /** Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
               typename bound_type_ = wait_capped_t>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
@@ -132,19 +134,19 @@ inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
     return cycles_per_us != 0 ? cycles_per_us : 3'000ull;
 }
 
-/** @brief Memoizes `x86_detect_tsc_cycles_per_micro`; the rate is fixed for the life of the process. */
+/** Memoizes `x86_detect_tsc_cycles_per_micro`; the rate is fixed for the life of the process. */
 inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
     static std::uint64_t const cycles_per_us = x86_detect_tsc_cycles_per_micro();
     return cycles_per_us;
 }
 
-/** @brief `UMWAIT` sleep-depth control: bit 0 = 1 selects the shallow, fast-waking C0.1 state. */
+/** `UMWAIT` sleep-depth control: bit 0 = 1 selects the shallow, fast-waking C0.1 state. */
 inline constexpr std::uint32_t x86_umwait_shallow_c01_k = 1;
-/** @brief `UMWAIT` sleep-depth control: bit 0 = 0 selects the deeper C0.2 state - slower to wake,
- *      but ceding more of the shared core's pipeline resources to the SMT sibling meanwhile. */
+/** `UMWAIT` sleep-depth control: bit 0 = 0 selects the deeper C0.2 state - slower to wake,
+ *  but ceding more of the shared core's pipeline resources to the SMT sibling meanwhile. */
 inline constexpr std::uint32_t x86_umwait_deeper_c02_k = 0;
 
-/** @brief Reads the time-stamp counter, via inline assembly or MSVC's `__rdtsc`. */
+/** Reads the time-stamp counter, via inline assembly or MSVC's `__rdtsc`. */
 inline std::uint64_t x86_now_tsc() noexcept {
 #if FU_DETECT_INLINE_ASM_SUPPORT_
     std::uint32_t rdtsc_lo, rdtsc_hi;
@@ -155,10 +157,10 @@ inline std::uint64_t x86_now_tsc() noexcept {
 #endif
 }
 
-/** @brief Arms this core's address-range monitor on the line holding @p watched_address.
- *      Where inline assembly is available the UMONITOR opcode is hand-encoded so no header is
- *      pulled in; MSVC has no inline assembly and instead calls the `<immintrin.h>` intrinsic
- *      the encoding stands in for - `_umonitor(const_cast<void *>(watched_address))`. */
+/** Arms this core's address-range monitor on the line holding @p watched_address.
+ *  Where inline assembly is available the UMONITOR opcode is hand-encoded so no header is
+ *  pulled in; MSVC has no inline assembly and instead calls the `<immintrin.h>` intrinsic
+ *  the encoding stands in for - `_umonitor(const_cast<void *>(watched_address))`. */
 inline void x86_arm_address(void const *watched_address) noexcept {
 #if FU_DETECT_INLINE_ASM_SUPPORT_
     // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
@@ -170,8 +172,8 @@ inline void x86_arm_address(void const *watched_address) noexcept {
 
 /**
  *  @brief Arms this core's address-range monitor on @p watched and reports whether to enter the wait.
- *  @retval true if the monitor is armed and @p watched still holds @p observed - proceed to wait.
- *  @retval false if @p watched already moved - the caller must re-check.
+ *  @return true if the monitor is armed and @p watched still holds @p observed - proceed to wait,
+ *      false if @p watched already moved and the caller must re-check.
  */
 template <typename value_type_>
 inline bool x86_arm_monitor(std::atomic<value_type_> const &watched, value_type_ const observed) noexcept {
@@ -180,7 +182,7 @@ inline bool x86_arm_monitor(std::atomic<value_type_> const &watched, value_type_
     return watched.load(std::memory_order_acquire) == observed;
 }
 
-/** @brief Same, for a word owned through `std::atomic_ref` rather than a `std::atomic` object. */
+/** Same, for a word owned through `std::atomic_ref` rather than a `std::atomic` object. */
 template <typename value_type_>
 inline bool x86_arm_monitor(value_type_ const *watched, value_type_ const observed) noexcept {
     x86_arm_address(watched);
@@ -198,9 +200,9 @@ inline bool x86_arm_monitor(value_type_ const *watched, value_type_ const observ
     return current == observed;
 }
 
-/** @brief Sleeps in @p sleep_state until @p deadline as a TSC value, an interrupt, or a store to the
- *      monitored line. Inline assembly hand-encodes the opcode to avoid an include, while MSVC calls
- *      the `<immintrin.h>` intrinsic - in pseudo-code, `_umwait(sleep_state, deadline)`. */
+/** Sleeps in @p sleep_state until @p deadline as a TSC value, an interrupt, or a store to the
+ *  monitored line. Inline assembly hand-encodes the opcode to avoid an include, while MSVC calls
+ *  the `<immintrin.h>` intrinsic - in pseudo-code, `_umwait(sleep_state, deadline)`. */
 inline void x86_umwait_until(std::uint64_t const deadline, std::uint32_t const sleep_state) noexcept {
 #if FU_DETECT_INLINE_ASM_SUPPORT_
     // Hand-encoding UMWAIT r32 as `F2 0F AE /6`, with the control in ECX and the deadline in EDX:EAX:
@@ -239,8 +241,8 @@ inline void x86_umwait_until(std::uint64_t const deadline, std::uint32_t const s
  */
 struct x86_tpause_t {
     static constexpr capabilities_t capability_k = capability_x86_tpause_k;
-    /** @brief Waits until a deadline ~1 micro-second ahead, for a loop that also guards another line.
-     *      Accepts a `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
+    /** Waits until a deadline ~1 micro-second ahead, for a loop that also guards another line.
+     *  Accepts a `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
@@ -250,7 +252,7 @@ struct x86_tpause_t {
         x86_umwait_until(x86_now_tsc() + x86_tsc_cycles_per_micro(), x86_umwait_shallow_c01_k);
     }
 
-    /** @brief Waits for the store with no effective cap, for a single-word loop. */
+    /** Waits for the store with no effective cap, for a single-word loop. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
@@ -277,7 +279,7 @@ struct x86_tpause_t {
 struct x86_tpause_saturated_t {
     static constexpr capabilities_t capability_k = capability_x86_tpause_k;
 
-    /** @brief Rare-wake wait: a quarter-microsecond deadline in the deeper C0.2 state. */
+    /** Rare-wake wait: a quarter-microsecond deadline in the deeper C0.2 state. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
@@ -285,7 +287,7 @@ struct x86_tpause_saturated_t {
         x86_umwait_until(x86_now_tsc() + (x86_tsc_cycles_per_micro() >> 2), x86_umwait_deeper_c02_k);
     }
 
-    /** @brief Critical-chain wait: uncapped, but shallow - the waking store must land instantly. */
+    /** Critical-chain wait: uncapped, but shallow - the waking store must land instantly. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
@@ -304,10 +306,10 @@ struct x86_tpause_saturated_t {
 
 #if FU_DETECT_ARCH_ARM64_
 
-/** @brief On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
+/** On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
 struct arm64_yield_t {
     static constexpr capabilities_t capability_k = capability_arm64_yield_k;
-    /** @brief Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
+    /** Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
               typename bound_type_ = wait_capped_t>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
@@ -352,8 +354,8 @@ struct arm64_yield_t {
  */
 struct arm64_wfet_t {
     static constexpr capabilities_t capability_k = capability_arm64_wfet_k;
-    /** @brief Waits with a ~1 micro-second cap, for a loop that also guards another line. Accepts a
-     *      `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
+    /** Waits with a ~1 micro-second cap, for a loop that also guards another line. Accepts a
+     *  `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
@@ -361,7 +363,7 @@ struct arm64_wfet_t {
         wfet_one_micro_();
     }
 
-    /** @brief Waits with no cap, for a single-word loop where the armed line is the only wake source. */
+    /** Waits with no cap, for a single-word loop where the armed line is the only wake source. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
@@ -371,7 +373,7 @@ struct arm64_wfet_t {
     }
 
   private:
-    /** @brief Enters a timed wait with a deadline ~1 micro-second ahead of the generic timer. */
+    /** Enters a timed wait with a deadline ~1 micro-second ahead of the generic timer. */
     static inline void wfet_one_micro_() noexcept {
         std::uint64_t cntfrq_el0, cntvct_el0;
         // Read the timer frequency (ticks per second)
@@ -396,11 +398,12 @@ struct arm64_wfet_t {
     }
 
     /**
-     *  @brief Arms this core's exclusive monitor on the word at @p watched_address and reports
-     *      whether to enter the wait - it only ever needed the address and the bit pattern, so
-     *      both `std::atomic` objects and in-place `std::atomic_ref`-owned words route here.
-     *  @retval true if the monitor is armed and the word still holds @p observed - proceed to wait.
-     *  @retval false if the word already moved - the monitor is dropped and the caller must re-check.
+     *  @brief Arms this core's exclusive monitor on the word at @p watched_address and reports whether to
+     *  enter the wait - it only ever needed the address and the bit pattern, so both `std::atomic`
+     *  objects and in-place `std::atomic_ref`-owned words route here.
+     *  @return true if the monitor is armed and the word still holds @p observed - proceed to wait,
+     *      false if the word already moved, in which case the monitor is dropped and the caller must
+     *      re-check.
      */
     template <typename value_type_>
     static inline bool arm_monitor_(void const *watched_address, value_type_ const observed) noexcept {
@@ -447,10 +450,10 @@ struct arm64_wfet_t {
 
 #if FU_DETECT_ARCH_RISC5_
 
-/** @brief On RISC-V, the `Zihintpause` spin-wait hint. */
+/** On RISC-V, the `Zihintpause` spin-wait hint. */
 struct risc5_pause_t {
     static constexpr capabilities_t capability_k = capability_risc5_pause_k;
-    /** @brief Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
+    /** Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
               typename bound_type_ = wait_capped_t>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
@@ -482,13 +485,13 @@ struct risc5_pause_t {
  *      would carry `Zawrs`.
  *
  *  @warning Hand-encoded and not exercised on `Zawrs` silicon in this tree; it needs a runtime
- *      `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe (not yet wired) before it
+ *      `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe, not yet wired, before it
  *      may be selected.
  */
 struct risc5_wrs_t {
     static constexpr capabilities_t capability_k = capability_risc5_wrs_k;
-    /** @brief Waits with the implementation-bounded short timeout, for a loop that also guards another
-     *      line. Accepts a `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
+    /** Waits with the implementation-bounded short timeout, for a loop that also guards another
+     *  line. Accepts a `std::atomic` object or a bare `std::atomic_ref`-owned word alike. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
@@ -497,7 +500,7 @@ struct risc5_wrs_t {
         __asm__ __volatile__(".4byte 0x01d00073" ::: "memory");
     }
 
-    /** @brief Waits unbounded, for a single-word loop where the reservation is the only wake source. */
+    /** Waits unbounded, for a single-word loop where the reservation is the only wake source. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
@@ -508,11 +511,11 @@ struct risc5_wrs_t {
 
   private:
     /**
-     *  @brief Arms a reservation on the word at @p watched_address and reports whether to enter the
-     *      wait - it only ever needed the address and the bit pattern, so both `std::atomic` objects
-     *      and in-place `std::atomic_ref`-owned words route here.
-     *  @retval true if the reservation is set and the word still holds @p observed - proceed to `WRS`.
-     *  @retval false if the word moved, or the width has no `LR` (a `pause` spin was emitted instead).
+     *  @brief Arms a reservation on the word at @p watched_address and reports whether to enter the wait -
+     *  it only ever needed the address and the bit pattern, so both `std::atomic` objects and
+     *  in-place `std::atomic_ref`-owned words route here.
+     *  @return true if the reservation is set and the word still holds @p observed - proceed to
+     *      `WRS`, false if the word moved, or the width has no `LR` - a `pause` spin was emitted instead.
      */
     template <typename value_type_>
     static inline bool arm_reservation_(void const *watched_address, value_type_ const observed) noexcept {
@@ -686,14 +689,19 @@ struct risc5_cbo_cache_hints_t {
  *  Layer-2 tri-state, never runtime silicon - everything a selected functor emits is trap-free
  *  wherever its gate holds, so no dispatch and no reporting bit ever guards an emission.  */
 #if FU_WITH_DEMOTE_CACHE_LINES && FU_DETECT_ARCH_X86_64_
+/** Both directions: `CLDEMOTE` demotes, `PREFETCHW` promotes. */
 using preferred_cache_hints_t = x86_cache_hints_t;
 #elif FU_WITH_DEMOTE_CACHE_LINES && FU_DETECT_ARCH_ARM64_
+/** Both directions: `DC CVAC` cleans, `PRFM PSTL1KEEP` promotes. */
 using preferred_cache_hints_t = arm64_cache_hints_t;
 #elif FU_WITH_PROMOTE_CACHE_LINES && FU_DETECT_ARCH_ARM64_
-using preferred_cache_hints_t = arm64_prefetch_cache_hints_t; // ? Windows/BSD: the clean traps, the hint stays
+/** Windows/BSD: the clean traps, the hint stays. */
+using preferred_cache_hints_t = arm64_prefetch_cache_hints_t;
 #elif FU_WITH_PROMOTE_CACHE_LINES && FU_DETECT_ARCH_RISC5_
+/** RISC-V: `cbo.clean` needs a runtime probe, so only `prefetch.w` remains. */
 using preferred_cache_hints_t = risc5_cache_hints_t;
 #else
+/** Neither gate holds, or the ISA has no trap-free hint: both directions are no-ops. */
 using preferred_cache_hints_t = standard_cache_hints_t;
 #endif
 
@@ -802,8 +810,8 @@ FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t linux_bind_range_to_domain
 }
 
 /**
- *  @brief Probes whether this process may actually place memory - a kernel that offers `mbind` still
- *      lets seccomp or a cgroup `cpuset.mems` refuse it, and only the call itself can say.
+ *  Probes whether this process may actually place memory - a kernel that offers `mbind` still
+ *  lets seccomp or a cgroup `cpuset.mems` refuse it, and only the call itself can say.
  */
 inline bool linux_can_place_memory_on_domain() noexcept {
     std::size_t const page_bytes = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));

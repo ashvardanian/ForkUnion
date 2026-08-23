@@ -56,6 +56,7 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
     """Why a call into the C core failed."""
 
     var code: Int32
+    """The raw `fu_status_t` value, kept even when this build does not name it."""
     comptime SUCCESS = Self(0)
     """The call completed."""
     comptime UNKNOWN = Self(-1)
@@ -86,6 +87,11 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
     """The library loaded but does not export a symbol the binding needs."""
 
     def write_to(self, mut writer: Some[Writer]):
+        """Spells the failure out in prose, so a code this build does not name still reads.
+
+        Args:
+            writer: The sink the reason is appended to.
+        """
         if self == Self.LIBRARY_MISSING:
             writer.write("the core is not on the loader path")
         elif self == Self.SYMBOL_MISSING:
@@ -115,7 +121,14 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
 
     @staticmethod
     def of(status: c_int) -> Self:
-        """Lifts a raw `fu_status_t`, keeping an unnamed one rather than guessing."""
+        """Lifts a raw `fu_status_t`, keeping an unnamed one rather than guessing.
+
+        Args:
+            status: Whatever the C call returned, named by this build or not.
+
+        Returns:
+            The matching kind, or one carrying the unrecognized code verbatim.
+        """
         return Self(Int32(status))
 
 
@@ -124,9 +137,16 @@ struct Error(Copyable, ImplicitlyCopyable, Writable):
     """What went wrong reaching the C core, and which symbol or argument it was."""
 
     var kind: ErrorKind
+    """Which class of failure the C core reported."""
     var detail: StaticString
+    """The symbol or argument it was about, for a reader rather than for a branch."""
 
     def write_to(self, mut writer: Some[Writer]):
+        """Writes the reason and the detail together, prefixed so the source is unambiguous.
+
+        Args:
+            writer: The sink the message is appended to.
+        """
         writer.write("ForkUnion: ", self.kind, " [", self.detail, "]")
 
 
@@ -137,7 +157,18 @@ comptime DEFAULT_ALIGNMENT = 128
 
 
 def bytes_for_elements(count: Int, element_bytes: Int) raises Error -> Int:
-    """Bytes occupied by `count` elements of `element_bytes` each, refusing a product that wraps."""
+    """Bytes occupied by `count` elements of `element_bytes` each, refusing a product that wraps.
+
+    Args:
+        count: How many elements the buffer holds.
+        element_bytes: The width of one element.
+
+    Returns:
+        The exact product, because the overflowing case raises rather than truncating.
+
+    Raises:
+        With `INVALID_ARGUMENT`, when the product would exceed `Int.MAX`.
+    """
     if element_bytes != 0 and count > Int.MAX // element_bytes:
         raise Error(ErrorKind.INVALID_ARGUMENT, "the element count times the element size would wrap")
     return count * element_bytes
@@ -166,12 +197,18 @@ struct CallerExclusivity(Equatable, ImplicitlyCopyable, TrivialRegisterPassable,
     """Whether the thread that dispatches also executes, or only coordinates."""
 
     var identifier: c_int
+    """The raw `fu_caller_exclusivity_t` value the C API exchanges."""
     comptime INCLUSIVE = Self(0)
     """The calling thread owes one slice of the work, which runs inside the join."""
     comptime EXCLUSIVE = Self(1)
     """The calling thread only coordinates, so a dispatch can be polled before it is joined."""
 
     def write_to(self, mut writer: Some[Writer]):
+        """Names which of the two policies this is.
+
+        Args:
+            writer: The sink the name is appended to.
+        """
         writer.write("inclusive" if self == Self.INCLUSIVE else "exclusive")
 
 
@@ -185,8 +222,14 @@ struct ComputeDomain(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Wri
     """A dense index into this machine's compute domains, counted from zero."""
 
     var index: Int
+    """The zero-based position among this machine's compute domains."""
 
     def write_to(self, mut writer: Some[Writer]):
+        """Writes the index with the kind of domain spelled out, so a log line cannot be misread.
+
+        Args:
+            writer: The sink the label is appended to.
+        """
         writer.write("compute domain ", self.index)
 
 
@@ -195,8 +238,14 @@ struct MemoryDomain(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writ
     """A dense index into this machine's memory domains, counted from zero."""
 
     var index: Int
+    """The zero-based position among this machine's memory domains."""
 
     def write_to(self, mut writer: Some[Writer]):
+        """Writes the index labeled as a dense one, never bare, so it cannot pass for an OS id.
+
+        Args:
+            writer: The sink the label is appended to.
+        """
         writer.write("memory domain ", self.index)
 
 
@@ -210,8 +259,14 @@ struct MemoryDomainId(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Wr
     """
 
     var identifier: c_int
+    """The id the operating system uses, which need not match any dense index."""
 
     def write_to(self, mut writer: Some[Writer]):
+        """Writes it as the NUMA node the operating system itself calls it.
+
+        Args:
+            writer: The sink the label is appended to.
+        """
         writer.write("NUMA node ", self.identifier)
 
 
@@ -225,6 +280,7 @@ struct Capabilities(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """
 
     var bits: UInt32
+    """One bit per facility, laid out as the C `fu_capability_t` enumerators are."""
 
     comptime NONE = Self(0)
     """Nothing detected, or nothing compiled in."""
@@ -271,13 +327,36 @@ struct Capabilities(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """All-ones allow-mask: hand to a pool to disable capability filtering."""
 
     def __contains__(self, other: Self) -> Bool:
-        """Whether every bit of `other` is set here."""
+        """Whether every bit of `other` is set here.
+
+        Args:
+            other: The facilities being asked about, one bit each.
+
+        Returns:
+            True only when all of them are present, so a multi-bit mask asks for all of them.
+        """
         return (self.bits & other.bits) == other.bits
 
     def __or__(self, other: Self) -> Self:
+        """The union, to build an allow-mask out of the named facilities.
+
+        Args:
+            other: The facilities to add.
+
+        Returns:
+            A set holding every bit either side had.
+        """
         return Self(self.bits | other.bits)
 
     def __and__(self, other: Self) -> Self:
+        """The intersection, to keep only what a build and a machine both offer.
+
+        Args:
+            other: The facilities to keep.
+
+        Returns:
+            A set holding only the bits both sides had.
+        """
         return Self(self.bits & other.bits)
 
 
@@ -304,17 +383,35 @@ struct TasksRange(Equatable, ImplicitlyCopyable, SizedRaising, TrivialRegisterPa
     """How many tasks the run covers; zero means an idle thread."""
 
     def __len__(self) -> Int:
+        """How many tasks the run covers.
+
+        Returns:
+            The count, which is zero on the thread a dispatch left idle.
+        """
         return self.count
 
     def __iter__(self) -> _TasksRangeIterator:
+        """Walks the task indices, so a callback loops over the run rather than rebuilding it.
+
+        Returns:
+            A `range` over the half-open span, empty for an idle thread.
+        """
         return range(self.first, self.first + self.count)
 
     def end(self) -> Int:
-        """One past the last task index, so `first..end()` is the half-open span."""
+        """One past the last task index, so `first..end()` is the half-open span.
+
+        Returns:
+            The exclusive upper bound, which equals `first` when the run is empty.
+        """
         return self.first + self.count
 
     def is_empty(self) -> Bool:
-        """Whether the run covers no tasks at all."""
+        """Whether the run covers no tasks at all.
+
+        Returns:
+            True on the idle thread every dispatch still calls exactly once.
+        """
         return self.count == 0
 
 
@@ -326,15 +423,30 @@ struct IndexedSplit(ImplicitlyCopyable, TrivialRegisterPassable):
     """
 
     var quotient: Int
+    """The floor of tasks over threads, which every run is at least this long."""
     var remainder: Int
+    """How many of the leading runs take one task more than the floor."""
 
     def __init__(out self, tasks_count: Int, threads_count: Int):
+        """Precomputes the split once, leaving `get` free of division.
+
+        Args:
+            tasks_count: How many tasks are shared out; zero is allowed and leaves every run empty.
+            threads_count: How many runs to cut, which must be positive.
+        """
         debug_assert(threads_count > 0, "a split needs at least one thread")
         self.quotient = tasks_count // threads_count
         self.remainder = tasks_count % threads_count
 
     def get(self, thread_index: Int) -> TasksRange:
-        """The run owned by `thread_index`."""
+        """The run owned by `thread_index`.
+
+        Args:
+            thread_index: Which of the runs to describe, counted from zero.
+
+        Returns:
+            That thread's span, one task longer for the first `remainder` of them.
+        """
         var first = self.quotient * thread_index + min(thread_index, self.remainder)
         var count = self.quotient + (1 if thread_index < self.remainder else 0)
         return TasksRange(first, count)
@@ -345,6 +457,9 @@ struct CacheAligned[T: ImplicitlyCopyable & Deinitable](Copyable):
 
     Allocate one per thread as scratch, then combine after the parallel region. The padding is
     what makes an array of these stride by a whole line, which is the property that matters.
+
+    Parameters:
+        T: The payload, which must be no wider than `DEFAULT_ALIGNMENT`.
     """
 
     var value: Self.T
@@ -353,6 +468,11 @@ struct CacheAligned[T: ImplicitlyCopyable & Deinitable](Copyable):
     """Fills the rest of the line, so the next slot starts on the next one."""
 
     def __init__(out self, var value: Self.T):
+        """Takes ownership of the payload and zeroes the line behind it.
+
+        Args:
+            value: The payload to move into the slot.
+        """
         self.value = value^
         self._padding = Array[UInt8, DEFAULT_ALIGNMENT - size_of[Self.T]()](fill=0)
 
@@ -362,12 +482,23 @@ struct SyncConstPointer[T: AnyType](ImplicitlyCopyable, TrivialRegisterPassable)
     """A read-only view letting one immutable buffer be read by every worker across a C callback.
 
     The caller guarantees the pointee outlives the parallel region and is not mutated while shared.
+
+    Parameters:
+        T: The element type, read unchanged by every worker for the whole region.
     """
 
     var pointer: Pointer[Self.T, ImmUntrackedOrigin]
+    """The first element, its origin erased so the view survives the C callback boundary."""
 
     def at(self, index: Int) -> ref[ImmUntrackedOrigin] Self.T:
-        """The element at `index`; the caller owns bounds checking."""
+        """The element at `index`; the caller owns bounds checking.
+
+        Args:
+            index: An offset in elements, not in bytes.
+
+        Returns:
+            A read-only reference into the caller's buffer, live as long as that buffer is.
+        """
         return self.pointer[unsafe_offset=index]
 
 
@@ -376,12 +507,23 @@ struct SyncMutPointer[T: AnyType](ImplicitlyCopyable, TrivialRegisterPassable):
     """A writable view letting workers write disjoint slots of one buffer across a C callback.
 
     The caller guarantees each worker touches disjoint indices and the pointee outlives the region.
+
+    Parameters:
+        T: The element type, whose slots the workers write one apiece.
     """
 
     var pointer: Pointer[Self.T, MutUntrackedOrigin]
+    """The first element, its origin erased so the view survives the C callback boundary."""
 
     def at(self, index: Int) -> ref[MutUntrackedOrigin] Self.T:
-        """A reference to the element at `index`; the caller owns disjointness and bounds."""
+        """A reference to the element at `index`; the caller owns disjointness and bounds.
+
+        Args:
+            index: An offset in elements, not in bytes.
+
+        Returns:
+            A writable reference into the caller's buffer, unsynchronized against every other one.
+        """
         return self.pointer[unsafe_offset=index]
 
 

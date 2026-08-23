@@ -1,6 +1,8 @@
 /**
- *  @file logging.hpp
  *  @brief Human-readable dumps of the harvested topology and capabilities.
+ *  @author Ash Vardanian
+ *  @file include/forkunion/logging.hpp
+ *  @date July 10, 2026
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
@@ -11,12 +13,23 @@ namespace forkunion {
 
 /**
  *  @brief Detects if the output stream supports ANSI color codes.
+ *  @note Every accessor below returns its escape sequence when colors are on, and an empty string when they
+ *      are off, so call sites interpolate them unconditionally.
  */
 struct logging_colors_t {
+    /** Whether the accessors emit escape sequences or empty strings. */
     bool use_colors_ = false;
 
+    /**
+     *  @brief Forces coloring on or off, bypassing the terminal probe.
+     *  @param[in] use_colors Whether the accessors should emit ANSI escape sequences.
+     */
     explicit logging_colors_t(bool use_colors) noexcept : use_colors_(use_colors) {}
 
+    /**
+     *  @brief Probes `stdout` and enables coloring only for a terminal advertising it.
+     *  @note On POSIX the `TERM` variable must name a color-capable terminal; Windows consoles are assumed capable.
+     */
     explicit logging_colors_t() noexcept {
 #if FU_ON_WINDOWS
         if (!::_isatty(_fileno(stdout))) return;
@@ -61,11 +74,18 @@ struct logging_colors_t {
     char const *bold_gray() const noexcept { return use_colors_ ? "\033[1;90m" : ""; }
 };
 
-/**
- *  @brief Formats memory volume in @p `bytes` with appropriate units and precision, like @b "1.5 GiB".
- */
+/** Formats memory volume in @p bytes with appropriate units and precision, like @b "1.5 GiB". */
 struct log_memory_volume_t {
 
+    /**
+     *  @brief Prints @p bytes into @p buffer with binary units, switching at every 1024-fold boundary.
+     *  @param[in] bytes Volume to format, rendered with one decimal place from a KiB upwards.
+     *  @param[out] buffer Destination for the NUL-terminated string.
+     *  @param[in] buffer_size Capacity of @p buffer in bytes, including the terminator.
+     *  @param[in] colors Palette tinting the number and its unit.
+     *  @note Output is truncated to fit and always NUL-terminated; escape sequences count against the budget,
+     *      so allow 64 bytes for colored output.
+     */
     void operator()(std::size_t bytes, char *buffer, std::size_t buffer_size, logging_colors_t colors) const noexcept {
 
         char const *value_color = colors.bold_white();
@@ -99,11 +119,20 @@ struct log_memory_volume_t {
     }
 };
 
-/**
- *  @brief Formats a set of CPU core IDs in a compact and readable way, like @b "0-3,5,7,8,10-12".
- */
+/** Formats a set of CPU core IDs in a compact and readable way, like @b "0-3,5,7,8,10-12". */
 struct log_core_range_t {
 
+    /**
+     *  @brief Prints @p count core IDs into @p buffer, collapsing a contiguous run into a range.
+     *  @param[in] core_ids Core IDs to format, expected in ascending order; may be empty.
+     *  @param[in] count Number of entries in @p core_ids.
+     *  @param[out] buffer Destination for the NUL-terminated string.
+     *  @param[in] buffer_size Capacity of @p buffer in bytes, including the terminator.
+     *  @param[in] colors Palette tinting the numbers.
+     *  @note An empty set prints "none", a contiguous one prints "first-last", and beyond 8 cores the middle
+     *      is elided with an ellipsis.
+     *  @note Output is truncated to fit and always NUL-terminated; allow 256 bytes for colored output.
+     */
     void operator()(                                  //
         core_id_t const *core_ids, std::size_t count, //
         char *buffer, std::size_t buffer_size, logging_colors_t colors) const noexcept {
@@ -151,16 +180,16 @@ struct log_core_range_t {
     }
 };
 
-/**
- *  @brief NUMA topology logger with compact tree design and color support.
- */
+/** NUMA topology logger with compact tree design and color support. */
 struct log_numa_topology_t {
 
     /**
      *  @brief Logs NUMA topology in compact tree format with colors.
-     *  @param topology The NUMA topology to log
-     *  @param colors Color scheme for output formatting
-     *  @param output Output file stream (defaults to stdout)
+     *  @param[in] topology The harvested topology whose sockets, domains, cores, and page sizes are printed.
+     *  @param[in] colors Whether to emit ANSI colour codes, and which.
+     *  @param[in] output Destination stream, defaulting to `stdout`.
+     *  @note An empty topology prints "No NUMA nodes detected", and only page sizes above 4 KiB are listed.
+     *  @note Each row is assembled in a 1024-byte line buffer, so an unusually wide row is truncated.
      */
     template <std::size_t max_page_sizes_, typename allocator_type_>
     void operator()(machine_topology<max_page_sizes_, allocator_type_> const &topology, logging_colors_t colors,
@@ -269,11 +298,16 @@ struct log_numa_topology_t {
     }
 };
 
-/**
- *  @brief Logs CPU and memory capabilities summary with compact formatting.
- */
+/** Logs CPU and memory capabilities summary with compact formatting. */
 struct log_capabilities_t {
 
+    /**
+     *  @brief Logs the detected capability bits as a two-row tree, one row for the CPU and one for the RAM.
+     *  @param[in] caps Bit-mask to render, where every recognized bit becomes one bullet.
+     *  @param[in] colors Whether to emit ANSI colour codes, and which.
+     *  @param[in] output Destination stream, defaulting to `stdout`.
+     *  @note Only the busy-wait and memory-placement bits are listed; a row matching none prints "None detected".
+     */
     void operator()(capabilities_t caps, logging_colors_t colors, std::FILE *output = stdout) const noexcept {
 
         // Line buffer for assembly

@@ -258,7 +258,7 @@ where
     /// # Returns
     /// The final reduced value of type `T`
     ///
-    /// # Example
+    /// # Examples
     /// ```
     /// use forkunion::*;
     /// let topology = Topology::new().unwrap();
@@ -315,7 +315,7 @@ where
     /// - `Ok(())` if all items were folded successfully
     /// - `Err(E)` with the first error encountered
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use forkunion::*;
@@ -400,7 +400,7 @@ where
     /// Overhead is one atomic load per item (~2% in compute-bound workloads).
     /// The atomic swap on error is negligible as it happens at most once.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use forkunion::*;
@@ -465,7 +465,7 @@ where
     /// - `Some(item)` with the lowest index if any match was found
     /// - `None` if no item matched or the iterator was empty
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use forkunion::*;
@@ -555,7 +555,7 @@ where
     /// - `Some(item)` with the highest index if any match was found
     /// - `None` if no item matched or the iterator was empty
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use forkunion::*;
@@ -637,7 +637,7 @@ where
     /// - `Some(item)` if a matching item was found
     /// - `None` if no item matched or the iterator was empty
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use forkunion::*;
@@ -691,7 +691,7 @@ where
     ///
     /// Stops searching after the first match is found.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use forkunion::*;
@@ -720,7 +720,7 @@ where
     ///
     /// Stops searching after the first non-match is found.
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use forkunion::*;
@@ -757,7 +757,7 @@ where
     /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, usize, ThreadInDomain)`
     /// * `combine` - Function to merge two accumulators: `fn(T, T) -> T`
     ///
-    /// # Example
+    /// # Examples
     /// ```
     /// use forkunion::*;
     /// let topology = Topology::new().unwrap();
@@ -819,7 +819,7 @@ where
     ///
     /// Works for owned values (usize, u64, etc.) and references (&u64, etc.).
     ///
-    /// # Example
+    /// # Examples
     /// ```
     /// use forkunion::*;
     /// let topology = Topology::new().unwrap();
@@ -842,7 +842,7 @@ where
 
     /// Count all items in parallel with NUMA-aware local counters.
     ///
-    /// # Example
+    /// # Examples
     /// ```
     /// use forkunion::*;
     /// let topology = Topology::new().unwrap();

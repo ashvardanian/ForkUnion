@@ -67,6 +67,7 @@ comptime BINDING_MAJOR = 3
 # region Signatures
 
 comptime VersionPart = def() thin abi("C") -> c_int
+"""A nullary `int` getter, the shape the three version numbers share."""
 
 # endregion Signatures
 
@@ -96,69 +97,133 @@ struct Symbols:
     """
 
     var version_major: VersionPart
+    """`fu_version_major`."""
     var version_minor: VersionPart
+    """`fu_version_minor`."""
     var version_patch: VersionPart
+    """`fu_version_patch`."""
 
     var comptime_capabilities: Capabilities32
+    """`fu_comptime_capabilities`."""
     var runtime_capabilities: Capabilities32
+    """`fu_runtime_capabilities`."""
     var name_capabilities: NameCapabilities
+    """`fu_name_capabilities`."""
 
     var topology_new: TopologyNew
+    """`fu_topology_new`."""
     var topology_delete: TopologyDelete
+    """`fu_topology_delete`."""
     var logical_cores_count: TopologyCount
+    """`fu_logical_cores_count`."""
     var logical_cores_count_in: TopologyCountIn
+    """`fu_logical_cores_count_in`."""
     var compute_domains_count: TopologyCount
+    """`fu_compute_domains_count`."""
     var compute_levels_count: TopologyCount
+    """`fu_compute_levels_count`."""
     var compute_level_in: TopologyCountIn
+    """`fu_compute_level_in`."""
     var compute_capacity_in: TopologyCountIn
+    """`fu_compute_capacity_in`."""
     var compute_cache_bytes_in: TopologyCountIn
+    """`fu_compute_cache_bytes_in`."""
     var memory_domains_count: TopologyCount
+    """`fu_memory_domains_count`."""
     var memory_domain_id_at_index: MemoryDomainIdAt
+    """`fu_memory_domain_id_at_index`."""
     var local_memory_of: TopologyCountIn
+    """`fu_local_memory_of`."""
     var volume_ram: TopologyCount
+    """`fu_volume_ram`."""
     var volume_ram_in: TopologyCountIn
+    """`fu_volume_ram_in`."""
     var volume_huge_pages: TopologyCount
+    """`fu_volume_huge_pages`."""
     var volume_huge_pages_in: TopologyCountIn
+    """`fu_volume_huge_pages_in`."""
     var huge_pages_count: TopologyCount
+    """`fu_huge_pages_count`."""
     var huge_pages_count_in: TopologyCountIn
+    """`fu_huge_pages_count_in`."""
 
     var allocate_on_domain_id: AllocateOnDomain
+    """`fu_allocate_on_domain_id`."""
     var allocate_at_least_on_domain_id: AllocateAtLeastOnDomain
+    """`fu_allocate_at_least_on_domain_id`."""
     var free_on_domain_id: FreeOnDomain
+    """`fu_free_on_domain_id`."""
     var allocate_symmetric: AllocateSymmetric
+    """`fu_allocate_symmetric`."""
     var free_symmetric: FreeSymmetric
+    """`fu_free_symmetric`."""
 
     var pool_new: PoolNew
+    """`fu_pool_new`."""
     var pool_delete: PoolDelete
+    """`fu_pool_delete`."""
     var pool_capabilities: PoolCapabilities
+    """`fu_pool_capabilities`."""
     var pool_spawn: PoolSpawn
+    """`fu_pool_spawn`."""
     var pool_spawn_on: PoolSpawnOn
+    """`fu_pool_spawn_on`."""
     var pool_caller_exclusivity: PoolExclusivity
+    """`fu_pool_caller_exclusivity`."""
     var pool_compute_domains_count: PoolCount
+    """`fu_pool_compute_domains_count`."""
     var pool_threads_count: PoolCount
+    """`fu_pool_threads_count`."""
     var pool_threads_count_in: PoolCountIn
+    """`fu_pool_threads_count_in`."""
     var pool_locate_thread_in: PoolLocateThreadIn
+    """`fu_pool_locate_thread_in`."""
     var pool_sleep: PoolSleep
+    """`fu_pool_sleep`."""
     var pool_terminate: PoolTerminate
+    """`fu_pool_terminate`."""
 
     var fabric_new: FabricNew
+    """`fu_fabric_new`."""
     var fabric_delete: FabricDelete
+    """`fu_fabric_delete`."""
     var fabric_harvest: FabricHarvest
+    """`fu_fabric_harvest`."""
     var fabric_memory_latency: FabricEdge
+    """`fu_fabric_memory_latency`."""
     var fabric_memory_bandwidth: FabricEdge
+    """`fu_fabric_memory_bandwidth`."""
     var fabric_memory_distance: FabricEdge
+    """`fu_fabric_memory_distance`."""
     var fabric_memory_level_in: FabricLevelIn
+    """`fu_fabric_memory_level_in`."""
     var fabric_memory_levels_count: FabricLevelsCount
+    """`fu_fabric_memory_levels_count`."""
 
     var pool_for_threads: PoolForThreads
+    """`fu_pool_for_threads`."""
     var pool_for_n: PoolForN
+    """`fu_pool_for_n`."""
     var pool_for_n_dynamic: PoolForN
+    """`fu_pool_for_n_dynamic`."""
     var pool_for_slices: PoolForSlices
+    """`fu_pool_for_slices`."""
     var pool_unsafe_for_threads: PoolUnsafeForThreads
+    """`fu_pool_unsafe_for_threads`."""
     var pool_is_complete: PoolIsComplete
+    """`fu_pool_is_complete`."""
     var pool_unsafe_join: PoolUnsafeJoin
+    """`fu_pool_unsafe_join`."""
 
     def __init__(out self, ref handle: OwnedDLHandle) raises Error:
+        """Resolves every entry point at once, so no call ever pays for a `dlsym`.
+
+        Args:
+            handle: The opened library, borrowed only while the addresses are read out.
+
+        Raises:
+            With `SYMBOL_MISSING`, on the first symbol the loaded library does not export.
+        """
         self.version_major = _resolve[VersionPart](handle, "fu_version_major")
         self.version_minor = _resolve[VersionPart](handle, "fu_version_minor")
         self.version_patch = _resolve[VersionPart](handle, "fu_version_patch")
@@ -253,16 +318,31 @@ struct Library(ImplicitlyCopyable):
     """
 
     var shared: ArcPointer[_Loaded]
+    """The handle and its symbols, refcounted so the last holder unmaps the object."""
 
     def __init__(out self) raises Error:
+        """Opens the shared object and resolves it, which every handle then shares.
+
+        Raises:
+            With `LIBRARY_MISSING`, when nothing is on the loader path or its major version differs.
+        """
         self.shared = ArcPointer(_Loaded())
 
     @always_inline
     def symbols(self) -> ref[origin_of(self.shared[].symbols)] Symbols:
+        """The resolved entry points, borrowed rather than copied on every call.
+
+        Returns:
+            A reference that stays valid for as long as this `Library` is held.
+        """
         return self.shared[].symbols
 
     def version(self) -> Tuple[Int, Int, Int]:
-        """The loaded library's own version, which is also the cheapest check that loading worked."""
+        """The loaded library's own version, which is also the cheapest check that loading worked.
+
+        Returns:
+            The major, minor, and patch numbers the shared object reports for itself.
+        """
         ref symbols = self.symbols()
         return (
             Int(symbols.version_major()),

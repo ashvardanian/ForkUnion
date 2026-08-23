@@ -1,7 +1,7 @@
 /**
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file forkunion.hpp
  *  @author Ash Vardanian
+ *  @file include/forkunion.hpp
  *  @date May 2, 2025
  *
  *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel Algorithms,
@@ -41,20 +41,20 @@
  *  It should reduce memory access latency by around 35% on average, compared to remote accesses.
  *  @sa `machine_topology_t`, `colocated_pool_t`, `distributed_pool_t`.
  *
- *  On heterogeneous chips, cores with a different @b "Quality-of-Service" (QoS) may be combined.
+ *  On heterogeneous chips, cores with a different @b "Quality-of-Service", or QoS, may be combined.
  *  A typical example is laptop/desktop chips, having 1 NUMA node, but 3 tiers of CPU cores:
  *  performance, efficiency, and power-saving cores. Each group will have vastly different speed,
  *  so considering them equal in tasks scheduling is a bad idea... and separating them automatically
  *  isn't feasible either. It's up to the user to isolate those groups into individual pools.
  *  @sa `core_quality_t`
  *
- *  On x86, Arm, and RISC-V (internally referred to as RISC5) architectures, depending on the CPU
- *  features available, the library also exposes cheaper @b "busy-waiting" mechanisms, such as
- *  `tpause`, `wfet`, & `yield` instructions.
+ *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
+ *  exposes cheaper @b "busy-waiting" mechanisms, such as `tpause`, `wfet`, & `yield` instructions.
+ *  RISC-V is internally referred to as RISC5.
  *  @sa `arm64_yield_t`, `arm64_wfet_t`, `x86_pause_t`, `x86_tpause_t`, `risc5_pause_t`.
  *
  *  The library uses modern C++ features and requires @b C++17 or newer.
- *  Using C++20 will enable additional compile-time checks (concepts) where available.
+ *  Using C++20 will enable additional compile-time checks with concepts where available.
  */
 #pragma once
 

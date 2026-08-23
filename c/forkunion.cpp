@@ -1,24 +1,25 @@
 /**
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @file forkunion.cpp
  *  @author Ash Vardanian
+ *  @file c/forkunion.cpp
  *  @date June 27, 2025
  */
-#include <forkunion.h>   // C type aliases
-#include <forkunion.hpp> // C++ core implementation
+#include <cstdint> // `std::uint8_t`
 
-#include <utility>     // `std::in_place_type_t`
 #include <algorithm>   // `std::max`
 #include <new>         // placement `new` operator
-#include <cstdint>     // `std::uint8_t`
 #include <type_traits> // `std::aligned_storage`
+#include <utility>     // `std::in_place_type_t`
+
+#include <forkunion.h>   // C type aliases
+#include <forkunion.hpp> // C++ core implementation
 
 namespace fu = ashvardanian::forkunion;
 
 using thread_allocator_t = std::allocator<std::thread>;
 
-/** @brief The concrete pool type for a shape, a waiter, and a cache-hints policy - the reverse map
- *      from a pool's `kind_k` and its stored capability bits. */
+/** The concrete pool type for a shape, a waiter, and a cache-hints policy - the reverse map
+ *  from a pool's `kind_k` and its stored capability bits. */
 template <fu::pool_kind_t kind_, typename yield_type_, typename cache_hints_type_>
 struct pool_for;
 template <typename yield_type_, typename cache_hints_type_>
@@ -43,7 +44,7 @@ struct pool_for<fu::pool_kind_t::distributed_k, yield_type_, cache_hints_type_> 
  */
 struct pool_variants_t {
 
-    /** @brief The largest `sizeof` and the strictest `alignof` across @p types_, for the union's storage. */
+    /** The largest `sizeof` and the strictest `alignof` across @p types_, for the union's storage. */
     template <typename... types_>
     struct max_size_align {
         static constexpr std::size_t size_k = std::max({sizeof(types_)...});
@@ -97,11 +98,11 @@ struct pool_variants_t {
         fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
         >;
 
-    /** @brief Raw aligned storage holding the one live pool, reinterpreted per `kind_` and `capabilities_`. */
+    /** Raw aligned storage holding the one live pool, reinterpreted per `kind_` and `capabilities_`. */
     alignas(pool_traits_t::alignment_k) std::uint8_t storage_[pool_traits_t::size_k];
-    /** @brief The stored pool's shape, or `unknown_k` when the storage is empty - no pool spawned yet. */
+    /** The stored pool's shape, or `unknown_k` when the storage is empty - no pool spawned yet. */
     fu::pool_kind_t kind_ {fu::pool_kind_t::unknown_k};
-    /** @brief The one busy-wait bit the stored pool uses; together with `kind_` it names the concrete type. */
+    /** The one busy-wait bit the stored pool uses; together with `kind_` it names the concrete type. */
     fu::capabilities_t capabilities_ {fu::capabilities_unknown_k};
 
     pool_variants_t() = default;
@@ -127,13 +128,13 @@ struct pool_variants_t {
     }
 };
 
-/** @brief Carries a concrete pool type into a generic action through overload resolution. */
+/** Carries a concrete pool type into a generic action through overload resolution. */
 template <typename pool_type_>
 struct pool_type_tag_t {
     using type = pool_type_;
 };
 
-/** @brief Whether every capability bit the @p yield_type_ and @p hints_type_ declare is in @p bits. */
+/** Whether every capability bit the @p yield_type_ and @p hints_type_ declare is in @p bits. */
 template <typename yield_type_, typename hints_type_>
 static bool selects(fu::capabilities_t const bits) noexcept {
     auto const required = yield_type_::capability_k | hints_type_::capability_k;
@@ -141,7 +142,7 @@ static bool selects(fu::capabilities_t const bits) noexcept {
 }
 
 /**
- *  @brief The one capability→type cascade: walks the silicon-real (waiter, cache-hints) pairs, most
+ *  @brief The one capability→type cascade: walks the silicon-real waiter and cache-hints pairs, most
  *      capable first, and invokes @p action with the tag of the first pair whose every declared
  *      bit is in @p bits; anything unexpected degrades to the nearest pair that only drops
  *      capabilities, down to the portable `(standard_yield_t, standard_cache_hints_t)` fallback.
@@ -210,10 +211,10 @@ auto visit_kind(visitor_type_ &&visitor, pool_variants_t &variants) {
  */
 static constexpr std::size_t poisoned_size_k = static_cast<std::size_t>(-1);
 
-/** @brief Lowers a C++ status onto the C vocabulary; the values agree, so this only retypes. */
+/** Lowers a C++ status onto the C vocabulary; the values agree, so this only retypes. */
 inline fu_status_t lower(fu::status_t status) noexcept { return static_cast<fu_status_t>(status); }
 
-/** @brief Runs @p visitor on the live pool and returns its result, or @p empty on empty storage. */
+/** Runs @p visitor on the live pool and returns its result, or @p empty on empty storage. */
 template <typename visitor_type_, typename result_type_>
 result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_type_ empty) {
     switch (variants.kind_) {
@@ -225,7 +226,7 @@ result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_ty
     return empty; // An out-of-enum `kind_` is undefined behavior upstream; stay total for `-Wreturn-type`.
 }
 
-/** @brief Runs @p visitor on the live pool for its side effects; a no-op on empty storage. */
+/** Runs @p visitor on the live pool for its side effects; a no-op on empty storage. */
 template <typename visitor_type_>
 void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
     switch (variants.kind_) {
@@ -238,7 +239,7 @@ void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
 
 /**
  *  @brief Constructs into @p variants the pool of the requested @p kind_k, picking the best
- *      (waiter, cache-hints) pair the @p effective capabilities allow and forwarding @p args to
+ *      waiter and cache-hints pair the @p effective capabilities allow and forwarding @p args to
  *      that pool's constructor.
  *
  *  One cascade for every pool shape - `select_pool` is the sole place the C ABI turns a capability
@@ -260,15 +261,15 @@ static void construct_pool(pool_variants_t &variants, fu::capabilities_t effecti
  *  on the caller's stack.
  */
 struct opaque_pool_t {
-    /** @brief The one live pool - flat, colocated, or distributed - or empty before the first spawn. */
+    /** The one live pool - flat, colocated, or distributed - or empty before the first spawn. */
     pool_variants_t variants;
-    /** @brief The capability envelope `machine_capabilities() & allowed`, fixed at creation. */
+    /** The capability envelope `machine_capabilities() & allowed`, fixed at creation. */
     fu::capabilities_t effective {fu::capabilities_unknown_k};
-    /** @brief Context held across a non-blocking `fu_pool_unsafe_for_threads` until its join. */
+    /** Context held across a non-blocking `fu_pool_unsafe_for_threads` until its join. */
     fu_lambda_context_t current_context {nullptr};
-    /** @brief Callback held across a non-blocking `fu_pool_unsafe_for_threads` until its join. */
+    /** Callback held across a non-blocking `fu_pool_unsafe_for_threads` until its join. */
     fu_for_threads_t current_callback {nullptr};
-    /** @brief The caller's pool name, kept so a re-spawn can rebuild the variant without losing it. */
+    /** The caller's pool name, kept so a re-spawn can rebuild the variant without losing it. */
     char name[FU_POOL_NAME_CAPACITY] {};
 
     opaque_pool_t(char const *pool_name, fu::capabilities_t pool_capabilities) noexcept : effective(pool_capabilities) {
@@ -279,13 +280,13 @@ struct opaque_pool_t {
         // `variants` starts empty (kind `unknown_k`); the first spawn builds the pool the topology dictates.
     }
 
-    /** @brief A shim to redirect unsafe callbacks to the current context. */
+    /** A shim to redirect unsafe callbacks to the current context. */
     void operator()(fu::thread_in_domain_t pinned) const noexcept {
         current_callback(current_context, pinned.thread, pinned.compute_domain);
     }
 };
 
-/** @brief Terminates and destroys the pool in @p variants, resetting it to the empty `unknown_k` state. */
+/** Terminates and destroys the pool in @p variants, resetting it to the empty `unknown_k` state. */
 static void destroy_variant(pool_variants_t &variants) noexcept {
     visit(
         [](auto &variant) {
@@ -297,7 +298,7 @@ static void destroy_variant(pool_variants_t &variants) noexcept {
     variants.kind_ = fu::pool_kind_t::unknown_k;
 }
 
-/** @brief This machine's capabilities - the CPU busy-wait waiters and the memory facilities - probed once. */
+/** This machine's capabilities - the CPU busy-wait waiters and the memory facilities - probed once. */
 static fu::capabilities_t machine_capabilities(void) {
     static fu::capabilities_t const capabilities =
         static_cast<fu::capabilities_t>(fu::cpu_capabilities() | fu::ram_capabilities());
@@ -306,7 +307,7 @@ static fu::capabilities_t machine_capabilities(void) {
 
 using machine_topology_t = fu::machine_topology_t;
 
-/** @brief Recovers the `machine_topology_t` behind an opaque `fu_topology_t` handle. */
+/** Recovers the `machine_topology_t` behind an opaque `fu_topology_t` handle. */
 static fu::machine_topology_t *upcast_topology(fu_topology_t topology) noexcept {
     return std::launder(reinterpret_cast<fu::machine_topology_t *>(topology));
 }
@@ -686,7 +687,7 @@ fu_status_t fu_pool_new(FU_MAYBE_UNUSED_ char const *name, fu_capabilities_t all
     return fu_success_k;
 }
 
-/** @brief Safely cast `fu_pool_t*` to `opaque_pool_t*` avoiding alignment violation warnings. */
+/** Safely cast `fu_pool_t*` to `opaque_pool_t*` avoiding alignment violation warnings. */
 inline opaque_pool_t *upcast_pool(fu_pool_t pool) noexcept {
     return std::launder(reinterpret_cast<opaque_pool_t *>(pool));
 }
@@ -768,7 +769,7 @@ fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comp
         opaque->variants));
 }
 
-/** @brief Safely cast `fu_fabric_t` to `fu::measured_fabric_t*` avoiding alignment violation warnings. */
+/** Safely cast `fu_fabric_t` to `fu::measured_fabric_t*` avoiding alignment violation warnings. */
 inline fu::measured_fabric_t *upcast_fabric(fu_fabric_t fabric) noexcept {
     return std::launder(reinterpret_cast<fu::measured_fabric_t *>(fabric));
 }

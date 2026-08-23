@@ -1,6 +1,8 @@
 /**
- *  @file types.hpp
  *  @brief Vocabulary and utilities: task ranges, padded buffers, index splitting, claim cursors.
+ *  @author Ash Vardanian
+ *  @file include/forkunion/types.hpp
+ *  @date July 10, 2026
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
@@ -52,6 +54,8 @@
 #if !defined(FU_ALLOW_UNSAFE)
 #define FU_ALLOW_UNSAFE FU_DETECT_EXCEPTIONS_
 #endif
+
+#pragma region Platform Identity
 
 /*  Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to derive
  *  the capabilities below. Nothing else in the library may ask `__linux__` again. Identity is the kernel
@@ -113,6 +117,9 @@
 #else
 #define FU_DETECT_LINUX_MMAN_ 0
 #endif
+#pragma endregion Platform Identity
+
+#pragma region Platform Capabilities
 
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
  *  facility rather than for the library that happens to provide it - so Windows' `VirtualAllocExNuma`
@@ -126,12 +133,12 @@
  *  A build system may @b override, never re-derive: that keeps the default in exactly one place,
  *  instead of duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift.  */
 
-/** @brief Can we create operating-system threads directly, rather than through `std::thread`? */
+/** Can we create operating-system threads directly, rather than through `std::thread`? */
 #if !defined(FU_WITH_OS_THREADS)
 #define FU_WITH_OS_THREADS (FU_ON_POSIX || FU_ON_WINDOWS)
 #endif
 
-/** @brief Can we enumerate this machine's cores, compute domains, and memory domains? */
+/** Can we enumerate this machine's cores, compute domains, and memory domains? */
 #if !defined(FU_WITH_TOPOLOGY)
 /*  Windows needs no separate library for this: `GetLogicalProcessorInformationEx` ships with the
  *  kernel since Vista and reports NUMA nodes, cores, processor groups, and caches in one call. */
@@ -154,7 +161,7 @@
 #define FU_WITH_PLACE_THREADS_BY_AFFINITY (FU_ON_LINUX || FU_ON_FREEBSD || FU_ON_WINDOWS)
 #endif
 
-/** @brief Can we hint which class of core a thread should run on, at creation time? */
+/** Can we hint which class of core a thread should run on, at creation time? */
 #if !defined(FU_WITH_PLACE_THREADS_BY_CORE_CLASS)
 #define FU_WITH_PLACE_THREADS_BY_CORE_CLASS FU_ON_APPLE
 #endif
@@ -166,14 +173,14 @@
 #define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
 #endif
 
-/** @brief Can we place pages on a chosen memory domain? */
+/** Can we place pages on a chosen memory domain? */
 #if !defined(FU_WITH_PLACE_MEMORY_ON_DOMAIN)
 /*  Linux places with `mbind`; Windows with `VirtualAllocExNuma`; FreeBSD sets the calling thread's
  *  `domainset` to a PREFER policy and first-touches. Same capability, named for the facility. */
 #define FU_WITH_PLACE_MEMORY_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_TOPOLOGY)
 #endif
 
-/** @brief Can we request pages larger than the base page? */
+/** Can we request pages larger than the base page? */
 #if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
 /*  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
  *  gated behind the `SeLockMemoryPrivilege` the caller must already hold; FreeBSD hints the alignment
@@ -219,7 +226,9 @@
 #error \
     "Retired capability macro. Use FU_WITH_PLACE_MEMORY_ON_DOMAIN, FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN, or FU_WITH_PLACE_THREADS_BY_AFFINITY"
 #endif
+#pragma endregion Platform Capabilities
 
+#pragma region Platform Headers
 #if FU_ALLOW_UNSAFE
 #include <exception> // `std::exception_ptr`
 #endif
@@ -288,6 +297,9 @@
 #pragma comment(lib, "advapi32.lib") // `OpenProcessToken`, `LookupPrivilegeValueW` for large pages
 #endif
 #endif
+#pragma endregion Platform Headers
+
+#pragma region Language and Architecture
 
 /**
  *  On C++17 and later we can detect misuse of lambdas that are not properly annotated.
@@ -361,7 +373,9 @@
 #include <concepts> // `std::same_as`, `std::invocable`
 #include <bit>      // `std::popcount`
 #endif
+#pragma endregion Language and Architecture
 
+#pragma region Compiler Intrinsics
 #if FU_DETECT_CPP_17_
 #define FU_MAYBE_UNUSED_ [[maybe_unused]]
 #else
@@ -429,24 +443,29 @@
 #if FU_WITH_DEMOTE_CACHE_LINES && !(FU_DETECT_ARCH_X86_64_ || FU_DETECT_ARCH_ARM64_)
 #error "FU_WITH_DEMOTE_CACHE_LINES names no demote-capable ISA on this target"
 #endif
+#pragma endregion Compiler Intrinsics
 
 namespace ashvardanian {
 namespace forkunion {
 
-/** @brief The OS's NUMA node number - on Linux, an `N` for which `/sys/devices/system/node/nodeN` exists. */
+#pragma region Domain Identifiers
+
+/** The OS's NUMA node number - on Linux, an `N` for which `/sys/devices/system/node/nodeN` exists. */
 using memory_domain_id_t = int;
-/** @brief Opaque logical-processor id; on Windows it packs a group and a bit. */
+/** Opaque logical-processor id; on Windows it packs a group and a bit. */
 using core_id_t = int;
-/** @brief Physical CPU socket, or -1 where the OS will not say. */
+/** Physical CPU socket, or -1 where the OS will not say. */
 using socket_id_t = int;
-/** @brief A core's performance tier, ranked from fastest to lowest-power, like "performance" or "efficiency". */
+/** A core's performance tier, ranked from fastest to lowest-power, like "performance" or "efficiency". */
 using core_quality_t = int;
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 /*  The two `mbind` inputs `<numaif.h>` supplied. Syscall ABI, so naming them needs no header - and
  *  where `<linux/mempolicy.h>` is installed, the `static_assert`s hold us to the kernel's spelling.  */
-static constexpr int mpol_bind_k = 2;               // ? `MPOL_BIND` - allocate strictly from the mask
-static constexpr int mpol_static_nodes_k = 1 << 15; // ? `MPOL_F_STATIC_NODES` - literal ids, not cpuset-relative
+/** `MPOL_BIND` - allocate strictly from the mask. */
+static constexpr int mpol_bind_k = 2;
+/** `MPOL_F_STATIC_NODES` - literal ids, not cpuset-relative. */
+static constexpr int mpol_static_nodes_k = 1 << 15;
 
 #if defined(MPOL_BIND)
 static_assert(mpol_bind_k == MPOL_BIND, "MPOL_BIND is the kernel's; ours must match it");
@@ -460,6 +479,7 @@ static_assert(mpol_static_nodes_k == MPOL_F_STATIC_NODES, "MPOL_F_STATIC_NODES i
  *      Bounds @b domains, never cores - those are a `core_mask`, which grows.
  */
 static constexpr std::size_t max_memory_domains_k = 1024;
+/** The node mask's width in `unsigned long` words, as the `mbind` syscall counts it. */
 static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
 #endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
@@ -483,8 +503,12 @@ static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(u
  */
 enum compute_domain_index_t : std::size_t {};
 
-/** @brief A position in `machine_topology`'s array of @b memory domains, in [0, memory_domains_count). */
+/** A position in `machine_topology`'s array of @b memory domains, in [0, memory_domains_count). */
 enum memory_domain_index_t : std::size_t {};
+
+#pragma endregion Domain Identifiers
+
+#pragma region Status Codes
 
 /**
  *  @brief Why a call failed. Success is `0`; every failure is negative.
@@ -503,40 +527,40 @@ enum memory_domain_index_t : std::size_t {};
  *      kernel declines to pin; `all_threads_pinned()` is where that is reported.
  */
 enum class status_t : int {
-    /** @brief The call completed and any output holds a meaningful value. */
+    /** The call completed and any output holds a meaningful value. */
     success_k = fu_success_k,
-    /** @brief No reason was reported, or one this build does not name. */
+    /** No reason was reported, or one this build does not name. */
     unknown_k = fu_unknown_k,
-    /** @brief An allocation or mapping failed; a smaller request may succeed. */
+    /** An allocation or mapping failed; a smaller request may succeed. */
     bad_alloc_k = fu_bad_alloc_k,
-    /** @brief A fixed ceiling was reached, so a smaller request will not help either. */
+    /** A fixed ceiling was reached, so a smaller request will not help either. */
     capacity_exhausted_k = fu_capacity_exhausted_k,
-    /** @brief An argument was malformed, out of range, or would overflow a byte count. */
+    /** An argument was malformed, out of range, or would overflow a byte count. */
     invalid_argument_k = fu_invalid_argument_k,
-    /** @brief The handles or the pool kind cannot serve this call together. */
+    /** The handles or the pool kind cannot serve this call together. */
     config_mismatch_k = fu_config_mismatch_k,
-    /** @brief The pool is already spawned; terminate it first. */
+    /** The pool is already spawned; terminate it first. */
     already_spawned_k = fu_already_spawned_k,
-    /** @brief The pool was never spawned. */
+    /** The pool was never spawned. */
     not_spawned_k = fu_not_spawned_k,
-    /** @brief The OS declined to create a thread - a resource limit, or permissions. */
+    /** The OS declined to create a thread - a resource limit, or permissions. */
     thread_refused_k = fu_thread_refused_k,
-    /** @brief The machine could not be described; transient if its CPU set changed mid-probe. */
+    /** The machine could not be described; transient if its CPU set changed mid-probe. */
     topology_unavailable_k = fu_topology_unavailable_k,
-    /** @brief A privileged operation was declined. */
+    /** A privileged operation was declined. */
     permission_denied_k = fu_permission_denied_k,
-    /** @brief This build or this machine has no such facility. */
+    /** This build or this machine has no such facility. */
     unsupported_k = fu_unsupported_k,
-    /** @brief Binding-only: nothing to load, or a different major version. Never returned here. */
+    /** Binding-only: nothing to load, or a different major version. Never returned here. */
     library_missing_k = fu_library_missing_k,
-    /** @brief Binding-only: the loaded core is missing a symbol. Never returned here. */
+    /** Binding-only: the loaded core is missing a symbol. Never returned here. */
     symbol_missing_k = fu_symbol_missing_k,
 };
 
-/** @brief Whether @p status reports success. */
+/** Whether @p status reports success. */
 constexpr bool succeeded(status_t status) noexcept { return status == status_t::success_k; }
 
-/** @brief Whether @p status reports failure. */
+/** Whether @p status reports failure. */
 constexpr bool failed(status_t status) noexcept { return status != status_t::success_k; }
 
 /**
@@ -564,12 +588,16 @@ constexpr char const *status_to_string(status_t status) noexcept {
     return "an unrecognized status";
 }
 
+#pragma endregion Status Codes
+
+#pragma region Enumerations
+
 /**
  *  @brief Defines the in- and exclusivity of the calling thread in for the executing task.
  *  @sa `caller_inclusive_k` and `caller_exclusive_k`
  *
  *  This enum affects how the join is performed. If the caller is inclusive, 1/Nth of the call
- *  will be executed by the calling thread (as opposed to workers) and the join will happen
+ *  will be executed by the calling thread, as opposed to workers, and the join will happen
  *  inside of the calling scope.
  */
 enum caller_exclusivity_t : unsigned int {
@@ -627,42 +655,43 @@ enum capabilities_t : unsigned int {
      * `FU_WITH_TOPOLOGY`. */
     capability_topology_k = 1 << 7,
     /**
-     *  Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
+     *  @brief Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_place_threads_by_affinity_k = 1 << 8,
     /**
-     *  Steer a thread onto a class of core at creation, choosing where it runs. Built:
+     *  @brief Steer a thread onto a class of core at creation, choosing where it runs. Built:
      * `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_place_threads_by_core_class_k = 1 << 9,
     /**
-     *  Reclass a thread's scheduler to sleep or wake it, choosing when it runs. Built:
+     *  @brief Reclass a thread's scheduler to sleep or wake it, choosing when it runs. Built:
      * `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_reschedule_threads_by_class_k = 1 << 10,
 
     /**
-     *  Place a buffer's pages on a chosen memory domain. Built: `FU_WITH_PLACE_MEMORY_ON_DOMAIN`.
+     *  @brief Place a buffer's pages on a chosen memory domain. Built: `FU_WITH_PLACE_MEMORY_ON_DOMAIN`.
      *  @sa `capability_topology_k` - the enumerated domains this places onto.
      */
     capability_place_memory_on_domain_k = 1 << 11,
     /**
-     *  Place larger-than-base pages on a chosen memory domain. A narrower case of memory placement. Built:
+     *  @brief Place larger-than-base pages on a chosen memory domain. A narrower case of memory placement. Built:
      * `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`.
      *  @sa `capability_place_memory_on_domain_k` - the placement this specializes.
      */
     capability_place_huge_pages_on_domain_k = 1 << 12,
     /**
-     *  The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation.
+     *  @brief The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation.
      *  @sa `capability_place_huge_pages_on_domain_k` - the explicit request this is the automatic counterpart to.
      */
     capability_huge_transparent_pages_k = 1 << 13,
 
     /**
-     *  Compile the domain-aware `colocated_pool` and `distributed_pool`. Built: `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`.
+     *  @brief Compile the domain-aware `colocated_pool` and `distributed_pool`.
+     *      Built: `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`.
      *  @sa `capability_os_threads_k` and `capability_topology_k` - both are needed; memory placement is not.
      */
     capability_colocate_pools_on_domain_k = 1 << 14,
@@ -680,7 +709,7 @@ enum capabilities_t : unsigned int {
      */
     capability_arm64_dc_cvac_k = 1 << 16,
     /**
-     *  The kernel enabled user-mode Zicbom cache-block management (`senvcfg.CBCFE`), attested through
+     *  The kernel enabled user-mode Zicbom cache-block management - `senvcfg.CBCFE` - attested through
      *  `hwprobe` - the only sound signal, since a compile-time `+zicbom` proves nothing about the
      *  kernel. No compile-time policy emits `cbo.clean` yet; the bit is the hook for runtime dispatch.
      */
@@ -761,6 +790,10 @@ inline capabilities_t capability_named(char const *name) noexcept {
     return capabilities_unknown_k;
 }
 
+#pragma endregion Enumerations
+
+#pragma region Numeric Helpers
+
 /**
  *  @brief Defines variable alignment to avoid false sharing.
  *  @see https://en.cppreference.com/w/cpp/thread/hardware_destructive_interference_size
@@ -784,7 +817,7 @@ static constexpr std::size_t default_alignment_k = 128;
 
 /**
  *  @brief Bytes occupied by @p count elements of @p element_bytes each.
- *  @retval 0 where the product would wrap, which every caller already refuses alongside a
+ *  @return 0 where the product would wrap, which every caller already refuses alongside a
  *      zero-element request - so the guard and the arithmetic cannot drift apart.
  */
 constexpr std::size_t bytes_for_elements(std::size_t count, std::size_t element_bytes) noexcept {
@@ -795,9 +828,9 @@ constexpr std::size_t bytes_for_elements(std::size_t count, std::size_t element_
 /**
  *  @brief Byte-wise `memcpy` of @p from into @p to, written as an explicit loop.
  *
- *  Not `std::memcpy`: the wait monitors that call this (`arm64_wfet_t`, `risc5_wrs_t`) are pinned to a
- *  narrower `target(...)` than `-march=native`, where the fortified `always_inline` `memcpy` cannot inline
- *  ("target specific option mismatch"). Reading and writing through `unsigned char` keeps it well-defined.
+ *  Not `std::memcpy`: the wait monitors that call this - `arm64_wfet_t` and `risc5_wrs_t` - are pinned to a
+ *  narrower `target(...)` than `-march=native`, where the fortified `always_inline` `memcpy` cannot inline -
+ *  "target specific option mismatch". Reading and writing through `unsigned char` keeps it well-defined.
  */
 template <typename value_type_>
 inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
@@ -807,7 +840,7 @@ inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
         to_bytes[byte_index] = from_bytes[byte_index];
 }
 
-/** @brief Checks if the @p x is a power of two. */
+/** Checks if the @p x is a power of two. */
 constexpr bool is_power_of_two(std::size_t x) noexcept { return x && ((x & (x - 1)) == 0); }
 
 /**
@@ -898,6 +931,10 @@ std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ con
     return distinct ? distinct : 1;
 }
 
+#pragma endregion Numeric Helpers
+
+#pragma region Pool Vocabulary
+
 /**
  *  @brief One thread, situated in one compute domain - the "where I am" every callback receives.
  *
@@ -907,13 +944,16 @@ std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ con
  */
 template <typename index_type_ = std::size_t>
 struct thread_in_domain {
+    /** The integer type both indices are counted in. */
     using index_t = index_type_;
-    using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using compute_domain_index_t = index_t; // ? A.k.a. NUMA-specific QoS-specific "compute_domain ID"
+    /** Core index, or thread ID, in [0, threads_count). */
+    using thread_index_t = index_t;
+    /** NUMA-specific, QoS-specific compute domain ID. */
+    using compute_domain_index_t = index_t;
 
-    /** @brief The thread (core) index, in [0, threads_count). */
+    /** The thread or core index, in [0, threads_count). */
     thread_index_t thread {0};
-    /** @brief The compute domain the thread is pinned to, in [0, compute_domains_count). */
+    /** The compute domain the thread is pinned to, in [0, compute_domains_count). */
     compute_domain_index_t compute_domain {0};
 
     constexpr thread_in_domain() noexcept = default;
@@ -928,7 +968,8 @@ struct thread_in_domain {
     inline operator thread_index_t() const noexcept { return thread; }
 };
 
-using thread_in_domain_t = thread_in_domain<>; // ? Default locator type with `std::size_t` indices
+/** Default locator type with `std::size_t` indices. */
+using thread_in_domain_t = thread_in_domain<>;
 
 /**
  *  @brief Back-ports the C++ 23 `std::allocation_result`. Unlike STL, also contains the page size.
@@ -939,13 +980,13 @@ struct allocation_result {
     using pointer_type = pointer_type_;
     using size_type = size_type_;
 
-    /** @brief Pointer to the allocated memory, or nullptr if allocation failed. */
+    /** Pointer to the allocated memory, or nullptr if allocation failed. */
     pointer_type ptr {nullptr};
-    /** @brief Number of elements allocated, or 0 if allocation failed. */
+    /** Number of elements allocated, or 0 if allocation failed. */
     size_type count {0};
-    /** @brief Total volume of memory allocated, in bytes. */
+    /** Total volume of memory allocated, in bytes. */
     size_type bytes {0};
-    /** @brief Number of memory pages allocated. */
+    /** Number of memory pages allocated. */
     size_type pages {0};
 
     constexpr allocation_result() noexcept = default;
@@ -958,11 +999,11 @@ struct allocation_result {
     size_type bytes_per_page() const noexcept { return bytes / pages; }
 
     /**
-     *  The standard says, that `std::allocation_result` must have 2 template arguments:
+     *  @brief The standard says, that `std::allocation_result` must have 2 template arguments:
      *  pointer type and size type. Clang until version 19 disagrees and results in a
      *  compilation error, so we use some ugly SFINAE to detect which form is available.
      *
-     *  `_LIBCPP_VERSION` is encoded  as (MAJOR * 10000 + MINOR * 100 + PATCH).
+     *  `_LIBCPP_VERSION` is encoded  as MAJOR * 10000 + MINOR * 100 + PATCH.
      *  @see https://github.com/llvm/llvm-project/blob/main/libcxx/include/__config
      */
 #if defined(__cpp_lib_allocate_at_least)
@@ -982,7 +1023,7 @@ struct allocation_result {
  *  @brief Result of a @b symmetric allocation - one mapping whose equal-stride slices sit on each domain.
  *  @tparam value_type_ The element type; the base pointer is `value_type_ *`.
  *
- *  Slice @b `d` begins at the byte address `ptr + d * stride_bytes` - see `slice` - and holds `count`
+ *  Slice @b d begins at the byte address `ptr + d * stride_bytes` - see `slice` - and holds `count`
  *  elements. Every slice is a uniform distance `stride_bytes` apart - the CPU analog of a GPU symmetric
  *  heap. The stride is in bytes, not elements, because it is page-aligned and a page rarely divides
  *  `sizeof(value_type)`.
@@ -993,23 +1034,23 @@ struct symmetric_allocation_result {
     using pointer_type = value_type_ *;
     using size_type = size_type_;
 
-    /** @brief Base of the mapping, or nullptr on failure. */
+    /** Base of the mapping, or nullptr on failure. */
     pointer_type ptr {nullptr};
-    /** @brief Usable elements per domain slice - what was requested. */
+    /** Usable elements per domain slice - what was requested. */
     size_type count {0};
-    /** @brief Page-aligned @b byte distance between consecutive slice bases; `>= count * sizeof(value_type)`. */
+    /** Page-aligned @b byte distance between consecutive slice bases; `>= count * sizeof(value_type)`. */
     size_type stride_bytes {0};
-    /** @brief Number of domain slices. */
+    /** Number of domain slices. */
     size_type domains {0};
-    /** @brief Total mapped volume in bytes - `domains * stride_bytes`. */
+    /** Total mapped volume in bytes - `domains * stride_bytes`. */
     size_type bytes {0};
-    /** @brief Number of memory pages mapped across all slices. */
+    /** Number of memory pages mapped across all slices. */
     size_type pages {0};
 
     explicit constexpr operator bool() const noexcept { return ptr != nullptr && count > 0; }
     size_type bytes_per_page() const noexcept { return pages ? bytes / pages : 0; }
 
-    /** @brief Base of the slice on memory domain @p domain_index, at `ptr + domain_index * stride_bytes`. */
+    /** Base of the slice on memory domain @p domain_index, at `ptr + domain_index * stride_bytes`. */
     pointer_type slice(size_type domain_index) const noexcept {
         return reinterpret_cast<pointer_type>(reinterpret_cast<char *>(ptr) + domain_index * stride_bytes);
     }
@@ -1030,6 +1071,10 @@ struct has_sized_allocate_at_least<
     allocator_type_, std::void_t<decltype(std::declval<allocator_type_ &>().allocate_at_least(std::size_t {}).bytes)>>
     : std::true_type {};
 
+#pragma endregion Pool Vocabulary
+
+#pragma region Containers
+
 /**
  *  @brief A fixed-capacity array with inline storage, so it never allocates.
  *  @sa `dynamic_array` when the count is only known at runtime.
@@ -1044,9 +1089,9 @@ class limited_array {
                   "limited_array requires noexcept-default-constructible values");
 
     using value_t = value_type_;
-    /** @brief Inline storage for up to `capacity_` values. */
+    /** Inline storage for up to `capacity_` values. */
     std::array<value_t, capacity_> values_ {};
-    /** @brief Number of values currently stored, in [0, capacity_]. */
+    /** Number of values currently stored, in [0, capacity_]. */
     std::size_t size_ {0};
 
   public:
@@ -1054,7 +1099,7 @@ class limited_array {
 
     constexpr limited_array() noexcept = default;
 
-    /** @retval capacity_exhausted_k when already at the fixed ceiling; the value is not stored. */
+    /** @return capacity_exhausted_k when already at the fixed ceiling; the value is not stored. */
     [[nodiscard]] status_t push_back(value_t const &value) noexcept {
         if (size_ == capacity_k) return status_t::capacity_exhausted_k;
         values_[size_++] = value;
@@ -1089,13 +1134,13 @@ class dynamic_array {
     using value_t = value_type_;
     using allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_t>;
 
-    /** @brief Allocator used to acquire and release the heap block. */
+    /** Allocator used to acquire and release the heap block. */
     allocator_t allocator_ {};
-    /** @brief Pointer to the heap block, or nullptr when empty. */
+    /** Pointer to the heap block, or nullptr when empty. */
     value_t *data_ {nullptr};
-    /** @brief Number of live elements. */
+    /** Number of live elements. */
     std::size_t size_ {0};
-    /** @brief Allocated element slots; `>= size_`, doubled by `push_back` when full. */
+    /** Allocated element slots; `>= size_`, doubled by `push_back` when full. */
     std::size_t capacity_ {0};
 
     void destroy_all() noexcept {
@@ -1139,7 +1184,7 @@ class dynamic_array {
     }
 
     /** @brief Reallocates to exactly @p new_size value-initialized elements, discarding any prior contents.
-     *  @retval false on allocation failure, leaving the array empty rather than half-built. */
+     *  @return false on allocation failure, leaving the array empty rather than half-built. */
     [[nodiscard]] status_t resize(std::size_t const new_size) noexcept {
         reset();
         if (new_size == 0) return status_t::success_k;
@@ -1173,7 +1218,7 @@ class dynamic_array {
         return status_t::success_k;
     }
 
-    /** @brief Grows capacity to at least @p new_capacity, preserving the live elements. */
+    /** Grows capacity to at least @p new_capacity, preserving the live elements. */
     [[nodiscard]] status_t reserve(std::size_t const new_capacity) noexcept {
         static_assert(std::is_trivially_copyable_v<value_t> || std::is_nothrow_move_constructible_v<value_t>,
                       "reserve moves elements; the value type must be trivially copyable or nothrow-movable");
@@ -1194,7 +1239,7 @@ class dynamic_array {
         return status_t::success_k;
     }
 
-    /** @brief Appends @p value, doubling capacity when full. */
+    /** Appends @p value, doubling capacity when full. */
     [[nodiscard]] status_t push_back(value_t const &value) noexcept {
         static_assert(std::is_nothrow_copy_constructible_v<value_t>,
                       "push_back copies the value; the value type must be nothrow-copy-constructible");
@@ -1242,17 +1287,17 @@ class dynamic_padded_array {
     using allocator_traits_t = std::allocator_traits<allocator_t>;
     using raw_allocator_t = typename allocator_traits_t::template rebind_alloc<char>;
 
-    /** @brief Aligned base the objects live at. */
+    /** Aligned base the objects live at. */
     char *raw_ {nullptr};
-    /** @brief What the allocator actually handed us, and what we must give back. */
+    /** What the allocator actually handed us, and what we must give back. */
     char *raw_owned_ {nullptr};
-    /** @brief Number of objects currently held. */
+    /** Number of objects currently held. */
     std::size_t objects_count_ {0};
-    /** @brief Stride between consecutive objects, in bytes; at least `sizeof(object_t)`. */
+    /** Stride between consecutive objects, in bytes; at least `sizeof(object_t)`. */
     std::size_t bytes_per_object_ {sizeof(object_t)};
-    /** @brief Total bytes owned, and what we must free. */
+    /** Total bytes owned, and what we must free. */
     std::size_t bytes_total_ {0};
-    /** @brief Raw byte allocator that backs the buffer. */
+    /** Raw byte allocator that backs the buffer. */
     raw_allocator_t allocator_ {};
 
     object_t *ptr(std::size_t i) noexcept { return reinterpret_cast<object_t *>(raw_ + i * bytes_per_object_); }
@@ -1363,9 +1408,11 @@ class dynamic_padded_array {
     explicit operator bool() const noexcept { return raw_ != nullptr && objects_count_ > 0; }
 };
 
-/**
- *  @brief Placeholder type for Parallel Algorithms.
- */
+#pragma endregion Containers
+
+#pragma region Wait Policies
+
+/** Placeholder type for Parallel Algorithms. */
 struct dummy_lambda_t {};
 
 /**
@@ -1387,21 +1434,21 @@ struct wait_capped_t {};
  */
 struct wait_uncapped_t {};
 
-/** @brief The canonical `wait_capped_t` value to pass as a wait tag. */
+/** The canonical `wait_capped_t` value to pass as a wait tag. */
 inline constexpr wait_capped_t wait_capped_k {};
-/** @brief The canonical `wait_uncapped_t` value to pass as a wait tag. */
+/** The canonical `wait_uncapped_t` value to pass as a wait tag. */
 inline constexpr wait_uncapped_t wait_uncapped_k {};
 
 /**
  *  @brief The portable busy-wait: hands the core back to the scheduler. Works everywhere, cheap nowhere.
  *
  *  A spin waiter ignores the watched word - the caller's loop already re-checks its own condition, so
- *  this only needs to emit one backoff hint per turn. The monitored waiters (`arm64_wfet_t`,
- *  `x86_tpause_t`, `risc5_wrs_t`) use the word to sleep the core until that line changes.
+ *  this only needs to emit one backoff hint per turn. The monitored waiters - `arm64_wfet_t`,
+ *  `x86_tpause_t`, and `risc5_wrs_t` - use the word to sleep the core until that line changes.
  */
 struct standard_yield_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
-    /** @brief Any waited word - a `std::atomic` object or a bare address - the yield watches nothing. */
+    /** Any waited word - a `std::atomic` object or a bare address - the yield watches nothing. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
               typename bound_type_ = wait_capped_t>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
@@ -1423,13 +1470,13 @@ struct is_wait_functor {
         std::is_nothrow_invocable_v<yield_type_ &, std::atomic<value_type_> const &, value_type_, thread_index_type_>;
 };
 
-/** @brief Tag for pushing a just-written line away, toward the LLC or the coherency point. */
+/** Tag for pushing a just-written line away, toward the LLC or the coherency point. */
 struct demote_line_t {};
-/** @brief Tag for pulling a line toward this core with write intent, ahead of an atomic claim. */
+/** Tag for pulling a line toward this core with write intent, ahead of an atomic claim. */
 struct promote_line_t {};
-/** @brief Canonical `demote_line_t` value, mirroring the `wait_capped_k` tag convention. */
+/** Canonical `demote_line_t` value, mirroring the `wait_capped_k` tag convention. */
 inline constexpr demote_line_t demote_line_k {};
-/** @brief Canonical `promote_line_t` value, mirroring the `wait_uncapped_k` tag convention. */
+/** Canonical `promote_line_t` value, mirroring the `wait_uncapped_k` tag convention. */
 inline constexpr promote_line_t promote_line_k {};
 
 /**
@@ -1489,12 +1536,16 @@ class spin_mutex {
             while (flag_.load(std::memory_order_relaxed)) micro_yield(flag_, true, static_cast<std::size_t>(0));
         }
     }
-    /** @retval true when the lock was free and is now held; contention, never an error. */
+    /** @return true when the lock was free and is now held; contention, never an error. */
     bool lock_if_free() noexcept { return !flag_.exchange(true, std::memory_order_acquire); }
     void unlock() noexcept { flag_.store(false, std::memory_order_release); }
 };
 
 using spin_mutex_t = spin_mutex<>;
+
+#pragma endregion Wait Policies
+
+#pragma region Task Ranges
 
 /**
  *  @brief A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
@@ -1506,15 +1557,15 @@ template <typename index_type_ = std::size_t>
 struct tasks_range {
     using index_t = index_type_;
 
-    /** @brief The first task index in the run. */
+    /** The first task index in the run. */
     index_t first {0};
-    /** @brief How many tasks the run covers; zero means an idle thread. */
+    /** How many tasks the run covers; zero means an idle thread. */
     index_t count {0};
 
-    /** @brief Whether the run covers no tasks at all. */
+    /** Whether the run covers no tasks at all. */
     constexpr bool empty() const noexcept { return count == 0; }
 
-    /** @brief Walks the task indices one at a time, so a range-for reads them directly. */
+    /** Walks the task indices one at a time, so a range-for reads them directly. */
     struct iterator {
         index_t task {0};
 
@@ -1545,9 +1596,9 @@ struct indexed_split {
     using tasks_range_t = tasks_range<index_t>;
 
   private:
-    /** @brief Floor of tasks divided by threads; the smaller run size. */
+    /** Floor of tasks divided by threads; the smaller run size. */
     index_t quotient_ {0};
-    /** @brief Tasks left over; the first `remainder_` runs get one extra task. */
+    /** Tasks left over; the first `remainder_` runs get one extra task. */
     index_t remainder_ {0};
 
   public:
@@ -1596,7 +1647,7 @@ struct default_sentinel_t {};
 /**
  *  @brief Iterator range over integers using a stride that is co-prime with length.
  *
- *  - O(1) dereference: two integer ops and a branchless wrap-around.
+ *  - Constant-time dereference: two integer ops and a branchless wrap-around.
  *  - Every value appears exactly once before `end()`.
  *
  *  @code{.cpp}
@@ -1609,13 +1660,13 @@ struct coprime_permutation_range {
     using index_t = index_type_;
 
   private:
-    /** @brief First value of the domain. */
+    /** First value of the domain. */
     index_t start_ {0};
-    /** @brief Size of the domain being permuted. */
+    /** Size of the domain being permuted. */
     index_t length_ {1};
-    /** @brief Co-prime step between consecutive values. */
+    /** Co-prime step between consecutive values. */
     index_t stride_ {1};
-    /** @brief Where this seed's walk begins, in [0, length_). */
+    /** Where this seed's walk begins, in [0, length_). */
     index_t first_offset_ {0};
 
   public:
@@ -1658,15 +1709,15 @@ struct coprime_permutation_range {
                         index_t const elements_left) noexcept
             : start_(start), length_(length), stride_(stride), offset_(first_offset), elements_left_(elements_left) {}
 
-        /** @brief First value of the domain. */
+        /** First value of the domain. */
         index_t start_ {0};
-        /** @brief Size of the domain being permuted. */
+        /** Size of the domain being permuted. */
         index_t length_ {1};
-        /** @brief Co-prime step between consecutive values. */
+        /** Co-prime step between consecutive values. */
         index_t stride_ {1};
-        /** @brief Current offset into the domain, in [0, length_). */
+        /** Current offset into the domain, in [0, length_). */
         index_t offset_ {0};
-        /** @brief Countdown of values remaining until `end()`. */
+        /** Countdown of values remaining until `end()`. */
         index_t elements_left_ {0};
     };
 
@@ -1716,7 +1767,11 @@ struct coprime_permutation_range {
 
 using coprime_permutation_range_t = coprime_permutation_range<>;
 
-/** @brief Wraps the metadata needed for `for_slices` APIs for `broadcast_join` compatibility. */
+#pragma endregion Task Ranges
+
+#pragma region Broadcast Invokers
+
+/** Wraps the metadata needed for `for_slices` APIs for `broadcast_join` compatibility. */
 template <typename fork_type_, typename index_type_>
 class invoke_for_slices {
     fork_type_ fork_;
@@ -1732,7 +1787,7 @@ class invoke_for_slices {
     }
 };
 
-/** @brief Wraps the metadata needed for `for_n` APIs for `broadcast_join` compatibility. */
+/** Wraps the metadata needed for `for_n` APIs for `broadcast_join` compatibility. */
 template <typename fork_type_, typename index_type_>
 class invoke_for_n {
     fork_type_ fork_;
@@ -1764,9 +1819,9 @@ class invoke_for_n {
  */
 template <typename index_type_ = std::size_t>
 struct dynamic_claim {
-    /** @brief Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
+    /** Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
     std::atomic<index_type_> next {0};
-    /** @brief One past this slice's last task; written once before the dispatch, then read-only. */
+    /** One past this slice's last task; written once before the dispatch, then read-only. */
     index_type_ end {0};
 };
 
@@ -1807,7 +1862,7 @@ inline void drain_claim(pool_type_ &pool, index_type_ const slice, locator_type_
 /**
  *  @brief Wraps the metadata needed for `for_n_dynamic` APIs for `broadcast_join` compatibility.
  *
- *  @section Scheduling Logic
+ *  @section tasks_range_scheduling Scheduling Logic
  *
  *  Tasks are split into one contiguous slice per thread. A thread first drains its own slice, then
  *  walks the others in a `coprime_permutation_range` order and drains theirs, one task per claim.
@@ -1820,7 +1875,7 @@ inline void drain_claim(pool_type_ &pool, index_type_ const slice, locator_type_
  *  @sa `invoke_distributed_for_n_dynamic`, which applies the same trick one level up, across
  *  compute domains, so a thread exhausts local work before touching a remote node's memory.
  *
- *  @section Overflow Considerations
+ *  @section tasks_range_overflow Overflow Considerations
  *
  *  If we run a default for-loop at 1 Billion times per second on a 64-bit machine, then every 585 years
  *  of computational time we will wrap around the `std::size_t` capacity for the task index.
@@ -1842,16 +1897,16 @@ inline void drain_claim(pool_type_ &pool, index_type_ const slice, locator_type_
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_for_n_dynamic {
-    /** @brief The pool, owning one padded `dynamic_claim` per thread; we never allocate. */
+    /** The pool, owning one padded `dynamic_claim` per thread; we never allocate. */
     pool_type_ &pool_;
-    /** @brief The per-task callback to invoke. */
+    /** The per-task callback to invoke. */
     fork_type_ fork_;
-    /** @brief Total number of tasks to dispatch. */
+    /** Total number of tasks to dispatch. */
     index_type_ n_;
-    /** @brief Number of worker threads sharing the dispatch. */
+    /** Number of worker threads sharing the dispatch. */
     index_type_ threads_;
 
-    /** @brief Number of tasks handed out dynamically; the trailing `threads_` are static prongs. */
+    /** Number of tasks handed out dynamically; the trailing `threads_` are static prongs. */
     index_type_ dynamic_count() const noexcept { return n_ > threads_ ? static_cast<index_type_>(n_ - threads_) : 0; }
 
   public:
@@ -1877,7 +1932,7 @@ class invoke_for_n_dynamic {
     }
 
   private:
-    /** @brief Publishes one contiguous slice per thread. Runs on the caller, before the broadcast. */
+    /** Publishes one contiguous slice per thread. Runs on the caller, before the broadcast. */
     void reset_slices_() noexcept {
         typename pool_type_::cache_hints_t cache_hints;
         index_type_ const n_dynamic = dynamic_count();
@@ -1899,8 +1954,8 @@ class invoke_for_n_dynamic {
  *  The lifecycle is keyed on the pool's exclusivity:
  *  - On `caller_exclusive_k` pools the fork is dispatched at @b construction: the workers
  *    start immediately, the caller may overlap its own work, poll `is_complete`, and the
- *    `join` call (or the destructor) waits for completion.
- *  - On `caller_inclusive_k` pools the dispatch is deferred to @b join (or the destructor),
+ *    `join` call, or the destructor, waits for completion.
+ *  - On `caller_inclusive_k` pools the dispatch is deferred to @b join, or the destructor,
  *    where the calling thread contributes its own slice - a deferred blocking call.
  *
  *  You don't have to explicitly handle the return value and wait on it.
@@ -1909,7 +1964,7 @@ class invoke_for_n_dynamic {
  *
  *  The object is immovable: on caller-exclusive pools the pool holds a pointer to the
  *  `fork_` member for the lifetime of the broadcast, so the object must never relocate.
- *  Guaranteed copy elision (C++17) still allows returning it by value from `for_threads`.
+ *  Guaranteed C++17 copy elision still allows returning it by value from `for_threads`.
  */
 template <typename pool_type_, typename fork_type_>
 struct broadcast_join {
@@ -1919,11 +1974,11 @@ struct broadcast_join {
     using generation_t = typename pool_t::generation_t;
 
   private:
-    /** @brief The pool this broadcast dispatches onto and joins. */
+    /** The pool this broadcast dispatches onto and joins. */
     pool_t &pool_ref_;
-    /** @brief The wrapped fork; held to extend the lifetime of the lambda object. */
+    /** The wrapped fork; held to extend the lifetime of the lambda object. */
     fork_t fork_;
-    /** @brief Generation token of this broadcast; real tokens are odd, zero means "not yet dispatched". */
+    /** Generation token of this broadcast; real tokens are odd, zero means "not yet dispatched". */
     generation_t generation_ {0};
 
   public:
@@ -1931,13 +1986,13 @@ struct broadcast_join {
         if (pool_ref_.caller_exclusivity() == caller_exclusive_k) generation_ = pool_ref_.unsafe_for_threads(fork_);
     }
 
-    /** @brief The wrapped fork; on caller-exclusive pools only read it after `join`. */
+    /** The wrapped fork; on caller-exclusive pools only read it after `join`. */
     fork_t &fork_ref() noexcept { return fork_; }
 
-    /** @brief The generation token of this broadcast; always odd once dispatched, zero before. */
+    /** The generation token of this broadcast; always odd once dispatched, zero before. */
     generation_t generation() const noexcept { return generation_; }
 
-    /** @brief Non-blocking check; can only turn `true` before `join` on caller-exclusive pools. */
+    /** Non-blocking check; can only turn `true` before `join` on caller-exclusive pools. */
     bool is_complete() const noexcept { return generation_ != 0 && pool_ref_.is_complete(generation_); }
 
     void join() noexcept {
@@ -1951,6 +2006,10 @@ struct broadcast_join {
     broadcast_join &operator=(broadcast_join &&) = delete;
     broadcast_join &operator=(broadcast_join const &) = delete;
 };
+
+#pragma endregion Broadcast Invokers
+
+#pragma region Callback Concepts
 
 template <typename fork_type_, typename index_type_ = std::size_t>
 constexpr bool can_be_for_thread_callback() noexcept {
@@ -1993,6 +2052,9 @@ constexpr bool can_be_for_slice_callback() noexcept {
 #define FU_DETECT_CONCEPTS_ 0
 #define FU_REQUIRES_(condition)
 #endif // FU_DETECT_CPP_20_
+#pragma endregion Callback Concepts
+
+#pragma region Dummy Pool
 
 /**
  *  @brief A zero-setup thread-pool that runs every task on the calling thread.
@@ -2055,6 +2117,8 @@ struct dummy_pool_t {
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
     }
 };
+
+#pragma endregion Dummy Pool
 
 } // namespace forkunion
 } // namespace ashvardanian
