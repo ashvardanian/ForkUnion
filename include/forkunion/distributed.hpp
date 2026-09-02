@@ -987,7 +987,7 @@ class invoke_distributed_for_slices {
 
     void operator()(index_type_ const thread) const noexcept {
         tasks_range<index_type_> const range = split_[thread];
-        index_type_ const compute_domain = pool_.thread_compute_domain(thread);
+        index_type_ const compute_domain = pool_.compute_domain_index_of(pool_.thread_compute_domain(thread));
         fork_(range, thread_in_domain<index_type_> {thread, compute_domain});
     }
 };
@@ -1008,7 +1008,8 @@ class invoke_distributed_for_n {
 
     void operator()(index_type_ const thread) const noexcept {
         tasks_range<index_type_> const range = split_[thread];
-        thread_in_domain<index_type_> const at {thread, pool_.thread_compute_domain(thread)};
+        thread_in_domain<index_type_> const at {thread,
+                                                pool_.compute_domain_index_of(pool_.thread_compute_domain(thread))};
         for (index_type_ const task : range) fork_(task, at);
     }
 };
@@ -1091,9 +1092,10 @@ class invoke_distributed_for_n_dynamic {
 
         // The locator's compute_domain is INVARIANT across every steal: it names the domain THIS
         // thread is pinned to, never the victim's - so a stolen task still reads the thief's
-        // node-local replica; replicas are identical, only their distances differ.
+        // node-local replica; replicas are identical, only their distances differ. The reported
+        // value is the topology-wide index; the colocation index drives the layout math below.
         index_type_ const native_compute_domain = pool_.thread_compute_domain(thread);
-        thread_in_domain<index_type_> const at {thread, native_compute_domain};
+        thread_in_domain<index_type_> const at {thread, pool_.compute_domain_index_of(native_compute_domain)};
 
         // Run (up to) one static prong from the native domain's trailing reservation.
         indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
@@ -1361,6 +1363,77 @@ struct distributed_pool {
     }
 
     /**
+     *  @brief Creates a thread-pool over just the compute domains local to @p memory_domain_id -
+     *      every P/E cluster or CCX sharing that NUMA node - so a workload pinned to one node's
+     *      memory engages all of its cores rather than one cluster's.
+     *  @param[in] topology The NUMA topology to use for the thread-pool.
+     *  @param[in] memory_domain_id The OS id of the memory domain whose local cores participate.
+     *  @param[in] threads The number of threads to be used.
+     *  @param[in] exclusivity Should we count the calling thread as one of the threads?
+     *  @param[in] pin_granularity How to pin the threads to the NUMA node?
+     *  @return `invalid_argument_k` when no compute domain is local to @p memory_domain_id.
+     *  @note Workers report their compute domain by its @b topology index, exactly as a
+     *      whole-machine spawn does, so `local_memory_of`-style lookups stay valid.
+     */
+    [[nodiscard]] status_t spawn_near_memory_domain( //
+        machine_topology_t const &topology, memory_domain_id_t const memory_domain_id, thread_index_t const threads,
+        caller_exclusivity_t const exclusivity = caller_inclusive_k,
+        pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
+
+        if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
+        if (threads_count_ != 0) return status_t::already_spawned_k;
+
+        // Count the local compute domains first: the array is sized to them alone, and the first
+        // of them hosts the array and pins the caller.
+        index_t const machine_domains_count = static_cast<index_t>(topology.compute_domains_count());
+        index_t local_domains_count = 0;
+        for (index_t domain_index = 0; domain_index < machine_domains_count; ++domain_index)
+            if (topology.compute_domain_at(static_cast<compute_domain_index_t>(domain_index)).memory_domain_id ==
+                memory_domain_id)
+                ++local_domains_count;
+        if (local_domains_count == 0) return status_t::invalid_argument_k;
+
+        allocator_t allocator = allocator_for_node(memory_domain_id);
+        index_t const colocations_count = std::min(local_domains_count, static_cast<index_t>(threads));
+
+        colocations_t colocations(allocator);
+        if (status_t const grew = colocations.resize(colocations_count); failed(grew)) return grew;
+        for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index)
+            colocations[colocation_index].rename(name_);
+
+        auto reset_on_failure = [&]() noexcept {
+            for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index)
+                colocations[colocation_index].terminate(); // ? A no-op on the pools not yet spawned
+        };
+
+        // Sub-pools sit at compacted colocation indices but carry their topology-wide domain index,
+        // so a worker's reported compute domain means what it does under a full spawn.
+        indexed_split<thread_index_t> threads_per_domain(threads, colocations_count);
+        index_t const compute_levels = static_cast<index_t>(topology.compute_levels_count());
+        index_t colocation_index = 0;
+        for (index_t domain_index = 0; domain_index < machine_domains_count && colocation_index < colocations_count;
+             ++domain_index) {
+            compute_domain_t const &domain =
+                topology.compute_domain_at(static_cast<compute_domain_index_t>(domain_index));
+            if (domain.memory_domain_id != memory_domain_id) continue;
+            caller_exclusivity_t const local_exclusivity = colocation_index == 0 ? exclusivity : caller_exclusive_k;
+            if (status_t const spawned = colocations[colocation_index].spawn(
+                    domain, threads_per_domain[colocation_index].count, local_exclusivity, pin_granularity,
+                    threads_per_domain[colocation_index].first, domain_index, compute_levels);
+                failed(spawned)) {
+                reset_on_failure();
+                return spawned;
+            }
+            ++colocation_index;
+        }
+
+        colocations_ = std::move(colocations);
+        threads_count_ = threads;
+        exclusivity_ = exclusivity;
+        return status_t::success_k;
+    }
+
+    /**
      *  @brief Executes a @p fork function in parallel on all threads.
      *  @param[in] fork The callback object, receiving the thread index as an argument.
      *  @return A `broadcast_join` synchronization point that waits in the destructor.
@@ -1570,6 +1643,14 @@ struct distributed_pool {
                 return compute_domain_index;
         }
         return compute_domain_index; // ? Not found
+    }
+
+    /** One sub-pool's topology-wide compute-domain index. Equals @p colocation_index under a
+     *  whole-machine spawn and diverges under `spawn_near_memory_domain`, which compacts the array to one node's
+     *  local domains - so callbacks always receive the index `compute_domain_at` understands. */
+    index_t compute_domain_index_of(index_t const colocation_index) const noexcept {
+        return colocation_index < colocations_.size() ? colocations_[colocation_index].compute_domain_index()
+                                                      : colocation_index;
     }
 
 #pragma endregion ComputeDomains Compatibility

@@ -614,7 +614,10 @@ fu_status_t fu_pool_capabilities(fu_pool_t pool, fu_capabilities_t *capabilities
  *  @param[in] pool Pool handle, must not be NULL.
  *  @param[in] threads Worker count, must be > 0. For an inclusive pool the caller counts as one of them.
  *  @param[in] exclusivity Whether the calling thread also executes tasks.
- *  @return 1 on success, 0 on failure.
+ *  @return `fu_success_k` once every worker started; `fu_invalid_argument_k` for a NULL handle, an
+ *      unnamed exclusivity, or @p threads of 0; `fu_already_spawned_k` while the pool still holds
+ *      workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated; and
+ *      `fu_thread_refused_k` when the OS declines a thread.
  *  @note Not thread-safe; call once per pool, or again after `fu_pool_terminate`.
  *
  *  Covers every compute domain. If a prior @ref fu_pool_spawn_on left the pool pinned to a single
@@ -630,7 +633,11 @@ fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads
  *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
  *  @param[in] threads Worker count, must be > 0.
  *  @param[in] exclusivity Whether the calling thread also executes tasks.
- *  @return 1 on success; 0 on failure or an out-of-range domain.
+ *  @return `fu_success_k` once every worker started pinned to @p compute_domain_index;
+ *      `fu_invalid_argument_k` for a NULL handle, an unnamed exclusivity, @p threads of 0, or a
+ *      @p compute_domain_index at or past `fu_compute_domains_count`; `fu_already_spawned_k` while the
+ *      pool still holds workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated;
+ *      and `fu_thread_refused_k` when the OS declines a thread.
  *  @note Not thread-safe; call once per pool.
  *
  *  Placement lives here, not in creation: @ref fu_pool_new allocates the handle, and this binds it to
@@ -641,6 +648,33 @@ fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads
  */
 fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t compute_domain_index, size_t threads,
                              fu_caller_exclusivity_t exclusivity);
+
+/**
+ *  @brief Spawns @p threads workers across every compute domain local to one memory domain.
+ *  @param[in] topology Machine topology from `fu_topology_new`; read only during this call.
+ *  @param[in] pool Pool handle, must not be NULL.
+ *  @param[in] memory_domain_id The OS id of the memory domain whose local cores participate.
+ *  @param[in] threads Worker count, must be > 0; split across the local compute domains.
+ *  @param[in] exclusivity Whether the calling thread also executes tasks.
+ *  @return `fu_success_k` once every worker started across the domains local to @p memory_domain_id;
+ *      `fu_invalid_argument_k` for a NULL handle, an unnamed exclusivity, @p threads of 0, or a
+ *      @p memory_domain_id no compute domain is local to; `fu_unsupported_k` where placement is masked
+ *      off on a machine with several memory domains; `fu_already_spawned_k` while the pool still holds
+ *      workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated; and
+ *      `fu_thread_refused_k` when the OS declines a thread.
+ *  @note Not thread-safe; call once per pool.
+ *
+ *  Sits between the extremes: @ref fu_pool_spawn_on binds one compute domain and @ref fu_pool_spawn
+ *  binds them all, but a memory domain often feeds several - P/E clusters on one node, or several
+ *  CCXs sharing one NUMA node - and this is the spawn that engages exactly those. Workers report
+ *  their compute domain by its topology index, so `fu_local_memory_of`-style lookups stay valid.
+ *  Where the placement capability is masked off, falls back to @ref fu_pool_spawn on single-domain
+ *  machines and reports `fu_unsupported_k` on NUMA ones.
+ *  @sa `fu_pool_spawn`, `fu_pool_spawn_on`, `fu_memory_domain_id_at_index`.
+ */
+fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t pool,
+                                             fu_memory_domain_id_t memory_domain_id, size_t threads,
+                                             fu_caller_exclusivity_t exclusivity);
 
 /**
  *  @brief Whether the calling thread executes a slice of each dispatch.
@@ -741,8 +775,12 @@ void fu_fabric_delete(fu_fabric_t fabric);
  *  @param[in] pool Pool handle, must not be NULL and spawned across the machine via `fu_pool_spawn`.
  *  @param[out] fabric Receives the observations, replacing any previous harvest; must not be NULL,
  *      and a failed harvest leaves it empty, never half-written.
- *  @return 1 on success; 0 on allocation failure or a pool that spans no memory domains - flat,
- *  pinned to a single compute domain, or terminated.
+ *  @return `fu_success_k` once every reachable edge was walked and @p fabric holds the observations;
+ *      `fu_invalid_argument_k` for a NULL handle; `fu_config_mismatch_k` when the pool spans no memory
+ *      domains - flat, pinned to a single compute domain, or terminated; `fu_bad_alloc_k` when the edge
+ *      or scratch storage cannot be allocated; `fu_unsupported_k` where this build or machine cannot
+ *      measure the fabric; `fu_permission_denied_k` when the OS declines a probe the walk needs; and
+ *      `fu_topology_unavailable_k` when the machine cannot be described.
  *  @note Not thread-safe: dispatches on the pool and rebuilds the fabric, so call it between task
  *        batches and do not query @p fabric concurrently. Expect seconds of runtime on large fabrics.
  *

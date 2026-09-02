@@ -312,6 +312,16 @@ static fu::machine_topology_t *upcast_topology(fu_topology_t topology) noexcept 
     return std::launder(reinterpret_cast<fu::machine_topology_t *>(topology));
 }
 
+/** Whether any compute domain is local to @p memory_domain_id. */
+static bool any_compute_domain_near(fu::machine_topology_t const &machine,
+                                    fu::memory_domain_id_t const memory_domain_id) noexcept {
+    for (std::size_t domain_index = 0; domain_index != machine.compute_domains_count(); ++domain_index)
+        if (machine.compute_domain_at(static_cast<fu::compute_domain_index_t>(domain_index)).memory_domain_id ==
+            memory_domain_id)
+            return true;
+    return false;
+}
+
 /*  `CXX_VISIBILITY_PRESET hidden` keeps the pool templates out of the dynamic symbol table, but alone
  *  it exports nothing, so this re-opens the C ABI below. Guarded on `__GNUC__`, not `__clang__`:
  *  clang-cl defines the latter yet rejects the pragma, and takes its exports from the `.def` instead.  */
@@ -765,6 +775,37 @@ fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comp
             return variant.spawn(
                 machine.compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index)), threads,
                 exclusivity);
+        },
+        opaque->variants));
+}
+
+fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t pool,
+                                             fu_memory_domain_id_t memory_domain_id, size_t threads,
+                                             fu_caller_exclusivity_t c_exclusivity) {
+    if (!pool || !topology) return fu_invalid_argument_k;
+    if (c_exclusivity != fu_caller_inclusive_k && c_exclusivity != fu_caller_exclusive_k) return fu_invalid_argument_k;
+    opaque_pool_t *opaque = upcast_pool(pool);
+    auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
+    fu::machine_topology_t const &machine = *upcast_topology(topology);
+
+    // Reject an unknown domain id before deciding how to spawn.
+    if (!any_compute_domain_near(machine, static_cast<fu::memory_domain_id_t>(memory_domain_id)))
+        return fu_invalid_argument_k;
+
+    // Spanning several pinned compute domains needs the distributed shape; without the placement
+    // capability the fallback is honest only where one memory domain is the whole machine.
+    if (!(opaque->effective & fu::capability_place_memory_on_domain_k)) {
+        if (machine.memory_domains_count() > 1) return fu_unsupported_k;
+        return fu_pool_spawn(topology, pool, threads, c_exclusivity);
+    }
+    if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) {
+        destroy_variant(opaque->variants);
+        construct_pool<fu::pool_kind_t::distributed_k>(opaque->variants, opaque->effective, opaque->name);
+    }
+    return lower(visit_kind<fu::pool_kind_t::distributed_k>(
+        [&](auto &variant) {
+            return variant.spawn_near_memory_domain(machine, static_cast<fu::memory_domain_id_t>(memory_domain_id),
+                                                    threads, exclusivity);
         },
         opaque->variants));
 }
