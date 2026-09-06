@@ -234,53 +234,156 @@ typedef enum fu_caller_exclusivity_t {
 typedef enum fu_capabilities_t {
     fu_capabilities_unknown_k = 0,
 
-    /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
+    /**
+     *  The `PAUSE` spin hint, on every x86 since the Pentium 4: a short pipeline stall that
+     *      keeps a busy-wait from flooding the load ports and eases the sibling hardware thread.
+     */
     fu_capability_x86_pause_k = 1 << 0,
-    /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
+    /**
+     *  @brief `TPAUSE` sleeps the core until a deadline rather than spinning - the `WAITPKG`
+     *      feature, `CPUID.(7,0):ECX[5]`, on Sapphire Rapids, Alder Lake and their successors.
+     *  @sa `fu_capability_x86_pause_k` - the spin it replaces.
+     */
     fu_capability_x86_tpause_k = 1 << 1,
-    /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
+    /**
+     *  The `YIELD` hint, on every AArch64: releases the pipeline to a sibling hardware
+     *      thread and costs nothing where there is none.
+     */
     fu_capability_arm64_yield_k = 1 << 2,
-    /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
+    /**
+     *  @brief `WFET` sleeps the core until a deadline or an event on the monitored line - `FEAT_WFxT`,
+     *      Armv8.7, read from `ID_AA64ISAR2_EL1` on Linux and `hw.optional.arm.FEAT_WFxT` on Apple.
+     *  @sa `fu_capability_arm64_yield_k` - the spin it replaces.
+     */
     fu_capability_arm64_wfet_k = 1 << 3,
-    /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
+    /**
+     *  The `PAUSE` spin hint of the `Zihintpause` extension - encoded as a `FENCE` every hart
+     *      accepts, so it is reported on every RISC-V.
+     */
     fu_capability_risc5_pause_k = 1 << 4,
-    /** `WRS.STO` sleeps the hart until a reservation breaks or a timeout. Needs the `Zawrs` extension. */
+    /**
+     *  @brief `WRS.STO` sleeps the hart until a reservation breaks or a short timeout - the `Zawrs`
+     *      extension, attested by the kernel's `hwprobe`.
+     *  @sa `fu_capability_risc5_pause_k` - the spin it replaces.
+     */
     fu_capability_risc5_wrs_k = 1 << 5,
 
-    /** Own the raw OS thread handle instead of a `std::thread`. Built: `FU_WITH_OS_THREADS`. */
+    /**
+     *  @brief Own the raw OS thread handle instead of a `std::thread` - the substrate every thread
+     *      lever below stands on. Built: `FU_WITH_OS_THREADS`.
+     *  @sa `fu_capability_place_threads_by_affinity_k`, `fu_capability_place_threads_by_core_class_k`
+     *      and `fu_capability_reschedule_threads_by_class_k` - the levers needing the handle.
+     */
     fu_capability_os_threads_k = 1 << 6,
-    /** Enumerate this machine's cores, compute domains, and memory domains. Built: `FU_WITH_TOPOLOGY`. */
+    /**
+     *  @brief Enumerate this machine's cores, compute domains, and memory domains - the root every
+     *      placement needs. Built: `FU_WITH_TOPOLOGY`.
+     *  @sa `fu_capability_place_memory_on_domain_k` and `fu_capability_colocate_pools_on_domain_k` -
+     *      the placements standing on it.
+     */
     fu_capability_topology_k = 1 << 7,
-    /** Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`. */
+    /**
+     *  @brief Bind a thread to a set of cores, choosing where it runs.
+     *      Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
+     *  @sa `fu_capability_os_threads_k` - the owned handle this needs.
+     */
     fu_capability_place_threads_by_affinity_k = 1 << 8,
-    /** Steer a thread onto a class of core at creation. Built: `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`. */
+    /**
+     *  @brief Steer a thread onto a class of core at creation, choosing where it runs.
+     *      Built: `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
+     *  @sa `fu_capability_os_threads_k` - the owned handle this needs.
+     */
     fu_capability_place_threads_by_core_class_k = 1 << 9,
-    /** Reclass a thread's scheduler to sleep or wake it. Built: `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`. */
+    /**
+     *  @brief Reclass a thread's scheduler to sleep or wake it, choosing when it runs.
+     *      Built: `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`.
+     *  @sa `fu_capability_os_threads_k` - the owned handle this needs.
+     */
     fu_capability_reschedule_threads_by_class_k = 1 << 10,
-    /** Place a buffer's pages on a chosen memory domain. Built: `FU_WITH_PLACE_MEMORY_ON_DOMAIN`. */
+    /**
+     *  @brief Place a buffer's pages on a chosen memory domain. Built: `FU_WITH_PLACE_MEMORY_ON_DOMAIN`.
+     *  @sa `fu_capability_topology_k` - the enumerated domains this places onto.
+     */
     fu_capability_place_memory_on_domain_k = 1 << 11,
-    /** Place larger-than-base pages on a chosen memory domain. Built: `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`. */
+    /**
+     *  @brief Place larger-than-base pages on a chosen memory domain. A narrower case of memory placement.
+     *      Built: `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`.
+     *  @sa `fu_capability_place_memory_on_domain_k` - the placement this specializes.
+     */
     fu_capability_place_huge_pages_on_domain_k = 1 << 12,
-    /** The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation. */
+    /**
+     *  @brief The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation.
+     *  @sa `fu_capability_place_huge_pages_on_domain_k` - the explicit request this is the automatic
+     *      counterpart to.
+     */
     fu_capability_huge_transparent_pages_k = 1 << 13,
-    /** The domain-aware `colocated_pool` and `distributed_pool` are compiled. Built:
-     *  `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`. */
+    /**
+     *  @brief The domain-aware `colocated_pool` and `distributed_pool` are compiled.
+     *      Built: `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`.
+     *  @sa `fu_capability_os_threads_k` and `fu_capability_topology_k` - both are needed; memory placement is not.
+     */
     fu_capability_colocate_pools_on_domain_k = 1 << 14,
-    /** `CLDEMOTE` moves a just-written line toward the shared LLC and retains it. Reporting-only:
-     *  the emitter is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, never dispatched. */
+
+    /**
+     *  `CLDEMOTE` moves a just-written line from this core's private caches toward the shared
+     *      LLC and retains it there. Reporting-only: the emitter is chosen at compile time by
+     *      `FU_WITH_DEMOTE_CACHE_LINES`, never dispatched.
+     */
     fu_capability_x86_cldemote_k = 1 << 15,
-    /** `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
-     *  EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`. */
+    /**
+     *  `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
+     *      EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+     */
     fu_capability_arm64_dc_cvac_k = 1 << 16,
-    /** The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
-     *  the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet. */
+    /**
+     *  The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
+     *      the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+     */
     fu_capability_risc5_zicbom_k = 1 << 17,
 
-    /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
+    /**
+     *  `CMPCCXADD`, the conditional atomic add - `CPUID.(7,1):EAX[7]`, on Sierra Forest, Diamond
+     *      Rapids and their successors: a bounded claim as one instruction instead of a compare-exchange
+     *      loop. Admits `x86_cmpccxadd_atomic_ref`.
+     */
+    fu_capability_x86_cmpccxadd_k = 1 << 18,
+    /**
+     *  @brief RAO-INT `aadd`, `aand`, `aor` and `axor` - `CPUID.(7,1):EAX[3]`, on Grand Ridge: no-return
+     *      atomics executed at the shared cache rather than pulling the line; weakly ordered, so relaxed
+     *      only. Admits `x86_raoint_atomic_ref`.
+     *  @sa `fu_capability_x86_cmpccxadd_k` - which it extends.
+     */
+    fu_capability_x86_raoint_k = 1 << 19,
+    /**
+     *  Armv8.1 `FEAT_LSE`: `swp`, `cas`, `ldadd` and the no-return `st*` forms - one instruction
+     *      per read-modify-write instead of a load-exclusive loop. Read from `ID_AA64ISAR0_EL1.Atomic`
+     *      on Linux and `hw.optional.arm.FEAT_LSE` on Apple. Admits `arm64_lse_atomic_ref`.
+     */
+    fu_capability_arm64_lse_k = 1 << 20,
+    /**
+     *  @brief Armv8.3 `FEAT_LRCPC`: `ldapr`, the RCpc acquiring load that needn't wait for the core's
+     *      earlier release stores. Read from `ID_AA64ISAR1_EL1.LRCPC` on Linux and
+     *      `hw.optional.arm.FEAT_LRCPC` on Apple. Admits `arm64_rcpc_atomic_ref`.
+     *  @sa `fu_capability_arm64_lse_k` - which it extends.
+     */
+    fu_capability_arm64_rcpc_k = 1 << 21,
+    /**
+     *  `Zacas`: `amocas`, compare-and-swap as one instruction instead of an `lr`/`sc` loop,
+     *      attested by the kernel's `hwprobe`. Admits `risc5_zacas_atomic_ref`.
+     */
+    fu_capability_risc5_zacas_k = 1 << 22,
+
+    /**
+     *  Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
+     *      offers in one intersection with `fu_runtime_capabilities`.
+     */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
                                 fu_capability_arm64_wfet_k | fu_capability_risc5_pause_k | fu_capability_risc5_wrs_k,
 
-    /** All-ones allow-mask: pass to `fu_pool_new` to disable capability filtering. */
+    /**
+     *  @brief All-ones allow-mask: pass to `fu_pool_new` to disable capability filtering.
+     *  @sa `fu_comptime_capabilities` and `fu_runtime_capabilities` - the masks it never narrows.
+     */
     fu_capabilities_all_k = ~0,
 } fu_capabilities_t;
 

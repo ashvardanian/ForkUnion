@@ -298,104 +298,56 @@ struct log_numa_topology_t {
     }
 };
 
-/** Logs CPU and memory capabilities summary with compact formatting. */
+/** Logs the CPU and memory capabilities as a two-row tree, one bullet per recognized bit. */
 struct log_capabilities_t {
+
+    /** One bullet of a row: the bit that earns it and the label it prints as. */
+    struct bullet_t {
+        capabilities_t bit;
+        char const *label;
+    };
 
     /**
      *  @brief Logs the detected capability bits as a two-row tree, one row for the CPU and one for the RAM.
      *  @param[in] caps Bit-mask to render, where every recognized bit becomes one bullet.
      *  @param[in] colors Whether to emit ANSI colour codes, and which.
      *  @param[in] output Destination stream, defaulting to `stdout`.
-     *  @note Only the busy-wait and memory-placement bits are listed; a row matching none prints "None detected".
+     *  @note Only the instruction and memory-placement bits are listed; a row matching none prints "None detected".
      */
     void operator()(capabilities_t caps, logging_colors_t colors, std::FILE *output = stdout) const noexcept {
 
-        // Line buffer for assembly
-        char line_buffer[1024];
+        // One row of the tree: the branch glyph and title, then every present bit as a bullet in the
+        // row's tint, or a dim placeholder when none is.
+        auto print_row = [&](char const *branch, char const *title, char const *tint, auto const &bullets) noexcept {
+            std::fprintf(output, "%s%s %s%s:%s ", colors.dim(), branch, colors.cyan(), title, colors.reset());
+            bool first = true;
+            for (bullet_t const &bullet : bullets) {
+                if (!(caps & bullet.bit)) continue;
+                std::fprintf(output, "%s%s%s%s", first ? "" : " • ", tint, bullet.label, colors.reset());
+                first = false;
+            }
+            if (first) std::fprintf(output, "%sNone detected%s", colors.dim(), colors.reset());
+            std::fprintf(output, "\n");
+        };
 
-        // Helper lambda to flush line buffer
-        auto flush_line = [&]() { std::fprintf(output, "%s", line_buffer); };
+        constexpr bullet_t cpu_bullets[] = {
+            {capability_x86_pause_k, "x86 PAUSE"},         {capability_x86_tpause_k, "x86 TPAUSE"},
+            {capability_x86_cmpccxadd_k, "x86 CMPCCXADD"}, {capability_x86_raoint_k, "x86 RAO-INT"},
+            {capability_arm64_yield_k, "ARM64 YIELD"},     {capability_arm64_wfet_k, "ARM64 WFET"},
+            {capability_arm64_lse_k, "ARM64 LSE"},         {capability_arm64_rcpc_k, "ARM64 RCPC"},
+            {capability_risc5_pause_k, "RISC-V PAUSE"},    {capability_risc5_wrs_k, "RISC-V WRS"},
+            {capability_risc5_zacas_k, "RISC-V ZACAS"},
+        };
+        constexpr bullet_t ram_bullets[] = {
+            {capability_place_memory_on_domain_k, "NUMA"},
+            {capability_place_huge_pages_on_domain_k, "Huge Pages"},
+            {capability_huge_transparent_pages_k, "Transparent Huge Pages"},
+        };
 
-        // Main header
-        std::snprintf(line_buffer, sizeof(line_buffer), "%sSystem Capabilities%s\n", colors.bold_cyan(),
-                      colors.reset());
-        flush_line();
-
-        // CPU Capabilities row
-        std::snprintf(line_buffer, sizeof(line_buffer), "%s├─ %sCPU:%s ", colors.dim(), colors.cyan(), colors.reset());
-        std::size_t pos = std::strlen(line_buffer);
-
-        bool first_cpu = true;
-        if (caps & capability_x86_pause_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sx86 PAUSE%s",
-                                                       first_cpu ? "" : " • ", colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_x86_tpause_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sx86 TPAUSE%s",
-                                                       first_cpu ? "" : " • ", colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_arm64_yield_k) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%s%sARM64 YIELD%s", first_cpu ? "" : " • ",
-                                                          colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_arm64_wfet_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sARM64 WFET%s",
-                                                       first_cpu ? "" : " • ", colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_risc5_pause_k) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%s%sRISC-V PAUSE%s", first_cpu ? "" : " • ",
-                                                          colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-
-        if (first_cpu) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%sNone detected%s", colors.dim(), colors.reset()));
-        }
-
-        std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "\n");
-        flush_line();
-
-        // Memory Capabilities row
-        std::snprintf(line_buffer, sizeof(line_buffer), "%s└─ %sRAM:%s ", colors.dim(), colors.cyan(), colors.reset());
-        pos = std::strlen(line_buffer);
-
-        bool first_mem = true;
-        if (caps & capability_place_memory_on_domain_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sNUMA%s",
-                                                       first_mem ? "" : " • ", colors.bold_yellow(), colors.reset()));
-            first_mem = false;
-        }
-        if (caps & capability_place_huge_pages_on_domain_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sHuge Pages%s",
-                                                       first_mem ? "" : " • ", colors.bold_yellow(), colors.reset()));
-            first_mem = false;
-        }
-        if (caps & capability_huge_transparent_pages_k) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%s%sTransparent Huge Pages%s", first_mem ? "" : " • ",
-                                                          colors.bold_yellow(), colors.reset()));
-            first_mem = false;
-        }
-
-        if (first_mem) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%sNone detected%s", colors.dim(), colors.reset()));
-        }
-
-        std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "\n\n");
-        flush_line();
+        std::fprintf(output, "%sSystem Capabilities%s\n", colors.bold_cyan(), colors.reset());
+        print_row("├─", "CPU", colors.bold_green(), cpu_bullets);
+        print_row("└─", "RAM", colors.bold_yellow(), ram_bullets);
+        std::fprintf(output, "\n");
     }
 };
 

@@ -635,39 +635,72 @@ enum class mood_t : unsigned int {
 enum capabilities_t : unsigned int {
     capabilities_unknown_k = 0,
 
-    /** The `PAUSE` spin hint, on every x86 since the Pentium 4. */
+    /**
+     *  @brief The `PAUSE` spin hint, on every x86 since the Pentium 4: a short pipeline stall that
+     *      keeps a busy-wait from flooding the load ports and eases the sibling hardware thread.
+     *  @sa `x86_pause_t` - the waiter emitting it.
+     */
     capability_x86_pause_k = 1 << 0,
-    /** `TPAUSE` sleeps the core until a deadline, rather than spinning. Needs the `WAITPKG` feature. */
+    /**
+     *  @brief `TPAUSE` sleeps the core until a deadline rather than spinning - the `WAITPKG`
+     *      feature, `CPUID.(7,0):ECX[5]`, on Sapphire Rapids, Alder Lake and their successors.
+     *  @sa `x86_tpause_t` - the waiter arming it; `capability_x86_pause_k` - the spin it replaces.
+     */
     capability_x86_tpause_k = 1 << 1,
-    /** The `YIELD` hint, on every AArch64. Releases the pipeline to a sibling hardware thread. */
+    /**
+     *  @brief The `YIELD` hint, on every AArch64: releases the pipeline to a sibling hardware
+     *      thread and costs nothing where there is none.
+     *  @sa `arm64_yield_t` - the waiter emitting it.
+     */
     capability_arm64_yield_k = 1 << 2,
-    /** `WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`. */
+    /**
+     *  @brief `WFET` sleeps the core until a deadline or an event on the monitored line - `FEAT_WFxT`,
+     *      Armv8.7, read from `ID_AA64ISAR2_EL1` on Linux and `hw.optional.arm.FEAT_WFxT` on Apple.
+     *  @sa `arm64_wfet_t` - the waiter arming it; `capability_arm64_yield_k` - the spin it replaces.
+     */
     capability_arm64_wfet_k = 1 << 3,
-    /** The `PAUSE` spin hint, from the `Zihintpause` extension. */
+    /**
+     *  @brief The `PAUSE` spin hint of the `Zihintpause` extension - encoded as a `FENCE` every hart
+     *      accepts, so it is reported on every RISC-V.
+     *  @sa `risc5_pause_t` - the waiter emitting it.
+     */
     capability_risc5_pause_k = 1 << 4,
-    /** `WRS.STO` sleeps the hart until a reservation breaks or a timeout. Needs the `Zawrs` extension. */
+    /**
+     *  @brief `WRS.STO` sleeps the hart until a reservation breaks or a short timeout - the `Zawrs`
+     *      extension, attested by the kernel's `hwprobe`.
+     *  @sa `risc5_wrs_t` - the waiter arming it; `capability_risc5_pause_k` - the spin it replaces.
+     */
     capability_risc5_wrs_k = 1 << 5,
 
-    /** Own the raw OS thread handle instead of a `std::thread` - the substrate the thread levers stand on. Built:
-     * `FU_WITH_OS_THREADS`. */
+    /**
+     *  @brief Own the raw OS thread handle instead of a `std::thread` - the substrate every thread
+     *      lever below stands on. Built: `FU_WITH_OS_THREADS`.
+     *  @sa `capability_place_threads_by_affinity_k`, `capability_place_threads_by_core_class_k` and
+     *      `capability_reschedule_threads_by_class_k` - the levers needing the handle.
+     */
     capability_os_threads_k = 1 << 6,
-    /** Enumerate this machine's cores, compute domains, and memory domains. The root the placements need. Built:
-     * `FU_WITH_TOPOLOGY`. */
+    /**
+     *  @brief Enumerate this machine's cores, compute domains, and memory domains - the root every
+     *      placement needs. Built: `FU_WITH_TOPOLOGY`.
+     *  @sa `machine_topology` - the harvest; `capability_place_memory_on_domain_k` and
+     *      `capability_colocate_pools_on_domain_k` - the placements standing on it.
+     */
     capability_topology_k = 1 << 7,
     /**
-     *  @brief Bind a thread to a set of cores, choosing where it runs. Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
+     *  @brief Bind a thread to a set of cores, choosing where it runs.
+     *      Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_place_threads_by_affinity_k = 1 << 8,
     /**
-     *  @brief Steer a thread onto a class of core at creation, choosing where it runs. Built:
-     * `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
+     *  @brief Steer a thread onto a class of core at creation, choosing where it runs.
+     *      Built: `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_place_threads_by_core_class_k = 1 << 9,
     /**
-     *  @brief Reclass a thread's scheduler to sleep or wake it, choosing when it runs. Built:
-     * `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`.
+     *  @brief Reclass a thread's scheduler to sleep or wake it, choosing when it runs.
+     *      Built: `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_reschedule_threads_by_class_k = 1 << 10,
@@ -678,8 +711,8 @@ enum capabilities_t : unsigned int {
      */
     capability_place_memory_on_domain_k = 1 << 11,
     /**
-     *  @brief Place larger-than-base pages on a chosen memory domain. A narrower case of memory placement. Built:
-     * `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`.
+     *  @brief Place larger-than-base pages on a chosen memory domain. A narrower case of memory placement.
+     *      Built: `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`.
      *  @sa `capability_place_memory_on_domain_k` - the placement this specializes.
      */
     capability_place_huge_pages_on_domain_k = 1 << 12,
@@ -697,25 +730,66 @@ enum capabilities_t : unsigned int {
     capability_colocate_pools_on_domain_k = 1 << 14,
 
     /**
-     *  `CLDEMOTE` moves a just-written line from this core's private caches toward the shared LLC and
-     *  retains it there. Runtime-detected on Sapphire-Rapids-class parts; the emitting functor is
-     *  chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, so this bit reports, it never dispatches.
+     *  @brief `CLDEMOTE` moves a just-written line from this core's private caches toward the shared
+     *      LLC and retains it there. Runtime-detected on Sapphire-Rapids-class parts; the emitting
+     *      functor is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, so this bit reports,
+     *      it never dispatches.
+     *  @sa `x86_cache_hints_t` - the functor emitting it.
      */
     capability_x86_cldemote_k = 1 << 15,
     /**
-     *  `DC CVAC` cleans a dirty line to the coherency point - the nearest thing AArch64 has to a
-     *  demote: the next claimer's snoop finds a clean line instead of forcing a dirty intervention.
-     *  Set where EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+     *  @brief `DC CVAC` cleans a dirty line to the coherency point - the nearest thing AArch64 has to a
+     *      demote: the next claimer's snoop finds a clean line instead of forcing a dirty intervention.
+     *      Set where EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+     *  @sa `arm64_cache_hints_t` - the functor emitting it.
      */
     capability_arm64_dc_cvac_k = 1 << 16,
     /**
-     *  The kernel enabled user-mode Zicbom cache-block management - `senvcfg.CBCFE` - attested through
-     *  `hwprobe` - the only sound signal, since a compile-time `+zicbom` proves nothing about the
-     *  kernel. No compile-time policy emits `cbo.clean` yet; the bit is the hook for runtime dispatch.
+     *  @brief The kernel enabled user-mode Zicbom cache-block management - `senvcfg.CBCFE` - attested
+     *      through `hwprobe`, the only sound signal, since a compile-time `+zicbom` proves nothing about
+     *      the kernel. No compile-time policy emits `cbo.clean` yet; the bit is the hook for runtime dispatch.
+     *  @sa `risc5_cbo_cache_hints_t` - the functor that would emit it.
      */
     capability_risc5_zicbom_k = 1 << 17,
 
-    /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers. */
+    /**
+     *  @brief `CMPCCXADD`, the conditional atomic add - `CPUID.(7,1):EAX[7]`, on Sierra Forest, Diamond
+     *      Rapids and their successors: a bounded claim as one instruction instead of a compare-exchange loop.
+     *  @sa `x86_cmpccxadd_atomic_ref` - the reference this admits.
+     */
+    capability_x86_cmpccxadd_k = 1 << 18,
+    /**
+     *  @brief RAO-INT `aadd`, `aand`, `aor` and `axor` - `CPUID.(7,1):EAX[3]`, on Grand Ridge: no-return
+     *      atomics executed at the shared cache rather than pulling the line; weakly ordered, so relaxed only.
+     *  @sa `x86_raoint_atomic_ref` - the reference this admits; `capability_x86_cmpccxadd_k` - which it extends.
+     */
+    capability_x86_raoint_k = 1 << 19,
+    /**
+     *  @brief Armv8.1 `FEAT_LSE`: `swp`, `cas`, `ldadd` and the no-return `st*` forms - one instruction
+     *      per read-modify-write instead of a load-exclusive loop. Read from `ID_AA64ISAR0_EL1.Atomic`
+     *      on Linux and `hw.optional.arm.FEAT_LSE` on Apple.
+     *  @sa `arm64_lse_atomic_ref` - the reference this admits.
+     */
+    capability_arm64_lse_k = 1 << 20,
+    /**
+     *  @brief Armv8.3 `FEAT_LRCPC`: `ldapr`, the RCpc acquiring load that needn't wait for the core's
+     *      earlier release stores the way RCsc `ldar` may. Read from `ID_AA64ISAR1_EL1.LRCPC` on Linux
+     *      and `hw.optional.arm.FEAT_LRCPC` on Apple.
+     *  @sa `arm64_rcpc_atomic_ref` - the reference this admits; `capability_arm64_lse_k` - which it extends.
+     */
+    capability_arm64_rcpc_k = 1 << 21,
+    /**
+     *  @brief `Zacas`: `amocas`, compare-and-swap as one instruction instead of an `lr`/`sc` loop,
+     *      attested by the kernel's `hwprobe`.
+     *  @sa `risc5_zacas_atomic_ref` - the reference this admits.
+     */
+    capability_risc5_zacas_k = 1 << 22,
+
+    /**
+     *  @brief Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
+     *      offers in one intersection with `runtime_capabilities()`.
+     *  @sa `capability_name` - which names single bits only, never this composite.
+     */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
                              capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
 
@@ -763,6 +837,11 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_x86_cldemote_k: return "x86_cldemote";
     case capability_arm64_dc_cvac_k: return "arm64_dc_cvac";
     case capability_risc5_zicbom_k: return "risc5_zicbom";
+    case capability_x86_cmpccxadd_k: return "x86_cmpccxadd";
+    case capability_x86_raoint_k: return "x86_raoint";
+    case capability_arm64_lse_k: return "arm64_lse";
+    case capability_arm64_rcpc_k: return "arm64_rcpc";
+    case capability_risc5_zacas_k: return "risc5_zacas";
     case capability_os_threads_k: return "os_threads";
     case capability_topology_k: return "topology";
     case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";

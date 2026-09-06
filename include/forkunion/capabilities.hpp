@@ -20,15 +20,16 @@
 #include <intrin.h> // `__yield`
 #endif
 
-/*  Runtime `Zawrs` detection on Linux RISC-V goes through the `riscv_hwprobe` syscall, but only when
- *  this kernel's headers actually define it. Without them we fall back to the compile-time
- *  `__riscv_zawrs` macro, and claim nothing if neither is available. */
+/*  Runtime extension detection on Linux RISC-V goes through the `riscv_hwprobe` syscall, wherever this
+ *  build's kernel headers define it; older headers leave every extension unclaimed. */
 #if FU_DETECT_ARCH_RISC5_ && FU_ON_LINUX && __has_include(<asm/hwprobe.h>) && \
     __has_include(<sys/syscall.h>) && __has_include(<unistd.h>)
-#include <asm/hwprobe.h> // `riscv_hwprobe`, `RISCV_HWPROBE_KEY_IMA_EXT_0`, `RISCV_HWPROBE_EXT_ZAWRS`
+#include <asm/hwprobe.h> // `riscv_hwprobe`, `RISCV_HWPROBE_KEY_IMA_EXT_0`, `RISCV_HWPROBE_EXT_*`
 #include <sys/syscall.h> // `SYS_riscv_hwprobe`
 #include <unistd.h>      // `syscall`
+#if defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_KEY_IMA_EXT_0)
 #define FU_DETECT_RISCV_HWPROBE_ 1
+#endif
 #endif
 
 namespace ashvardanian {
@@ -102,8 +103,9 @@ inline cpuid_registers_t cpuid(std::uint32_t const leaf, std::uint32_t const sub
 inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
     // Ask leaf 0x15 for the TSC-to-crystal ratio: EAX holds the denominator, EBX the numerator,
     // and ECX the crystal frequency in Hz - the exact fields of libc's
-    // `__get_cpuid(0x15, &denominator, &numerator, &crystal_hz, &unused)`.
-    cpuid_registers_t const leaf15 = cpuid(0x15u, 0);
+    // `__get_cpuid(0x15, &denominator, &numerator, &crystal_hz, &unused)`. Only where the part
+    // declares the leaf: Intel answers an out-of-range leaf with another leaf's registers.
+    cpuid_registers_t const leaf15 = cpuid(0u, 0).eax >= 0x15u ? cpuid(0x15u, 0) : cpuid_registers_t {};
     std::uint32_t const denominator = leaf15.eax, numerator = leaf15.ebx, crystal_hz = leaf15.ecx;
     if (denominator != 0 && numerator != 0 && crystal_hz != 0) {
         std::uint64_t const tsc_hz = static_cast<std::uint64_t>(crystal_hz) * numerator / denominator;
@@ -484,9 +486,8 @@ struct risc5_pause_t {
  *      `-march=...+zawrs` assembler support; `LR` is plain `A`-extension, present on any core that
  *      would carry `Zawrs`.
  *
- *  @warning Hand-encoded and not exercised on `Zawrs` silicon in this tree; it needs a runtime
- *      `riscv_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0, ..._ZAWRS)` probe, not yet wired, before it
- *      may be selected.
+ *  @warning Hand-encoded and not exercised on `Zawrs` silicon in this tree; `capability_risc5_wrs_k`,
+ *      the kernel's `hwprobe` word, gates its selection at runtime.
  */
 struct risc5_wrs_t {
     static constexpr capabilities_t capability_k = capability_risc5_wrs_k;
@@ -705,85 +706,131 @@ using preferred_cache_hints_t = risc5_cache_hints_t;
 using preferred_cache_hints_t = standard_cache_hints_t;
 #endif
 
-/**
- *  @brief Represents the CPU capabilities for hardware-friendly yielding.
- *  @sa `ram_capabilities` to get the full set of library capabilities.
- */
-inline capabilities_t cpu_capabilities() noexcept {
-    capabilities_t caps = capabilities_unknown_k;
-
 #if FU_DETECT_ARCH_X86_64_
 
-    // Check for basic PAUSE instruction support (always available on x86-64)
-    caps |= capability_x86_pause_k;
-
-    // CPUID leaf 7, sub-leaf 0, ECX: WAITPKG (backing UMWAIT/TPAUSE) is bit 5; CLDEMOTE is bit 25.
-    // The CLDEMOTE bit reports whether the hint bites - Sapphire-Rapids-class parts - it never
-    // gates emission, which the compile-time `preferred_cache_hints_t` decides.
+/**
+ *  @brief The instruction-level bits this x86 offers, read from `CPUID` in leaf order: the spin
+ *      hint, the monitored wait, the cache-line hint, then the atomics.
+ *  @note A leaf is read only where the part declares it: Intel answers an out-of-range leaf with
+ *      the highest basic leaf's registers, so a blind read of leaf 7 on a pre-Haswell part would
+ *      flag features from unrelated bits.
+ */
+inline capabilities_t x86_cpu_capabilities() noexcept {
+    capabilities_t caps = capability_x86_pause_k;
+    if (cpuid(0u, 0).eax < 7u) return caps;
+    // Leaf 7, sub-leaf 0, ECX: WAITPKG backing `TPAUSE` is bit 5; CLDEMOTE is bit 25, reported for
+    // Sapphire-Rapids-class parts and never gating emission, which `preferred_cache_hints_t` decides.
     cpuid_registers_t const leaf7 = cpuid(7u, 0);
     if (leaf7.ecx & (1u << 5)) caps |= capability_x86_tpause_k;
     if (leaf7.ecx & (1u << 25)) caps |= capability_x86_cldemote_k;
+    // Leaf 7, sub-leaf 1, EAX - declared by sub-leaf 0's EAX: CMPCCXADD is bit 7, RAO-INT is bit 3.
+    if (leaf7.eax < 1u) return caps;
+    cpuid_registers_t const leaf7_1 = cpuid(7u, 1);
+    if (leaf7_1.eax & (1u << 7)) caps |= capability_x86_cmpccxadd_k;
+    if (leaf7_1.eax & (1u << 3)) caps |= capability_x86_raoint_k;
+    return caps;
+}
 
 #elif FU_DETECT_ARCH_ARM64_
 
-    // Basic YIELD is always available on AArch64
-    caps |= capability_arm64_yield_k;
-
-    // Use sysctl to check for WFET support on Apple platforms
 #if FU_ON_APPLE
-    int wfet_support = 0;
-    size_t size = sizeof(wfet_support);
-    if (sysctlbyname("hw.optional.arm.FEAT_WFxT", &wfet_support, &size, NULL, 0) == 0 && wfet_support)
-        caps |= capability_arm64_wfet_k;
-#elif FU_DETECT_INLINE_ASM_SUPPORT_ // We use inline assembly - unavailable in MSVC
-    // On non-Apple ARM systems, try to read the system register
-    // Note: This may fail on some systems where userspace access is restricted
-    std::uint64_t id_aa64isar2_el0 = 0;
-    // `ID_AA64ISAR2_EL0` is `S3_0_C0_C6_2`; the named form needs `-march=armv8.6-a+` to assemble, so the
-    // generic `S<op0>_<op1>_<Cn>_<Cm>_<op2>` encoding is used instead - every assembler accepts it.
-    __asm__ __volatile__("mrs %0, S3_0_C0_C6_2" : "=r"(id_aa64isar2_el0) : : "memory");
-    // WFET is bits [3:0], value 2 indicates WFET support
-    std::uint64_t const wfet_field = id_aa64isar2_el0 & 0xF;
-    if (wfet_field >= 2) caps |= capability_arm64_wfet_k;
+/** One boolean `sysctl` of the `hw.optional.arm.FEAT_*` family; `false` where the key is unknown. */
+inline bool apple_sysctl_flag(char const *name) noexcept {
+    int value = 0;
+    std::size_t size = sizeof(value);
+    return ::sysctlbyname(name, &value, &size, nullptr, 0) == 0 && value != 0;
+}
+#elif (FU_ON_LINUX || FU_ON_FREEBSD) && FU_DETECT_INLINE_ASM_SUPPORT_
+/** A four-bit field of an `ID_AA64*` register, as the kernel's `MRS` emulation shows it to EL0. */
+constexpr std::uint64_t arm64_id_field(std::uint64_t id_register, unsigned lsb) noexcept {
+    return (id_register >> lsb) & 0xFu;
+}
 #endif
 
-    // `DC CVAC` is a base-ISA clean; what varies is whether EL0 may issue it. Linux sets
-    // `SCTLR_EL1.UCI`, so the capability is a kernel attestation, not a silicon probe.
+/**
+ *  @brief The instruction-level bits this AArch64 offers: the spin hint, the monitored wait, the
+ *      cache-line hint, then the atomics - each a kernel attestation, never a bare silicon probe.
+ *  @note Apple answers through `sysctl`. Linux and FreeBSD trap and emulate EL0 reads of the
+ *      `ID_AA64*` registers, showing only the fields they enabled for user space; elsewhere nothing
+ *      past the hint is claimed. The generic `S<op0>_<op1>_<Cn>_<Cm>_<op2>` encodings assemble
+ *      without any `-march` bump, unlike the registers' names.
+ */
+inline capabilities_t arm64_cpu_capabilities() noexcept {
+    capabilities_t caps = capability_arm64_yield_k;
+#if FU_ON_APPLE
+    if (apple_sysctl_flag("hw.optional.arm.FEAT_WFxT")) caps |= capability_arm64_wfet_k;
+    if (apple_sysctl_flag("hw.optional.arm.FEAT_LSE")) caps |= capability_arm64_lse_k;
+    if (apple_sysctl_flag("hw.optional.arm.FEAT_LRCPC")) caps |= capability_arm64_rcpc_k;
+#elif (FU_ON_LINUX || FU_ON_FREEBSD) && FU_DETECT_INLINE_ASM_SUPPORT_
+    std::uint64_t isar0 = 0, isar1 = 0, isar2 = 0;
+    __asm__ __volatile__("mrs %0, S3_0_C0_C6_0" : "=r"(isar0));         // `ID_AA64ISAR0_EL1`
+    __asm__ __volatile__("mrs %0, S3_0_C0_C6_1" : "=r"(isar1));         // `ID_AA64ISAR1_EL1`
+    __asm__ __volatile__("mrs %0, S3_0_C0_C6_2" : "=r"(isar2));         // `ID_AA64ISAR2_EL1`
+    if (arm64_id_field(isar2, 0) >= 2) caps |= capability_arm64_wfet_k; // `WFxT`
 #if FU_ON_LINUX
-    caps |= capability_arm64_dc_cvac_k;
+    caps |= capability_arm64_dc_cvac_k; // ? `DC CVAC` is base ISA; Linux sets `SCTLR_EL1.UCI`, so EL0 may issue it
 #endif
+    if (arm64_id_field(isar0, 20) >= 2) caps |= capability_arm64_lse_k;  // `Atomic`
+    if (arm64_id_field(isar1, 20) >= 1) caps |= capability_arm64_rcpc_k; // `LRCPC`
+#endif
+    return caps;
+}
 
 #elif FU_DETECT_ARCH_RISC5_
 
-    // Basic PAUSE is available on RISC-V with the Zihintpause extension
-    caps |= capability_risc5_pause_k;
-
-    // Zawrs (`WRS.STO` / `WRS.NTO`) is learned one of two ways:
-#if defined(__riscv_zawrs)
-    // The compiler was told the target has it (`-march=...+zawrs`), so it is guaranteed present here.
-    caps |= capability_risc5_wrs_k;
-#elif defined(FU_DETECT_RISCV_HWPROBE_) && defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_EXT_ZAWRS)
-    // Otherwise ask the kernel. With no CPU set, the value is the AND across all online harts.
-    riscv_hwprobe probe {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
-    long const probe_result = ::syscall(SYS_riscv_hwprobe, &probe, static_cast<std::size_t>(1),
-                                        static_cast<std::size_t>(0), static_cast<void *>(nullptr), 0u);
-    if (probe_result == 0 && (probe.value & RISCV_HWPROBE_EXT_ZAWRS) != 0) caps |= capability_risc5_wrs_k;
+#if defined(FU_DETECT_RISCV_HWPROBE_)
+/** One `hwprobe` answer for @p key - the AND across every online hart - or zero if the kernel refuses. */
+inline std::uint64_t risc5_hwprobe(std::int64_t key) noexcept {
+    riscv_hwprobe probe;
+    probe.key = key;
+    probe.value = 0;
+    long const result = ::syscall(SYS_riscv_hwprobe, &probe, static_cast<std::size_t>(1), static_cast<std::size_t>(0),
+                                  static_cast<void *>(nullptr), 0u);
+    return result == 0 ? probe.value : 0;
+}
 #endif
 
-    // Zicbom user-mode cache-block management: `hwprobe` is the only sound attestation, since the
-    // kernel only advertises the extension where it also set `senvcfg.CBCFE` - a compile-time
-    // `+zicbom` proves nothing about the kernel, so unlike Zawrs there is no compile-time shortcut.
-    // The `#ifdef` guards older uapi headers that predate the key.
-#if defined(FU_DETECT_RISCV_HWPROBE_) && defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_EXT_ZICBOM)
-    riscv_hwprobe cbo_probe {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
-    long const cbo_result = ::syscall(SYS_riscv_hwprobe, &cbo_probe, static_cast<std::size_t>(1),
-                                      static_cast<std::size_t>(0), static_cast<void *>(nullptr), 0u);
-    if (cbo_result == 0 && (cbo_probe.value & RISCV_HWPROBE_EXT_ZICBOM) != 0) caps |= capability_risc5_zicbom_k;
+/**
+ *  @brief The instruction-level bits this RISC-V offers: the spin hint, then the monitored wait,
+ *      the cache-line hint and the atomics, all from one `hwprobe` of the `IMA_EXT_0` key.
+ *  @note U-mode has no CSR listing the extensions, so the kernel's word is the only one: a bit whose
+ *      name this build's uapi headers predate is never asked for. A `-march` flag says what the
+ *      compiler was promised, not what this machine runs, so it sets nothing here.
+ */
+inline capabilities_t risc5_cpu_capabilities() noexcept {
+    capabilities_t caps = capability_risc5_pause_k;
+#if defined(FU_DETECT_RISCV_HWPROBE_)
+    std::uint64_t const extensions = risc5_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0);
+#if defined(RISCV_HWPROBE_EXT_ZAWRS)
+    if (extensions & RISCV_HWPROBE_EXT_ZAWRS) caps |= capability_risc5_wrs_k;
 #endif
-
+#if defined(RISCV_HWPROBE_EXT_ZICBOM)
+    if (extensions & RISCV_HWPROBE_EXT_ZICBOM) caps |= capability_risc5_zicbom_k; // ? Only where `senvcfg.CBCFE` is set
 #endif
-
+#if defined(RISCV_HWPROBE_EXT_ZACAS)
+    if (extensions & RISCV_HWPROBE_EXT_ZACAS) caps |= capability_risc5_zacas_k;
+#endif
+#endif
     return caps;
+}
+
+#endif
+
+/**
+ *  @brief The instruction-level bits this CPU and its kernel offer: the spin hint, the monitored
+ *      wait, the cache-line hint and the atomics of the ISA in hand.
+ *  @sa `ram_capabilities` for the memory side; together they form `runtime_capabilities`.
+ */
+inline capabilities_t cpu_capabilities() noexcept {
+#if FU_DETECT_ARCH_X86_64_
+    return x86_cpu_capabilities();
+#elif FU_DETECT_ARCH_ARM64_
+    return arm64_cpu_capabilities();
+#elif FU_DETECT_ARCH_RISC5_
+    return risc5_cpu_capabilities();
+#else
+    return capabilities_unknown_k;
+#endif
 }
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX

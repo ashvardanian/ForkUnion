@@ -14,6 +14,7 @@
 #include <cstring> // `std::strrchr`
 
 #include <algorithm>   // `std::sort`
+#include <bit>         // `std::bit_floor`
 #include <type_traits> // `std::is_integral`, `std::is_enum`
 #include <vector>      // `std::vector`
 
@@ -89,9 +90,19 @@ static void skip_(char const *reason) noexcept {
     std::printf("%s(skip: %s)%s ", colors.dim(), reason, colors.reset());
 }
 
+/** Evaluates each side once, so a read-modify-write may sit inside the comparison. */
+template <typename a_type_, typename b_type_>
+static void expect_eq_(a_type_ const &a, b_type_ const &b, char const *expr, char const *file, int line) noexcept {
+    expect_cmp_(a == b, a, b, expr, file, line);
+}
+template <typename a_type_, typename b_type_>
+static void expect_ne_(a_type_ const &a, b_type_ const &b, char const *expr, char const *file, int line) noexcept {
+    expect_cmp_(a != b, a, b, expr, file, line);
+}
+
 #define expect(cond) expect_((cond), #cond, __FILE__, __LINE__)
-#define expect_eq(a, b) expect_cmp_((a) == (b), (a), (b), #a " == " #b, __FILE__, __LINE__)
-#define expect_ne(a, b) expect_cmp_((a) != (b), (a), (b), #a " != " #b, __FILE__, __LINE__)
+#define expect_eq(a, b) expect_eq_((a), (b), #a " == " #b, __FILE__, __LINE__)
+#define expect_ne(a, b) expect_ne_((a), (b), #a " != " #b, __FILE__, __LINE__)
 #define fail(reason) report_failure_(__FILE__, __LINE__, (reason), "")
 #define skip(reason)   \
     do {               \
@@ -1351,6 +1362,146 @@ static void test_caller_affinity_preserved() noexcept {
 }
 #endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
 
+#if defined(__cpp_lib_atomic_ref) && defined(__cpp_lib_bit_cast)
+
+/** The standard operations a reference spells by hand: every return value is the word before. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref_words() noexcept {
+    std::uint32_t word = 5;
+    atomic_ref_<std::uint32_t> reference(word);
+    expect_eq(reference.exchange(9u, std::memory_order_acq_rel), 5u);
+    expect_eq(reference.fetch_add(3u, std::memory_order_acquire), 9u);
+    expect_eq(reference.fetch_sub(2u, std::memory_order_relaxed), 12u);
+    expect_eq(reference.load(std::memory_order_acquire), 10u);
+    std::uint32_t expected = 10;
+    expect(reference.compare_exchange_strong(expected, 11u, std::memory_order_acq_rel, std::memory_order_acquire));
+    expected = 3;
+    expect(!reference.compare_exchange_weak(expected, 12u, std::memory_order_acquire, std::memory_order_relaxed));
+    expect_eq(expected, 11u); // ? The failed compare reports what it saw
+    reference.store(6u, std::memory_order_release);
+    expect_eq(word, 6u);
+
+    std::uint64_t bits = 0xF0F0;
+    atomic_ref_<std::uint64_t> bits_reference(bits);
+    expect_eq(bits_reference.fetch_and(0xFF00ull, std::memory_order_acq_rel), 0xF0F0ull);
+    expect_eq(bits_reference.fetch_or(0x1ull, std::memory_order_acq_rel), 0xF000ull);
+    expect_eq(bits, 0xF001ull);
+
+    bool flag = false;
+    atomic_ref_<bool> flag_reference(flag);
+    expect_eq(flag_reference.exchange(true, std::memory_order_acquire), false);
+    flag_reference.store(false, std::memory_order_release);
+    expect_eq(flag, false);
+}
+
+/** The operations past the standard - no-return forms, `fetch_max`/`fetch_min`, the conditional
+ *  adds - each refusing exactly at its bound, unsigned and signed alike. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref_extensions() noexcept {
+    std::uint32_t word = 11;
+    atomic_ref_<std::uint32_t> reference(word);
+    expect_eq(reference.fetch_max(7u, std::memory_order_acq_rel), 11u);  // ? Loses: writes nothing
+    expect_eq(reference.fetch_max(12u, std::memory_order_acq_rel), 11u); // ? Wins
+    expect_eq(reference.fetch_min(3u, std::memory_order_relaxed), 12u);
+    reference.add(4u, std::memory_order_release);
+    reference.sub(2u, std::memory_order_relaxed);
+    expect_eq(word, 5u);
+    expect_eq(reference.fetch_add_if_at_most(3u, 8u, std::memory_order_acq_rel), 5u);  // 5 + 3 <= 8: adds
+    expect_eq(reference.fetch_add_if_at_most(1u, 8u, std::memory_order_acq_rel), 8u);  // 8 + 1 > 8: refuses
+    expect_eq(reference.fetch_sub_if_at_least(8u, 0u, std::memory_order_acquire), 8u); // 8 - 8 >= 0: subtracts
+    expect_eq(reference.fetch_sub_if_at_least(1u, 0u, std::memory_order_acquire), 0u); // 0 - 1 < 0: refuses
+    expect_eq(word, 0u);
+
+    std::uint64_t bits = 0xF0F0;
+    atomic_ref_<std::uint64_t> bits_reference(bits);
+    bits_reference.clear(0xF0u, std::memory_order_release);
+    bits_reference.set(0x0Fu, std::memory_order_relaxed);
+    expect_eq(bits, 0xF00Full);
+
+    std::int64_t signed_word = -5;
+    atomic_ref_<std::int64_t> signed_reference(signed_word);
+    expect_eq(signed_reference.fetch_max(std::int64_t(-9), std::memory_order_acquire), std::int64_t(-5));
+    expect_eq(signed_reference.fetch_sub_if_at_least(std::int64_t(3), std::int64_t(-8), std::memory_order_acq_rel),
+              std::int64_t(-5));
+    expect_eq(signed_reference.fetch_sub_if_at_least(std::int64_t(1), std::int64_t(-8), std::memory_order_acq_rel),
+              std::int64_t(-8)); // ? -8 - 1 < -8: refuses
+    expect_eq(signed_word, std::int64_t(-8));
+}
+
+/** The shapes the indexes lean on, under contention - a dispenser by the no-return add, a bounded
+ *  claim by the conditional add, a high-water mark by `fetch_max`, a lock by `exchange` - each
+ *  with an exact expected total. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref_under_contention() noexcept {
+    constexpr std::size_t threads_k = 8, rounds_k = 20'000, claim_limit_k = threads_k * rounds_k / 3;
+    alignas(128) std::uint32_t dispensed = 0;
+    alignas(128) std::uint32_t claimed = 0;
+    alignas(128) std::uint64_t high_water = 0;
+    alignas(128) bool lock = false;
+    alignas(128) std::uint64_t guarded = 0;
+
+    fu::flat_pool_t pool;
+    expect(fu::succeeded(pool.spawn(threads_k)));
+    pool.for_threads([&](std::size_t const thread) noexcept {
+        for (std::size_t round = 0; round != rounds_k; ++round) {
+            atomic_ref_<std::uint32_t>(dispensed).add(1u, std::memory_order_relaxed);
+            (void)atomic_ref_<std::uint32_t>(claimed).fetch_add_if_at_most(1u, claim_limit_k,
+                                                                           std::memory_order_acq_rel);
+            (void)atomic_ref_<std::uint64_t>(high_water)
+                .fetch_max(thread * rounds_k + round, std::memory_order_relaxed);
+            while (atomic_ref_<bool>(lock).exchange(true, std::memory_order_acquire)) {}
+            ++guarded;
+            atomic_ref_<bool>(lock).store(false, std::memory_order_release);
+        }
+    });
+
+    expect_eq(dispensed, threads_k * rounds_k);
+    expect_eq(claimed, claim_limit_k); // ? The bounded claim stops exactly at the limit
+    expect_eq(high_water, threads_k * rounds_k - 1);
+    expect_eq(guarded, threads_k * rounds_k); // ? The lock serialized every increment
+}
+
+/** Runs one reference through the contract where the machine admits it - the bits it declares are
+ *  the same ones a CPU class needs before the runtime dispatch may pick it; a missing one skips by name. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref() noexcept {
+    fu::capabilities_t const needed = atomic_ref_<std::uint32_t>::capabilities_k;
+    unsigned const missing = needed & ~fu::runtime_capabilities();
+    if (missing) {
+        char reason[64];
+        std::snprintf(reason, sizeof(reason), "no %s",
+                      fu::capability_name(static_cast<fu::capabilities_t>(std::bit_floor(missing))));
+        skip_(reason);
+        return;
+    }
+    check_atomic_ref_words<atomic_ref_>();
+    check_atomic_ref_extensions<atomic_ref_>();
+    check_atomic_ref_under_contention<atomic_ref_>();
+}
+
+/** Every reference the build spells - the standard one everywhere, the instruction-set ones where
+ *  inline assembly exists - each run only where the machine admits it. */
+static void test_atomic_refs() noexcept {
+    check_atomic_ref<fu::standard_atomic_ref>();
+#if FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+    check_atomic_ref<fu::x86_cmpccxadd_atomic_ref>();
+    check_atomic_ref<fu::x86_raoint_atomic_ref>();
+#elif FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+    check_atomic_ref<fu::arm64_lse_atomic_ref>();
+    check_atomic_ref<fu::arm64_rcpc_atomic_ref>();
+#elif FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && __riscv_xlen == 64
+    check_atomic_ref<fu::risc5_atomic_ref>();
+    check_atomic_ref<fu::risc5_zacas_atomic_ref>();
+#endif
+}
+
+#else
+
+/** The references need the library's `std::atomic_ref` and `std::bit_cast`; say so rather than vanish. */
+static void test_atomic_refs() noexcept { skip("no `std::atomic_ref`"); }
+
+#endif // __cpp_lib_atomic_ref && __cpp_lib_bit_cast
+
 int main(void) {
     install_crash_handlers_();
 
@@ -1366,6 +1517,7 @@ int main(void) {
         // Helpers
         {"`indexed_split` helpers", test_indexed_split},            //
         {"`coprime_permutation` ranges", test_coprime_permutation}, //
+        {"`atomic_ref` contracts per ISA", test_atomic_refs},       //
         // Hardware topology, on every host that reports one
         {"`machine_topology` invariants", test_topology_invariants}, //
         {"`replicated_array` per-domain buffer", test_replicated_array},
