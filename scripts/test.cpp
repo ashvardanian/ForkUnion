@@ -1410,6 +1410,9 @@ static void check_atomic_ref_extensions() noexcept {
     expect_eq(reference.fetch_add_if_at_most(1u, 8u, std::memory_order_acq_rel), 8u);  // 8 + 1 > 8: refuses
     expect_eq(reference.fetch_sub_if_at_least(8u, 0u, std::memory_order_acquire), 8u); // 8 - 8 >= 0: subtracts
     expect_eq(reference.fetch_sub_if_at_least(1u, 0u, std::memory_order_acquire), 0u); // 0 - 1 < 0: refuses
+    expect_eq(reference.fetch_add_if_at_most(9u, 8u, std::memory_order_acq_rel), 0u);  // ? An operand past the limit
+    expect_eq(reference.fetch_sub_if_at_least(1u, ~0u, std::memory_order_acquire),
+              0u); // ? A floor plus operand that wraps
     expect_eq(word, 0u);
 
     std::uint64_t bits = 0xF0F0;

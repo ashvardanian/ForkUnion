@@ -118,13 +118,15 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
 
     /** Adds @p operand only if the sum stays at most @p limit - one `cmpccxadd` on Intel, a
      *  read-first compare-exchange loop elsewhere. Returns the value held before; the caller
-     *  learns the outcome from `observed + operand <= limit`. Requires `operand <= limit`. */
+     *  learns the outcome from `observed + operand <= limit`. An operand past the limit, or a
+     *  floor the operand cannot be taken from, merely observes the word - nothing is required of
+     *  either, beyond a signed sum or difference that stays representable. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         value_type_ observed = base_t::load(std::memory_order_acquire);
-        while (observed <= limit - operand &&
+        while (observed <= limit && limit - observed >= operand &&
                !base_t::compare_exchange_weak(observed, observed + operand, order, std::memory_order_acquire)) {}
         return observed;
     }
@@ -135,7 +137,7 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
         requires atomic_integer<value_type_>
     {
         value_type_ observed = base_t::load(std::memory_order_acquire);
-        while (observed >= floor + operand &&
+        while (observed >= floor && observed - floor >= operand &&
                !base_t::compare_exchange_weak(observed, observed - operand, order, std::memory_order_acquire)) {}
         return observed;
     }
@@ -1169,7 +1171,7 @@ struct arm64_lse_atomic_ref {
         requires atomic_integer<value_type_>
     {
         value_type_ observed = load(std::memory_order_acquire);
-        while (observed <= limit - operand &&
+        while (observed <= limit && limit - observed >= operand &&
                !compare_exchange_strong(observed, observed + operand, order, std::memory_order_acquire)) {}
         return observed;
     }
@@ -1178,7 +1180,7 @@ struct arm64_lse_atomic_ref {
         requires atomic_integer<value_type_>
     {
         value_type_ observed = load(std::memory_order_acquire);
-        while (observed >= floor + operand &&
+        while (observed >= floor && observed - floor >= operand &&
                !compare_exchange_strong(observed, observed - operand, order, std::memory_order_acquire)) {}
         return observed;
     }
@@ -1325,6 +1327,7 @@ struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
         // Adds while `word <= limit - operand`: below-or-equal unsigned, less-or-equal signed.
+        if (operand > limit) return base_t::load(std::memory_order_acquire); // ? Nothing could be admitted
         value_type_ const bound = static_cast<value_type_>(limit - operand);
         if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
             return x86_cmplexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, operand);
@@ -1340,6 +1343,8 @@ struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
     {
         // Subtracts while `word >= floor + operand`: above-or-equal unsigned, greater-or-equal signed.
         value_type_ const bound = static_cast<value_type_>(floor + operand);
+        if (bound < floor)
+            return base_t::load(std::memory_order_acquire); // ? The bound wrapped: nothing could be taken
         value_type_ const negated = static_cast<value_type_>(value_type_ {0} - operand);
         if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
             return x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, negated);
@@ -1837,7 +1842,7 @@ struct risc5_atomic_ref {
         requires atomic_integer<value_type_>
     {
         value_type_ observed = load(std::memory_order_acquire);
-        while (observed <= limit - operand &&
+        while (observed <= limit && limit - observed >= operand &&
                !compare_exchange_strong(observed, observed + operand, order, std::memory_order_acquire)) {}
         return observed;
     }
@@ -1846,7 +1851,7 @@ struct risc5_atomic_ref {
         requires atomic_integer<value_type_>
     {
         value_type_ observed = load(std::memory_order_acquire);
-        while (observed >= floor + operand &&
+        while (observed >= floor && observed - floor >= operand &&
                !compare_exchange_strong(observed, observed - operand, order, std::memory_order_acquire)) {}
         return observed;
     }
