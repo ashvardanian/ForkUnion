@@ -30,8 +30,8 @@
  *  Only the widths & operations the indexes use are spelled: byte exchanges & compare-exchanges
  *  for flags, 32-bit forms for node ids, 64-bit forms for counters & packed words. Every reference
  *  assembles in a baseline translation unit: on Arm the extension is named in the assembly text
- *  - `.arch_extension` - and the RISC-V `amocas` is a raw encoding; the runtime capability bit
- *  decides whether it may run. Where inline assembly is unavailable - MSVC - only
+ *  - `.arch_extension` - and the x86 and RISC-V extension instructions are raw bytes; the runtime
+ *  capability bit decides whether it may run. Where inline assembly is unavailable - MSVC - only
  *  `standard_atomic_ref` remains. `preferred_atomic_ref`, at the bottom, is the newest reference
  *  the build target guarantees through its predefined macros - the `preferred_yield_t` rule - for
  *  callers picking at compile time rather than per CPU class.
@@ -1227,84 +1227,107 @@ struct arm64_rcpc_atomic_ref : public arm64_lse_atomic_ref<value_type_> {
 
 /*  `cmpccxadd`: compares the word against `bound` - flags from `word - bound` - and adds `addend`
  *  only when the condition holds; the register handed as `bound` receives what the word held.
- *  AT&T order is the Intel one reversed: addend, compare-and-return register, memory. */
+ *  Spelled as bytes, since binutils before 2.40 and LLVM before 16 have no mnemonic: the VEX form
+ *  in map 0F38, opcode E0 plus the condition, `W` set for the 64-bit forms; the word in `rax`, the
+ *  compare-and-return register in `rcx`, the addend in `rdx`. */
 
 inline std::uint32_t x86_cmpbexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
-    __asm__ __volatile__("cmpbexadd %k[addend], %k[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xe6, 0x08" // ? `cmpbexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 inline std::uint64_t x86_cmpbexadd_u64(std::uint64_t *word, std::uint64_t bound, std::uint64_t addend) noexcept {
-    __asm__ __volatile__("cmpbexadd %q[addend], %q[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xe6, 0x08" // ? `cmpbexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 inline std::int32_t x86_cmplexadd_i32(std::int32_t *word, std::int32_t bound, std::int32_t addend) noexcept {
-    __asm__ __volatile__("cmplexadd %k[addend], %k[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xee, 0x08" // ? `cmplexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 inline std::int64_t x86_cmplexadd_i64(std::int64_t *word, std::int64_t bound, std::int64_t addend) noexcept {
-    __asm__ __volatile__("cmplexadd %q[addend], %q[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xee, 0x08" // ? `cmplexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 inline std::uint32_t x86_cmpaexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
-    __asm__ __volatile__("cmpaexadd %k[addend], %k[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xe3, 0x08" // ? `cmpaexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 inline std::uint64_t x86_cmpaexadd_u64(std::uint64_t *word, std::uint64_t bound, std::uint64_t addend) noexcept {
-    __asm__ __volatile__("cmpaexadd %q[addend], %q[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xe3, 0x08" // ? `cmpaexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 inline std::int32_t x86_cmpgexadd_i32(std::int32_t *word, std::int32_t bound, std::int32_t addend) noexcept {
-    __asm__ __volatile__("cmpgexadd %k[addend], %k[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xed, 0x08" // ? `cmpgexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 inline std::int64_t x86_cmpgexadd_i64(std::int64_t *word, std::int64_t bound, std::int64_t addend) noexcept {
-    __asm__ __volatile__("cmpgexadd %q[addend], %q[bound], (%[word])"
-                         : [bound] "+r"(bound)
-                         : [addend] "r"(addend), [word] "r"(word)
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xed, 0x08" // ? `cmpgexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
                          : "memory", "cc");
     return bound;
 }
 
-/*  RAO-INT: the remote, no-return forms - weakly ordered, so only the relaxed callers take them. */
+/*  RAO-INT: the remote, no-return forms - weakly ordered, so only the relaxed callers take them.
+ *  Bytes for the same reason: map 0F38 opcode FC, the operation picked by the legacy prefix - none
+ *  for add, 66 for and, F2 for or - `REX.W` for the 64-bit forms; the word in `rax`, the operand
+ *  in `rcx`. */
 
 inline void x86_aadd_u32(std::uint32_t *word, std::uint32_t operand) noexcept {
-    __asm__ __volatile__("aadd %k0, (%1)" : : "r"(operand), "r"(word) : "memory");
+    __asm__ __volatile__(".byte 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(operand), "a"(word)
+                         : "memory"); // ? `aadd %ecx, (%rax)`
 }
 inline void x86_aadd_u64(std::uint64_t *word, std::uint64_t operand) noexcept {
-    __asm__ __volatile__("aadd %q0, (%1)" : : "r"(operand), "r"(word) : "memory");
+    __asm__ __volatile__(".byte 0x48, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(operand), "a"(word)
+                         : "memory"); // ? `aadd %rcx, (%rax)`
 }
 inline void x86_aand_u32(std::uint32_t *word, std::uint32_t mask) noexcept {
-    __asm__ __volatile__("aand %k0, (%1)" : : "r"(mask), "r"(word) : "memory");
+    __asm__ __volatile__(".byte 0x66, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(mask), "a"(word)
+                         : "memory"); // ? `aand %ecx, (%rax)`
 }
 inline void x86_aand_u64(std::uint64_t *word, std::uint64_t mask) noexcept {
-    __asm__ __volatile__("aand %q0, (%1)" : : "r"(mask), "r"(word) : "memory");
+    __asm__ __volatile__(".byte 0x66, 0x48, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(mask), "a"(word)
+                         : "memory"); // ? `aand %rcx, (%rax)`
 }
 inline void x86_aor_u32(std::uint32_t *word, std::uint32_t bits) noexcept {
-    __asm__ __volatile__("aor %k0, (%1)" : : "r"(bits), "r"(word) : "memory");
+    __asm__ __volatile__(".byte 0xf2, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(bits), "a"(word)
+                         : "memory"); // ? `aor %ecx, (%rax)`
 }
 inline void x86_aor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
-    __asm__ __volatile__("aor %q0, (%1)" : : "r"(bits), "r"(word) : "memory");
+    __asm__ __volatile__(".byte 0xf2, 0x48, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(bits), "a"(word)
+                         : "memory"); // ? `aor %rcx, (%rax)`
 }
 
 /**
@@ -1660,16 +1683,29 @@ inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired)
 
 /*  `Zacas`: compare-and-swap as one instruction; the comparand register receives what the word
  *  held. Assemblers disagree on how to name the extension inline - `zacas`, `zacas1p0`, or not at
- *  all - so the two are spelled as raw R-type encodings: the AMO opcode, funct5 `00101`, both `aq`
- *  and `rl` set. A baseline `rv64gc` build then assembles them and the runtime bit decides. */
+ *  all - and `.insn` is a directive older LLVM lacks, so the two are whole words with the registers
+ *  pinned: the AMO opcode, funct5 `00101`, both `aq` and `rl` set, `a0` as the comparand, `a1` as
+ *  the address, `a2` as the desired value. A baseline `rv64gc` build then assembles them and the
+ *  runtime bit decides. */
 inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
-    std::int64_t observed = static_cast<std::int32_t>(expected);
-    __asm__ __volatile__(".insn r 0x2f, 0x2, 0x17, %0, %1, %2" : "+r"(observed) : "r"(word), "r"(desired) : "memory");
+    register std::int64_t observed __asm__("a0") = static_cast<std::int32_t>(expected);
+    register std::uint32_t *address __asm__("a1") = word;
+    register std::uint32_t value __asm__("a2") = desired;
+    __asm__ __volatile__(".4byte 0x2ec5a52f"
+                         : "+r"(observed)
+                         : "r"(address), "r"(value)
+                         : "memory"); // ? `amocas.w.aqrl a0, a2, (a1)`
     return static_cast<std::uint32_t>(observed);
 }
 inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
-    __asm__ __volatile__(".insn r 0x2f, 0x3, 0x17, %0, %1, %2" : "+r"(expected) : "r"(word), "r"(desired) : "memory");
-    return expected;
+    register std::uint64_t observed __asm__("a0") = expected;
+    register std::uint64_t *address __asm__("a1") = word;
+    register std::uint64_t value __asm__("a2") = desired;
+    __asm__ __volatile__(".4byte 0x2ec5b52f"
+                         : "+r"(observed)
+                         : "r"(address), "r"(value)
+                         : "memory"); // ? `amocas.d.aqrl a0, a2, (a1)`
+    return observed;
 }
 
 /**
