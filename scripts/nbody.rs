@@ -256,18 +256,20 @@ fn iteration_fu_iter_static(
         let bodies_ref = &*bodies;
         fu::IntoParallelIterator::into_par_iter(&mut forces[..])
             .with_pool(pool)
-            .for_each_with_prong(|force, prong| {
-                let bi = &bodies_ref[prong.task_index];
+            .for_each(|force, task, _at| {
+                let bi = &bodies_ref[task];
                 *force = net_force(bi, &bodies_ref[..n]);
-            });
+            })
+            .expect("force sweep");
     }
     {
         let forces_ref = &*forces;
         fu::IntoParallelIterator::into_par_iter(&mut bodies[..])
             .with_pool(pool)
-            .for_each_with_prong(|body, prong| {
-                apply_force(body, &forces_ref[prong.task_index]);
-            });
+            .for_each(|body, task, _at| {
+                apply_force(body, &forces_ref[task]);
+            })
+            .expect("apply sweep");
     }
 }
 
@@ -282,18 +284,20 @@ fn iteration_fu_iter_dynamic(
         let bodies_ref = &*bodies;
         fu::IntoParallelIterator::into_par_iter(&mut forces[..])
             .with_schedule(pool, fu::DynamicScheduler)
-            .for_each_with_prong(|force, prong| {
-                let bi = &bodies_ref[prong.task_index];
+            .for_each(|force, task, _at| {
+                let bi = &bodies_ref[task];
                 *force = net_force(bi, &bodies_ref[..n]);
-            });
+            })
+            .expect("force sweep");
     }
     {
         let forces_ref = &*forces;
         fu::IntoParallelIterator::into_par_iter(&mut bodies[..])
             .with_schedule(pool, fu::DynamicScheduler)
-            .for_each_with_prong(|body, prong| {
-                apply_force(body, &forces_ref[prong.task_index]);
-            });
+            .for_each(|body, task, _at| {
+                apply_force(body, &forces_ref[task]);
+            })
+            .expect("apply sweep");
     }
 }
 
@@ -309,24 +313,31 @@ fn refresh_replicas(
     let n = bodies.len();
     let source = fu::SyncConstPtr::new(bodies.as_ptr());
     pool.scope(|scope| {
+        let view = scope.view();
         scope.broadcast(|thread_index, compute_domain_index| {
-            let memory_domain = topology.local_memory_of(fu::ComputeDomain(compute_domain_index));
+            let memory_domain = topology
+                .local_memory_of(fu::ComputeDomain(compute_domain_index))
+                .expect("in-range domain");
 
             // Rank this thread among every thread on its memory domain, and count them, so the node's
             // whole team splits [0, n) without overlap even when several compute domains share the node.
             let mut threads_on_memory_domain = 0usize;
             let mut local_index_on_memory_domain = 0usize;
-            for other in 0..scope.compute_domains_count() {
-                if topology.local_memory_of(fu::ComputeDomain(other)) != memory_domain {
+            for other in 0..view.compute_domains_count() {
+                if topology
+                    .local_memory_of(fu::ComputeDomain(other))
+                    .expect("in-range domain")
+                    != memory_domain
+                {
                     continue;
                 }
                 if other < compute_domain_index {
-                    local_index_on_memory_domain += scope.threads_count_in(other);
+                    local_index_on_memory_domain += view.threads_count_in(other);
                 }
-                threads_on_memory_domain += scope.threads_count_in(other);
+                threads_on_memory_domain += view.threads_count_in(other);
             }
             local_index_on_memory_domain +=
-                scope.locate_thread_in(thread_index, compute_domain_index);
+                view.locate_thread_in(thread_index, compute_domain_index);
 
             let range = fu::IndexedSplit::new(n, threads_on_memory_domain)
                 .get(local_index_on_memory_domain);
@@ -368,7 +379,8 @@ fn bodies_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> &'a 
         let memory_domain = work
             .topology
             .expect("topology")
-            .local_memory_of(fu::ComputeDomain(compute_domain));
+            .local_memory_of(fu::ComputeDomain(compute_domain))
+            .expect("in-range domain");
         work.replicas.expect("replicas").replica_ptr(memory_domain) as *const Body
     } else {
         work.bodies_ptr.as_ptr()
@@ -380,31 +392,31 @@ fn bodies_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> &'a 
 
 /// The all-to-all force on the body owning this task, summed over the array it reads.
 #[inline]
-fn force_kernel<P: Placement>(work: WorkCtx, prong: fu::Prong) -> Vector3 {
-    let local = bodies_at::<P>(work, prong.compute_domain_index);
-    let bi = &local[prong.task_index];
+fn force_kernel<P: Placement>(work: WorkCtx, task: usize, at: fu::ThreadInDomain) -> Vector3 {
+    let local = bodies_at::<P>(work, at.compute_domain);
+    let bi = &local[task];
     net_force(bi, local)
 }
 
 /// Integrates one canonical body by the force computed for it - identical for both placements.
 #[inline]
-fn apply_kernel(work: WorkCtx, body: &mut Body, prong: fu::Prong) {
+fn apply_kernel(work: WorkCtx, body: &mut Body, task: usize, _at: fu::ThreadInDomain) {
     // SAFETY: `forces` holds `n` initialized elements, read-only while the apply pass mutates `bodies`.
-    let force = unsafe { work.forces_ptr.get(prong.task_index) };
+    let force = unsafe { work.forces_ptr.get(task) };
     apply_force(body, force);
 }
 
 /// Sweeps a mutating pass over `data`, split statically or work-stolen per the schedule axis.
 #[inline]
-fn for_each<S: Schedule, T: Send + Sync, F: Fn(&mut T, fu::Prong) + Sync + Send>(
+fn for_each<S: Schedule, T: Send + Sync, F: Fn(&mut T, usize, fu::ThreadInDomain) + Sync + Send>(
     pool: &mut fu::ThreadPool,
     data: &mut [T],
     body: F,
 ) {
     if S::STATIC_SCHEDULE {
-        fu::for_each_prong_mut(pool, data, body);
+        fu::for_each_task_mut(pool, data, body);
     } else {
-        fu::for_each_prong_mut_dynamic(pool, data, body);
+        fu::for_each_task_mut_dynamic(pool, data, body);
     }
 }
 
@@ -433,13 +445,13 @@ fn iteration_forkunion<S: Schedule, P: Placement>(
     };
 
     // Force pass: all-to-all, reading the shared array or each thread's node-local replica.
-    for_each::<S, _, _>(pool, forces, move |force, prong| {
-        *force = force_kernel::<P>(work, prong);
+    for_each::<S, _, _>(pool, forces, move |force, task, at| {
+        *force = force_kernel::<P>(work, task, at);
     });
 
     // Apply pass: integrate each canonical body by its force - identical for both placements.
-    for_each::<S, _, _>(pool, bodies, move |body, prong| {
-        apply_kernel(work, body, prong);
+    for_each::<S, _, _>(pool, bodies, move |body, task, at| {
+        apply_kernel(work, body, task, at);
     });
 }
 
@@ -693,12 +705,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Engine::ForkUnion | Engine::ForkUnionReplicated => {
             let probed = fu::Topology::new().expect("Failed to detect hardware topology");
             fu_pool = Some(
-                fu::ThreadPool::try_spawn(&probed, threads)
+                fu::ThreadPool::spawn(&probed, threads)
                     .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}")),
             );
             if selected.engine == Engine::ForkUnionReplicated {
                 replicas = Some(
-                    fu::ReplicatedArray::<Body>::try_new(&probed, bodies_n)
+                    fu::ReplicatedArray::<Body>::new_in(&probed, bodies_n)
                         .expect("Failed to allocate per-domain body replicas"),
                 );
             }

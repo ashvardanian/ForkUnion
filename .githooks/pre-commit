@@ -39,22 +39,177 @@ check_rulers() {
 # Documentation is Doxygen, and Doxygen only reads `/** */`. A `//`, `///`, or `///<` comment trailing
 # a member or an enumerator is either invisible (`//`) or attached to the WRONG entity (`///` documents
 # what follows, so every doc slides down one member and the last is silently lost). Declarations get a
-# hovering `/** @brief ... */`; `//` stays for implementation notes inside function bodies.
+# hovering `/** ... */`; `//` stays for implementation notes inside function bodies. Scope is what
+# tells the two apart - a local and a member declare identically - so this tracks brace depth over the
+# whole staged file rather than grepping the hunks, and the tree already conforms.
 check_trailing_docs() {
-    # A declaration line: indented, opens with an identifier, carries no call parentheses, and closes
-    # with `,` or `;` before the comment. Statement keywords are excluded so a `// ?` note beside a
-    # `return` inside an inline body stays legal.
-    local trailing own_line
-    trailing=$(printf '%s\n' "$added" |
-        grep -vE '^\+[[:space:]]*(return|break|continue|else|do|goto|case|default|assert|throw|delete|using)\b' |
-        grep -E '^\+[[:space:]]+[A-Za-z_][^()]*[,;][[:space:]]*(///|//[[:space:]]*\?)' || true)
-    [ -z "$trailing" ] || fail "$trailing" \
-        "$file documents a declaration with a trailing comment - Doxygen either ignores" \
-        "            it (//) or attaches it to the next entity (///). Hover a /** @brief ... */ above:"
+    local misplaced
+    misplaced=$(
+        git show ":$file" | awk '
+            # Strings and comments are stripped before the braces are counted, so a `@code` sample
+            # inside a docblock opens no scope. What separates a member from a local is that scope
+            # and nothing on the line itself, which is why this reads the file rather than the hunks.
+            {
+                code = $0
+                if (in_comment) { pos = index(code, "*/"); code = (pos == 0) ? "" : substr(code, pos + 2); in_comment = (pos == 0) }
+                gsub(/"[^"]*"/, "", code)
+                gsub(/\047[^\047]*\047/, "", code)
+                while ((pos = index(code, "/*")) > 0) {
+                    rest = substr(code, pos + 2); tail = index(rest, "*/")
+                    if (tail == 0) { code = substr(code, 1, pos - 1); in_comment = 1; break }
+                    code = substr(code, 1, pos - 1) substr(rest, tail + 2)
+                }
+                pos = index(code, "//"); if (pos > 0) code = substr(code, 1, pos - 1)
 
-    own_line=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*///' || true)
-    [ -z "$own_line" ] || fail "$own_line" \
-        "$file uses a /// doc-comment - this codebase documents with /** ... */ blocks:"
+                # A declaration closes with `,` or `;` before its comment. Judged in the scope this
+                # line opens in, so only a member, an enumerator, or an alias can match - and only
+                # `using namespace` is the directive that closes the same way without declaring.
+                scope = (depth > 0) ? kinds[depth] : "type"
+                if (scope == "type" && $0 !~ /^[ \t]*using[ \t]+namespace/ &&
+                    $0 ~ /^[ \t]*[A-Za-z_].*[,;][ \t]*\/\/[ \t]*\?/) printf "line %d: trailing // ? on a declaration\n", NR
+                if ($0 ~ /^[ \t]*\/\/\//) printf "line %d: /// doc-comment\n", NR
+
+                kind = (code ~ /\)[^;]*\{/) ? "func" : ((code ~ /(^|[^A-Za-z_])(struct|class|enum|union|namespace)([^A-Za-z_]|$)/) ? "type" : "block")
+                opens = gsub(/\{/, "{", code); closes = gsub(/\}/, "}", code)
+                while (opens-- > 0) kinds[++depth] = kind
+                while (closes-- > 0) if (depth > 0) depth--
+            }
+        '
+    )
+    [ -z "$misplaced" ] || fail "$misplaced" \
+        "$file documents a declaration with a trailing or /// comment - Doxygen either" \
+        "            ignores it (//) or attaches it to the next entity (///). Hover a /** ... */ above:"
+}
+
+# `@brief` earns its place only when the block has something to separate it from - a body below it, or
+# a `@param` / `@retval` / `@sa` section. On a lone paragraph the tag is pure noise, so a one-thought
+# docblock reads `/** What this is. */` and gains the tag at the moment a second section appears. A
+# docblock is a block rather than a line, so unlike most checks above this validates the whole staged
+# file - the tree already conforms.
+check_lone_brief() {
+    local lone
+    lone=$(
+        git show ":$file" | awk '
+            /\/\*\*/ { in_block = 1; block = ""; opener = NR }
+            in_block { block = block "\n" $0 }
+            in_block && /\*\// {
+                in_block = 0
+                if (block ~ /@brief/ &&
+                    block !~ /@(param|tparam|return|retval|sa|see|note|warning|throws|pre|post|code|file|author|date|copyright|version|ingroup)/ &&
+                    block !~ /\n[ \t]*\*[ \t]*\n/) printf "line %d: lone-paragraph @brief\n", opener
+            }
+        '
+    )
+    [ -z "$lone" ] || fail "$lone" \
+        "$file tags a lone-paragraph docblock with @brief - the tag only earns its place" \
+        "            when a detached body or a @param/@return/@sa section follows it:"
+}
+
+# The other direction of the same rule: once a block carries a section, the summary above it needs the
+# `@brief` that separates the two, or the summary reads as part of the first section. Only a block that
+# has BOTH a prose summary and a section is flagged - a lone paragraph correctly carries no tag, and a
+# block that is nothing but a `@return` has no summary to tag.
+check_missing_brief() {
+    local missing
+    missing=$(
+        git show ":$file" | awk '
+            /\/\*\*/ { in_block = 1; block = ""; opener = NR; first = "" }
+            in_block {
+                block = block "\n" $0
+                if (first == "") {
+                    line = $0
+                    sub(/^[ \t]*/, "", line)
+                    if (NR == opener) sub(/^\/\*\*[ \t]*/, "", line)
+                    else sub(/^\*[ \t]*/, "", line)
+                    sub(/[ \t]*\*\/[ \t]*$/, "", line)
+                    if (line != "") first = line
+                }
+            }
+            in_block && /\*\// {
+                in_block = 0
+                if (block !~ /@brief/ && block !~ /@file/ && first != "" && first !~ /^@/ &&
+                    (block ~ /@(param|tparam|return|retval|sa|see|note|warning|throws|pre|post)/ ||
+                     block ~ /\n[ \t]*\*[ \t]*\n/))
+                    printf "line %d: a summary and a section, but no @brief\n", opener
+            }
+        '
+    )
+    [ -z "$missing" ] || fail "$missing" \
+        "$file has a docblock whose summary sits above a section with no @brief between" \
+        "            them - the tag is what separates the two:"
+}
+
+# `@retval` names one return value per line and binds the FIRST token as that value, so a line opening
+# with prose renders a nonsense value column - the same trap `check_section_ids` guards below. This
+# codebase says the same thing in one `@return` sentence listing the outcomes, so the tag is unused.
+check_retval() {
+    local retval
+    retval=$(printf '%s\n' "$added" | grep -E '@retval\b' || true)
+    [ -z "$retval" ] || fail "$retval" \
+        "$file uses @retval - name the outcomes in a single @return sentence instead:"
+}
+
+# `@p`, `@b`, `@a`, `@c` and `@ref` each bind the literal next token, so a backticked argument carries
+# its backticks into the rendered name - `@p `n`` documents a parameter called "`n`". One marker wins.
+# Backticks stay legal everywhere else in a docblock, and in `//` comments.
+check_double_markup() {
+    local doubled
+    doubled=$(printf '%s\n' "$added" | grep -E '@(p|b|a|c|ref)[[:space:]]+`' || true)
+    [ -z "$doubled" ] || fail "$doubled" \
+        "$file marks one token twice - @p/@b/@a/@c/@ref take the next word literally, so the" \
+        "            backticks land inside the name. Drop the backticks and keep the command:"
+}
+
+# Every `@param` declares a direction - [in]/[out]/[inout] - so a reader knows whether the callee reads,
+# writes, or mutates the argument. A bare `@param` and the comma form `@param[in,out]` are both rejected;
+# the one spelling for a mutated argument is `@param[inout]`.
+check_param_direction() {
+    local undirected
+    undirected=$(printf '%s\n' "$added" | grep -E '@param([^[]|\[in,out\])' || true)
+    [ -z "$undirected" ] || fail "$undirected" \
+        "$file has a @param with no direction, or with the comma form - write @param[in]," \
+        "            @param[out], or @param[inout]:"
+}
+
+# Every C and C++ file opens with the same four tags in the same order, so a reader lands on the same
+# shape whichever file they open, and `@file` carries the repo-relative path because two headers can
+# share a basename. `@copyright` is used nowhere here. A header is structure rather than lines, so like
+# `check_workflow_names` this reads the whole staged file.
+check_file_header() {
+    local header
+    header=$(
+        git show ":$file" | awk '
+            NR == 1 && $0 != "/**" { print "line 1: file does not open with a docblock"; exit }
+            NR > 1 && /^ \*\// { exit }
+            { for (i = 1; i <= NF; i++) if ($i ~ /^@(brief|author|file|date)$/) order = order substr($i, 2, 1) }
+            /@file/ { path = $3 }
+            END {
+                if (order != "" && order != "bafd")
+                    print "line 1: header tags read `" order "`, expected @brief @author @file @date"
+                if (order == "") print "line 1: header carries none of @brief @author @file @date"
+                if (path != "" && path !~ /\//)
+                    print "line 1: @file names `" path "`, not the repo-relative path"
+            }
+        '
+    )
+    [ -z "$header" ] || fail "$header" \
+        "$file has a non-conforming header - open with @brief, @author, @file carrying the" \
+        "            repo-relative path, then @date:"
+}
+
+# `@section <id> <Title>` binds the FIRST token as the link target and the rest as the visible title, so
+# `@section Scheduling Logic` silently anchors "Scheduling" and titles the section "Logic" - the heading
+# reads wrong and nothing can link to it. The id is lowercase snake_case carrying its domain, since ids
+# share one namespace across the whole Doxygen project: `pool_concurrency_model`, as `flat.hpp` already
+# spells it. A Title-Case first token is the exact signature of a missing id, and an id with no title
+# renders an empty heading, so both arms are required.
+check_section_ids() {
+    local sections
+    sections=$(printf '%s\n' "$added" | grep -E '@(section|subsection|subsubsection|page)[[:space:]]' |
+        grep -vE '@(section|subsection|subsubsection|page)[[:space:]]+[a-z][a-z0-9_]*[[:space:]]+[^[:space:]]' || true)
+    [ -z "$sections" ] || fail "$sections" \
+        "$file adds a Doxygen section without a lowercase snake_case id, or with an id but" \
+        "            no title - Doxygen anchors the first token. Write @section domain_topic Title:"
 }
 
 # `@sa` cross-references an identifier, `@see` cross-references a URL. Both tags mean the same thing to
@@ -86,8 +241,9 @@ check_hand_ceils() {
     hand_ceils=$(printf '%s\n' "$added" |
         grep -E '\+[[:space:]]*[A-Za-z0-9_.]+[[:space:]]*-[[:space:]]*1\)[[:space:]]*/' || true)
     [ -z "$hand_ceils" ] || fail "$hand_ceils" \
-        "$file hand-rolls ceiling division - use fu::div_ceil (C++), .div_ceil() (Rust), or" \
-        "            std.math.divCeil (Zig). Not a bug, a symptom: the author didn't know the house" \
+        "$file hand-rolls ceiling division - use fu::div_ceil (C++), .div_ceil() (Rust)," \
+        "            std.math.divCeil (Zig), or std.math.ceildiv (Mojo). Not a bug, a symptom: the" \
+        "            author didn't know the house" \
         "            vocabulary, so re-validate the rest of this change against types.hpp helpers too:"
 }
 
@@ -106,6 +262,7 @@ check_region_dashes() {
 # `__linux__` again. A genuine exception carries an inline `// FU-ALLOW: <reason>`.
 check_raw_macros() {
     [ "$file" != include/forkunion/types.hpp ] || return 0 # ? The one file that derives them
+    case "$file" in probes/*) return 0 ;; esac # ? The probes ask the bare compiler, before the vocabulary exists
     local raw
     raw=$(printf '%s\n' "$added" | grep -vE 'FU-ALLOW' |
         grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b' |
@@ -113,6 +270,24 @@ check_raw_macros() {
     [ -z "$raw" ] || fail "$raw" \
         "$file asks a raw platform macro - use the FU_* vocabulary types.hpp derives" \
         "            (FU_ON_*, FU_GLIBC_PREREQ_, FU_DETECT_ARCH_*), or mark a real exception // FU-ALLOW:"
+}
+
+# Capability gates are flat: one `#if FU_TARGET_<BIT>` region per bit, never inside another bit's region
+# or an architecture envelope, so a reader learns a block's gate from the one line above it. Nesting is
+# structure, not lines, so this validates the whole staged file.
+check_nested_gates() {
+    local nested
+    nested=$(git show ":$file" | awk '
+        /^[[:space:]]*#[[:space:]]*if/ { depth++; stack[depth] = 0 }
+        /^[[:space:]]*#[[:space:]]*(if|elif)/ {
+            gate = ($0 ~ /FU_TARGET_/); outer = ($0 ~ /FU_TARGET_|FU_DETECT_ARCH_/)
+            open -= stack[depth]; if (gate && open) print NR ": " $0
+            stack[depth] = outer; open += outer; next
+        }
+        /^[[:space:]]*#[[:space:]]*else/ { open -= stack[depth]; stack[depth] = 0; next }
+        /^[[:space:]]*#[[:space:]]*endif/ { open -= stack[depth]; delete stack[depth]; depth-- }' || true)
+    [ -z "$nested" ] || fail "$nested" \
+        "$file nests a capability gate inside another - one flat #if FU_TARGET_<BIT> region per bit:"
 }
 
 # CI workflows - every job and every step carries a `name:`. An unnamed step renders as its raw
@@ -160,20 +335,26 @@ while IFS= read -r -d '' file; do
     case "$file" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.inl)
         check_rulers
+        check_section_ids
         check_cross_refs
         check_deprecations
         check_hand_ceils
         check_region_dashes
         check_raw_macros
+        check_nested_gates
+        check_lone_brief
+        check_missing_brief
+        check_trailing_docs
+        check_retval
+        check_double_markup
+        check_param_direction
+        check_file_header
         ;;
-    *.rs | *.zig)
+    *.rs | *.zig | *.mojo)
         check_deprecations
         check_hand_ceils
         ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
-    esac
-    case "$file" in
-    *.h | *.hpp) check_trailing_docs ;;
     esac
 done < <(git diff --cached --name-only -z --diff-filter=ACM)
 
@@ -217,6 +398,22 @@ if command -v zig > /dev/null 2>&1; then
             failed=1
         fi
     fi
+fi
+
+# Mojo - `mojo format` is the law, but it has no --check mode, so format a copy and diff. The width
+# lives in `pyproject.toml`, which `mojo format` reads the way Black does; it is repeated here
+# because the copy sits outside the tree, where that discovery would not find it.
+if command -v mojo > /dev/null 2>&1; then
+    while IFS= read -r -d '' file; do
+        scratch=$(mktemp --suffix=.mojo)
+        git show ":$file" > "$scratch"
+        mojo format -q -l 120 "$scratch" > /dev/null 2>&1
+        if ! git show ":$file" | diff -q - "$scratch" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not mojo-format clean - run: mojo format -l 120 $file"
+            failed=1
+        fi
+        rm -f "$scratch"
+    done < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.mojo')
 fi
 
 # CMake - CMakeLists.txt / *.cmake must satisfy the checked-in .cmake-format.py profile.

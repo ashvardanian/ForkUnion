@@ -1,14 +1,15 @@
 /**
  *  @brief Demo app: Connected Components by label propagation, with ForkUnion, OpenMP, and Taskflow.
  *  @author Ash Vardanian
- *  @file propagation.cpp
+ *  @file scripts/propagation.cpp
+ *  @date July 14, 2026
  *
  *  The N-body simulation gives every task an identical cost, so it can only measure dispatch
  *  latency. Label propagation is the opposite end of fork-join usage: one parallel sweep per round,
  *  repeated until no label changes - so a single pass pays the dispatch-and-join tax once @b per
  *  @b round, and the graph's topology decides how many rounds there are.
  *
- *  @section The Necklace
+ *  @section propagation_necklace The Necklace
  *
  *  A single R-MAT graph converges in a dozen rounds - too few to expose the barrier tax. So the
  *  generator strings @b C independent R-MAT communities on a ring, joined by one bridge edge per
@@ -21,7 +22,7 @@
  *  the hubs at low indices, so a low endpoint is essentially guaranteed well-connected, and the ring
  *  cannot be severed by an isolated endpoint.
  *
- *  @section Determinism
+ *  @section propagation_determinism Determinism
  *
  *  The labels are double-buffered: every round reads the immutable previous array and each vertex
  *  writes only its own slot in the next - no atomics, no races, and every round is a pure function
@@ -43,7 +44,7 @@
  *  The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
  *  the baselines are `{openmp,taskflow}_{static,dynamic}`.
  *
- *  @section Benchmarking Protocol
+ *  @section propagation_protocol Benchmarking Protocol
  *
  *  Every runtime schedules the same one-vertex dynamic tasks: `schedule(dynamic, 1)` in OpenMP,
  *  `tf::DynamicPartitioner(1)` in Taskflow, and `for_n_dynamic` here. Cells run bare - core-granular
@@ -89,13 +90,16 @@
 
 namespace fu = ashvardanian::forkunion;
 
+/** A vertex index, dense in [0, vertices). */
 using vertex_t = std::uint32_t;
+/** An index into the edge array, wide enough for a graph past 4 billion edges. */
 using edge_offset_t = std::uint64_t;
-using label_t = std::uint32_t; // ? A component name: the smallest vertex index reachable so far
+/** A component name: the smallest vertex index reachable so far. */
+using label_t = std::uint32_t;
 
 #pragma region Graph
 
-/** @brief A read-only CSR as two spans - the interface every kernel takes. */
+/** A read-only CSR as two spans - the interface every kernel takes. */
 struct csr_view_t {
     fu::span<edge_offset_t const> row_offsets;
     fu::span<vertex_t const> column_indices;
@@ -104,7 +108,7 @@ struct csr_view_t {
     edge_offset_t edges() const noexcept { return column_indices.size(); }
 };
 
-/** @brief The two CSR arrays built once on the host, in growable `dynamic_array`s. */
+/** The two CSR arrays built once on the host, in growable `dynamic_array`s. */
 struct csr_host_t {
     fu::dynamic_array<edge_offset_t> row_offsets;
     fu::dynamic_array<vertex_t> column_indices;
@@ -120,15 +124,15 @@ struct edge_t {
     bool operator==(edge_t const &o) const noexcept { return row == o.row && column == o.column; }
 };
 
-/** @brief Sorts past every valid edge; marks dropped self-loops, trimmed together with `unique`'s tail. */
+/** Sorts past every valid edge; marks dropped self-loops, trimmed together with `unique`'s tail. */
 static constexpr edge_t sentinel_edge_k {~vertex_t(0), ~vertex_t(0)};
 
-/** @brief One quadrant choice in `[0, 100)` - same draw and counter scheme as every sibling benchmark. */
+/** One quadrant choice in `[0, 100)` - same draw and counter scheme as every sibling benchmark. */
 static inline unsigned random_percent(std::uint64_t const counter) noexcept {
     return static_cast<unsigned>(fu::split_mix(counter) % 100);
 }
 
-/** @brief One bridge endpoint in `[0, bound)`, from the same avalanche. */
+/** One bridge endpoint in `[0, bound)`, from the same avalanche. */
 static inline vertex_t random_index(std::uint64_t const counter, vertex_t const bound) noexcept {
     return static_cast<vertex_t>(fu::split_mix(counter) % bound);
 }
@@ -136,7 +140,7 @@ static inline vertex_t random_index(std::uint64_t const counter, vertex_t const 
 /**
  *  @brief Generates the necklace: @p communities independent R-MAT graphs of `2^scale` vertices,
  *      joined in a ring by one bridge per neighbouring pair, and scatters it all into a CSR.
- *  @retval false on any allocation failure, leaving @p graph half-built but valid to destroy.
+ *  @return false on any allocation failure, leaving @p graph half-built but valid to destroy.
  *
  *  Community `c` owns global edge indices `[c * raw_local, (c+1) * raw_local)` and the vertex range
  *  `[c << scale, (c+1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters as the
@@ -155,7 +159,7 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
     // the CSR build and never coexists with the work arrays at peak.
     {
         fu::dynamic_array<edge_t> edges;
-        if (!edges.try_resize(raw_edges * 2 + bridges * 2)) return false; // ? Slots `2e, 2e+1` belong to edge `e`
+        if (failed(edges.resize(raw_edges * 2 + bridges * 2))) return false; // ? Slots `2e, 2e+1` belong to edge `e`
 
         // Generation is the most expensive setup step - `scale` draws per edge, millions of edges - and
         // the counter-based draws make it embarrassingly parallel with no generator objects at all.
@@ -168,12 +172,9 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
                 unsigned const r = random_percent(e * 64 + static_cast<std::size_t>(bit)); // ? `a=57 b=19 c=19 d=5`
                 vertex_t const step = static_cast<vertex_t>(1u) << bit;
                 if (r < 57) continue; // ? Stay in the dense quadrant
-                else if (r < 76)
-                    column |= step;
-                else if (r < 95)
-                    row |= step;
-                else
-                    row |= step, column |= step;
+                else if (r < 76) column |= step;
+                else if (r < 95) row |= step;
+                else row |= step, column |= step;
             }
             vertex_t const base = static_cast<vertex_t>((e / raw_local) << scale);           // ? This community's range
             bool const self_loop = row == column;                                            // ? Dropped via sentinels
@@ -205,13 +206,13 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
         while (edge_count && edges[edge_count - 1] == sentinel_edge_k) --edge_count;
 
         // CSR: count the degrees into `row_offsets`, then prefix-sum them into row starts.
-        if (!graph.row_offsets.try_resize(vertices + 1)) return false; // ? Zero-filled
+        if (failed(graph.row_offsets.resize(vertices + 1))) return false; // ? Zero-filled
         for (std::size_t i = 0; i < edge_count; ++i) graph.row_offsets[edges[i].row + 1]++;
         for (vertex_t v = 0; v < vertices; ++v) graph.row_offsets[v + 1] += graph.row_offsets[v];
 
-        if (!graph.column_indices.try_resize(edge_count)) return false;
+        if (failed(graph.column_indices.resize(edge_count))) return false;
         fu::dynamic_array<edge_offset_t> cursor;
-        if (!cursor.try_resize(vertices)) return false;
+        if (failed(cursor.resize(vertices))) return false;
         for (vertex_t v = 0; v < vertices; ++v) cursor[v] = graph.row_offsets[v];
         for (std::size_t i = 0; i < edge_count; ++i) graph.column_indices[cursor[edges[i].row]++] = edges[i].column;
     }
@@ -222,7 +223,7 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
 
 #pragma region Kernel
 
-/** @brief The smallest label visible from @p v: its own, or the smallest among its neighbours'. */
+/** The smallest label visible from @p v: its own, or the smallest among its neighbours'. */
 static inline label_t min_label_of(csr_view_t const &graph, label_t const *old_labels, vertex_t const v) noexcept {
     label_t best = old_labels[v];
     edge_offset_t const end = graph.row_offsets[v + 1];
@@ -233,8 +234,7 @@ static inline label_t min_label_of(csr_view_t const &graph, label_t const *old_l
     return best;
 }
 
-/** @brief Converges serially from `labels[v] = v`, returning the rounds taken - the reference for `PROPAGATION_CHECK`.
- */
+/** Converges serially from `labels[v] = v`, returning the rounds taken - the reference for `PROPAGATION_CHECK`. */
 static std::size_t converge_serially(csr_view_t const &graph, label_t *labels_a, label_t *labels_b) noexcept {
     vertex_t const vertices = graph.vertices();
     for (vertex_t v = 0; v < vertices; ++v) labels_a[v] = v;
@@ -256,7 +256,7 @@ static std::size_t converge_serially(csr_view_t const &graph, label_t *labels_a,
 
 #pragma region Backends
 
-/** @brief Per-thread change tally, spaced so two threads never share a cache line. */
+/** Per-thread change tally, spaced so two threads never share a cache line. */
 struct alignas(fu::default_alignment_k) counter_t {
     std::uint64_t value {0};
 };
@@ -285,7 +285,7 @@ struct replicated_csr_t {
     template <typename value_type_>
     static bool replicate(fu::replicated_array<value_type_> &destination, fu::dynamic_array<value_type_> const &host,
                           fu::machine_topology_t const &topology) noexcept {
-        if (!destination.try_resize_uninitialized(topology, host.size())) return false;
+        if (failed(destination.resize_uninitialized(topology, host.size()))) return false;
         for (std::size_t domain = 0; domain < destination.memory_domains_count(); ++domain) {
             fu::span<value_type_> const slice =
                 destination.on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
@@ -306,44 +306,57 @@ struct replicated_csr_t {
 template <typename value_type_>
 static bool retouch_deterministically(distributed_pool_t &pool, fu::dynamic_array<value_type_> &array) noexcept {
     fu::dynamic_array<value_type_> placed;
-    if (!placed.try_resize_uninitialized(array.size())) return false; // ? Pages stay unfaulted until the copy
+    if (failed(placed.resize_uninitialized(array.size()))) return false; // ? Pages stay unfaulted until the copy
     value_type_ const *source = array.data();
     value_type_ *destination = placed.data();
-    pool.for_slices(array.size(), [=](distributed_pool_t::prong_t prong, std::size_t count) noexcept {
-        std::memcpy(destination + prong.task, source + prong.task, count * sizeof(value_type_));
+    pool.for_slices(array.size(), [=](fu::tasks_range_t range, fu::thread_in_domain_t) noexcept {
+        std::memcpy(destination + range.first, source + range.first, range.count * sizeof(value_type_));
     });
     array = std::move(placed);
     return true;
 }
 
-/** @brief Everything a backend reads or writes for one convergence pass; the harness owns the lifetimes. */
+/**
+ *  @brief Everything a backend reads or writes for one convergence pass; the harness owns the lifetimes.
+ *
+ *  The two label buffers ping-pong from round to round, so the fixed point ends in both.
+ */
 struct run_context_t {
-    csr_view_t graph;                       // ? The shared host view - what every non-replicated backend reads
-    replicated_csr_t const &replicas;       // ? Per-node replicas, populated only for the `_replicated` cells
-    fu::machine_topology_t const &topology; // ? The compute-to-memory bridge for the replicated read
-    fu::span<counter_t> counters;           // ? Per-thread change tallies, zeroed each round
-    fu::span<label_t> labels_a;             // ? Ping-pong label buffers; the fixed point ends in both
+    /** The shared host view - what every non-replicated backend reads. */
+    csr_view_t graph;
+    /** Per-node replicas, populated only for the `_replicated` cells. */
+    replicated_csr_t const &replicas;
+    /** The compute-to-memory bridge for the replicated read. */
+    fu::machine_topology_t const &topology;
+    /** Per-thread change tallies, zeroed each round. */
+    fu::span<counter_t> counters;
+    /** The labels a round reads, seeded with each vertex's own index. */
+    fu::span<label_t> labels_a;
+    /** The labels a round writes. */
     fu::span<label_t> labels_b;
+    /** Worker count the `counters` span is sized to. */
     std::size_t threads;
-    std::size_t rounds = 0;             // ? Rounds to convergence, written back by every backend
-    distributed_pool_t *pool = nullptr; // ? Spawned by `main` only for the ForkUnion backends
-    tf::Executor *taskflow = nullptr;   // ? Spawned by `main` only for the `taskflow_*` backends
+    /** Rounds to convergence, written back by every backend. */
+    std::size_t rounds = 0;
+    /** Spawned by `main` only for the ForkUnion backends. */
+    distributed_pool_t *pool = nullptr;
+    /** Spawned by `main` only for the `taskflow_*` backends. */
+    tf::Executor *taskflow = nullptr;
 };
 
-/** @brief Pre-split across threads vs work-stolen. */
+/** Pre-split across threads vs work-stolen. */
 enum class schedule_k : unsigned int { static_k, dynamic_k };
-/** @brief One shared CSR vs one read-only CSR replica per memory domain. */
+/** One shared CSR vs one read-only CSR replica per memory domain. */
 enum class placement_k : unsigned int { shared_k, replicated_k };
 
-/** @brief Runs @p body over `[0, n)`, statically pre-split or work-stolen per the compile-time schedule. */
+/** Runs @p body over `[0, n)`, statically pre-split or work-stolen per the compile-time schedule. */
 template <schedule_k schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
     if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
-    else
-        pool.for_n_dynamic(n, body);
+    else pool.for_n_dynamic(n, body);
 }
 
-/** @brief Zeroes the per-thread tallies and sums them - the tiny serial bookends of every round. */
+/** Zeroes the per-thread tallies and sums them - the tiny serial bookends of every round. */
 static void zero_counters(fu::span<counter_t> counters) noexcept {
     for (std::size_t t = 0; t < counters.size(); ++t) counters[t].value = 0;
 }
@@ -362,13 +375,11 @@ static std::uint64_t sum_counters(fu::span<counter_t> counters) noexcept {
  */
 template <schedule_k schedule_, placement_k placement_>
 static void run(run_context_t &c) noexcept {
-    using local_prong_t = typename distributed_pool_t::prong_t;
     auto graph_at = [&](std::size_t compute_domain) noexcept -> csr_view_t {
         if constexpr (placement_ == placement_k::replicated_k)
             return c.replicas.on_memory_domain(
                 c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain)));
-        else
-            return c.graph;
+        else return c.graph;
     };
 
     vertex_t const vertices = c.graph.vertices();
@@ -378,11 +389,11 @@ static void run(run_context_t &c) noexcept {
     std::size_t rounds = 0;
     for (std::uint64_t changes = 1; changes != 0; ++rounds, std::swap(old_labels, new_labels)) {
         zero_counters(c.counters);
-        for_n_scheduled<schedule_>(*c.pool, vertices, [&](local_prong_t prong) noexcept {
-            vertex_t const v = static_cast<vertex_t>(prong.task);
-            label_t const next = min_label_of(graph_at(prong.compute_domain), old_labels, v);
+        for_n_scheduled<schedule_>(*c.pool, vertices, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
+            vertex_t const v = static_cast<vertex_t>(task);
+            label_t const next = min_label_of(graph_at(at.compute_domain), old_labels, v);
             new_labels[v] = next;
-            c.counters[prong.thread].value += next != old_labels[v];
+            c.counters[at.thread].value += next != old_labels[v];
         });
         changes = sum_counters(c.counters);
     }
@@ -390,7 +401,7 @@ static void run(run_context_t &c) noexcept {
 }
 
 #if defined(_OPENMP)
-/** @brief The OpenMP baselines - one `parallel for` with a change reduction per round. */
+/** The OpenMP baselines - one `parallel for` with a change reduction per round. */
 template <bool dynamic_>
 static void run_openmp(run_context_t &c) noexcept {
     csr_view_t const graph = c.graph;
@@ -459,15 +470,19 @@ static void run_taskflow(run_context_t &c, partitioner_ partitioner) noexcept {
 static void run_taskflow_static(run_context_t &c) noexcept { run_taskflow(c, tf::StaticPartitioner()); }
 static void run_taskflow_dynamic(run_context_t &c) noexcept { run_taskflow(c, tf::DynamicPartitioner(1)); }
 
-/** @brief Which execution engine a backend runs on, so `main` builds exactly the resource it needs. */
+/** Which execution engine a backend runs on, so `main` builds exactly the resource it needs. */
 enum class engine_t : unsigned int {
-    forkunion_k,            // ? Spawns the shared ForkUnion pool
-    forkunion_replicated_k, // ? Also builds the per-node CSR replicas
-    openmp_k,               // ? Runs under `omp parallel for`, needing no pool object
-    taskflow_k,             // ? Runs on a reused `tf::Executor`, needing no pool object
+    /** Spawns the shared ForkUnion pool. */
+    forkunion_k,
+    /** Also builds the per-node CSR replicas. */
+    forkunion_replicated_k,
+    /** Runs under `omp parallel for`, needing no pool object. */
+    openmp_k,
+    /** Runs on a reused `tf::Executor`, needing no pool object. */
+    taskflow_k,
 };
 
-/** @brief The dispatch table - a name, its convergence pass, and the engine it runs on. */
+/** The dispatch table - a name, its convergence pass, and the engine it runs on. */
 struct backend_t {
     std::string_view name;
     void (*run)(run_context_t &) noexcept;
@@ -491,7 +506,7 @@ static constexpr backend_t backends_k[] = {
 
 #pragma endregion Backends
 
-/** @brief Reads an environment variable, or @p fallback when unset - `getenv_s` on MSVC. */
+/** Reads an environment variable, or @p fallback when unset - `getenv_s` on MSVC. */
 static char const *env_string(char const *name, char const *fallback) noexcept {
 #if defined(_MSC_VER)
     static char buffer[256];
@@ -503,13 +518,13 @@ static char const *env_string(char const *name, char const *fallback) noexcept {
 #endif
 }
 
-/** @brief Parses a fractional environment variable, or @p fallback when unset. */
+/** Parses a fractional environment variable, or @p fallback when unset. */
 static double env_double(char const *name, double fallback) noexcept {
     char const *value = env_string(name, nullptr);
     return value ? std::atof(value) : fallback;
 }
 
-/** @brief Parses an unsigned environment variable, or @p fallback when unset. */
+/** Parses an unsigned environment variable, or @p fallback when unset. */
 static std::size_t env_usize(char const *name, std::size_t fallback) noexcept {
     char const *value = env_string(name, nullptr);
     return value ? static_cast<std::size_t>(std::strtoull(value, nullptr, 10)) : fallback;
@@ -560,19 +575,19 @@ int main() {
     replicated_csr_t replicas;
     std::optional<distributed_pool_t> pool;
     std::optional<tf::Executor> taskflow; // ? Spawned for the Taskflow backends
-    if (!topology.try_harvest()) {
+    if (failed(topology.harvest())) {
         std::fprintf(stderr, "Failed to harvest the memory topology\n");
         return EXIT_FAILURE;
     }
     pool.emplace();
-    if (!pool->try_spawn(topology, threads)) {
+    if (failed(pool->spawn(topology, threads))) {
         std::fprintf(stderr, "Failed to spawn the thread pool\n");
         return EXIT_FAILURE;
     }
 
     fu::dynamic_array<counter_t> counters;
     fu::dynamic_array<label_t> labels_a, labels_b;
-    if (!counters.try_resize(threads) || !labels_a.try_resize(vertices) || !labels_b.try_resize(vertices)) {
+    if (failed(counters.resize(threads)) || failed(labels_a.resize(vertices)) || failed(labels_b.resize(vertices))) {
         std::fprintf(stderr, "Failed to allocate the labels\n");
         return EXIT_FAILURE;
     }
@@ -617,8 +632,7 @@ int main() {
     std::size_t passes = 0;
     if (iterations > 0)
         for (; passes < iterations; ++passes) selected->run(context);
-    else
-        do {
+    else do {
             selected->run(context), ++passes;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
     double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() //
@@ -639,7 +653,7 @@ int main() {
 
     if (check) {
         fu::dynamic_array<label_t> serial_a, serial_b;
-        if (!serial_a.try_resize(vertices) || !serial_b.try_resize(vertices)) {
+        if (failed(serial_a.resize(vertices)) || failed(serial_b.resize(vertices))) {
             std::fprintf(stderr, "Failed to allocate the reference labels\n");
             return EXIT_FAILURE;
         }

@@ -1,10 +1,141 @@
-//! Portable building blocks - cache-line padding, spin mutexes, prongs, sync pointers, and splits.
+//! Portable building blocks - cache-line padding, spin mutexes, task ranges, sync pointers, and splits.
 //!
 //! Pure logic with no FFI; mirrors the C++ `types` header.
 
 use core::cell::UnsafeCell;
+use core::ffi::c_int;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Why a call into the C core failed, in the vocabulary the core itself uses.
+///
+/// Mirrors `fu_status_t` value-for-value, so the FFI boundary only retypes. `Unrecognized` covers a
+/// status a newer core reports and this build has no name for.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum Status {
+    /// No reason was reported, or one this build does not name.
+    Unknown = -1,
+    /// An allocation or mapping failed; a smaller request may succeed.
+    BadAlloc = -2,
+    /// A fixed ceiling was reached, so a smaller request will not help either.
+    CapacityExhausted = -3,
+    /// An argument was malformed, out of range, or would overflow a byte count.
+    InvalidArgument = -4,
+    /// The handles or the pool kind cannot serve this call together.
+    ConfigMismatch = -5,
+    /// The pool is already spawned; terminate it first.
+    AlreadySpawned = -6,
+    /// The pool was never spawned.
+    NotSpawned = -7,
+    /// The OS declined to create a thread - a resource limit, or permissions.
+    ThreadRefused = -8,
+    /// The machine could not be described; transient if its CPU set changed mid-probe.
+    TopologyUnavailable = -9,
+    /// A privileged operation was declined.
+    PermissionDenied = -10,
+    /// This build or this machine has no such facility.
+    Unsupported = -11,
+    /// A status this binding has no name for.
+    Unrecognized = i32::MIN,
+}
+
+impl Status {
+    /// Maps a raw `fu_status_t`, keeping an unnamed one rather than guessing.
+    fn from_raw(raw: i32) -> Self {
+        match raw {
+            -1 => Self::Unknown,
+            -2 => Self::BadAlloc,
+            -3 => Self::CapacityExhausted,
+            -4 => Self::InvalidArgument,
+            -5 => Self::ConfigMismatch,
+            -6 => Self::AlreadySpawned,
+            -7 => Self::NotSpawned,
+            -8 => Self::ThreadRefused,
+            -9 => Self::TopologyUnavailable,
+            -10 => Self::PermissionDenied,
+            -11 => Self::Unsupported,
+            _ => Self::Unrecognized,
+        }
+    }
+
+    /// Static, English description; mirrors `fu_status_to_string`.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Unknown => "the core reported no reason",
+            Self::BadAlloc => "an allocation failed",
+            Self::CapacityExhausted => "a fixed capacity was exhausted",
+            Self::InvalidArgument => "an argument was rejected",
+            Self::ConfigMismatch => "the handles cannot serve this call together",
+            Self::AlreadySpawned => "the pool is already spawned",
+            Self::NotSpawned => "the pool was never spawned",
+            Self::ThreadRefused => "the OS declined to create a thread",
+            Self::TopologyUnavailable => "the machine could not be described",
+            Self::PermissionDenied => "a privileged operation was declined",
+            Self::Unsupported => "this build has no such facility",
+            Self::Unrecognized => "an unrecognized status",
+        }
+    }
+}
+
+/// A failure, whether the core reported it or the binding caught it before the call.
+///
+/// `detail` names the symbol or the argument, which is what turns a status into a diagnosis.
+/// Both fields are plain data, so nothing allocates on the failure path - which is what lets this
+/// crate stay `no_std`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Error {
+    /// The identity of the failure, shared with the C interface.
+    pub status: Status,
+    /// The detail the status alone cannot carry.
+    pub detail: &'static str,
+}
+
+impl Error {
+    /// A failure the binding caught before the call crossed, under the status the core would use.
+    pub(crate) const fn new(status: Status, detail: &'static str) -> Self {
+        Self { status, detail }
+    }
+
+    /// Turns a raw status into a `Result`, naming `detail` on failure.
+    pub(crate) fn check(raw: c_int, detail: &'static str) -> Result<()> {
+        if raw == 0 {
+            return Ok(());
+        }
+        Err(Error::new(Status::from_raw(raw), detail))
+    }
+}
+
+impl core::fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "Error({:?}, {:?})", self.status, self.detail)
+    }
+}
+
+/// The result of every fallible call in this crate.
+pub type Result<T> = core::result::Result<T, Error>;
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{}: {}", self.detail, self.status.describe())
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
+
+/// Bytes occupied by `count` elements of `element_bytes` each, refusing a product that would wrap.
+pub fn bytes_for_elements(count: usize, element_bytes: usize) -> Result<usize> {
+    match count.checked_mul(element_bytes) {
+        Some(bytes) => Ok(bytes),
+        None => Err(Error::new(
+            Status::InvalidArgument,
+            "the element count times the element size would wrap",
+        )),
+    }
+}
 
 /// Default alignment for preventing false sharing between threads.
 ///
@@ -30,7 +161,7 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 /// use forkunion::{CacheAligned, ThreadPool, Topology};
 ///
 /// let topology = Topology::new().unwrap();
-/// let mut pool = ThreadPool::try_spawn(&topology, 4).unwrap();
+/// let mut pool = ThreadPool::spawn(&topology, 4).unwrap();
 /// let data: Vec<usize> = (0..1000).collect();
 ///
 /// // Each thread gets its own cache-aligned accumulator
@@ -85,6 +216,7 @@ const _: () = assert!(
 ///
 /// Fast for short critical sections but spins continuously. Use when latency matters
 /// more than CPU usage. Avoid for long critical sections or high contention scenarios.
+#[repr(align(128))]
 pub struct BasicSpinMutex<T, const PAUSE: bool> {
     locked: AtomicBool,
     data: UnsafeCell<T>,
@@ -104,6 +236,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     /// ```
+    #[must_use]
     pub const fn new(data: T) -> Self {
         Self {
             locked: AtomicBool::new(false),
@@ -125,18 +258,20 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// let mut guard = mutex.lock();
     /// *guard = 42;
     /// ```
+    #[must_use]
     pub fn lock(&self) -> BasicSpinMutexGuard<'_, T, PAUSE> {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            // Busy-wait with pause instructions if enabled
-            if PAUSE {
-                core::hint::spin_loop();
+        loop {
+            // The only store in the loop, so contenders spin on a shared line rather than
+            // taking it exclusive on every attempt.
+            if !self.locked.swap(true, Ordering::Acquire) {
+                return BasicSpinMutexGuard { mutex: self };
+            }
+            while self.locked.load(Ordering::Relaxed) {
+                if PAUSE {
+                    core::hint::spin_loop();
+                }
             }
         }
-        BasicSpinMutexGuard { mutex: self }
     }
 
     /// Attempts to acquire the lock without blocking.
@@ -151,19 +286,15 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     ///
     /// let mutex = BasicSpinMutex::<i32, true>::new(0);
     ///
-    /// if let Some(mut guard) = mutex.try_lock() {
+    /// if let Some(mut guard) = mutex.lock_if_free() {
     ///     *guard = 42;
     ///     println!("Lock acquired and value set");
     /// } else {
     ///     println!("Lock is currently held by another thread");
     /// };
     /// ```
-    pub fn try_lock(&self) -> Option<BasicSpinMutexGuard<'_, T, PAUSE>> {
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+    pub fn lock_if_free(&self) -> Option<BasicSpinMutexGuard<'_, T, PAUSE>> {
+        if !self.locked.swap(true, Ordering::Acquire) {
             Some(BasicSpinMutexGuard { mutex: self })
         } else {
             None
@@ -190,6 +321,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     ///
     /// assert!(!mutex.is_locked());
     /// ```
+    #[must_use]
     pub fn is_locked(&self) -> bool {
         self.locked.load(Ordering::Acquire)
     }
@@ -208,6 +340,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// let data = mutex.into_inner();
     /// assert_eq!(data, 42);
     /// ```
+    #[must_use]
     pub fn into_inner(self) -> T {
         self.data.into_inner()
     }
@@ -226,6 +359,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// *mutex.get_mut() = 42;
     /// assert_eq!(*mutex.lock(), 42);
     /// ```
+    #[must_use]
     pub fn get_mut(&mut self) -> &mut T {
         self.data.get_mut()
     }
@@ -248,6 +382,7 @@ impl<'a, T, const PAUSE: bool> BasicSpinMutexGuard<'a, T, PAUSE> {
     /// Returns a reference to the protected data.
     ///
     /// This method is rarely needed since the guard implements `Deref`.
+    #[must_use]
     pub fn get(&self) -> &T {
         unsafe { &*self.mutex.data.get() }
     }
@@ -255,6 +390,7 @@ impl<'a, T, const PAUSE: bool> BasicSpinMutexGuard<'a, T, PAUSE> {
     /// Returns a mutable reference to the protected data.
     ///
     /// This method is rarely needed since the guard implements `DerefMut`.
+    #[must_use]
     pub fn get_mut(&mut self) -> &mut T {
         unsafe { &mut *self.mutex.data.get() }
     }
@@ -296,53 +432,58 @@ impl<'a, T, const PAUSE: bool> Drop for BasicSpinMutexGuard<'a, T, PAUSE> {
 /// ```
 pub type SpinMutex<T> = BasicSpinMutex<T, true>;
 
-/// A "prong" - the tip of a "fork" - pinning a "task" to a "thread" within a "compute domain".
+/// A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
 ///
-/// A `Prong` represents a single unit of work that connects:
-/// - A **task** (what work to do) - identified by `task_index`
-/// - A **thread** (which CPU thread is executing it) - identified by `thread_index`
-/// - A **compute domain** (the same-QoS core cluster it runs on) - identified by `compute_domain_index`
-///
-/// This metadata is essential for topology-aware algorithms, debugging parallel execution,
-/// and understanding load distribution across the thread pool.
-#[derive(Copy, Clone, Debug)]
-pub struct Prong {
-    /// The logical index of the task being processed (0-based)
-    pub task_index: usize,
-    /// The physical thread executing this task (0-based)
-    pub thread_index: usize,
-    /// The compute domain this thread belongs to (a same-QoS core cluster within a memory domain)
-    pub compute_domain_index: usize,
+/// Iterable, so a callback reads `for task in range` rather than rebuilding the bounds. An idle
+/// thread receives a range with `count == 0`, which every dispatch still calls exactly once.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TasksRange {
+    /// The first task index in the run.
+    pub first: usize,
+    /// How many tasks the run covers; zero means an idle thread.
+    pub count: usize,
 }
 
-/// A thread-safe wrapper for raw pointers used in parallel operations.
+impl TasksRange {
+    /// One past the last task index, so `first..end()` is the half-open span.
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.first + self.count
+    }
+
+    /// Whether the run covers no tasks at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The run as a `Range`, for indexing a slice or driving a `for` loop.
+    #[must_use]
+    pub fn range(&self) -> core::ops::Range<usize> {
+        self.first..self.end()
+    }
+}
+
+impl IntoIterator for TasksRange {
+    type Item = usize;
+    type IntoIter = core::ops::Range<usize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.range()
+    }
+}
+
+/// One thread, situated in one compute domain - the "where I am" every callback receives.
 ///
-/// # Safety
-/// This wrapper is only safe when used with NUMA-aware thread pools where
-/// each thread accesses different memory locations - different memory domains.
-
-pub struct SafePtr<T>(*mut T);
-
-unsafe impl<T> Send for SafePtr<T> {}
-unsafe impl<T> Sync for SafePtr<T> {}
-
-impl<T> SafePtr<T> {
-    /// Creates a new SafePtr from a raw pointer.
-    pub fn new(ptr: *mut T) -> Self {
-        SafePtr(ptr)
-    }
-
-    /// Accesses the element at the given index.
-    #[allow(clippy::mut_from_ref)]
-    pub fn get_mut_at(&self, index: usize) -> &mut T {
-        unsafe { &mut *self.0.add(index) }
-    }
-
-    /// Accesses the element.
-    #[allow(clippy::mut_from_ref)]
-    pub fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0 }
-    }
+/// Every dispatch hands its callback two things: the work, and this. A callback placing memory
+/// reads `compute_domain` to find the node it runs on; one indexing per-thread scratch reads
+/// `thread`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ThreadInDomain {
+    /// The physical thread executing the work (0-based).
+    pub thread: usize,
+    /// The compute domain the thread is pinned to - a same-QoS core cluster within a memory domain.
+    pub compute_domain: usize,
 }
 
 /// A thread-safe wrapper around raw pointers for sharing read-only data across threads.
@@ -378,14 +519,8 @@ pub struct SyncConstPtr<T> {
 }
 
 impl<T> SyncConstPtr<T> {
-    /// Creates a new `SyncConstPtr` from a raw pointer.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that:
-    /// - The pointer is valid for the intended usage duration
-    /// - The pointed-to data will not be modified during use
-    /// - The pointer is properly aligned for type `T`
+    /// Wraps a raw pointer; every obligation is discharged at [`get`](Self::get).
+    #[must_use]
     pub fn new(ptr: *const T) -> Self {
         Self { ptr }
     }
@@ -407,12 +542,14 @@ impl<T> SyncConstPtr<T> {
     ///
     /// A reference to the element at the given index.
     #[inline]
+    #[must_use]
     pub unsafe fn get(&self, index: usize) -> &T {
         &*self.ptr.add(index)
     }
 
     /// Returns the raw pointer.
     #[inline]
+    #[must_use]
     pub fn as_ptr(&self) -> *const T {
         self.ptr
     }
@@ -428,6 +565,7 @@ pub struct SyncMutPtr<T> {
 }
 
 impl<T> SyncMutPtr<T> {
+    #[must_use]
     pub const fn new(ptr: *mut T) -> Self {
         Self {
             ptr,
@@ -445,11 +583,13 @@ impl<T> SyncMutPtr<T> {
     /// - Each thread accesses disjoint indices when used concurrently
     /// - The pointer remains valid for the duration of access
     #[inline]
+    #[must_use]
     pub unsafe fn get(&self, index: usize) -> *mut T {
         self.ptr.add(index)
     }
 
     #[inline]
+    #[must_use]
     pub fn as_ptr(&self) -> *mut T {
         self.ptr
     }
@@ -458,10 +598,10 @@ impl<T> SyncMutPtr<T> {
 unsafe impl<T> Send for SyncMutPtr<T> {}
 unsafe impl<T> Sync for SyncMutPtr<T> {}
 
-/// Splits a range of tasks into fair-sized chunks for parallel distribution.
+/// Splits a range of tasks into fair-sized runs for parallel distribution.
 ///
-/// The first `(tasks % threads)` chunks have size `ceil(tasks / threads)`.
-/// The remaining chunks have size `floor(tasks / threads)`.
+/// The first `(tasks % threads)` runs have size `ceil(tasks / threads)`.
+/// The remaining runs have size `floor(tasks / threads)`.
 ///
 /// This ensures optimal load balancing across threads with minimal size variance.
 /// See: <https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/>
@@ -482,6 +622,7 @@ impl IndexedSplit {
     /// # Panics
     ///
     /// Panics if `threads_count` is zero.
+    #[must_use]
     pub fn new(tasks_count: usize, threads_count: usize) -> Self {
         assert!(threads_count > 0, "Threads count must be greater than zero");
         Self {
@@ -492,6 +633,7 @@ impl IndexedSplit {
 
     /// Returns the range for a specific thread index.
     #[inline]
+    #[must_use]
     pub fn get(&self, thread_index: usize) -> core::ops::Range<usize> {
         let begin = self.quotient * thread_index + thread_index.min(self.remainder);
         let count = self.quotient + if thread_index < self.remainder { 1 } else { 0 };
@@ -516,7 +658,7 @@ mod tests {
         // On exclusive pools the work is dispatched at guard construction:
         // the caller can overlap its own work and poll `is_complete`.
         let mut pool =
-            ThreadPool::try_spawn_with_exclusivity(&topology, 4, CallerExclusivity::Exclusive)
+            ThreadPool::spawn_with_exclusivity(&topology, 4, CallerExclusivity::Exclusive)
                 .expect("Failed to create exclusive thread pool");
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
@@ -625,6 +767,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "Threads count must be greater than zero")]
     fn indexed_split_zero_threads() {
-        IndexedSplit::new(10, 0);
+        let _ = IndexedSplit::new(10, 0);
     }
 }

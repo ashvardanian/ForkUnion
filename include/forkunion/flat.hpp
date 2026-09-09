@@ -1,6 +1,8 @@
 /**
- *  @file flat.hpp
  *  @brief The portable `flat_pool`, built on `std::thread`.
+ *  @author Ash Vardanian
+ *  @file include/forkunion/flat.hpp
+ *  @date July 10, 2026
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
@@ -42,7 +44,7 @@ namespace forkunion {
  *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::flat_pool_t pool; // ? Alias to `fu::flat_pool<>` template
- *      if (!pool.try_spawn(allowed_cores_count())) return EXIT_FAILURE;
+ *      if (!pool.spawn(allowed_cores_count())) return EXIT_FAILURE;
  *      pool.for_threads([](std::size_t i) noexcept { std::printf("Hi from thread %zu\n", i); });
  *      return EXIT_SUCCESS;
  *  }
@@ -60,7 +62,7 @@ namespace forkunion {
  *  using fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::flat_pool_t first_pool, second_pool;
- *      if (!first_pool.try_spawn(2) || !second_pool.try_spawn(2, fu::caller_exclusive_k)) return EXIT_FAILURE;
+ *      if (!first_pool.spawn(2) || !second_pool.spawn(2, fu::caller_exclusive_k)) return EXIT_FAILURE;
  *      auto broadcast = second_pool.for_threads([](std::size_t i) noexcept { poll_ssd(i); });
  *      first_pool.for_threads([](std::size_t i) noexcept { poll_nic(i); });
  *      broadcast.join(); // ! Wait for the second pool to finish
@@ -116,25 +118,39 @@ template <                                                  //
 class flat_pool {
 
   public:
+    /** Allocator the pool rebinds to its worker cells - the pool's one allocation. */
     using allocator_t = allocator_type_;
+    /** Functor spinning threads while they wait on an atomic. */
     using micro_yield_t = micro_yield_type_;
+    /** Functor demoting and promoting individual cache lines. */
     using cache_hints_t = cache_hints_type_;
+    /** Tags this pool as the domain-agnostic shape. */
     static constexpr pool_kind_t kind_k = pool_kind_t::flat_k;
+    /** Alignment isolating the pool's atomics onto their own cache lines. */
     static constexpr std::size_t alignment_k = alignment_;
     static_assert(is_power_of_two(alignment_k), "Alignment must be a power of 2");
 
+    /** Unsigned counter width; narrow it below `std::size_t` only to debug wrap-around. */
     using index_t = index_type_;
     static_assert(std::is_unsigned<index_t>::value, "Index type must be an unsigned integer");
-    using epoch_index_t = index_t;      // ? A.k.a. number of previous API calls in [0, UINT_MAX)
-    using generation_t = epoch_index_t; // ? A.k.a. token returned from `unsafe_for_threads`; always odd
-    // ! With small index types (like the `fu8_t`/`fu16_t` debug configs) a worker stalled across
-    // ! exactly 2^bits epochs would alias its `last_epoch` - astronomically unlikely at `size_t`.
-    using thread_index_t = index_t;         // ? A.k.a. "core index" or "thread ID" in [0, threads_count)
-    using compute_domain_index_t = index_t; // ? Dense index in [0, compute_domains_count)
+    /**
+     *  @brief Number of previous API calls, in [0, UINT_MAX).
+     *  @note At the `fu8_t`/`fu16_t` debug widths a worker stalled across exactly 2^bits epochs would
+     *      alias its `last_epoch` - astronomically unlikely at `size_t`.
+     */
+    using epoch_index_t = index_t;
+    /** Token returned from `unsafe_for_threads`; always odd. */
+    using generation_t = epoch_index_t;
+    /** Core index, or thread ID, in [0, threads_count). */
+    using thread_index_t = index_t;
+    /** Dense index in [0, compute_domains_count). */
+    using compute_domain_index_t = index_t;
+    /** Half-open range of tasks handed to one thread. */
     using indexed_split_t = indexed_split<index_t>;
-    using local_thread_t = local_thread<index_t>;
-    using prong_t = prong<index_t>;
-    using claim_t = dynamic_claim<index_t>; // ? One private cursor per thread
+    /** One thread paired with the compute domain it runs on. */
+    using thread_in_domain_t = thread_in_domain<index_t>;
+    /** One private cursor per thread. */
+    using claim_t = dynamic_claim<index_t>;
 
     /**
      *  @brief Everything the pool keeps @b per @b thread, on a cache line of its own.
@@ -142,7 +158,7 @@ class flat_pool {
      *  The claim cursor must not share a line with anything, or the dynamic scheduler reintroduces
      *  the very coherence traffic that giving each thread a private cursor exists to remove. Rather
      *  than allocate a second array beside `std::thread`, both live in one padded cell, so the pool
-     *  still performs exactly one allocation - in `try_spawn`, never on a dispatch path.
+     *  still performs exactly one allocation - in `spawn`, never on a dispatch path.
      *
      *  Cells are indexed by @b thread @b index, so on inclusive pools cell 0 belongs to the caller
      *  and holds no `std::thread`. That costs one cell and buys `claim` and `worker` the same index.
@@ -154,16 +170,20 @@ class flat_pool {
     struct worker_cell_t {
         /** @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`. */
         claim_t claim {};
-        /** @brief The worker thread; default-constructed, and left so for the caller's own cell. */
+        /** The worker thread; default-constructed, and left so for the caller's own cell. */
         std::thread worker {};
     };
     static_assert(sizeof(worker_cell_t) <= alignment_k, "A worker cell must fit within one stride");
 
+    /** The pool's allocator rebound to the padded per-thread cells. */
     using worker_cell_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<worker_cell_t>;
+    /** The pool's single buffer: one worker cell per `alignment_k` stride. */
     using worker_cells_t = dynamic_padded_array<worker_cell_t, worker_cell_allocator_t>;
 
-    using punned_fork_context_t = void *;                                 // ? Pointer to the on-stack lambda
-    using trampoline_t = void (*)(punned_fork_context_t, thread_index_t); // ? Wraps lambda's `operator()`
+    /** Pointer to the on-stack fork lambda. */
+    using punned_fork_context_t = void *;
+    /** Wraps the lambda's `operator()`. */
+    using trampoline_t = void (*)(punned_fork_context_t, thread_index_t);
 
     static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
                   "Yield must be callable as `yield(watched_atomic, observed_value, thread_index)`");
@@ -172,27 +192,27 @@ class flat_pool {
 
   private:
     // Thread-pool-specific variables:
-    /** @brief Allocator backing the pool's single worker-cells allocation. */
+    /** Allocator backing the pool's single worker-cells allocation. */
     allocator_t allocator_ {};
-    /** @brief One padded cell per thread: its `std::thread` and its claim cursor. */
+    /** One padded cell per thread: its `std::thread` and its claim cursor. */
     worker_cells_t workers_ {};
-    /** @brief Total threads in the pool, including the caller on inclusive pools. */
+    /** Total threads in the pool, including the caller on inclusive pools. */
     thread_index_t threads_count_ {0};
-    /** @brief Whether the caller thread is counted as one of the contributors. */
+    /** Whether the caller thread is counted as one of the contributors. */
     caller_exclusivity_t exclusivity_ {caller_inclusive_k};
-    /** @brief How long to nap in microseconds while `chill_k`, waiting for work. */
+    /** How long to nap in microseconds while `chill_k`, waiting for work. */
     std::size_t sleep_length_micros_ {0};
-    /** @brief Lifecycle switch between spinning (`grind_k`), sleeping (`chill_k`), and exiting (`die_k`). */
+    /** Lifecycle switch between spinning at `grind_k`, sleeping at `chill_k`, and exiting at `die_k`. */
     alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
 
     // Task-specific variables:
-    /** @brief Type-erased pointer to the caller's on-stack fork lambda. */
+    /** Type-erased pointer to the caller's on-stack fork lambda. */
     punned_fork_context_t fork_state_ {nullptr};
-    /** @brief Invokes the punned fork lambda for a given thread index. */
+    /** Invokes the punned fork lambda for a given thread index. */
     trampoline_t fork_trampoline_ {nullptr};
-    /** @brief Countdown of contributors still running; the one reaching zero signals completion. */
+    /** Countdown of contributors still running; the one reaching zero signals completion. */
     alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
-    /** @brief Generation clock: odd while a fork is in flight, even when idle. */
+    /** Generation clock: odd while a fork is in flight, even when idle. */
     alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
 
   public:
@@ -210,29 +230,29 @@ class flat_pool {
      */
     std::size_t memory_usage() const noexcept { return sizeof(flat_pool) + workers_.size() * workers_.stride(); }
 
-    /** @brief Checks if the thread-pool's core synchronization points are lock-free. */
+    /** Checks if the thread-pool's core synchronization points are lock-free. */
     bool is_lock_free() const noexcept { return mood_.is_lock_free() && threads_to_sync_.is_lock_free(); }
 
     /**
      *  @brief Returns the memory domain this thread-pool is pinned to.
-     *  @retval -1 as this pool is not memory-domain-aware.
+     *  @return -1, since this pool is not memory-domain-aware.
      */
     constexpr memory_domain_id_t memory_domain_id() const noexcept { return -1; }
 
     /**
      *  @brief Returns the first thread index in the thread-pool.
-     *  @retval 0 as this pool isn't intended for compute_domain/distributed topologies.
+     *  @return 0, since this pool is not built for compute-domain or distributed topologies.
      */
     constexpr thread_index_t first_thread() const noexcept { return 0; }
 
-    /** @brief Exposes a thread's private claim cursor. Use with caution. */
+    /** Exposes a thread's private claim cursor. Use with caution. */
     claim_t &unsafe_dynamic_claim_ref(thread_index_t const thread) noexcept { return workers_[thread].claim; }
 
 #pragma region Core API
 
     /**
      *  @brief Returns the number of threads in the thread-pool, including the main thread.
-     *  @retval 0 if the thread-pool is not initialized, 1 if only the main thread is used.
+     *  @return The thread count, 0 if the pool is not initialized and 1 if only the main thread is used.
      *  @note This API is @b not synchronized.
      */
     thread_index_t threads_count() const noexcept { return threads_count_; }
@@ -247,28 +267,28 @@ class flat_pool {
      *  @brief Creates a thread-pool with the given number of threads.
      *  @param[in] threads The number of threads to be used.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
-     *  @retval false if the number of threads is zero or the "workers" allocation failed.
-     *  @retval true if the thread-pool was created successfully, started, and is ready to use.
+     *  @return False if the number of threads is zero or the "workers" allocation failed, true if the
+     *      thread-pool was created successfully, started, and is ready to use.
      *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
      */
-    bool try_spawn(                   //
+    [[nodiscard]] status_t spawn(     //
         thread_index_t const threads, //
         caller_exclusivity_t const exclusivity = caller_inclusive_k) noexcept {
 
-        if (threads == 0) return false;        // ! Can't have zero threads working on something
-        if (threads_count_ != 0) return false; // ! Already initialized
+        if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
+        if (threads_count_ != 0) return status_t::already_spawned_k;
 
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (threads == 1 && use_caller_thread) {
             threads_count_ = 1;
-            return true; // ! The current thread will always be used, and allocates nothing
+            return status_t::success_k; // ! The caller is the pool, and allocates nothing
         }
 
         // Allocate the thread pool: one padded cell per thread, holding its worker and its cursor.
         // This is the pool's only allocation, and `for_n_dynamic` performs none of its own. Striding
         // by `alignment_k` is what keeps two threads' cursors off a shared cache line.
         worker_cells_t cells {worker_cell_allocator_t {allocator_}, alignment_k};
-        if (!cells.try_resize(threads)) return false; // ! Allocation failed
+        if (status_t const grew = cells.resize(threads); failed(grew)) return grew;
 
         // Before we start the threads, make sure we set some of the shared
         // state variables that will be used in the `_worker_loop` function.
@@ -308,10 +328,10 @@ class flat_pool {
             mood_.store(mood_t::die_k, std::memory_order_release);
             for (thread_index_t j = 0; j < i; ++j) workers_[j + use_caller_thread].worker.join();
             reset_on_failure();
-            return false;
+            return status_t::thread_refused_k;
         }
 
-        return true;
+        return status_t::success_k;
     }
 
     /**
@@ -334,7 +354,7 @@ class flat_pool {
     /**
      *  @brief Stops all threads and deallocates the thread-pool after the last call finishes.
      *  @note Can be called from @b any thread at any time.
-     *  @note Must `try_spawn` again to re-use the pool.
+     *  @note Must `spawn` again to re-use the pool.
      *
      *  When and how @b NOT to use this function:
      *  - as a synchronization point between concurrent tasks.
@@ -390,7 +410,7 @@ class flat_pool {
         mood_.store(mood_t::chill_k, std::memory_order_release);
     }
 
-    /** @brief Helper function to create a spin mutex with same yield characteristics. */
+    /** Helper function to create a spin mutex with same yield characteristics. */
     static spin_mutex<micro_yield_t, alignment_k> make_mutex() noexcept { return {}; }
 
 #pragma endregion Control Flow
@@ -398,9 +418,9 @@ class flat_pool {
 #pragma region Indexed Task Scheduling
 
     /**
-     *  @brief Distributes @p `n` similar duration calls between threads in slices, as opposed to individual indices.
+     *  @brief Distributes @p n similar duration calls between threads in slices, as opposed to individual indices.
      *  @param[in] n The total length of the range to split between threads.
-     *  @param[in] fork The callback object, receiving the first @b `prong_t` and the slice length.
+     *  @param[in] fork The callback object, receiving a @b tasks_range_t and a @b thread_in_domain_t.
      */
     template <typename fork_type_ = dummy_lambda_t>
     FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
@@ -411,13 +431,13 @@ class flat_pool {
     }
 
     /**
-     *  @brief Distributes @p `n` similar duration calls between threads.
+     *  @brief Distributes @p n similar duration calls between threads.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving @b `prong_t` or a call index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b thread_in_domain_t.
      *
      *  Is designed for a "balanced" workload, where all threads have roughly the same amount of work.
      *  @sa `for_n_dynamic` for a more dynamic workload.
-     *  The @p fork is called @p `n` times, and each thread receives a slice of consecutive tasks.
+     *  The @p fork is called @p n times, and each thread receives a slice of consecutive tasks.
      *  @sa `for_slices` if you prefer to receive workload slices over individual indices.
      */
     template <typename fork_type_ = dummy_lambda_t>
@@ -431,7 +451,7 @@ class flat_pool {
     /**
      *  @brief Executes uneven tasks on all threads, greedying for work.
      *  @param[in] n The number of times to call the @p fork.
-     *  @param[in] fork The callback object, receiving the `prong_t` or the task index as an argument.
+     *  @param[in] fork The callback object, receiving a task index and a @b thread_in_domain_t.
      *  @sa `for_n` for a more "balanced" evenly-splittable workload.
      */
     template <typename fork_type_ = dummy_lambda_t>
@@ -524,7 +544,7 @@ class flat_pool {
             micro_yield(epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
     }
 
-    /** @brief Blocks the calling thread until the currently broadcasted task finishes. */
+    /** Blocks the calling thread until the currently broadcasted task finishes. */
     void unsafe_join() noexcept {
         epoch_index_t const current_epoch = epoch_.load(std::memory_order_acquire);
         if (current_epoch & 1u) unsafe_join(static_cast<generation_t>(current_epoch)); // ? Even means idle
@@ -535,8 +555,8 @@ class flat_pool {
 #pragma region ComputeDomains Compatibility
 
     /**
-     *  @brief Number of individual sub-pool with the same NUMA-locality and QoS.
-     *  @retval 1 constant for compatibility.
+     *  @brief Number of individual sub-pools with the same NUMA-locality and QoS.
+     *  @return 1, as this pool spans a single compute domain.
      */
     constexpr index_t compute_domains_count() const noexcept { return 1; }
 
@@ -552,7 +572,7 @@ class flat_pool {
     }
 
     /**
-     *  @brief Converts a @p `global_thread_index` to a local thread index within a @b compute_domain.
+     *  @brief Converts a @p global_thread_index to a local thread index within a @b compute_domain.
      *  @return Same value as `global_thread_index`, as we only support one compute_domain.
      */
     constexpr thread_index_t thread_local_index(thread_index_t global_thread_index,
@@ -564,7 +584,7 @@ class flat_pool {
 #pragma endregion ComputeDomains Compatibility
 
   private:
-    /** @brief Clears the fork state and trampoline between dispatches. */
+    /** Clears the fork state and trampoline between dispatches. */
     void _reset_fork() noexcept {
         fork_state_ = nullptr;
         fork_trampoline_ = nullptr;
@@ -578,7 +598,7 @@ class flat_pool {
     template <typename fork_type_>
     static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, thread_index_t thread_index) noexcept {
         fork_type_ &lambda_object = *static_cast<fork_type_ *>(punned_lambda_pointer);
-        lambda_object(local_thread_t {thread_index, 0});
+        lambda_object(thread_in_domain_t {thread_index, 0});
     }
 
     /**
@@ -632,7 +652,7 @@ using flat_pool_t = flat_pool<>;
 #pragma region Concepts
 #if FU_DETECT_CONCEPTS_
 
-/** @brief Does nothing on every thread. The default fork for a `broadcast_join` that only needs the join. */
+/** Does nothing on every thread. The default fork for a `broadcast_join` that only needs the join. */
 struct broadcasted_noop_t {
     template <typename index_type_>
     void operator()(index_type_) const noexcept

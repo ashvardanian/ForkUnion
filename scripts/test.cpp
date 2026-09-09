@@ -1,10 +1,22 @@
+/**
+ *  @brief Unit and stress tests for the pools, the harvested topology, and the parallel algorithms.
+ *  @author Ash Vardanian
+ *  @file scripts/test.cpp
+ *  @date May 2, 2025
+ *
+ *  Every test is a `static void test_*` reached through the `unit_tests` and `stress_tests` tables in
+ *  `main`, so a test absent from its table does not run - the tables are the only index that cannot
+ *  drift from what executes. Asserts stay live whatever the build type, which is what the `#undef
+ *  NDEBUG` below buys: a failure that only reproduces in Release is the one worth catching.
+ */
 #include <cstdio>  // `std::printf`, `std::fprintf`
 #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
 #include <cstring> // `std::strrchr`
 
-#include <vector>      // `std::vector`
 #include <algorithm>   // `std::sort`
+#include <bit>         // `std::bit_floor`
 #include <type_traits> // `std::is_integral`, `std::is_enum`
+#include <vector>      // `std::vector`
 
 #include <forkunion.hpp>
 
@@ -29,7 +41,7 @@ namespace fu = ashvardanian::forkunion;
 #define FU_TEST_SKIP_STRESS_ 0
 #endif
 
-/** @brief Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
+/** Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
 template <typename value_type_>
 static void format_value_(char *buffer, std::size_t capacity, value_type_ const &value) noexcept {
     if constexpr (std::is_same<value_type_, bool>::value)
@@ -42,11 +54,10 @@ static void format_value_(char *buffer, std::size_t capacity, value_type_ const 
         std::snprintf(buffer, capacity, "%lld", static_cast<long long>(value));
     else if constexpr (std::is_integral<value_type_>::value)
         std::snprintf(buffer, capacity, "%llu", static_cast<unsigned long long>(value));
-    else
-        std::snprintf(buffer, capacity, "?");
+    else std::snprintf(buffer, capacity, "?");
 }
 
-/** @brief Prints a located `FAIL` and exits; the preceding `Running ...` line already names the test. */
+/** Prints a located `FAIL` and exits; the preceding `Running ...` line already names the test. */
 [[noreturn]] static void report_failure_(char const *file, int line, char const *expr, char const *detail) noexcept {
     fu::logging_colors_t colors;
     char const *slash = std::strrchr(file, '/');
@@ -61,7 +72,7 @@ static void expect_(bool condition, char const *expr, char const *file, int line
     if (!condition) report_failure_(file, line, expr, "");
 }
 
-/** @brief Compares two values, printing both sides on mismatch; `==` and `!=` share this path. */
+/** Compares two values, printing both sides on mismatch; `==` and `!=` share this path. */
 template <typename a_type_, typename b_type_>
 static void expect_cmp_(bool ok, a_type_ const &a, b_type_ const &b, char const *expr, char const *file,
                         int line) noexcept {
@@ -73,15 +84,25 @@ static void expect_cmp_(bool ok, a_type_ const &a, b_type_ const &b, char const 
     report_failure_(file, line, expr, detail);
 }
 
-/** @brief Notes a skipped test inline; the runner still prints `PASS` after the test returns. */
+/** Notes a skipped test inline; the runner still prints `PASS` after the test returns. */
 static void skip_(char const *reason) noexcept {
     fu::logging_colors_t colors;
     std::printf("%s(skip: %s)%s ", colors.dim(), reason, colors.reset());
 }
 
+/** Evaluates each side once, so a read-modify-write may sit inside the comparison. */
+template <typename a_type_, typename b_type_>
+static void expect_eq_(a_type_ const &a, b_type_ const &b, char const *expr, char const *file, int line) noexcept {
+    expect_cmp_(a == b, a, b, expr, file, line);
+}
+template <typename a_type_, typename b_type_>
+static void expect_ne_(a_type_ const &a, b_type_ const &b, char const *expr, char const *file, int line) noexcept {
+    expect_cmp_(a != b, a, b, expr, file, line);
+}
+
 #define expect(cond) expect_((cond), #cond, __FILE__, __LINE__)
-#define expect_eq(a, b) expect_cmp_((a) == (b), (a), (b), #a " == " #b, __FILE__, __LINE__)
-#define expect_ne(a, b) expect_cmp_((a) != (b), (a), (b), #a " != " #b, __FILE__, __LINE__)
+#define expect_eq(a, b) expect_eq_((a), (b), #a " == " #b, __FILE__, __LINE__)
+#define expect_ne(a, b) expect_ne_((a), (b), #a " != " #b, __FILE__, __LINE__)
 #define fail(reason) report_failure_(__FILE__, __LINE__, (reason), "")
 #define skip(reason)   \
     do {               \
@@ -90,7 +111,7 @@ static void skip_(char const *reason) noexcept {
     } while (0)
 
 #if FU_ON_POSIX
-/** @brief Adds a backtrace to a fatal signal; the flushed `Running ...` line names the test. */
+/** Adds a backtrace to a fatal signal; the flushed `Running ...` line names the test. */
 extern "C" void on_fatal_signal_(int signal_number) noexcept {
     ssize_t const written = ::write(STDERR_FILENO, "\nCRASH - backtrace:\n", 20);
     (void)written; // ? Best-effort in a handler; still re-raise below
@@ -134,7 +155,7 @@ template struct fu::distributed_pool<>;
 #endif
 
 /**
- *  @brief Exhausts every (tasks, threads) pair in the index space, checking the split is a partition.
+ *  @brief Exhausts every tasks-and-threads pair in the index space, checking the split is a partition.
  *
  *  Every task index must fall in bounds and be visited exactly once across the per-thread subranges;
  *  a gap or an overlap here would mean lost or double-dispatched work in every static scheduler.
@@ -165,7 +186,7 @@ void test_indexed_split() noexcept {
 }
 
 /**
- *  @brief Exhausts every (start, end, seed) triple in the index space, checking each walk permutes.
+ *  @brief Exhausts every start-end-seed triple in the index space, checking each walk permutes.
  *
  *  Counting alone can't tell a permutation from a walk that revisits some values and skips others,
  *  so each value's first visit is recorded - a revisit makes a stealing thread drain a victim twice.
@@ -217,7 +238,7 @@ void test_coprime_permutation() noexcept {
  */
 static void test_topology_invariants() noexcept {
     fu::machine_topology_t topology;
-    if (!topology.try_harvest()) skip("no topology"); // ? No harvest on this host; nothing to check
+    if (fu::failed(topology.harvest())) skip("no topology"); // ? No harvest on this host; nothing to check
 
     std::size_t const compute_domains = topology.compute_domains_count();
     std::size_t const memory_domains = topology.memory_domains_count();
@@ -256,7 +277,7 @@ constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
  *  its pool through a maker and spawns it on `maker.scope()`, so the same body runs against the
  *  flat, colocated, and distributed pools without knowing which one it drives.  */
 
-/** @brief Makes `flat_pool_t`s scoped to a thread count - the allowed cores, times oversubscription. */
+/** Makes `flat_pool_t`s scoped to a thread count - the allowed cores, times oversubscription. */
 struct make_pool_t {
     fu::flat_pool_t construct() const noexcept { return fu::flat_pool_t(); }
     std::size_t scope(std::size_t oversubscription = 1) const noexcept {
@@ -267,7 +288,7 @@ struct make_pool_t {
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 static fu::machine_topology_t machine_topology;
 
-/** @brief Makes `colocated_pool_t`s scoped to the machine's first compute domain. */
+/** Makes `colocated_pool_t`s scoped to the machine's first compute domain. */
 struct make_colocated_pool_t {
     fu::colocated_pool_t construct() const noexcept { return fu::colocated_pool_t("forkunion"); }
     fu::compute_domain_t scope(std::size_t = 0) const noexcept {
@@ -275,7 +296,7 @@ struct make_colocated_pool_t {
     }
 };
 
-/** @brief Makes `distributed_pool_t`s scoped to the whole harvested topology. */
+/** Makes `distributed_pool_t`s scoped to the whole harvested topology. */
 struct make_distributed_pool_t {
     fu::distributed_pool_t construct() const noexcept { return fu::distributed_pool_t("forkunion"); }
     fu::machine_topology_t const &scope(std::size_t = 0) const noexcept { return machine_topology; }
@@ -316,19 +337,19 @@ static void test_fabric_level_derivation() noexcept {
 }
 
 /**
- *  @brief A harvested fabric must cover every reachable edge with sane bounds and leave
- *      unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
- *      guests legitimately measure every edge the same.
+ *  A harvested fabric must cover every reachable edge with sane bounds and leave
+ *  unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
+ *  guests legitimately measure every edge the same.
  */
 static void test_measured_fabric() noexcept {
     fu::machine_topology_t const &topology = machine_topology;
     alignas(fu::default_alignment_k) fu::distributed_pool<fu::preferred_yield_t> pool;
-    expect(pool.try_spawn(topology));
+    expect(fu::succeeded(pool.spawn(topology)));
 
     fu::measured_fabric_t fabric;
     expect(fabric.memory_latency(fu::compute_domain_index_t {}, fu::memory_domain_index_t {}) == 0);
     expect(fabric.memory_levels_count() == 1); // ? Unharvested: zeros everywhere, one tier
-    expect(fabric.try_harvest(topology, pool));
+    expect(fu::succeeded(fabric.harvest(topology, pool)));
     expect_eq(fabric.compute_domains_count(), topology.compute_domains_count());
     expect_eq(fabric.memory_domains_count(), topology.memory_domains_count());
 
@@ -376,48 +397,48 @@ static void test_measured_fabric() noexcept {
     expect(some_domain_is_fastest);
 
     // Bulk-snapshot semantics: a second harvest replaces the first and stays sane.
-    expect(fabric.try_harvest(topology, pool));
+    expect(fu::succeeded(fabric.harvest(topology, pool)));
     expect(fabric.memory_latency(fu::compute_domain_index_t {},
                                  topology.local_memory_of(fu::compute_domain_index_t {})) > 0);
 }
 #endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 
-/** @brief Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
-static void test_try_spawn_zero() noexcept {
+/** Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
+static void test_spawn_zero() noexcept {
     fu::flat_pool_t pool;
-    expect(!pool.try_spawn(0u));
+    expect(fu::failed(pool.spawn(0u)));
 }
 
-/** @brief The default spawn - one thread per allowed core - must succeed on every pool type. */
+/** The default spawn - one thread per allowed core - must succeed on every pool type. */
 template <typename make_pool_type_ = make_pool_t>
-static void test_try_spawn_success() noexcept {
+static void test_spawn_success() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 }
 
-/** @brief The pool is the single source of truth for exclusivity, even across re-spawns. */
+/** The pool is the single source of truth for exclusivity, even across re-spawns. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_caller_exclusivity_query() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
 
-    expect(pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
+    expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_inclusive_k)));
     expect_eq(pool.caller_exclusivity(), fu::caller_inclusive_k);
 
     // Re-spawn with the opposite mode: the query must follow, not a stale cache
     pool.terminate();
-    expect(pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_exclusive_k)));
     expect_eq(pool.caller_exclusivity(), fu::caller_exclusive_k);
 }
 
-/** @brief Make sure that `for_threads` is called from each thread. */
+/** Make sure that `for_threads` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_threads() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::vector<std::atomic<bool>> visited(pool.threads_count());
     pool.for_threads([&](std::size_t const thread_index) noexcept { //
@@ -427,13 +448,13 @@ static void test_for_threads() noexcept {
     for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
 }
 
-/** @brief Make sure that `unsafe_for_threads` is called from each thread. */
+/** Make sure that `unsafe_for_threads` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_unsafe_for_threads() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::vector<std::atomic<bool>> visited(pool.threads_count());
     auto on_each_thread = [&](std::size_t const thread_index) noexcept {
@@ -445,7 +466,7 @@ static void test_unsafe_for_threads() noexcept {
     for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
 }
 
-/** @brief Tests generation token polling with two caller-exclusive pools. */
+/** Tests generation token polling with two caller-exclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_generation_polling() noexcept {
 
@@ -455,8 +476,8 @@ static void test_generation_polling() noexcept {
 
     // Polling before join is the caller-exclusive pattern: on inclusive pools the
     // caller owes a slice that only runs inside `unsafe_join`.
-    expect(pool_a.try_spawn(maker.scope(), fu::caller_exclusive_k));
-    expect(pool_b.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(fu::succeeded(pool_a.spawn(maker.scope(), fu::caller_exclusive_k)));
+    expect(fu::succeeded(pool_b.spawn(maker.scope(), fu::caller_exclusive_k)));
 
     std::vector<std::atomic<bool>> visited_a(pool_a.threads_count());
     std::vector<std::atomic<bool>> visited_b(pool_b.threads_count());
@@ -488,7 +509,7 @@ static void test_generation_polling() noexcept {
     for (std::size_t i = 0; i < pool_b.threads_count(); ++i) expect(visited_b[i]);
 }
 
-/** @brief Verifies guard timing: dispatch at construction on exclusive pools, at join on inclusive. */
+/** Verifies guard timing: dispatch at construction on exclusive pools, at join on inclusive. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_guard_lifecycle() noexcept {
 
@@ -497,7 +518,7 @@ static void test_guard_lifecycle() noexcept {
     // On exclusive pools the work starts at construction, before `join`:
     {
         auto pool = maker.construct();
-        expect(pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+        expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_exclusive_k)));
 
         std::atomic<std::size_t> visited_count {0};
         auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
@@ -512,7 +533,7 @@ static void test_guard_lifecycle() noexcept {
     // On inclusive pools no work may start before `join`:
     {
         auto pool = maker.construct();
-        expect(pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
+        expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_inclusive_k)));
 
         std::atomic<std::size_t> visited_count {0};
         auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
@@ -526,14 +547,14 @@ static void test_guard_lifecycle() noexcept {
     }
 }
 
-/** @brief Dropping the guard without an explicit `join` must still join in the destructor. */
+/** Dropping the guard without an explicit `join` must still join in the destructor. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_guard_destructor_joins() noexcept {
 
     auto maker = make_pool_type_ {};
     for (fu::caller_exclusivity_t const exclusivity : {fu::caller_exclusive_k, fu::caller_inclusive_k}) {
         auto pool = maker.construct();
-        expect(pool.try_spawn(maker.scope(), exclusivity));
+        expect(fu::succeeded(pool.spawn(maker.scope(), exclusivity)));
 
         std::atomic<std::size_t> visited_count {0};
         auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
@@ -542,13 +563,13 @@ static void test_guard_destructor_joins() noexcept {
     }
 }
 
-/** @brief Covers the caller-as-contributor protocol on inclusive pools. */
+/** Covers the caller-as-contributor protocol on inclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_generation_inclusive() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
+    expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_inclusive_k)));
 
     std::vector<std::atomic<bool>> visited(pool.threads_count());
     auto mark_visited = [&](std::size_t const thread_index) noexcept {
@@ -564,10 +585,10 @@ static void test_generation_inclusive() noexcept {
     pool.unsafe_join(generation); // ? Idempotent: double-join must be a no-op
 }
 
-/** @brief Degenerate single-thread inclusive pool: the caller is the only contributor. */
+/** Degenerate single-thread inclusive pool: the caller is the only contributor. */
 static void test_generation_single_thread() noexcept {
     fu::flat_pool_t pool;
-    expect(pool.try_spawn(1)); // ? Default is caller-inclusive: zero workers
+    expect(fu::succeeded(pool.spawn(1))); // ? Default is caller-inclusive: zero workers
 
     std::atomic<bool> visited {false};
     auto mark_visited = [&](std::size_t) noexcept { visited.store(true, std::memory_order_relaxed); };
@@ -580,10 +601,10 @@ static void test_generation_single_thread() noexcept {
     expect(visited.load(std::memory_order_relaxed));
 }
 
-/** @brief The exclusive mirror: one lone worker, while the caller only polls and never contributes. */
+/** The exclusive mirror: one lone worker, while the caller only polls and never contributes. */
 static void test_generation_single_thread_exclusive() noexcept {
     fu::flat_pool_t pool;
-    expect(pool.try_spawn(1, fu::caller_exclusive_k));
+    expect(fu::succeeded(pool.spawn(1, fu::caller_exclusive_k)));
 
     std::atomic<bool> visited {false};
     auto mark_visited = [&](std::size_t) noexcept { visited.store(true, std::memory_order_relaxed); };
@@ -595,15 +616,15 @@ static void test_generation_single_thread_exclusive() noexcept {
     expect(visited.load(std::memory_order_relaxed));
 }
 
-/** @brief Hammers the dispatch/join race window with tight iterations on exclusive pools. */
+/** Hammers the dispatch/join race window with tight iterations on exclusive pools. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_generation_stress() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
     auto polled_pool = maker.construct();
-    expect(pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
-    expect(polled_pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_exclusive_k)));
+    expect(fu::succeeded(polled_pool.spawn(maker.scope(), fu::caller_exclusive_k)));
 
     std::atomic<std::size_t> counter {0};
     auto count_up = [&](std::size_t) noexcept { counter.fetch_add(1, std::memory_order_relaxed); };
@@ -625,15 +646,15 @@ static void test_generation_stress() noexcept {
     expect_eq(counter.load(std::memory_order_relaxed), expected);
 }
 
-/** @brief Overlaps an inclusive and an exclusive pool from one caller, through the raw token API. */
+/** Overlaps an inclusive and an exclusive pool from one caller, through the raw token API. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_exclusivity() noexcept {
 
     auto maker = make_pool_type_ {};
     auto first_pool = maker.construct();
     auto second_pool = maker.construct();
-    expect(first_pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
-    expect(second_pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(fu::succeeded(first_pool.spawn(maker.scope(), fu::caller_inclusive_k)));
+    expect(fu::succeeded(second_pool.spawn(maker.scope(), fu::caller_exclusive_k)));
 
     std::size_t const first_size = first_pool.threads_count();
     std::size_t const second_size = second_pool.threads_count();
@@ -659,15 +680,15 @@ static void test_exclusivity() noexcept {
     }
 }
 
-/** @brief The same overlap through the guard API: inline lambdas re-packaged into returned objects. */
+/** The same overlap through the guard API: inline lambdas re-packaged into returned objects. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_exclusivity_inline_guards() noexcept {
 
     auto maker = make_pool_type_ {};
     auto first_pool = maker.construct();
     auto second_pool = maker.construct();
-    expect(first_pool.try_spawn(maker.scope(), fu::caller_inclusive_k));
-    expect(second_pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(fu::succeeded(first_pool.spawn(maker.scope(), fu::caller_inclusive_k)));
+    expect(fu::succeeded(second_pool.spawn(maker.scope(), fu::caller_exclusive_k)));
 
     std::size_t const first_size = first_pool.threads_count();
     std::size_t const second_size = second_pool.threads_count();
@@ -684,19 +705,19 @@ static void test_exclusivity_inline_guards() noexcept {
     for (std::size_t i = 0; i < total_size; ++i) expect(visited[i]);
 }
 
-/** @brief Make sure that `for_n` is called from each thread. */
+/** Make sure that `for_n` is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_uncomfortable_input_size() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::size_t const max_input_size = pool.threads_count() * 3; // Arbitrary size, larger than the number of threads
     for (std::size_t input_size = 0; input_size <= max_input_size; ++input_size) {
         std::atomic<bool> out_of_bounds(false);
         std::atomic<std::size_t> executed(0);
-        auto probe = [&](std::size_t const task) noexcept {
+        auto probe = [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
             if (task >= input_size) out_of_bounds.store(true, std::memory_order_relaxed);
             executed.fetch_add(1, std::memory_order_relaxed);
         };
@@ -715,53 +736,50 @@ static void test_uncomfortable_input_size() noexcept {
 /**
  *  @brief One `for_slices` dispatch of @p n tasks must partition [0, n) into non-empty slices.
  *
- *  A slice callback receives the first prong and a length, so a broken split shows up as an index
- *  covered twice, never, or past the range. Empty slices must be skipped, not dispatched, and no
- *  dispatch may produce more slices than there are threads.
+ *  A slice callback receives a `tasks_range_t`, so a broken split shows up as an index covered
+ *  twice, never, or past the range. Every thread is dispatched exactly once, an idle one with an
+ *  empty range, and no dispatch may produce more ranges than there are threads.
  */
 template <typename pool_type_>
 static void expect_for_slices_cover_(pool_type_ &pool, std::size_t const n) noexcept {
-    using prong_t = typename pool_type_::prong_t;
-
     std::vector<std::atomic<unsigned>> executions(n);
     std::atomic<std::size_t> slices_count {0};
-    std::atomic<bool> saw_empty_slice {false}, out_of_bounds {false};
+    std::atomic<bool> out_of_bounds {false};
 
-    pool.for_slices(n, [&](prong_t prong, std::size_t count) noexcept {
-        if (count == 0) saw_empty_slice.store(true, std::memory_order_relaxed);
-        std::size_t const first = static_cast<std::size_t>(prong.task);
-        if (first + count > n) {
+    pool.for_slices(n, [&](fu::tasks_range_t range, fu::thread_in_domain_t) noexcept {
+        if (range.first + range.count > n) {
             out_of_bounds.store(true, std::memory_order_relaxed);
             return;
         }
         slices_count.fetch_add(1, std::memory_order_relaxed);
-        for (std::size_t i = 0; i != count; ++i) executions[first + i].fetch_add(1, std::memory_order_relaxed);
+        for (std::size_t const task : range) executions[task].fetch_add(1, std::memory_order_relaxed);
     });
 
-    expect(!saw_empty_slice.load(std::memory_order_relaxed));
+    // Every thread is dispatched exactly once, whether or not it drew any tasks.
+    expect_eq(slices_count.load(std::memory_order_relaxed), pool.threads_count());
     expect(!out_of_bounds.load(std::memory_order_relaxed));
     expect(slices_count.load(std::memory_order_relaxed) <= pool.threads_count());
     for (std::size_t i = 0; i < n; ++i) expect_eq(executions[i].load(std::memory_order_relaxed), 1u);
 }
 
-/** @brief Sweeps `for_slices` through the awkward sizes around the thread count and one large run. */
+/** Sweeps `for_slices` through the awkward sizes around the thread count and one large run. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_slices() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::size_t const threads = pool.threads_count();
     std::size_t const sizes[] = {0, 1, threads - 1, threads, threads + 1, 3 * threads, default_parallel_tasks_k};
     for (std::size_t const n : sizes) expect_for_slices_cover_(pool, n);
 }
 
-/** @brief A joined token must stay complete even while a newer fork is in flight. */
+/** A joined token must stay complete even while a newer fork is in flight. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_stale_generation_completes() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope(), fu::caller_exclusive_k));
+    expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_exclusive_k)));
 
     std::atomic<std::size_t> counter {0};
     auto count_up = [&](std::size_t) noexcept { counter.fetch_add(1, std::memory_order_relaxed); };
@@ -792,30 +810,33 @@ static void test_spawn_terminate_churn() noexcept {
     constexpr std::size_t rounds_k = 16;
     std::atomic<std::size_t> executed {0};
     for (std::size_t round = 0; round != rounds_k; ++round) {
-        expect(pool.try_spawn(maker.scope()));
+        expect(fu::succeeded(pool.spawn(maker.scope())));
         executed.store(0, std::memory_order_relaxed);
         std::size_t const n = pool.threads_count() + round % 3; // ? Vary the remainder across rounds
-        pool.for_n(n, [&](std::size_t) noexcept { executed.fetch_add(1, std::memory_order_relaxed); });
+        pool.for_n(
+            n, [&](std::size_t, fu::thread_in_domain_t) noexcept { executed.fetch_add(1, std::memory_order_relaxed); });
         expect_eq(executed.load(std::memory_order_relaxed), n);
         pool.terminate();
     }
 }
 
-/** @brief Two caller threads drive two independent pools at once; no cross-pool state may bleed. */
+/** Two caller threads drive two independent pools at once; no cross-pool state may bleed. */
 static void test_concurrent_caller_threads() noexcept {
     constexpr std::size_t tasks_k = 4096;
     std::atomic<bool> first_ok {true}, second_ok {true};
 
     auto drive = [&](std::atomic<bool> &ok) noexcept {
         fu::flat_pool_t pool;
-        if (!pool.try_spawn(fu::allowed_cores_count())) {
+        if (fu::failed(pool.spawn(fu::allowed_cores_count()))) {
             ok.store(false, std::memory_order_relaxed);
             return;
         }
         std::atomic<std::size_t> counter {0};
         for (std::size_t round = 0; round != 8; ++round) {
             counter.store(0, std::memory_order_relaxed);
-            pool.for_n(tasks_k, [&](std::size_t) noexcept { counter.fetch_add(1, std::memory_order_relaxed); });
+            pool.for_n(tasks_k, [&](std::size_t, fu::thread_in_domain_t) noexcept {
+                counter.fetch_add(1, std::memory_order_relaxed);
+            });
             if (counter.load(std::memory_order_relaxed) != tasks_k) {
                 ok.store(false, std::memory_order_relaxed);
                 return;
@@ -831,7 +852,7 @@ static void test_concurrent_caller_threads() noexcept {
     expect(second_ok.load(std::memory_order_relaxed));
 }
 
-/** @brief Convenience structure to ensure we output match locations to independent cache lines. */
+/** Convenience structure to ensure we output match locations to independent cache lines. */
 struct alignas(fu::default_alignment_k) aligned_visit_t {
     std::size_t task = 0;
     bool operator<(aligned_visit_t const &other) const noexcept { return task < other.task; }
@@ -840,7 +861,7 @@ struct alignas(fu::default_alignment_k) aligned_visit_t {
     bool operator==(std::size_t other_index) const noexcept { return task == other_index; }
 };
 
-/** @brief Sorts the visit records in place and checks they cover [0, size) exactly once. */
+/** Sorts the visit records in place and checks they cover [0, size) exactly once. */
 bool contains_iota(std::vector<aligned_visit_t> &visited) noexcept {
     std::sort(visited.begin(), visited.end());
     std::size_t visited_progress = 0;
@@ -852,7 +873,7 @@ bool contains_iota(std::vector<aligned_visit_t> &visited) noexcept {
     return true;
 }
 
-/** @brief Make sure that `for_n` is called the right number of times with the right prong IDs. */
+/** Make sure that `for_n` is called the right number of times with the right task indices. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_n() noexcept {
 
@@ -861,30 +882,29 @@ static void test_for_n() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     using pool_t = decltype(pool);
-    using prong_t = typename pool_t::prong_t;
 
-    pool.for_n(default_parallel_tasks_k, [&](prong_t prong) noexcept {
+    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
         // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
-        visited[count_populated].task = prong.task;
+        visited[count_populated].task = task;
     });
 
-    // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
-    pool.for_n(default_parallel_tasks_k, [&](prong_t prong) noexcept {
+    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
         // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
-        visited[count_populated].task = prong.task;
+        visited[count_populated].task = task;
     });
 
-    // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 
@@ -892,35 +912,36 @@ static void test_for_n() noexcept {
     std::vector<aligned_visit_t> visited_threads(pool.threads_count());
     constexpr std::size_t invalid_task = std::numeric_limits<std::size_t>::max();
     for (auto &visit : visited_threads) visit.task = invalid_task;
-    pool.for_n(default_parallel_tasks_k, // ? Could have been an arbitrary number `>= pool.threads_count()`
-               [&](prong_t prong) noexcept { visited_threads[prong.thread].task = prong.thread; });
+    pool.for_n(
+        default_parallel_tasks_k, // ? Could have been an arbitrary number `>= pool.threads_count()`
+        [&](std::size_t const, fu::thread_in_domain_t at) noexcept { visited_threads[at.thread].task = at.thread; });
 
     expect(contains_iota(visited_threads));
 }
 
-/** @brief Make sure that `for_n_dynamic` is called the right number of times with the right prong IDs. */
+/** Make sure that `for_n_dynamic` is called the right number of times with the right task indices. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_n_dynamic() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter(0);
-    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
+    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
 
-    // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
-    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
+    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
@@ -943,12 +964,11 @@ static void test_for_n_dynamic_stealing() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::size_t const threads = pool.threads_count();
     if (threads < 2) skip("needs 2+ threads"); // ? Nobody to steal from, and nobody to steal
 
-    using pool_prong_t = typename std::remove_reference<decltype(pool)>::type::prong_t;
     constexpr std::size_t tasks_k = 8192;
 
     std::atomic<std::size_t> total {0};
@@ -956,14 +976,14 @@ static void test_for_n_dynamic_stealing() noexcept {
     std::vector<std::atomic<unsigned>> executions(tasks_k);
     for (auto &e : executions) e.store(0, std::memory_order_relaxed);
 
-    pool.for_n_dynamic(tasks_k, [&](pool_prong_t prong) noexcept {
+    pool.for_n_dynamic(tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
         // Thread 0 crawls: a spin, not a sleep, so the pool's own yields don't mask the stall.
-        if (prong.thread == 0) {
+        if (at.thread == 0) {
             volatile std::size_t sink = 0;
             for (std::size_t i = 0; i < 200000; ++i) sink = sink + i;
             thread_0_runs.fetch_add(1, std::memory_order_relaxed);
         }
-        executions[prong.task].fetch_add(1, std::memory_order_relaxed);
+        executions[task].fetch_add(1, std::memory_order_relaxed);
         total.fetch_add(1, std::memory_order_relaxed);
     });
 
@@ -991,7 +1011,6 @@ static void test_for_n_dynamic_stealing() noexcept {
  */
 template <typename pool_type_>
 static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n, bool const crawl) noexcept {
-    using prong_t = typename pool_type_::prong_t;
     std::size_t const domains = pool.compute_domains_count();
 
     std::atomic<std::size_t> total {0};
@@ -999,17 +1018,17 @@ static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n,
     std::vector<std::atomic<unsigned>> executions(n);
     for (auto &e : executions) e.store(0, std::memory_order_relaxed);
 
-    pool.for_n_dynamic(n, [&](prong_t prong) noexcept {
+    pool.for_n_dynamic(n, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
         // ? A spin, not a sleep, so the pool's yields don't mask it. Keyed on the executing thread's
         // ? domain, so a stealer from elsewhere runs the stolen task at full speed.
-        if (crawl && prong.compute_domain == 0) {
+        if (crawl && at.compute_domain == 0) {
             volatile std::size_t sink = 0;
             for (std::size_t i = 0; i < 200000; ++i) sink = sink + i;
         }
-        std::size_t const owner_domain = fu::indexed_split<std::size_t>(n, domains).index_of(prong.task);
-        if (owner_domain != static_cast<std::size_t>(prong.compute_domain))
+        std::size_t const owner_domain = fu::indexed_split<std::size_t>(n, domains).index_of(task);
+        if (owner_domain != static_cast<std::size_t>(at.compute_domain))
             cross_domain_runs.fetch_add(1, std::memory_order_relaxed);
-        executions[prong.task].fetch_add(1, std::memory_order_relaxed);
+        executions[task].fetch_add(1, std::memory_order_relaxed);
         total.fetch_add(1, std::memory_order_relaxed);
     });
 
@@ -1030,7 +1049,7 @@ static void test_distributed_for_n_dynamic_exhaustive() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::size_t const threads = pool.threads_count();
     std::size_t const domains = pool.compute_domains_count();
@@ -1044,19 +1063,19 @@ static void test_distributed_for_n_dynamic_exhaustive() noexcept {
     }
 }
 
-/** @brief Stress-tests the implementation by oversubscribing the number of threads. */
+/** Stress-tests the implementation by oversubscribing the number of threads. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_oversubscribed_threads() noexcept {
     constexpr std::size_t oversubscription = 3;
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope(oversubscription)));
+    expect(fu::succeeded(pool.spawn(maker.scope(oversubscription))));
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter(0);
     thread_local volatile std::size_t some_local_work = 0;
-    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
+    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         // Perform some weird amount of work, that is not very different between consecutive tasks.
         for (std::size_t i = 0; i != task % oversubscription; ++i) some_local_work = some_local_work + i * i;
 
@@ -1065,7 +1084,7 @@ static void test_oversubscribed_threads() noexcept {
         visited[count_populated].task = task;
     });
 
-    // Make sure that all prong IDs are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 }
@@ -1081,14 +1100,14 @@ template <typename make_pool_type_ = make_pool_t>
 static void test_sleep_wake() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter {0};
     for (std::size_t batch = 0; batch != 4; ++batch) {
         pool.sleep(100); // ? Nap in 100 us intervals until the next dispatch
         counter.store(0, std::memory_order_relaxed);
-        pool.for_n(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
+        pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
             std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
             visited[count_populated].task = task;
         });
@@ -1097,18 +1116,18 @@ static void test_sleep_wake() noexcept {
     }
 }
 
-/** @brief Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
+/** Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
 template <bool should_restart_, typename make_pool_type_ = make_pool_t>
 static void test_mixed_restart() noexcept {
 
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
-    expect(pool.try_spawn(maker.scope()));
+    expect(fu::succeeded(pool.spawn(maker.scope())));
 
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter(0);
 
-    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
+    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
@@ -1119,12 +1138,12 @@ static void test_mixed_restart() noexcept {
     // Make sure that the pool can be reset and reused
     if (should_restart_) {
         pool.terminate();
-        expect(pool.try_spawn(maker.scope()));
+        expect(fu::succeeded(pool.spawn(maker.scope())));
     }
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
-    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task) noexcept {
+    pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
@@ -1147,18 +1166,17 @@ static void stress_test_composite(std::size_t const threads_count, std::size_t c
 
     using pool_t = pool_type_;
     using index_t = typename pool_t::index_t;
-    using prong_t = fu::prong<index_t>;
 
     pool_t pool;
-    expect(pool.try_spawn(static_cast<index_t>(threads_count)));
+    expect(fu::succeeded(pool.spawn(static_cast<index_t>(threads_count))));
 
     std::atomic<std::size_t> counter(0);
     std::vector<aligned_visit_t> visited(parallel_tasks_count);
 
     // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
-    auto log_visit = [&](prong_t prong) noexcept {
+    auto log_visit = [&](index_t const task, typename pool_t::thread_in_domain_t) noexcept {
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
-        visited[count_populated].task = prong.task;
+        visited[count_populated].task = task;
     };
     auto dispatch_and_verify = [&](auto dispatch) noexcept {
         counter = 0;
@@ -1174,14 +1192,14 @@ static void stress_test_composite(std::size_t const threads_count, std::size_t c
     }
 }
 
-/** @brief `replicated_array` is one uninitialized per-domain buffer; the caller fills and reads its slices. */
+/** `replicated_array` is one uninitialized per-domain buffer; the caller fills and reads its slices. */
 static void test_replicated_array() noexcept {
     fu::machine_topology_t topology;
-    if (!topology.try_harvest()) skip("no topology"); // ? No topology here; nothing to check
+    if (fu::failed(topology.harvest())) skip("no topology"); // ? No topology here; nothing to check
 
     std::size_t const n = 4096;
     fu::replicated_array<std::uint32_t> replicas;
-    expect(replicas.try_resize_uninitialized(topology, n));
+    expect(fu::succeeded(replicas.resize_uninitialized(topology, n)));
     expect_eq(replicas.size(), n);
     expect_eq(replicas.memory_domains_count(), topology.memory_domains_count());
 
@@ -1198,7 +1216,7 @@ static void test_replicated_array() noexcept {
 
     // A single-element replica is the smallest shape the stride math must survive.
     fu::replicated_array<std::uint32_t> tiny;
-    expect(tiny.try_resize_uninitialized(topology, 1));
+    expect(fu::succeeded(tiny.resize_uninitialized(topology, 1)));
     expect_eq(tiny.size(), 1u);
     for (std::size_t domain = 0; domain < tiny.memory_domains_count(); ++domain)
         tiny.at(static_cast<fu::memory_domain_index_t>(domain), 0) = static_cast<std::uint32_t>(domain);
@@ -1206,14 +1224,14 @@ static void test_replicated_array() noexcept {
         expect_eq(tiny.at(static_cast<fu::memory_domain_index_t>(domain), 0), domain);
 }
 
-/** @brief `sharded_array` stores each element once; `location_of`/`logical_index_of` round-trip the segment map. */
+/** `sharded_array` stores each element once; `location_of`/`logical_index_of` round-trip the segment map. */
 static void test_sharded_array() noexcept {
     fu::machine_topology_t topology;
-    if (!topology.try_harvest()) skip("no topology");
+    if (fu::failed(topology.harvest())) skip("no topology");
 
     std::size_t const n = 4096;
     fu::sharded_array<std::uint32_t> shards;
-    expect(shards.try_resize_uninitialized(topology, n));
+    expect(fu::succeeded(shards.resize_uninitialized(topology, n)));
 
     // Each element lives exactly once: the shard lengths sum to the logical length.
     std::size_t footprint = 0;
@@ -1235,7 +1253,7 @@ static void test_sharded_array() noexcept {
 
     // A logical length shorter than the domain count leaves trailing shards empty, never negative.
     fu::sharded_array<std::uint32_t> tiny;
-    expect(tiny.try_resize_uninitialized(topology, 1));
+    expect(fu::succeeded(tiny.resize_uninitialized(topology, 1)));
     expect_eq(tiny.segment(), 1u);
     std::size_t tiny_footprint = 0;
     for (std::size_t domain = 0; domain < tiny.memory_domains_count(); ++domain)
@@ -1247,17 +1265,17 @@ static void test_sharded_array() noexcept {
 }
 
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
-/** @brief One distributed pool of exactly @p threads workers must dispatch every task exactly once. */
+/** One distributed pool of exactly @p threads workers must dispatch every task exactly once. */
 static void expect_spawn_shape_dispatches_(std::size_t const threads) noexcept {
     constexpr std::size_t tasks_k = 4096;
     std::vector<aligned_visit_t> visited(tasks_k);
     std::atomic<std::size_t> counter {0};
 
     fu::distributed_pool_t pool("forkunion");
-    expect(pool.try_spawn(machine_topology, threads));
+    expect(fu::succeeded(pool.spawn(machine_topology, threads)));
     expect_eq(static_cast<std::size_t>(pool.threads_count()), threads); // ! A shape was silently resized
 
-    pool.for_n_dynamic(tasks_k, [&](std::size_t const task) noexcept {
+    pool.for_n_dynamic(tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
@@ -1279,14 +1297,12 @@ static void test_distributed_spawn_shapes() noexcept {
 }
 #endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 
-/**
- *  @brief Enhanced NUMA topology logging function using the logger class.
- */
+/** Enhanced NUMA topology logging function using the logger class. */
 void log_numa_topology() noexcept {
     fu::logging_colors_t colors;
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
     // Harvest topology
-    if (!machine_topology.try_harvest()) {
+    if (fu::failed(machine_topology.harvest())) {
         std::fprintf(stderr, "%sX Failed to harvest NUMA topology%s\n", colors.bold_red(), colors.reset());
         std::exit(EXIT_FAILURE);
     }
@@ -1314,37 +1330,211 @@ void log_numa_topology() noexcept {
  */
 static void test_caller_affinity_preserved() noexcept {
     fu::core_mask_t original;
-    if (!fu::try_capture_thread_cores(original)) skip("no affinity control"); // ? Nothing to restrict
-    if (original.count() < 2) skip("too few cores");                          // ? Too narrow to narrow further
+    if (fu::failed(fu::capture_thread_cores(original))) skip("no affinity control");
+    if (original.count() < 2) skip("too few cores"); // ? Too narrow to narrow further
 
     // Narrow the caller the way `taskset` would: keep the two lowest allowed cores.
     fu::core_mask_t narrowed;
-    expect(narrowed.try_resize());
+    expect(fu::succeeded(narrowed.resize()));
     std::size_t kept = 0;
     for (std::size_t cpu = 0; cpu < original.capacity() && kept < 2; ++cpu)
         if (original.contains(static_cast<fu::core_id_t>(cpu))) narrowed.add(static_cast<fu::core_id_t>(cpu)), ++kept;
 
-    bool succeeded = fu::try_restore_thread_cores(narrowed); // ? Applies `narrowed` to this thread
+    bool succeeded = fu::succeeded(fu::restore_thread_cores(narrowed)); // ? Applies `narrowed`
     if (succeeded) {
         fu::machine_topology_t topology;
-        succeeded = topology.try_harvest() && topology.logical_cores_count() == 2;
+        succeeded = fu::succeeded(topology.harvest()) && topology.logical_cores_count() == 2;
 
         if (succeeded) {
             fu::distributed_pool_t pool;
-            succeeded = pool.try_spawn(topology, 2);
+            succeeded = fu::succeeded(pool.spawn(topology, 2));
             if (succeeded) succeeded = pool.all_threads_pinned();
             pool.terminate();
         }
 
         // The caller must be back on the two cores it narrowed itself to, not on the machine's cores.
         fu::core_mask_t afterwards;
-        succeeded = succeeded && fu::try_capture_thread_cores(afterwards) && afterwards.count() == 2;
+        succeeded = succeeded && fu::succeeded(fu::capture_thread_cores(afterwards)) && afterwards.count() == 2;
     }
 
-    (void)fu::try_restore_thread_cores(original); // ? Leave the process as we found it
+    (void)fu::restore_thread_cores(original); // ? Leave the process as we found it
     expect(succeeded);
 }
 #endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
+
+#if defined(__cpp_lib_atomic_ref) && defined(__cpp_lib_bit_cast)
+
+/** The standard operations a reference spells by hand: every return value is the word before. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref_words() noexcept {
+    std::uint32_t word = 5;
+    atomic_ref_<std::uint32_t> reference(word);
+    expect_eq(reference.exchange(9u, std::memory_order_acq_rel), 5u);
+    expect_eq(reference.fetch_add(3u, std::memory_order_acquire), 9u);
+    expect_eq(reference.fetch_sub(2u, std::memory_order_relaxed), 12u);
+    expect_eq(reference.load(std::memory_order_acquire), 10u);
+    std::uint32_t expected = 10;
+    expect(reference.compare_exchange_strong(expected, 11u, std::memory_order_acq_rel, std::memory_order_acquire));
+    expected = 3;
+    expect(!reference.compare_exchange_weak(expected, 12u, std::memory_order_acquire, std::memory_order_relaxed));
+    expect_eq(expected, 11u); // ? The failed compare reports what it saw
+    reference.store(6u, std::memory_order_release);
+    expect_eq(word, 6u);
+
+    std::uint64_t bits = 0xF0F0;
+    atomic_ref_<std::uint64_t> bits_reference(bits);
+    expect_eq(bits_reference.fetch_and(0xFF00ull, std::memory_order_acq_rel), 0xF0F0ull);
+    expect_eq(bits_reference.fetch_or(0x1ull, std::memory_order_acq_rel), 0xF000ull);
+    expect_eq(bits, 0xF001ull);
+
+    bool flag = false;
+    atomic_ref_<bool> flag_reference(flag);
+    expect_eq(flag_reference.exchange(true, std::memory_order_acquire), false);
+    flag_reference.store(false, std::memory_order_release);
+    expect_eq(flag, false);
+}
+
+/** The operations past the standard - no-return forms, `fetch_max`/`fetch_min`, the conditional
+ *  adds - each refusing exactly at its bound, unsigned and signed alike. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref_extensions() noexcept {
+    std::uint32_t word = 11;
+    atomic_ref_<std::uint32_t> reference(word);
+    expect_eq(reference.fetch_max(7u, std::memory_order_acq_rel), 11u);  // ? Loses: writes nothing
+    expect_eq(reference.fetch_max(12u, std::memory_order_acq_rel), 11u); // ? Wins
+    expect_eq(reference.fetch_min(3u, std::memory_order_relaxed), 12u);
+    reference.add(4u, std::memory_order_release);
+    reference.sub(2u, std::memory_order_relaxed);
+    expect_eq(word, 5u);
+    expect_eq(reference.fetch_add_if_at_most(3u, 8u, std::memory_order_acq_rel), 5u);  // 5 + 3 <= 8: adds
+    expect_eq(reference.fetch_add_if_at_most(1u, 8u, std::memory_order_acq_rel), 8u);  // 8 + 1 > 8: refuses
+    expect_eq(reference.fetch_sub_if_at_least(8u, 0u, std::memory_order_acquire), 8u); // 8 - 8 >= 0: subtracts
+    expect_eq(reference.fetch_sub_if_at_least(1u, 0u, std::memory_order_acquire), 0u); // 0 - 1 < 0: refuses
+    expect_eq(reference.fetch_add_if_at_most(9u, 8u, std::memory_order_acq_rel), 0u);  // ? An operand past the limit
+    expect_eq(reference.fetch_sub_if_at_least(1u, ~0u, std::memory_order_acquire),
+              0u); // ? A floor plus operand that wraps
+    expect_eq(word, 0u);
+
+    std::uint64_t bits = 0xF0F0;
+    atomic_ref_<std::uint64_t> bits_reference(bits);
+    bits_reference.clear_bits(0xF0u, std::memory_order_release);
+    bits_reference.set_bits(0x0Fu, std::memory_order_relaxed);
+    expect_eq(bits, 0xF00Full);
+
+    std::int64_t signed_word = -5;
+    atomic_ref_<std::int64_t> signed_reference(signed_word);
+    expect_eq(signed_reference.fetch_max(std::int64_t(-9), std::memory_order_acquire), std::int64_t(-5));
+    expect_eq(signed_reference.fetch_sub_if_at_least(std::int64_t(3), std::int64_t(-8), std::memory_order_acq_rel),
+              std::int64_t(-5));
+    expect_eq(signed_reference.fetch_sub_if_at_least(std::int64_t(1), std::int64_t(-8), std::memory_order_acq_rel),
+              std::int64_t(-8)); // ? -8 - 1 < -8: refuses
+    expect_eq(signed_word, std::int64_t(-8));
+}
+
+/** The free functions post through any reference: the standard's with the result discarded, a
+ *  ForkUnion one through its own verb, and the bounded forms refuse exactly at their bounds. */
+static void check_atomic_verbs() noexcept {
+    std::uint32_t word = 5;
+    fu::atomic_add(std::atomic_ref<std::uint32_t>(word), 4u, std::memory_order_release);
+    fu::atomic_sub(fu::standard_atomic_ref<std::uint32_t>(word), 2u, std::memory_order_relaxed);
+    fu::atomic_set_bits(std::atomic_ref<std::uint32_t>(word), 8u, std::memory_order_relaxed);
+    fu::atomic_clear_bits(fu::standard_atomic_ref<std::uint32_t>(word), 1u, std::memory_order_relaxed);
+    expect_eq(word, 14u); // ? 5 + 4 - 2 = 7, then 7 | 8 = 15, then 15 & ~1 = 14
+    expect_eq(fu::atomic_fetch_add_if_at_most(std::atomic_ref<std::uint32_t>(word), 2u, 16u, std::memory_order_acq_rel),
+              14u);
+    expect_eq(fu::atomic_fetch_add_if_at_most(fu::standard_atomic_ref<std::uint32_t>(word), 1u, 16u,
+                                              std::memory_order_acq_rel),
+              16u);
+    expect_eq(
+        fu::atomic_fetch_sub_if_at_least(std::atomic_ref<std::uint32_t>(word), 16u, 0u, std::memory_order_acquire),
+        16u);
+    expect_eq(fu::atomic_fetch_sub_if_at_least(fu::standard_atomic_ref<std::uint32_t>(word), 1u, 0u,
+                                               std::memory_order_acquire),
+              0u);
+}
+
+/** The shapes the indexes lean on, under contention - a dispenser by the no-return add, a bounded
+ *  claim by the conditional add, a high-water mark by `fetch_max`, a lock by `exchange` - each
+ *  with an exact expected total. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref_under_contention() noexcept {
+    constexpr std::size_t threads_k = 8, rounds_k = 20'000, claim_limit_k = threads_k * rounds_k / 3;
+    alignas(128) std::uint32_t dispensed = 0;
+    alignas(128) std::uint32_t claimed = 0;
+    alignas(128) std::uint64_t high_water = 0;
+    alignas(128) bool lock = false;
+    alignas(128) std::uint64_t guarded = 0;
+
+    fu::flat_pool_t pool;
+    expect(fu::succeeded(pool.spawn(threads_k)));
+    pool.for_threads([&](std::size_t const thread) noexcept {
+        for (std::size_t round = 0; round != rounds_k; ++round) {
+            atomic_ref_<std::uint32_t>(dispensed).add(1u, std::memory_order_relaxed);
+            (void)atomic_ref_<std::uint32_t>(claimed).fetch_add_if_at_most(1u, claim_limit_k,
+                                                                           std::memory_order_acq_rel);
+            (void)atomic_ref_<std::uint64_t>(high_water)
+                .fetch_max(thread * rounds_k + round, std::memory_order_relaxed);
+            while (atomic_ref_<bool>(lock).exchange(true, std::memory_order_acquire)) {}
+            ++guarded;
+            atomic_ref_<bool>(lock).store(false, std::memory_order_release);
+        }
+    });
+
+    expect_eq(dispensed, threads_k * rounds_k);
+    expect_eq(claimed, claim_limit_k); // ? The bounded claim stops exactly at the limit
+    expect_eq(high_water, threads_k * rounds_k - 1);
+    expect_eq(guarded, threads_k * rounds_k); // ? The lock serialized every increment
+}
+
+/** Runs one reference through the contract where the machine admits it - the bits it declares are
+ *  the same ones a CPU class needs before the runtime dispatch may pick it; a missing one skips by name. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref() noexcept {
+    fu::capabilities_t const needed = atomic_ref_<std::uint32_t>::capabilities_k;
+    unsigned const missing = needed & ~fu::runtime_capabilities();
+    if (missing) {
+        char reason[64];
+        std::snprintf(reason, sizeof(reason), "no %s",
+                      fu::capability_name(static_cast<fu::capabilities_t>(std::bit_floor(missing))));
+        skip_(reason);
+        return;
+    }
+    check_atomic_ref_words<atomic_ref_>();
+    check_atomic_ref_extensions<atomic_ref_>();
+    check_atomic_ref_under_contention<atomic_ref_>();
+}
+
+/** Every reference the build spells - the standard one everywhere, the instruction-set ones where
+ *  inline assembly exists - each run only where the machine admits it. */
+static void test_atomic_refs() noexcept {
+    check_atomic_ref<fu::standard_atomic_ref>();
+    check_atomic_verbs();
+#if FU_TARGET_X86_CMPCCXADD
+    check_atomic_ref<fu::x86_cmpccxadd_atomic_ref>();
+#endif
+#if FU_TARGET_X86_RAOINT
+    check_atomic_ref<fu::x86_raoint_atomic_ref>();
+#endif
+#if FU_TARGET_ARM64_LSE
+    check_atomic_ref<fu::arm64_lse_atomic_ref>();
+#endif
+#if FU_TARGET_ARM64_RCPC
+    check_atomic_ref<fu::arm64_rcpc_atomic_ref>();
+#endif
+#if FU_TARGET_RISC5_ATOMIC
+    check_atomic_ref<fu::risc5_atomic_ref>();
+#endif
+#if FU_TARGET_RISC5_ZACAS
+    check_atomic_ref<fu::risc5_zacas_atomic_ref>();
+#endif
+}
+
+#else
+
+/** The references need the library's `std::atomic_ref` and `std::bit_cast`; say so rather than vanish. */
+static void test_atomic_refs() noexcept { skip("no `std::atomic_ref`"); }
+
+#endif // __cpp_lib_atomic_ref && __cpp_lib_bit_cast
 
 int main(void) {
     install_crash_handlers_();
@@ -1361,13 +1551,14 @@ int main(void) {
         // Helpers
         {"`indexed_split` helpers", test_indexed_split},            //
         {"`coprime_permutation` ranges", test_coprime_permutation}, //
+        {"`atomic_ref` contracts per ISA", test_atomic_refs},       //
         // Hardware topology, on every host that reports one
         {"`machine_topology` invariants", test_topology_invariants}, //
         {"`replicated_array` per-domain buffer", test_replicated_array},
         {"`sharded_array` segment round-trip", test_sharded_array},
         // Actual thread-pools
-        {"`try_spawn` zero threads", test_try_spawn_zero},                  //
-        {"`try_spawn` normal", test_try_spawn_success},                     //
+        {"`spawn` zero threads", test_spawn_zero},                          //
+        {"`spawn` normal", test_spawn_success},                             //
         {"`caller_exclusivity` query", test_caller_exclusivity_query},      //
         {"`for_threads` dispatch", test_for_threads},                       //
         {"`unsafe_for_threads` dispatch", test_unsafe_for_threads},         //
@@ -1394,7 +1585,7 @@ int main(void) {
         {"`terminate` and re-spawn churn", test_spawn_terminate_churn},               //
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
         // Uniform Memory Access (UMA) tests for threads pinned to the same NUMA node
-        {"UMA `try_spawn` normal", test_try_spawn_success<make_colocated_pool_t>},
+        {"UMA `spawn` normal", test_spawn_success<make_colocated_pool_t>},
         {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_colocated_pool_t>},
         {"UMA `for_threads` dispatch", test_for_threads<make_colocated_pool_t>},
         {"UMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_colocated_pool_t>},
@@ -1417,7 +1608,7 @@ int main(void) {
         {"UMA `terminate` and re-spawn", test_mixed_restart<true, make_colocated_pool_t>},
         {"UMA `terminate` and re-spawn churn", test_spawn_terminate_churn<make_colocated_pool_t>},
         // Non-Uniform Memory Access (NUMA) tests for threads addressing all NUMA nodes
-        {"NUMA `try_spawn` normal", test_try_spawn_success<make_distributed_pool_t>},
+        {"NUMA `spawn` normal", test_spawn_success<make_distributed_pool_t>},
         {"NUMA `caller_exclusivity` query", test_caller_exclusivity_query<make_distributed_pool_t>},
         {"NUMA `for_threads` dispatch", test_for_threads<make_distributed_pool_t>},
         {"NUMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_distributed_pool_t>},
