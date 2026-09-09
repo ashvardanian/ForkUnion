@@ -1417,8 +1417,8 @@ static void check_atomic_ref_extensions() noexcept {
 
     std::uint64_t bits = 0xF0F0;
     atomic_ref_<std::uint64_t> bits_reference(bits);
-    bits_reference.clear(0xF0u, std::memory_order_release);
-    bits_reference.set(0x0Fu, std::memory_order_relaxed);
+    bits_reference.clear_bits(0xF0u, std::memory_order_release);
+    bits_reference.set_bits(0x0Fu, std::memory_order_relaxed);
     expect_eq(bits, 0xF00Full);
 
     std::int64_t signed_word = -5;
@@ -1429,6 +1429,28 @@ static void check_atomic_ref_extensions() noexcept {
     expect_eq(signed_reference.fetch_sub_if_at_least(std::int64_t(1), std::int64_t(-8), std::memory_order_acq_rel),
               std::int64_t(-8)); // ? -8 - 1 < -8: refuses
     expect_eq(signed_word, std::int64_t(-8));
+}
+
+/** The free functions post through any reference: the standard's with the result discarded, a
+ *  ForkUnion one through its own verb, and the bounded forms refuse exactly at their bounds. */
+static void check_atomic_verbs() noexcept {
+    std::uint32_t word = 5;
+    fu::atomic_add(std::atomic_ref<std::uint32_t>(word), 4u, std::memory_order_release);
+    fu::atomic_sub(fu::standard_atomic_ref<std::uint32_t>(word), 2u, std::memory_order_relaxed);
+    fu::atomic_set_bits(std::atomic_ref<std::uint32_t>(word), 8u, std::memory_order_relaxed);
+    fu::atomic_clear_bits(fu::standard_atomic_ref<std::uint32_t>(word), 1u, std::memory_order_relaxed);
+    expect_eq(word, 14u); // ? 5 + 4 - 2 = 7, then 7 | 8 = 15, then 15 & ~1 = 14
+    expect_eq(fu::atomic_fetch_add_if_at_most(std::atomic_ref<std::uint32_t>(word), 2u, 16u, std::memory_order_acq_rel),
+              14u);
+    expect_eq(fu::atomic_fetch_add_if_at_most(fu::standard_atomic_ref<std::uint32_t>(word), 1u, 16u,
+                                              std::memory_order_acq_rel),
+              16u);
+    expect_eq(
+        fu::atomic_fetch_sub_if_at_least(std::atomic_ref<std::uint32_t>(word), 16u, 0u, std::memory_order_acquire),
+        16u);
+    expect_eq(fu::atomic_fetch_sub_if_at_least(fu::standard_atomic_ref<std::uint32_t>(word), 1u, 0u,
+                                               std::memory_order_acquire),
+              0u);
 }
 
 /** The shapes the indexes lean on, under contention - a dispenser by the no-return add, a bounded
@@ -1486,6 +1508,7 @@ static void check_atomic_ref() noexcept {
  *  inline assembly exists - each run only where the machine admits it. */
 static void test_atomic_refs() noexcept {
     check_atomic_ref<fu::standard_atomic_ref>();
+    check_atomic_verbs();
 #if FU_TARGET_X86_CMPCCXADD
     check_atomic_ref<fu::x86_cmpccxadd_atomic_ref>();
 #endif

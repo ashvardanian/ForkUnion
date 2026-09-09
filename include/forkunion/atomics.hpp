@@ -8,7 +8,7 @@
  *
  *  `standard_atomic_ref` is the in-house `std::atomic_ref`: the standard operations verbatim plus
  *  the ones the standard lacks - `fetch_max`/`fetch_min` ahead of C++26, the no-return `add`/`sub`/
- *  `set`/`clear`, and the conditional `fetch_add_if_at_most`/`fetch_sub_if_at_least` - spelled
+ *  `set_bits`/`clear_bits`, and the conditional `fetch_add_if_at_most`/`fetch_sub_if_at_least` - spelled
  *  portably over compare-exchange. The instruction-set references share that interface and replace
  *  the loops and the compiler's flag-dependent lowering with instructions:
  *
@@ -81,6 +81,70 @@ constexpr std::memory_order failure_order(std::memory_order success) noexcept {
     return success;
 }
 
+/** A reference spelling the verbs past the standard's - every reference in this header does,
+ *  `std::atomic_ref` does not - so code holding either posts through the functions below. */
+template <typename reference_type_, typename value_type_>
+concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
+    reference.add(value, std::memory_order_relaxed);
+    reference.sub(value, std::memory_order_relaxed);
+    reference.set_bits(value, std::memory_order_relaxed);
+    reference.clear_bits(value, std::memory_order_relaxed);
+    reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
+    reference.fetch_sub_if_at_least(value, value, std::memory_order_relaxed);
+};
+
+/** The no-return read-modify-writes for any reference: the reference's own verb where it spells
+ *  one, the standard's returning form with the result discarded otherwise. */
+template <typename reference_type_, typename value_type_>
+void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.add(operand, order);
+    else reference.fetch_add(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.sub(operand, order);
+    else reference.fetch_sub(operand, order);
+}
+template <typename reference_type_, typename value_type_>
+void atomic_set_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.set_bits(bits, order);
+    else reference.fetch_or(bits, order);
+}
+template <typename reference_type_, typename value_type_>
+void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.clear_bits(bits, order);
+    else reference.fetch_and(static_cast<value_type_>(~bits), order);
+}
+
+/** The bounded read-modify-writes for any reference: adds @p operand only if the sum stays at
+ *  most @p limit, or subtracts it only if the difference stays at least @p floor, returning the
+ *  value held before. One `cmpccxadd` on Intel; elsewhere a read-first compare-exchange loop, so a
+ *  word that already refuses returns without writing and losers never take the line. */
+template <typename reference_type_, typename value_type_>
+value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
+                                        std::memory_order order) noexcept {
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>)
+        return reference.fetch_add_if_at_most(operand, limit, order);
+    else {
+        value_type_ observed = reference.load(std::memory_order_acquire);
+        while (observed <= limit && limit - observed >= operand &&
+               !reference.compare_exchange_weak(observed, observed + operand, order, std::memory_order_acquire)) {}
+        return observed;
+    }
+}
+template <typename reference_type_, typename value_type_>
+value_type_ atomic_fetch_sub_if_at_least(reference_type_ reference, value_type_ operand, value_type_ floor,
+                                         std::memory_order order) noexcept {
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>)
+        return reference.fetch_sub_if_at_least(operand, floor, order);
+    else {
+        value_type_ observed = reference.load(std::memory_order_acquire);
+        while (observed >= floor && observed - floor >= operand &&
+               !reference.compare_exchange_weak(observed, observed - operand, order, std::memory_order_acquire)) {}
+        return observed;
+    }
+}
+
 /**
  *  @brief `std::atomic_ref` with the operations the standard lacks, spelled the portable way:
  *      compare-exchange loops for the conditional and extremal read-modify-writes, discarded
@@ -126,10 +190,7 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        value_type_ observed = base_t::load(std::memory_order_acquire);
-        while (observed <= limit && limit - observed >= operand &&
-               !base_t::compare_exchange_weak(observed, observed + operand, order, std::memory_order_acquire)) {}
-        return observed;
+        return atomic_fetch_add_if_at_most(static_cast<base_t const &>(*this), operand, limit, order);
     }
     /** Subtracts @p operand only if the difference stays at least @p floor - the semaphore
      *  acquire. Returns the value held before; the outcome is `observed >= floor + operand`. */
@@ -137,10 +198,7 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
                                       std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        value_type_ observed = base_t::load(std::memory_order_acquire);
-        while (observed >= floor && observed - floor >= operand &&
-               !base_t::compare_exchange_weak(observed, observed - operand, order, std::memory_order_acquire)) {}
-        return observed;
+        return atomic_fetch_sub_if_at_least(static_cast<base_t const &>(*this), operand, floor, order);
     }
 
     /** No-return read-modify-writes: the op is posted, nothing is waited for - `stadd`, `stclr`,
@@ -149,22 +207,22 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        (void)base_t::fetch_add(operand, order);
+        base_t::fetch_add(operand, order);
     }
     void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        (void)base_t::fetch_sub(operand, order);
+        base_t::fetch_sub(operand, order);
     }
-    void set(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        (void)base_t::fetch_or(bits, order);
+        base_t::fetch_or(bits, order);
     }
-    void clear(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        (void)base_t::fetch_and(static_cast<value_type_>(~bits), order);
+        base_t::fetch_and(static_cast<value_type_>(~bits), order);
     }
 };
 
@@ -363,18 +421,18 @@ struct x86_raoint_atomic_ref : public x86_cmpccxadd_atomic_ref<value_type_> {
     {
         add(static_cast<value_type_>(value_type_ {0} - operand), order);
     }
-    void set(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        if (order != std::memory_order_relaxed) return base_t::set(bits, order);
+        if (order != std::memory_order_relaxed) return base_t::set_bits(bits, order);
         word_t *word = reinterpret_cast<word_t *>(this->word_);
         if constexpr (sizeof(value_type_) == 4) x86_aor_u32(word, std::bit_cast<word_t>(bits));
         else x86_aor_u64(word, std::bit_cast<word_t>(bits));
     }
-    void clear(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        if (order != std::memory_order_relaxed) return base_t::clear(bits, order);
+        if (order != std::memory_order_relaxed) return base_t::clear_bits(bits, order);
         word_t *word = reinterpret_cast<word_t *>(this->word_);
         word_t const mask = static_cast<word_t>(~std::bit_cast<word_t>(bits));
         if constexpr (sizeof(value_type_) == 4) x86_aand_u32(word, mask);
@@ -1350,7 +1408,7 @@ struct arm64_lse_atomic_ref {
     {
         add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
     }
-    void set(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) != 1, "Byte no-return set is not spelled yet");
@@ -1358,7 +1416,7 @@ struct arm64_lse_atomic_ref {
         if constexpr (sizeof(value_type_) == 4) arm64_stset_u32(word_, word, order);
         else arm64_stset_u64(word_, word, order);
     }
-    void clear(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) != 1, "Byte no-return clear is not spelled yet");
@@ -1846,7 +1904,7 @@ struct risc5_atomic_ref {
     {
         add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
     }
-    void set(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) != 1, "Byte no-return set is not spelled yet");
@@ -1854,7 +1912,7 @@ struct risc5_atomic_ref {
         if constexpr (sizeof(value_type_) == 4) risc5_amoor_w_x0(word_, word, order);
         else risc5_amoor_d_x0(word_, word, order);
     }
-    void clear(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) != 1, "Byte no-return clear is not spelled yet");
