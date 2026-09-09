@@ -48,21 +48,6 @@ inline void const *watched_address(value_type_ const *watched) noexcept {
 
 #if FU_DETECT_ARCH_X86_64_
 
-/** On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
-struct x86_pause_t {
-    static constexpr capabilities_t capability_k = capability_x86_pause_k;
-    /** Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
-    template <typename watched_type_, typename value_type_, typename thread_index_type_,
-              typename bound_type_ = wait_capped_t>
-    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-        __asm__ __volatile__("pause");
-#else
-        _mm_pause();
-#endif
-    }
-};
-
 /** @brief All four registers of one `CPUID` invocation. @sa `cpuid`, the one home of both toolchain idioms. */
 struct cpuid_registers_t {
     std::uint32_t eax, ebx, ecx, edx;
@@ -84,13 +69,6 @@ inline cpuid_registers_t cpuid(std::uint32_t const leaf, std::uint32_t const sub
 #endif
     return r;
 }
-
-#if defined(__clang__)
-#pragma clang attribute push(__attribute__((target("waitpkg"))), apply_to = function)
-#elif defined(__GNUC__)
-#pragma GCC push_options
-#pragma GCC target("waitpkg")
-#endif
 
 /**
  *  @brief The TSC rate in cycles per microsecond, detected once from `CPUID.15h` or by calibration.
@@ -142,12 +120,6 @@ inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
     return cycles_per_us;
 }
 
-/** `UMWAIT` sleep-depth control: bit 0 = 1 selects the shallow, fast-waking C0.1 state. */
-inline constexpr std::uint32_t x86_umwait_shallow_c01_k = 1;
-/** `UMWAIT` sleep-depth control: bit 0 = 0 selects the deeper C0.2 state - slower to wake,
- *  but ceding more of the shared core's pipeline resources to the SMT sibling meanwhile. */
-inline constexpr std::uint32_t x86_umwait_deeper_c02_k = 0;
-
 /** Reads the time-stamp counter, via inline assembly or MSVC's `__rdtsc`. */
 inline std::uint64_t x86_now_tsc() noexcept {
 #if FU_DETECT_INLINE_ASM_SUPPORT_
@@ -158,6 +130,33 @@ inline std::uint64_t x86_now_tsc() noexcept {
     return __rdtsc();
 #endif
 }
+
+#endif // FU_DETECT_ARCH_X86_64_
+
+#if FU_TARGET_X86_PAUSE
+/** On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order speculation. */
+struct x86_pause_t {
+    static constexpr capabilities_t capability_k = capability_x86_pause_k;
+    /** Any waited word - a `std::atomic` object or a bare address - the hint watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+        __asm__ __volatile__("pause");
+#else
+        _mm_pause();
+#endif
+    }
+};
+#endif // FU_TARGET_X86_PAUSE
+
+#if FU_TARGET_X86_TPAUSE
+
+/** `UMWAIT` sleep-depth control: bit 0 = 1 selects the shallow, fast-waking C0.1 state. */
+inline constexpr std::uint32_t x86_umwait_shallow_c01_k = 1;
+/** `UMWAIT` sleep-depth control: bit 0 = 0 selects the deeper C0.2 state - slower to wake,
+ *  but ceding more of the shared core's pipeline resources to the SMT sibling meanwhile. */
+inline constexpr std::uint32_t x86_umwait_deeper_c02_k = 0;
 
 /** Arms this core's address-range monitor on the line holding @p watched_address.
  *  Where inline assembly is available the UMONITOR opcode is hand-encoded so no header is
@@ -297,17 +296,9 @@ struct x86_tpause_saturated_t {
         x86_umwait_until(~std::uint64_t {0}, x86_umwait_shallow_c01_k);
     }
 };
+#endif // FU_TARGET_X86_TPAUSE
 
-#if defined(__clang__)
-#pragma clang attribute pop
-#elif defined(__GNUC__)
-#pragma GCC pop_options
-#endif
-
-#endif // FU_DETECT_ARCH_X86_64_
-
-#if FU_DETECT_ARCH_ARM64_
-
+#if FU_TARGET_ARM64_YIELD
 /** On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
 struct arm64_yield_t {
     static constexpr capabilities_t capability_k = capability_arm64_yield_k;
@@ -322,17 +313,12 @@ struct arm64_yield_t {
 #endif
     }
 };
+#endif // FU_TARGET_ARM64_YIELD
+
+#if FU_TARGET_ARM64_WFET
 
 // `WFET` and the exclusive-monitor `LDAXR`/`CLREX` it rides on have no MSVC intrinsic, so the timed
 // waiter is inline-assembly only; MSVC-ARM64 stays on the `arm64_yield_t` hint above.
-#if FU_DETECT_INLINE_ASM_SUPPORT_
-
-#if defined(__clang__)
-#pragma clang attribute push(__attribute__((target("arch=armv8-a"))), apply_to = function)
-#elif defined(__GNUC__)
-#pragma GCC push_options
-#pragma GCC target("arch=armv8-a")
-#endif
 
 /**
  *  @brief On AArch64, a monitored wait built on the `WFET` "Wait For Event, Timed" instruction.
@@ -440,18 +426,9 @@ struct arm64_wfet_t {
     }
 };
 
-#if defined(__clang__)
-#pragma clang attribute pop
-#elif defined(__GNUC__)
-#pragma GCC pop_options
-#endif
+#endif // FU_TARGET_ARM64_WFET
 
-#endif // FU_DETECT_INLINE_ASM_SUPPORT_
-
-#endif // FU_DETECT_ARCH_ARM64_
-
-#if FU_DETECT_ARCH_RISC5_
-
+#if FU_TARGET_RISC5_PAUSE
 /** On RISC-V, the `Zihintpause` spin-wait hint. */
 struct risc5_pause_t {
     static constexpr capabilities_t capability_k = capability_risc5_pause_k;
@@ -464,7 +441,9 @@ struct risc5_pause_t {
         __asm__ __volatile__(".4byte 0x0100000f");
     }
 };
+#endif // FU_TARGET_RISC5_PAUSE
 
+#if FU_TARGET_RISC5_WRS
 /**
  *  @brief On RISC-V `Zawrs`, a monitored wait built on `LR` + `WRS.STO`.
  *
@@ -546,8 +525,7 @@ struct risc5_wrs_t {
         }
     }
 };
-
-#endif // FU_DETECT_ARCH_RISC5_
+#endif // FU_TARGET_RISC5_WRS
 
 /**
  *  @brief The fastest waiter this build may use with @b no runtime feature probe.
@@ -562,25 +540,21 @@ struct risc5_wrs_t {
  *  is a runtime fact there, detected via `sysctl` on Apple or `HWCAP2_WFXT` on Linux, so a caller
  *  reaches `arm64_wfet_t` through the C ABI's runtime capability dispatch rather than at compile time.
  */
-#if FU_DETECT_ARCH_X86_64_
-#if defined(__WAITPKG__)
+#if FU_TARGET_X86_TPAUSE && defined(__WAITPKG__)
 using preferred_yield_t = x86_tpause_t;
-#else
+#elif FU_TARGET_X86_PAUSE
 using preferred_yield_t = x86_pause_t;
-#endif
-#elif FU_DETECT_ARCH_ARM64_
+#elif FU_TARGET_ARM64_YIELD
 using preferred_yield_t = arm64_yield_t;
-#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
-#if defined(__riscv_zawrs)
+#elif FU_TARGET_RISC5_WRS && defined(__riscv_zawrs)
 using preferred_yield_t = risc5_wrs_t;
-#else
+#elif FU_TARGET_RISC5_PAUSE
 using preferred_yield_t = risc5_pause_t;
-#endif
 #else
 using preferred_yield_t = standard_yield_t;
 #endif
 
-#if FU_DETECT_ARCH_X86_64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
+#if FU_TARGET_X86_CLDEMOTE
 /**
  *  @brief x86 cache hints: `CLDEMOTE` toward the LLC, `PREFETCHW` for write-intent promotion.
  *  @note Both live in hint or reserved-NOP space, so neither can fault on any x86-64 part; whether
@@ -605,9 +579,9 @@ struct x86_cache_hints_t {
 #endif
     }
 };
-#endif // FU_DETECT_ARCH_X86_64_
+#endif // FU_TARGET_X86_CLDEMOTE
 
-#if FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#if FU_TARGET_ARM64_DC_CVAC
 /**
  *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes.
  *  @note There is no demote on Arm - the clean is the nearest thing: the next claimer's snoop finds
@@ -626,7 +600,7 @@ struct arm64_cache_hints_t {
         __asm__ __volatile__("prfm pstl1keep, [%0]" ::"r"(address) : "memory");
     }
 };
-#endif // FU_DETECT_ARCH_ARM64_
+#endif // FU_TARGET_ARM64_DC_CVAC
 
 #if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
 /**
@@ -647,7 +621,7 @@ struct arm64_prefetch_cache_hints_t {
 #endif
     }
 };
-#endif // FU_DETECT_ARCH_ARM64_
+#endif // FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
 
 #if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_
 /**
@@ -665,7 +639,9 @@ struct risc5_cache_hints_t {
         __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
     }
 };
+#endif // FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_
 
+#if FU_TARGET_RISC5_ZICBOM
 /**
  *  @brief RISC-V cache hints where `hwprobe` attested Zicbom: `cbo.clean` writes the dirty block
  *      back toward another cache or memory, and `prefetch.w` promotes with write intent.
@@ -684,15 +660,15 @@ struct risc5_cbo_cache_hints_t {
         __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
     }
 };
-#endif // FU_DETECT_ARCH_RISC5_
+#endif // FU_TARGET_RISC5_ZICBOM
 
 /*  One deterministic cache-hints policy per build, mirroring `preferred_yield_t`: the gate is the
  *  Layer-2 tri-state, never runtime silicon - everything a selected functor emits is trap-free
  *  wherever its gate holds, so no dispatch and no reporting bit ever guards an emission.  */
-#if FU_WITH_DEMOTE_CACHE_LINES && FU_DETECT_ARCH_X86_64_
+#if FU_WITH_DEMOTE_CACHE_LINES && FU_TARGET_X86_CLDEMOTE
 /** Both directions: `CLDEMOTE` demotes, `PREFETCHW` promotes. */
 using preferred_cache_hints_t = x86_cache_hints_t;
-#elif FU_WITH_DEMOTE_CACHE_LINES && FU_DETECT_ARCH_ARM64_
+#elif FU_WITH_DEMOTE_CACHE_LINES && FU_TARGET_ARM64_DC_CVAC
 /** Both directions: `DC CVAC` cleans, `PRFM PSTL1KEEP` promotes. */
 using preferred_cache_hints_t = arm64_cache_hints_t;
 #elif FU_WITH_PROMOTE_CACHE_LINES && FU_DETECT_ARCH_ARM64_
@@ -791,14 +767,15 @@ inline std::uint64_t risc5_hwprobe(std::int64_t key) noexcept {
 #endif
 
 /**
- *  @brief The instruction-level bits this RISC-V offers: the spin hint, then the monitored wait,
- *      the cache-line hint and the atomics, all from one `hwprobe` of the `IMA_EXT_0` key.
+ *  @brief The instruction-level bits this RISC-V offers: the spin hint and the A extension, which every
+ *      Linux ABI guarantees, then the monitored wait, the cache-line hint and `amocas` from one
+ *      `hwprobe` of the `IMA_EXT_0` key.
  *  @note U-mode has no CSR listing the extensions, so the kernel's word is the only one: a bit whose
  *      name this build's uapi headers predate is never asked for. A `-march` flag says what the
  *      compiler was promised, not what this machine runs, so it sets nothing here.
  */
 inline capabilities_t risc5_cpu_capabilities() noexcept {
-    capabilities_t caps = capability_risc5_pause_k;
+    capabilities_t caps = capability_risc5_pause_k | capability_risc5_atomic_k;
 #if defined(FU_DETECT_RISCV_HWPROBE_)
     std::uint64_t const extensions = risc5_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0);
 #if defined(RISCV_HWPROBE_EXT_ZAWRS)

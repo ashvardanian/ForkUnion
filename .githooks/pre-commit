@@ -262,6 +262,7 @@ check_region_dashes() {
 # `__linux__` again. A genuine exception carries an inline `// FU-ALLOW: <reason>`.
 check_raw_macros() {
     [ "$file" != include/forkunion/types.hpp ] || return 0 # ? The one file that derives them
+    case "$file" in probes/*) return 0 ;; esac # ? The probes ask the bare compiler, before the vocabulary exists
     local raw
     raw=$(printf '%s\n' "$added" | grep -vE 'FU-ALLOW' |
         grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b' |
@@ -269,6 +270,24 @@ check_raw_macros() {
     [ -z "$raw" ] || fail "$raw" \
         "$file asks a raw platform macro - use the FU_* vocabulary types.hpp derives" \
         "            (FU_ON_*, FU_GLIBC_PREREQ_, FU_DETECT_ARCH_*), or mark a real exception // FU-ALLOW:"
+}
+
+# Capability gates are flat: one `#if FU_TARGET_<BIT>` region per bit, never inside another bit's region
+# or an architecture envelope, so a reader learns a block's gate from the one line above it. Nesting is
+# structure, not lines, so this validates the whole staged file.
+check_nested_gates() {
+    local nested
+    nested=$(git show ":$file" | awk '
+        /^[[:space:]]*#[[:space:]]*if/ { depth++; stack[depth] = 0 }
+        /^[[:space:]]*#[[:space:]]*(if|elif)/ {
+            gate = ($0 ~ /FU_TARGET_/); outer = ($0 ~ /FU_TARGET_|FU_DETECT_ARCH_/)
+            open -= stack[depth]; if (gate && open) print NR ": " $0
+            stack[depth] = outer; open += outer; next
+        }
+        /^[[:space:]]*#[[:space:]]*else/ { open -= stack[depth]; stack[depth] = 0; next }
+        /^[[:space:]]*#[[:space:]]*endif/ { open -= stack[depth]; delete stack[depth]; depth-- }' || true)
+    [ -z "$nested" ] || fail "$nested" \
+        "$file nests a capability gate inside another - one flat #if FU_TARGET_<BIT> region per bit:"
 }
 
 # CI workflows - every job and every step carries a `name:`. An unnamed step renders as its raw
@@ -322,6 +341,7 @@ while IFS= read -r -d '' file; do
         check_hand_ceils
         check_region_dashes
         check_raw_macros
+        check_nested_gates
         check_lone_brief
         check_missing_brief
         check_trailing_docs

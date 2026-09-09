@@ -90,6 +90,19 @@ target_include_directories(
 # themselves to 20.
 target_compile_features(forkunion_header INTERFACE cxx_std_17)
 
+# The toolchain's verdict per instruction-level capability bit, `FU_TARGET_<BIT>`, one probe each under `probes/`. The
+# header-only target hands the answers to every consumer - the same paths the compiled libraries take - build interface
+# only, so an installed package never pins the compiler that built it. Without them the header derives each bit from the
+# architecture and the compiler. `probes/README.md` has the table.
+include(cmake/fu_x86_isa_probes.cmake)
+include(cmake/fu_arm64_isa_probes.cmake)
+include(cmake/fu_risc5_isa_probes.cmake)
+target_compile_definitions(
+    forkunion_header
+    INTERFACE "$<BUILD_INTERFACE:${fu_x86_compile_defs_}>" "$<BUILD_INTERFACE:${fu_arm64_compile_defs_}>"
+              "$<BUILD_INTERFACE:${fu_risc5_compile_defs_}>"
+)
+
 # Strictest possible compilation flags with fatal warnings
 if (FORKUNION_STRICT)
     target_compile_options(

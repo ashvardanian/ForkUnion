@@ -330,9 +330,8 @@
 #error "ForkUnion requires C++17 or later"
 #endif
 
-/*  Detect target CPU architecture.
- *  We'll only use it when compiling Inline Assembly code on GCC or Clang.
- */
+/*  The target architecture - each in its 64-bit form: x86-64, AArch64, RV64 - which the inline assembly and
+ *  the capability bits key on. A 32-bit RISC-V build lands on none of them and on the portable paths. */
 #if defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64)
 #define FU_DETECT_ARCH_ARM64_ 1
 #else
@@ -343,7 +342,7 @@
 #else
 #define FU_DETECT_ARCH_X86_64_ 0
 #endif
-#if defined(__riscv)
+#if defined(__riscv) && __riscv_xlen == 64
 #define FU_DETECT_ARCH_RISC5_ 1
 #else
 #define FU_DETECT_ARCH_RISC5_ 0
@@ -396,9 +395,9 @@
 #define fu_unlikely_(x) (x)
 #endif
 
-/*  Whether GNU-style inline assembly (`__asm__`) is available. GCC and Clang have it; MSVC does not on
- *  x86-64 or AArch64, and reaches the same instructions through intrinsics instead. Gates only the paths
- *  that genuinely need inline asm - the hand-encoded `WFET`/`WRS` opcodes and the MSR/register reads. */
+/*  Whether GNU-style inline assembly (`__asm__`) is available: GCC and Clang have it, MSVC does not on
+ *  x86-64 or AArch64, and reaches the same instructions through intrinsics instead. Gates only the
+ *  paths that genuinely need inline asm - the hand-encoded opcodes and the MSR/register reads. */
 #if defined(__GNUC__) || defined(__clang__)
 #define FU_DETECT_INLINE_ASM_SUPPORT_ 1
 #else
@@ -414,17 +413,87 @@
 #define FU_DETECT_HINT_INTRINSICS_ 0
 #endif
 
+/*  The toolchain's verdict per instruction-level capability bit - `FU_TARGET_<BIT>` - what the build's
+ *  probes publish on `forkunion::header`. Without a probe the bit derives here: the architecture, and
+ *  inline assembly where the path is a raw encoding or a mnemonic, or nothing more where MSVC reaches the
+ *  same instruction through an intrinsic. Every extension instruction is a raw encoding; the LSE and
+ *  RCpc mnemonics ride `.arch_extension`, which every assembler of the last decade takes, and the
+ *  RISC-V A extension's mnemonics need the `-march` the compiler reports as `__riscv_atomic`. */
+#if !defined(FU_TARGET_X86_PAUSE)
+#define FU_TARGET_X86_PAUSE FU_DETECT_ARCH_X86_64_
+#endif
+#if !defined(FU_TARGET_X86_TPAUSE)
+#define FU_TARGET_X86_TPAUSE FU_DETECT_ARCH_X86_64_
+#endif
+#if !defined(FU_TARGET_X86_CLDEMOTE)
+#define FU_TARGET_X86_CLDEMOTE (FU_DETECT_ARCH_X86_64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_))
+#endif
+#if !defined(FU_TARGET_X86_CMPCCXADD)
+#define FU_TARGET_X86_CMPCCXADD (FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_X86_RAOINT)
+#define FU_TARGET_X86_RAOINT (FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_ARM64_YIELD)
+#define FU_TARGET_ARM64_YIELD FU_DETECT_ARCH_ARM64_
+#endif
+#if !defined(FU_TARGET_ARM64_WFET)
+#define FU_TARGET_ARM64_WFET (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_ARM64_DC_CVAC)
+#define FU_TARGET_ARM64_DC_CVAC (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_ARM64_LSE)
+#define FU_TARGET_ARM64_LSE (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_ARM64_RCPC)
+#define FU_TARGET_ARM64_RCPC (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_RISC5_PAUSE)
+#define FU_TARGET_RISC5_PAUSE (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_RISC5_WRS)
+#define FU_TARGET_RISC5_WRS (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_RISC5_ZICBOM)
+#define FU_TARGET_RISC5_ZICBOM (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+#if !defined(FU_TARGET_RISC5_ATOMIC)
+#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && defined(__riscv_atomic)
+#define FU_TARGET_RISC5_ATOMIC 1
+#else
+#define FU_TARGET_RISC5_ATOMIC 0
+#endif
+#endif
+#if !defined(FU_TARGET_RISC5_ZACAS)
+#define FU_TARGET_RISC5_ZACAS (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#endif
+
+/*  RCpc extends LSE, RAO-INT extends CMPCCXADD and Zacas extends the A extension, so a rung without
+ *  its parent is demoted: every `#if FU_TARGET_<BIT>` region is then complete on its own and never
+ *  repeats the parent's bit. */
+#if !FU_TARGET_ARM64_LSE
+#undef FU_TARGET_ARM64_RCPC
+#define FU_TARGET_ARM64_RCPC 0
+#endif
+#if !FU_TARGET_X86_CMPCCXADD
+#undef FU_TARGET_X86_RAOINT
+#define FU_TARGET_X86_RAOINT 0
+#endif
+#if !FU_TARGET_RISC5_ATOMIC
+#undef FU_TARGET_RISC5_ZACAS
+#define FU_TARGET_RISC5_ZACAS 0
+#endif
+
 /** @brief Can we deterministically push a freshly-written cache line away from this core?
  *
  *  x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the
  *  `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
- *  and Windows traps it, so MSVC-ARM64 never reaches this gate. RISC-V `cbo.clean` traps
- *  unless the kernel set `senvcfg.CBCFE`, which no compile-time macro can prove, so it is
- *  reached only through the runtime capability, never this gate. */
+ *  and Windows traps it. RISC-V `cbo.clean` traps unless the kernel set `senvcfg.CBCFE`,
+ *  which no compile-time macro can prove, so it is reached only through the runtime
+ *  capability, never this gate. Derived from the two demote bits the toolchain can build. */
 #if !defined(FU_WITH_DEMOTE_CACHE_LINES)
-#define FU_WITH_DEMOTE_CACHE_LINES                                    \
-    ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
-     (FU_DETECT_ARCH_X86_64_ || (FU_DETECT_ARCH_ARM64_ && FU_ON_LINUX)))
+#define FU_WITH_DEMOTE_CACHE_LINES (FU_TARGET_X86_CLDEMOTE || (FU_TARGET_ARM64_DC_CVAC && FU_ON_LINUX))
 #endif
 
 /** @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
@@ -437,11 +506,8 @@
      (FU_DETECT_ARCH_X86_64_ || FU_DETECT_ARCH_ARM64_ || FU_DETECT_ARCH_RISC5_))
 #endif
 
-#if FU_WITH_DEMOTE_CACHE_LINES && !(FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
-#error "FU_WITH_DEMOTE_CACHE_LINES emits hint opcodes; it needs GNU inline assembly or MSVC intrinsics"
-#endif
-#if FU_WITH_DEMOTE_CACHE_LINES && !(FU_DETECT_ARCH_X86_64_ || FU_DETECT_ARCH_ARM64_)
-#error "FU_WITH_DEMOTE_CACHE_LINES names no demote-capable ISA on this target"
+#if FU_WITH_DEMOTE_CACHE_LINES && !(FU_TARGET_X86_CLDEMOTE || FU_TARGET_ARM64_DC_CVAC)
+#error "FU_WITH_DEMOTE_CACHE_LINES names no demote this toolchain can build - CLDEMOTE on x86-64, DC CVAC on AArch64"
 #endif
 #pragma endregion Compiler Intrinsics
 
@@ -784,6 +850,12 @@ enum capabilities_t : unsigned int {
      *  @sa `risc5_zacas_atomic_ref` - the reference this admits.
      */
     capability_risc5_zacas_k = 1 << 22,
+    /**
+     *  @brief The A extension: `lr`/`sc` and the `amo*` read-modify-writes, the RISC-V baseline every
+     *      Linux ABI guarantees, so the detector sets it unconditionally.
+     *  @sa `risc5_atomic_ref` - the reference this admits; `capability_risc5_zacas_k` - which extends it.
+     */
+    capability_risc5_atomic_k = 1 << 23,
 
     /**
      *  @brief Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
@@ -842,6 +914,7 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_arm64_lse_k: return "arm64_lse";
     case capability_arm64_rcpc_k: return "arm64_rcpc";
     case capability_risc5_zacas_k: return "risc5_zacas";
+    case capability_risc5_atomic_k: return "risc5_atomic";
     case capability_os_threads_k: return "os_threads";
     case capability_topology_k: return "topology";
     case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";

@@ -12,16 +12,16 @@
  *  portably over compare-exchange. The instruction-set references share that interface and replace
  *  the loops and the compiler's flag-dependent lowering with instructions:
  *
+ *  - `x86_cmpccxadd_atomic_ref`: the conditional adds as one `cmpccxadd`; every other operation
+ *    is the `lock`-prefixed instruction the compiler emits anyway.
+ *  - `x86_raoint_atomic_ref`: the relaxed no-return forms as RAO-INT `aadd`/`aand`/`aor`, executed
+ *    at the shared cache rather than pulling the line.
  *  - `arm64_lse_atomic_ref`: Armv8.1 `swp`, `cas`, `ldadd`, `ldclr`, `ldset`, `ldeor`, `ldsmax`
  *    & kin - one instruction per read-modify-write, the no-return `st*` forms posted without a
  *    round trip; `ldar`/`stlr` for the ordered loads & stores. Measured on an M5 Pro against the
  *    exclusive loops a baseline build gets: 5x uncontended, 3-4x with 18 threads on one word.
  *  - `arm64_rcpc_atomic_ref`: the above with Armv8.3 `ldapr` for acquiring loads - RCpc, which
  *    needn't wait for the core's earlier release stores the way RCsc `ldar` may.
- *  - `x86_cmpccxadd_atomic_ref`: the conditional adds as one `cmpccxadd`; every other operation
- *    is the `lock`-prefixed instruction the compiler emits anyway.
- *  - `x86_raoint_atomic_ref`: the relaxed no-return forms as RAO-INT `aadd`/`aand`/`aor`, executed
- *    at the shared cache rather than pulling the line.
  *  - `risc5_atomic_ref`: the base A extension - `amoswap`, `amoadd`, `amoand`, `amoor`, `amomax`,
  *    `amomin` & the unsigned twins, with `x0` as the destination for the no-return forms - and
  *    `lr`/`sc` loops for compare-exchange and byte exchanges; fences around loads & stores.
@@ -30,7 +30,8 @@
  *  Only the widths & operations the indexes use are spelled: byte exchanges & compare-exchanges
  *  for flags, 32-bit forms for node ids, 64-bit forms for counters & packed words. Every reference
  *  assembles in a baseline translation unit: on Arm the extension is named in the assembly text
- *  - `.arch_extension` - and the x86 and RISC-V extension instructions are raw bytes; the runtime
+ *  - `.arch_extension` - the RISC-V base atomics are the A-extension mnemonics every `rv64gc`
+ *  toolchain assembles, and the x86 and RISC-V extension instructions are raw bytes; the runtime
  *  capability bit decides whether it may run. Where inline assembly is unavailable - MSVC - only
  *  `standard_atomic_ref` remains. `preferred_atomic_ref`, at the bottom, is the newest reference
  *  the build target guarantees through its predefined macros - the `preferred_yield_t` rule - for
@@ -167,11 +168,229 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
     }
 };
 
-#if FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#if FU_TARGET_X86_CMPCCXADD
 
-#pragma region Arm64
+#pragma region x86 CMPCCXADD
 
-/*  Loads: plain, acquire, and RCpc acquire. */
+/*  `cmpccxadd`: compares the word against `bound` - flags from `word - bound` - and adds `addend`
+ *  only when the condition holds; the register handed as `bound` receives what the word held.
+ *  Spelled as bytes, since binutils before 2.40 and LLVM before 16 have no mnemonic: the VEX form
+ *  in map 0F38, opcode E0 plus the condition, `W` set for the 64-bit forms; the word in `rax`, the
+ *  compare-and-return register in `rcx`, the addend in `rdx`. */
+
+inline std::uint32_t x86_cmpbexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xe6, 0x08" // ? `cmpbexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+inline std::uint64_t x86_cmpbexadd_u64(std::uint64_t *word, std::uint64_t bound, std::uint64_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xe6, 0x08" // ? `cmpbexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+inline std::int32_t x86_cmplexadd_i32(std::int32_t *word, std::int32_t bound, std::int32_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xee, 0x08" // ? `cmplexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+inline std::int64_t x86_cmplexadd_i64(std::int64_t *word, std::int64_t bound, std::int64_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xee, 0x08" // ? `cmplexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+inline std::uint32_t x86_cmpaexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xe3, 0x08" // ? `cmpaexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+inline std::uint64_t x86_cmpaexadd_u64(std::uint64_t *word, std::uint64_t bound, std::uint64_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xe3, 0x08" // ? `cmpaexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+inline std::int32_t x86_cmpgexadd_i32(std::int32_t *word, std::int32_t bound, std::int32_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xed, 0x08" // ? `cmpgexadd %edx, %ecx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+inline std::int64_t x86_cmpgexadd_i64(std::int64_t *word, std::int64_t bound, std::int64_t addend) noexcept {
+    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xed, 0x08" // ? `cmpgexadd %rdx, %rcx, (%rax)`
+                         : "+c"(bound)
+                         : "d"(addend), "a"(word)
+                         : "memory", "cc");
+    return bound;
+}
+
+/**
+ *  @brief The standard reference with the conditional adds as one `cmpccxadd` - every other
+ *      operation is already the `lock`-prefixed instruction the compiler emits. Intel cores from
+ *      the 2024 E-core Xeons on; `CPUID.(7,1):EAX[7]` says so at runtime. The standard reference
+ *      hides its pointer, so the word's address is kept alongside.
+ *  @sa `capability_x86_cmpccxadd_k` - the bit admitting it; `x86_raoint_atomic_ref` - the same with RAO-INT.
+ */
+template <typename value_type_>
+struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
+    using base_t = standard_atomic_ref<value_type_>;
+    using word_t = atomic_word<value_type_>;
+    static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k;
+
+    explicit x86_cmpccxadd_atomic_ref(value_type_ &word) noexcept : base_t(word), word_(&word) {}
+
+    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
+                                     std::memory_order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        // Adds while `word <= limit - operand`: below-or-equal unsigned, less-or-equal signed.
+        if (operand > limit) return base_t::load(std::memory_order_acquire); // ? Nothing could be admitted
+        value_type_ const bound = static_cast<value_type_>(limit - operand);
+        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
+            return x86_cmplexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, operand);
+        else if constexpr (std::signed_integral<value_type_>)
+            return x86_cmplexadd_i64(reinterpret_cast<std::int64_t *>(word_), bound, operand);
+        else if constexpr (sizeof(value_type_) == 4)
+            return x86_cmpbexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, operand);
+        else return x86_cmpbexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, operand);
+    }
+    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        // Subtracts while `word >= floor + operand`: above-or-equal unsigned, greater-or-equal signed.
+        value_type_ const bound = static_cast<value_type_>(floor + operand);
+        if (bound < floor)
+            return base_t::load(std::memory_order_acquire); // ? The bound wrapped: nothing could be taken
+        value_type_ const negated = static_cast<value_type_>(value_type_ {0} - operand);
+        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
+            return x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, negated);
+        else if constexpr (std::signed_integral<value_type_>)
+            return x86_cmpgexadd_i64(reinterpret_cast<std::int64_t *>(word_), bound, negated);
+        else if constexpr (sizeof(value_type_) == 4)
+            return x86_cmpaexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, negated);
+        else return x86_cmpaexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, negated);
+    }
+
+  protected:
+    value_type_ *word_;
+};
+
+#pragma endregion x86 CMPCCXADD
+
+#endif // FU_TARGET_X86_CMPCCXADD
+
+#if FU_TARGET_X86_RAOINT
+
+#pragma region x86 RAOINT
+
+/*  RAO-INT: the remote, no-return forms - weakly ordered, so only the relaxed callers take them.
+ *  Bytes for the same reason: map 0F38 opcode FC, the operation picked by the legacy prefix - none
+ *  for add, 66 for and, F2 for or - `REX.W` for the 64-bit forms; the word in `rax`, the operand
+ *  in `rcx`. */
+
+inline void x86_aadd_u32(std::uint32_t *word, std::uint32_t operand) noexcept {
+    __asm__ __volatile__(".byte 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(operand), "a"(word)
+                         : "memory"); // ? `aadd %ecx, (%rax)`
+}
+inline void x86_aadd_u64(std::uint64_t *word, std::uint64_t operand) noexcept {
+    __asm__ __volatile__(".byte 0x48, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(operand), "a"(word)
+                         : "memory"); // ? `aadd %rcx, (%rax)`
+}
+inline void x86_aand_u32(std::uint32_t *word, std::uint32_t mask) noexcept {
+    __asm__ __volatile__(".byte 0x66, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(mask), "a"(word)
+                         : "memory"); // ? `aand %ecx, (%rax)`
+}
+inline void x86_aand_u64(std::uint64_t *word, std::uint64_t mask) noexcept {
+    __asm__ __volatile__(".byte 0x66, 0x48, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(mask), "a"(word)
+                         : "memory"); // ? `aand %rcx, (%rax)`
+}
+inline void x86_aor_u32(std::uint32_t *word, std::uint32_t bits) noexcept {
+    __asm__ __volatile__(".byte 0xf2, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(bits), "a"(word)
+                         : "memory"); // ? `aor %ecx, (%rax)`
+}
+inline void x86_aor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
+    __asm__ __volatile__(".byte 0xf2, 0x48, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(bits), "a"(word)
+                         : "memory"); // ? `aor %rcx, (%rax)`
+}
+
+/**
+ *  @brief The above plus RAO-INT for the relaxed no-return forms: `aadd`, `aand`, `aor` execute
+ *      at the shared cache. Anything ordered keeps the `lock`-prefixed base, already a full
+ *      fence. `CPUID.(7,1):EAX[3]` says so at runtime.
+ *  @sa `capability_x86_raoint_k` - the bit admitting it, on top of `capability_x86_cmpccxadd_k`.
+ */
+template <typename value_type_>
+struct x86_raoint_atomic_ref : public x86_cmpccxadd_atomic_ref<value_type_> {
+    using base_t = x86_cmpccxadd_atomic_ref<value_type_>;
+    using base_t::base_t;
+    using typename base_t::word_t;
+    static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k | capability_x86_raoint_k;
+
+    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        if (order != std::memory_order_relaxed) return base_t::add(operand, order);
+        word_t *word = reinterpret_cast<word_t *>(this->word_);
+        if constexpr (sizeof(value_type_) == 4) x86_aadd_u32(word, std::bit_cast<word_t>(operand));
+        else x86_aadd_u64(word, std::bit_cast<word_t>(operand));
+    }
+    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        add(static_cast<value_type_>(value_type_ {0} - operand), order);
+    }
+    void set(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        if (order != std::memory_order_relaxed) return base_t::set(bits, order);
+        word_t *word = reinterpret_cast<word_t *>(this->word_);
+        if constexpr (sizeof(value_type_) == 4) x86_aor_u32(word, std::bit_cast<word_t>(bits));
+        else x86_aor_u64(word, std::bit_cast<word_t>(bits));
+    }
+    void clear(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        if (order != std::memory_order_relaxed) return base_t::clear(bits, order);
+        word_t *word = reinterpret_cast<word_t *>(this->word_);
+        word_t const mask = static_cast<word_t>(~std::bit_cast<word_t>(bits));
+        if constexpr (sizeof(value_type_) == 4) x86_aand_u32(word, mask);
+        else x86_aand_u64(word, mask);
+    }
+};
+
+#pragma endregion x86 RAOINT
+
+#endif // FU_TARGET_X86_RAOINT
+
+#if FU_TARGET_ARM64_LSE
+
+#pragma region Arm64 LSE
+
+/*  Loads: plain and acquire. */
 
 inline std::uint8_t arm64_ldr_u8(std::uint8_t const *word) noexcept {
     std::uint8_t value;
@@ -202,22 +421,6 @@ inline std::uint32_t arm64_ldar_u32(std::uint32_t const *word) noexcept {
 inline std::uint64_t arm64_ldar_u64(std::uint64_t const *word) noexcept {
     std::uint64_t value;
     __asm__ __volatile__("ldar %x0, [%1]" : "=r"(value) : "r"(word) : "memory");
-    return value;
-}
-
-inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept {
-    std::uint8_t value;
-    __asm__ __volatile__(".arch_extension rcpc\n\tldaprb %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
-    return value;
-}
-inline std::uint32_t arm64_ldapr_u32(std::uint32_t const *word) noexcept {
-    std::uint32_t value;
-    __asm__ __volatile__(".arch_extension rcpc\n\tldapr %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
-    return value;
-}
-inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept {
-    std::uint64_t value;
-    __asm__ __volatile__(".arch_extension rcpc\n\tldapr %x0, [%1]" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
 
@@ -1198,6 +1401,32 @@ struct arm64_lse_atomic_ref {
     }
 };
 
+#pragma endregion Arm64 LSE
+
+#endif // FU_TARGET_ARM64_LSE
+
+#if FU_TARGET_ARM64_RCPC
+
+#pragma region Arm64 RCpc
+
+/*  RCpc acquire loads: ordered against later loads and stores, not against earlier stores. */
+
+inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept {
+    std::uint8_t value;
+    __asm__ __volatile__(".arch_extension rcpc\n\tldaprb %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
+    return value;
+}
+inline std::uint32_t arm64_ldapr_u32(std::uint32_t const *word) noexcept {
+    std::uint32_t value;
+    __asm__ __volatile__(".arch_extension rcpc\n\tldapr %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
+    return value;
+}
+inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept {
+    std::uint64_t value;
+    __asm__ __volatile__(".arch_extension rcpc\n\tldapr %x0, [%1]" : "=r"(value) : "r"(word) : "memory");
+    return value;
+}
+
 /**
  *  @brief Armv8.3 RCpc on top of LSE: acquiring loads are `ldapr`. Sequentially-consistent
  *      loads keep `ldar` - the only form that composes with `stlr` into a total order.
@@ -1217,223 +1446,13 @@ struct arm64_rcpc_atomic_ref : public arm64_lse_atomic_ref<value_type_> {
     }
 };
 
-#pragma endregion Arm64
+#pragma endregion Arm64 RCpc
 
-#endif // FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#endif // FU_TARGET_ARM64_RCPC
 
-#if FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#if FU_TARGET_RISC5_ATOMIC
 
-#pragma region x86
-
-/*  `cmpccxadd`: compares the word against `bound` - flags from `word - bound` - and adds `addend`
- *  only when the condition holds; the register handed as `bound` receives what the word held.
- *  Spelled as bytes, since binutils before 2.40 and LLVM before 16 have no mnemonic: the VEX form
- *  in map 0F38, opcode E0 plus the condition, `W` set for the 64-bit forms; the word in `rax`, the
- *  compare-and-return register in `rcx`, the addend in `rdx`. */
-
-inline std::uint32_t x86_cmpbexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xe6, 0x08" // ? `cmpbexadd %edx, %ecx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-inline std::uint64_t x86_cmpbexadd_u64(std::uint64_t *word, std::uint64_t bound, std::uint64_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xe6, 0x08" // ? `cmpbexadd %rdx, %rcx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-inline std::int32_t x86_cmplexadd_i32(std::int32_t *word, std::int32_t bound, std::int32_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xee, 0x08" // ? `cmplexadd %edx, %ecx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-inline std::int64_t x86_cmplexadd_i64(std::int64_t *word, std::int64_t bound, std::int64_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xee, 0x08" // ? `cmplexadd %rdx, %rcx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-inline std::uint32_t x86_cmpaexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xe3, 0x08" // ? `cmpaexadd %edx, %ecx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-inline std::uint64_t x86_cmpaexadd_u64(std::uint64_t *word, std::uint64_t bound, std::uint64_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xe3, 0x08" // ? `cmpaexadd %rdx, %rcx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-inline std::int32_t x86_cmpgexadd_i32(std::int32_t *word, std::int32_t bound, std::int32_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xed, 0x08" // ? `cmpgexadd %edx, %ecx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-inline std::int64_t x86_cmpgexadd_i64(std::int64_t *word, std::int64_t bound, std::int64_t addend) noexcept {
-    __asm__ __volatile__(".byte 0xc4, 0xe2, 0xe9, 0xed, 0x08" // ? `cmpgexadd %rdx, %rcx, (%rax)`
-                         : "+c"(bound)
-                         : "d"(addend), "a"(word)
-                         : "memory", "cc");
-    return bound;
-}
-
-/*  RAO-INT: the remote, no-return forms - weakly ordered, so only the relaxed callers take them.
- *  Bytes for the same reason: map 0F38 opcode FC, the operation picked by the legacy prefix - none
- *  for add, 66 for and, F2 for or - `REX.W` for the 64-bit forms; the word in `rax`, the operand
- *  in `rcx`. */
-
-inline void x86_aadd_u32(std::uint32_t *word, std::uint32_t operand) noexcept {
-    __asm__ __volatile__(".byte 0x0f, 0x38, 0xfc, 0x08"
-                         :
-                         : "c"(operand), "a"(word)
-                         : "memory"); // ? `aadd %ecx, (%rax)`
-}
-inline void x86_aadd_u64(std::uint64_t *word, std::uint64_t operand) noexcept {
-    __asm__ __volatile__(".byte 0x48, 0x0f, 0x38, 0xfc, 0x08"
-                         :
-                         : "c"(operand), "a"(word)
-                         : "memory"); // ? `aadd %rcx, (%rax)`
-}
-inline void x86_aand_u32(std::uint32_t *word, std::uint32_t mask) noexcept {
-    __asm__ __volatile__(".byte 0x66, 0x0f, 0x38, 0xfc, 0x08"
-                         :
-                         : "c"(mask), "a"(word)
-                         : "memory"); // ? `aand %ecx, (%rax)`
-}
-inline void x86_aand_u64(std::uint64_t *word, std::uint64_t mask) noexcept {
-    __asm__ __volatile__(".byte 0x66, 0x48, 0x0f, 0x38, 0xfc, 0x08"
-                         :
-                         : "c"(mask), "a"(word)
-                         : "memory"); // ? `aand %rcx, (%rax)`
-}
-inline void x86_aor_u32(std::uint32_t *word, std::uint32_t bits) noexcept {
-    __asm__ __volatile__(".byte 0xf2, 0x0f, 0x38, 0xfc, 0x08"
-                         :
-                         : "c"(bits), "a"(word)
-                         : "memory"); // ? `aor %ecx, (%rax)`
-}
-inline void x86_aor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
-    __asm__ __volatile__(".byte 0xf2, 0x48, 0x0f, 0x38, 0xfc, 0x08"
-                         :
-                         : "c"(bits), "a"(word)
-                         : "memory"); // ? `aor %rcx, (%rax)`
-}
-
-/**
- *  @brief The standard reference with the conditional adds as one `cmpccxadd` - every other
- *      operation is already the `lock`-prefixed instruction the compiler emits. Intel cores from
- *      the 2024 E-core Xeons on; `CPUID.(7,1):EAX[7]` says so at runtime. The standard reference
- *      hides its pointer, so the word's address is kept alongside.
- *  @sa `capability_x86_cmpccxadd_k` - the bit admitting it; `x86_raoint_atomic_ref` - the same with RAO-INT.
- */
-template <typename value_type_>
-struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
-    using base_t = standard_atomic_ref<value_type_>;
-    using word_t = atomic_word<value_type_>;
-    static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k;
-
-    explicit x86_cmpccxadd_atomic_ref(value_type_ &word) noexcept : base_t(word), word_(&word) {}
-
-    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
-                                     std::memory_order = std::memory_order_seq_cst) const noexcept
-        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
-    {
-        // Adds while `word <= limit - operand`: below-or-equal unsigned, less-or-equal signed.
-        if (operand > limit) return base_t::load(std::memory_order_acquire); // ? Nothing could be admitted
-        value_type_ const bound = static_cast<value_type_>(limit - operand);
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return x86_cmplexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, operand);
-        else if constexpr (std::signed_integral<value_type_>)
-            return x86_cmplexadd_i64(reinterpret_cast<std::int64_t *>(word_), bound, operand);
-        else if constexpr (sizeof(value_type_) == 4)
-            return x86_cmpbexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, operand);
-        else return x86_cmpbexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, operand);
-    }
-    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
-                                      std::memory_order = std::memory_order_seq_cst) const noexcept
-        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
-    {
-        // Subtracts while `word >= floor + operand`: above-or-equal unsigned, greater-or-equal signed.
-        value_type_ const bound = static_cast<value_type_>(floor + operand);
-        if (bound < floor)
-            return base_t::load(std::memory_order_acquire); // ? The bound wrapped: nothing could be taken
-        value_type_ const negated = static_cast<value_type_>(value_type_ {0} - operand);
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, negated);
-        else if constexpr (std::signed_integral<value_type_>)
-            return x86_cmpgexadd_i64(reinterpret_cast<std::int64_t *>(word_), bound, negated);
-        else if constexpr (sizeof(value_type_) == 4)
-            return x86_cmpaexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, negated);
-        else return x86_cmpaexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, negated);
-    }
-
-  protected:
-    value_type_ *word_;
-};
-
-/**
- *  @brief The above plus RAO-INT for the relaxed no-return forms: `aadd`, `aand`, `aor` execute
- *      at the shared cache. Anything ordered keeps the `lock`-prefixed base, already a full
- *      fence. `CPUID.(7,1):EAX[3]` says so at runtime.
- *  @sa `capability_x86_raoint_k` - the bit admitting it, on top of `capability_x86_cmpccxadd_k`.
- */
-template <typename value_type_>
-struct x86_raoint_atomic_ref : public x86_cmpccxadd_atomic_ref<value_type_> {
-    using base_t = x86_cmpccxadd_atomic_ref<value_type_>;
-    using base_t::base_t;
-    using typename base_t::word_t;
-    static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k | capability_x86_raoint_k;
-
-    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
-        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
-    {
-        if (order != std::memory_order_relaxed) return base_t::add(operand, order);
-        word_t *word = reinterpret_cast<word_t *>(this->word_);
-        if constexpr (sizeof(value_type_) == 4) x86_aadd_u32(word, std::bit_cast<word_t>(operand));
-        else x86_aadd_u64(word, std::bit_cast<word_t>(operand));
-    }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
-        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
-    {
-        add(static_cast<value_type_>(value_type_ {0} - operand), order);
-    }
-    void set(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
-        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
-    {
-        if (order != std::memory_order_relaxed) return base_t::set(bits, order);
-        word_t *word = reinterpret_cast<word_t *>(this->word_);
-        if constexpr (sizeof(value_type_) == 4) x86_aor_u32(word, std::bit_cast<word_t>(bits));
-        else x86_aor_u64(word, std::bit_cast<word_t>(bits));
-    }
-    void clear(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
-        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
-    {
-        if (order != std::memory_order_relaxed) return base_t::clear(bits, order);
-        word_t *word = reinterpret_cast<word_t *>(this->word_);
-        word_t const mask = static_cast<word_t>(~std::bit_cast<word_t>(bits));
-        if constexpr (sizeof(value_type_) == 4) x86_aand_u32(word, mask);
-        else x86_aand_u64(word, mask);
-    }
-};
-
-#pragma endregion x86
-
-#endif // FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_
-
-#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && __riscv_xlen == 64
-
-#pragma region RISC5
+#pragma region RISC5 A
 
 /*  Loads & stores carry their order as fences, per the RISC-V mapping: acquire is `fence r,rw`
  *  after the load, release `fence rw,w` before the store, sequential consistency both. */
@@ -1681,38 +1700,11 @@ inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired)
     return static_cast<std::uint8_t>(observed >> shift);
 }
 
-/*  `Zacas`: compare-and-swap as one instruction; the comparand register receives what the word
- *  held. Assemblers disagree on how to name the extension inline - `zacas`, `zacas1p0`, or not at
- *  all - and `.insn` is a directive older LLVM lacks, so the two are whole words with the registers
- *  pinned: the AMO opcode, funct5 `00101`, both `aq` and `rl` set, `a0` as the comparand, `a1` as
- *  the address, `a2` as the desired value. A baseline `rv64gc` build then assembles them and the
- *  runtime bit decides. */
-inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
-    register std::int64_t observed __asm__("a0") = static_cast<std::int32_t>(expected);
-    register std::uint32_t *address __asm__("a1") = word;
-    register std::uint32_t value __asm__("a2") = desired;
-    __asm__ __volatile__(".4byte 0x2ec5a52f"
-                         : "+r"(observed)
-                         : "r"(address), "r"(value)
-                         : "memory"); // ? `amocas.w.aqrl a0, a2, (a1)`
-    return static_cast<std::uint32_t>(observed);
-}
-inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
-    register std::uint64_t observed __asm__("a0") = expected;
-    register std::uint64_t *address __asm__("a1") = word;
-    register std::uint64_t value __asm__("a2") = desired;
-    __asm__ __volatile__(".4byte 0x2ec5b52f"
-                         : "+r"(observed)
-                         : "r"(address), "r"(value)
-                         : "memory"); // ? `amocas.d.aqrl a0, a2, (a1)`
-    return observed;
-}
-
 /**
  *  @brief `std::atomic_ref` over the RISC-V base A extension: one `amo*` per read-modify-write,
  *      `x0` as the destination for the no-return forms, `lr`/`sc` loops for compare-exchange and
  *      byte exchanges, fences around the ordered loads & stores.
- *  @sa `risc5_zacas_atomic_ref` - the same with `amocas`; the A extension itself needs no bit.
+ *  @sa `capability_risc5_atomic_k` - the bit admitting it; `risc5_zacas_atomic_ref` - the same with `amocas`.
  */
 template <typename value_type_>
 struct risc5_atomic_ref {
@@ -1721,8 +1713,7 @@ struct risc5_atomic_ref {
                   "Only byte, 32-bit and 64-bit words are spelled");
     using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
-    /** No bit to admit: the A extension is the RISC-V baseline. */
-    static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
+    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k;
 
     explicit risc5_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {}
 
@@ -1896,6 +1887,41 @@ struct risc5_atomic_ref {
     word_t *word_;
 };
 
+#pragma endregion RISC5 A
+
+#endif // FU_TARGET_RISC5_ATOMIC
+
+#if FU_TARGET_RISC5_ZACAS
+
+#pragma region RISC5 Zacas
+
+/*  `Zacas`: compare-and-swap as one instruction; the comparand register receives what the word
+ *  held. Assemblers disagree on how to name the extension inline - `zacas`, `zacas1p0`, or not at
+ *  all - and `.insn` is a directive older LLVM lacks, so the two are whole words with the registers
+ *  pinned: the AMO opcode, funct5 `00101`, both `aq` and `rl` set, `a0` as the comparand, `a1` as
+ *  the address, `a2` as the desired value. A baseline `rv64gc` build then assembles them and the
+ *  runtime bit decides. */
+inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
+    register std::int64_t observed __asm__("a0") = static_cast<std::int32_t>(expected);
+    register std::uint32_t *address __asm__("a1") = word;
+    register std::uint32_t value __asm__("a2") = desired;
+    __asm__ __volatile__(".4byte 0x2ec5a52f"
+                         : "+r"(observed)
+                         : "r"(address), "r"(value)
+                         : "memory"); // ? `amocas.w.aqrl a0, a2, (a1)`
+    return static_cast<std::uint32_t>(observed);
+}
+inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
+    register std::uint64_t observed __asm__("a0") = expected;
+    register std::uint64_t *address __asm__("a1") = word;
+    register std::uint64_t value __asm__("a2") = desired;
+    __asm__ __volatile__(".4byte 0x2ec5b52f"
+                         : "+r"(observed)
+                         : "r"(address), "r"(value)
+                         : "memory"); // ? `amocas.d.aqrl a0, a2, (a1)`
+    return observed;
+}
+
 /**
  *  @brief `Zacas` on top of the base: compare-exchange as one `amocas` instead of an `lr`/`sc` loop.
  *  @sa `capability_risc5_zacas_k` - the bit admitting it; `risc5_atomic_ref` - the base it extends.
@@ -1905,7 +1931,7 @@ struct risc5_zacas_atomic_ref : public risc5_atomic_ref<value_type_> {
     using base_t = risc5_atomic_ref<value_type_>;
     using base_t::base_t;
     using typename base_t::word_t;
-    static constexpr capabilities_t capabilities_k = capability_risc5_zacas_k;
+    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k | capability_risc5_zacas_k;
 
     bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order,
                                  std::memory_order) const noexcept {
@@ -1932,9 +1958,9 @@ struct risc5_zacas_atomic_ref : public risc5_atomic_ref<value_type_> {
     }
 };
 
-#pragma endregion RISC5
+#pragma endregion RISC5 Zacas
 
-#endif // FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && __riscv_xlen == 64
+#endif // FU_TARGET_RISC5_ZACAS
 
 /**
  *  The newest reference the build target guarantees through its predefined macros - the
@@ -1942,23 +1968,22 @@ struct risc5_zacas_atomic_ref : public risc5_atomic_ref<value_type_> {
  *  be illegal; otherwise the standard reference, whose lowering the same flags decide. Callers
  *  dispatching per CPU class at runtime name the references directly instead.
  */
-#if FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && defined(__ARM_FEATURE_ATOMICS) && \
-    defined(__ARM_FEATURE_RCPC)
+#if FU_TARGET_ARM64_RCPC && defined(__ARM_FEATURE_ATOMICS) && defined(__ARM_FEATURE_RCPC)
 template <typename value_type_>
 using preferred_atomic_ref = arm64_rcpc_atomic_ref<value_type_>;
-#elif FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && defined(__ARM_FEATURE_ATOMICS)
+#elif FU_TARGET_ARM64_LSE && defined(__ARM_FEATURE_ATOMICS)
 template <typename value_type_>
 using preferred_atomic_ref = arm64_lse_atomic_ref<value_type_>;
-#elif FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && defined(__CMPCCXADD__) && defined(__RAOINT__)
+#elif FU_TARGET_X86_RAOINT && defined(__CMPCCXADD__) && defined(__RAOINT__)
 template <typename value_type_>
 using preferred_atomic_ref = x86_raoint_atomic_ref<value_type_>;
-#elif FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && defined(__CMPCCXADD__)
+#elif FU_TARGET_X86_CMPCCXADD && defined(__CMPCCXADD__)
 template <typename value_type_>
 using preferred_atomic_ref = x86_cmpccxadd_atomic_ref<value_type_>;
-#elif FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && __riscv_xlen == 64 && defined(__riscv_zacas)
+#elif FU_TARGET_RISC5_ZACAS && defined(__riscv_zacas)
 template <typename value_type_>
 using preferred_atomic_ref = risc5_zacas_atomic_ref<value_type_>;
-#elif FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && __riscv_xlen == 64 && defined(__riscv_atomic)
+#elif FU_TARGET_RISC5_ATOMIC && defined(__riscv_atomic)
 template <typename value_type_>
 using preferred_atomic_ref = risc5_atomic_ref<value_type_>;
 #else

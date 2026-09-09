@@ -372,6 +372,11 @@ typedef enum fu_capabilities_t {
      *      attested by the kernel's `hwprobe`. Admits `risc5_zacas_atomic_ref`.
      */
     fu_capability_risc5_zacas_k = 1 << 22,
+    /**
+     *  The A extension: `lr`/`sc` and the `amo*` read-modify-writes, the RISC-V baseline every Linux
+     *      ABI guarantees. Admits `risc5_atomic_ref`; `fu_capability_risc5_zacas_k` extends it.
+     */
+    fu_capability_risc5_atomic_k = 1 << 23,
 
     /**
      *  Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine

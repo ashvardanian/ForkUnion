@@ -336,7 +336,7 @@ struct log_capabilities_t {
             {capability_arm64_yield_k, "ARM64 YIELD"},     {capability_arm64_wfet_k, "ARM64 WFET"},
             {capability_arm64_lse_k, "ARM64 LSE"},         {capability_arm64_rcpc_k, "ARM64 RCPC"},
             {capability_risc5_pause_k, "RISC-V PAUSE"},    {capability_risc5_wrs_k, "RISC-V WRS"},
-            {capability_risc5_zacas_k, "RISC-V ZACAS"},
+            {capability_risc5_atomic_k, "RISC-V A"},       {capability_risc5_zacas_k, "RISC-V ZACAS"},
         };
         constexpr bullet_t ram_bullets[] = {
             {capability_place_memory_on_domain_k, "NUMA"},

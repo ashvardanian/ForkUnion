@@ -55,44 +55,64 @@ struct pool_variants_t {
      *  out explicitly per shape. A missed entry cannot silently under-size the storage: `construct`
      *  static-asserts every pool it places against these bounds, so drift fails the build.  */
     using pool_traits_t = max_size_align< //
-#if FU_DETECT_ARCH_X86_64_
-        fu::flat_pool<thread_allocator_t, fu::x86_pause_t, fu::standard_cache_hints_t>,  //
+#if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
+        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::x86_cache_hints_t>, //
+#endif
+#if FU_TARGET_X86_TPAUSE
         fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::standard_cache_hints_t>, //
-        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::x86_cache_hints_t>,      //
-#elif FU_DETECT_ARCH_ARM64_
-        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
-#if FU_DETECT_INLINE_ASM_SUPPORT_ // `WFET` is inline-assembly only
+#endif
+#if FU_TARGET_X86_PAUSE
+        fu::flat_pool<thread_allocator_t, fu::x86_pause_t, fu::standard_cache_hints_t>, //
+#endif
+#if FU_TARGET_ARM64_WFET
         fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
 #endif
-#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
-        fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
-        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cache_hints_t>,     //
+#if FU_TARGET_ARM64_YIELD
+        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
+#endif
+#if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
+#endif
+#if FU_TARGET_RISC5_WRS
+        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
+#endif
+#if FU_TARGET_RISC5_PAUSE
+        fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
 
         fu::colocated_pool<fu::standard_yield_t, fu::standard_cache_hints_t>,   // Single-compute-domain pools
         fu::distributed_pool<fu::standard_yield_t, fu::standard_cache_hints_t>, // Whole-machine pools
-#if FU_DETECT_ARCH_X86_64_
-        fu::colocated_pool<fu::x86_pause_t, fu::standard_cache_hints_t>,    //
+#if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
+        fu::colocated_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>,   //
+        fu::distributed_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>, //
+#endif
+#if FU_TARGET_X86_TPAUSE
         fu::colocated_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>,   //
-        fu::colocated_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>,        //
-        fu::distributed_pool<fu::x86_pause_t, fu::standard_cache_hints_t>,  //
         fu::distributed_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>, //
-        fu::distributed_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>,      //
-#elif FU_DETECT_ARCH_ARM64_
-        fu::colocated_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>,   //
-        fu::distributed_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
-#if FU_DETECT_INLINE_ASM_SUPPORT_ // `WFET` is inline-assembly only
+#endif
+#if FU_TARGET_X86_PAUSE
+        fu::colocated_pool<fu::x86_pause_t, fu::standard_cache_hints_t>,   //
+        fu::distributed_pool<fu::x86_pause_t, fu::standard_cache_hints_t>, //
+#endif
+#if FU_TARGET_ARM64_WFET
         fu::colocated_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>,   //
         fu::distributed_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
 #endif
-#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
-        fu::colocated_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,     //
-        fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,       //
+#if FU_TARGET_ARM64_YIELD
+        fu::colocated_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>,   //
+        fu::distributed_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
+#endif
+#if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
         fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,     //
         fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
+#endif
+#if FU_TARGET_RISC5_WRS
+        fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,   //
+        fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
+#endif
+#if FU_TARGET_RISC5_PAUSE
+        fu::colocated_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
+        fu::distributed_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
 
         fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
@@ -152,36 +172,46 @@ static bool selects(fu::capabilities_t const bits) noexcept {
  */
 template <fu::pool_kind_t kind_, typename action_type_>
 static auto select_pool(FU_MAYBE_UNUSED_ fu::capabilities_t const bits, action_type_ &&action) {
-#if FU_DETECT_ARCH_X86_64_
     // WAITPKG ships in Tremont, Alder Lake, and Sapphire Rapids onward; CLDEMOTE only ever shipped
     // alongside it (Tremont, SPR, GNR - fused off on Alder/Raptor/Meteor client parts), so the
     // (pause + cldemote) cell has no silicon and is deliberately not offered.
+#if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
     if (selects<fu::x86_tpause_t, fu::x86_cache_hints_t>(bits))
         return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_tpause_t, fu::x86_cache_hints_t>::type> {});
+#endif
+#if FU_TARGET_X86_TPAUSE
     if (selects<fu::x86_tpause_t, fu::standard_cache_hints_t>(bits))
         return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_tpause_t, fu::standard_cache_hints_t>::type> {});
+#endif
+#if FU_TARGET_X86_PAUSE
     if (selects<fu::x86_pause_t, fu::standard_cache_hints_t>(bits))
         return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_pause_t, fu::standard_cache_hints_t>::type> {});
-#elif FU_DETECT_ARCH_ARM64_
+#endif
     // `DC CVAC` legality is an OS property (`SCTLR_EL1.UCI`), so the hints half is decided at
     // compile time by `preferred_cache_hints_t` - the clean on Linux, a no-op elsewhere - and the
     // runtime axis stays the waiter alone.
-#if FU_DETECT_INLINE_ASM_SUPPORT_ // `WFET` is inline-assembly only
+#if FU_TARGET_ARM64_WFET
     if (selects<fu::arm64_wfet_t, fu::preferred_cache_hints_t>(bits))
         return action(
             pool_type_tag_t<typename pool_for<kind_, fu::arm64_wfet_t, fu::preferred_cache_hints_t>::type> {});
 #endif
+#if FU_TARGET_ARM64_YIELD
     if (selects<fu::arm64_yield_t, fu::preferred_cache_hints_t>(bits))
         return action(
             pool_type_tag_t<typename pool_for<kind_, fu::arm64_yield_t, fu::preferred_cache_hints_t>::type> {});
-#elif FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_RISC5_
+#endif
     // RVA23 mandates Zawrs and Zicbom together, so the monitored waiter travels with the
     // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space
     // `prefetch.w` promotion that can never fault.
+#if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
     if (selects<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>(bits))
         return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
+#endif
+#if FU_TARGET_RISC5_WRS
     if (selects<fu::risc5_wrs_t, fu::risc5_cache_hints_t>(bits))
         return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cache_hints_t>::type> {});
+#endif
+#if FU_TARGET_RISC5_PAUSE
     if (selects<fu::risc5_pause_t, fu::risc5_cache_hints_t>(bits))
         return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_pause_t, fu::risc5_cache_hints_t>::type> {});
 #endif
@@ -353,6 +383,7 @@ fu_assert_same_bit_(fu_capability_x86_raoint_k, capability_x86_raoint_k);
 fu_assert_same_bit_(fu_capability_arm64_lse_k, capability_arm64_lse_k);
 fu_assert_same_bit_(fu_capability_arm64_rcpc_k, capability_arm64_rcpc_k);
 fu_assert_same_bit_(fu_capability_risc5_zacas_k, capability_risc5_zacas_k);
+fu_assert_same_bit_(fu_capability_risc5_atomic_k, capability_risc5_atomic_k);
 fu_assert_same_bit_(fu_capability_any_yield_k, capability_any_yield_k);
 fu_assert_same_bit_(fu_capability_os_threads_k, capability_os_threads_k);
 fu_assert_same_bit_(fu_capability_topology_k, capability_topology_k);

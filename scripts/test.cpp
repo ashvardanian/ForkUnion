@@ -1486,14 +1486,22 @@ static void check_atomic_ref() noexcept {
  *  inline assembly exists - each run only where the machine admits it. */
 static void test_atomic_refs() noexcept {
     check_atomic_ref<fu::standard_atomic_ref>();
-#if FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#if FU_TARGET_X86_CMPCCXADD
     check_atomic_ref<fu::x86_cmpccxadd_atomic_ref>();
+#endif
+#if FU_TARGET_X86_RAOINT
     check_atomic_ref<fu::x86_raoint_atomic_ref>();
-#elif FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#endif
+#if FU_TARGET_ARM64_LSE
     check_atomic_ref<fu::arm64_lse_atomic_ref>();
+#endif
+#if FU_TARGET_ARM64_RCPC
     check_atomic_ref<fu::arm64_rcpc_atomic_ref>();
-#elif FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && __riscv_xlen == 64
+#endif
+#if FU_TARGET_RISC5_ATOMIC
     check_atomic_ref<fu::risc5_atomic_ref>();
+#endif
+#if FU_TARGET_RISC5_ZACAS
     check_atomic_ref<fu::risc5_zacas_atomic_ref>();
 #endif
 }
