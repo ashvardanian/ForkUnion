@@ -413,11 +413,22 @@
 #define FU_DETECT_HINT_INTRINSICS_ 0
 #endif
 
+/*  Whether MSVC's AArch64 atomic intrinsics are available and lower to LSE: `__ldar`/`__stlr`/`__ldapr`,
+ *  `__swp*` and `__cas*` are encoded unconditionally, while the arithmetic tail rides `_Interlocked*`,
+ *  which tail-calls the CRT unless `/arch:armv8.1` is given - reported as `__ARM_FEATURE_ATOMICS`, the
+ *  macro GCC and Clang publish for `+lse`. clang-cl takes the inline-asm path above. */
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64) && defined(__ARM_FEATURE_ATOMICS)
+#define FU_DETECT_ARM64_ATOMIC_INTRINSICS_ 1
+#else
+#define FU_DETECT_ARM64_ATOMIC_INTRINSICS_ 0
+#endif
+
 /*  The toolchain's verdict per instruction-level capability bit - `FU_TARGET_<BIT>` - what the build's
  *  probes publish on `forkunion::header`. Without a probe the bit derives here: the architecture, and
  *  inline assembly where the path is a raw encoding or a mnemonic, or nothing more where MSVC reaches the
  *  same instruction through an intrinsic. Every extension instruction is a raw encoding; the LSE and
- *  RCpc mnemonics ride `.arch_extension`, which every assembler of the last decade takes, and the
+ *  RCpc mnemonics ride `.arch_extension`, which every assembler of the last decade takes, MSVC reaches
+ *  the same two rungs through intrinsics whose arithmetic tail asks for `/arch:armv8.1`, and the
  *  RISC-V A extension's mnemonics need the `-march` the compiler reports as `__riscv_atomic`. */
 #if !defined(FU_TARGET_X86_PAUSE)
 #define FU_TARGET_X86_PAUSE FU_DETECT_ARCH_X86_64_
@@ -444,10 +455,12 @@
 #define FU_TARGET_ARM64_DC_CVAC (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
 #endif
 #if !defined(FU_TARGET_ARM64_LSE)
-#define FU_TARGET_ARM64_LSE (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#define FU_TARGET_ARM64_LSE \
+    (FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_))
 #endif
 #if !defined(FU_TARGET_ARM64_RCPC)
-#define FU_TARGET_ARM64_RCPC (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#define FU_TARGET_ARM64_RCPC \
+    (FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_))
 #endif
 #if !defined(FU_TARGET_RISC5_PAUSE)
 #define FU_TARGET_RISC5_PAUSE (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)

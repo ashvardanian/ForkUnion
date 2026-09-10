@@ -1504,8 +1504,8 @@ static void check_atomic_ref() noexcept {
     check_atomic_ref_under_contention<atomic_ref_>();
 }
 
-/** Every reference the build spells - the standard one everywhere, the instruction-set ones where
- *  inline assembly exists - each run only where the machine admits it. */
+/** Every reference the build spells - the standard one everywhere, the instruction-set ones the
+ *  toolchain can emit - each run only where the machine admits it. */
 static void test_atomic_refs() noexcept {
     check_atomic_ref<fu::standard_atomic_ref>();
     check_atomic_verbs();

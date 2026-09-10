@@ -7,6 +7,9 @@ A consumer without the probes gets the same answer the header derives on its own
 The verdict answers one question: can this toolchain build this bit's path.
 Every extension instruction is a raw encoding, so those probes fail only where `__asm__` is missing.
 The LSE and RCpc mnemonics ride on `.arch_extension`, which every assembler of the last decade takes.
+MSVC has no inline assembly and spells both rungs as intrinsics instead, so those two probes carry a second arm.
+`__ldapr32` needs no flag, while the LSE arithmetic goes through `_Interlocked*`, which stays inline only under `/arch:armv8.1`, so the LSE probe asks for that flag through `__ARM_FEATURE_ATOMICS`, the same macro `FU_DETECT_ARM64_ATOMIC_INTRINSICS_` keys the header's definitions on.
+A baseline MSVC therefore answers LSE 0 and RCpc 1, and the demotion in `types.hpp` takes the child rung down with its parent.
 The RISC-V base atomics are the A extension's own mnemonics, so that probe also needs the extension in `-march`, as every `rv64gc` build has.
 Whether the CPU has the instruction is the runtime's question, answered by `cpu_capabilities()`, never by a probe.
 
@@ -20,4 +23,5 @@ The OS-level bits - owned threads, topology, placements, transparent huge pages 
 | `arm64_wfet`, `risc5_pause`, `risc5_wrs`, `risc5_zicbom`, `risc5_zacas` | raw words | inline assembly |
 | `arm64_dc_cvac` | `dc cvac` | inline assembly |
 | `risc5_atomic` | `amoswap`, `lr` and `sc` | inline assembly and the A extension in `-march` |
-| `arm64_lse`, `arm64_rcpc` | `.arch_extension` and a mnemonic | inline assembly |
+| `arm64_rcpc` | `.arch_extension` and a mnemonic, or `__ldapr32` | nothing |
+| `arm64_lse` | `.arch_extension` and a mnemonic, or `__swp32` | `/arch:armv8.1` on MSVC, nothing elsewhere |

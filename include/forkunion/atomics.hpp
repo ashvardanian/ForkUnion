@@ -32,10 +32,13 @@
  *  assembles in a baseline translation unit: on Arm the extension is named in the assembly text
  *  - `.arch_extension` - the RISC-V base atomics are the A-extension mnemonics every `rv64gc`
  *  toolchain assembles, and the x86 and RISC-V extension instructions are raw bytes; the runtime
- *  capability bit decides whether it may run. Where inline assembly is unavailable - MSVC - only
- *  `standard_atomic_ref` remains. `preferred_atomic_ref`, at the bottom, is the newest reference
- *  the build target guarantees through its predefined macros - the `preferred_yield_t` rule - for
- *  callers picking at compile time rather than per CPU class.
+ *  capability bit decides whether it may run. Where inline assembly is unavailable - MSVC - the Arm64
+ *  references are spelled over `__ldar`/`__stlr`/`__ldapr`, `__swp*`, `__cas*` and the `_Interlocked*`
+ *  arithmetic, which stays inline only under `/arch:armv8.1`; the x86 and RISC-V references have no
+ *  intrinsic for their instructions, so those targets keep `standard_atomic_ref`.
+ *  `preferred_atomic_ref`, at the bottom, is the newest reference the build target guarantees through
+ *  its predefined macros - the `preferred_yield_t` rule - for callers picking at compile time rather
+ *  than per CPU class.
  *
  *  The header needs the library's `std::atomic_ref` and `std::bit_cast`, so it is empty without
  *  them - a C++17 translation unit including the umbrella sees nothing here.
@@ -49,6 +52,11 @@
 #include <type_traits> // `std::conditional_t`, `std::is_trivially_copyable_v`
 
 #include "types.hpp" // `capabilities_t`, the bits a reference needs admitted, and the target macros
+
+/*  Gated on a macro `types.hpp` defines, so it follows rather than joins the third-party group. */
+#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+#include <intrin.h> // `__ldar64`, `__stlr64`, `__ldapr64`, `__swpal64`, `__casal64`, `_Interlocked*`
+#endif
 
 namespace ashvardanian {
 namespace forkunion {
@@ -447,6 +455,8 @@ struct x86_raoint_atomic_ref : public x86_cmpccxadd_atomic_ref<value_type_> {
 #if FU_TARGET_ARM64_LSE
 
 #pragma region Arm64 LSE
+
+#if FU_DETECT_INLINE_ASM_SUPPORT_
 
 /*  Loads: plain and acquire. */
 
@@ -1249,6 +1259,313 @@ inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, 
     return expected;
 }
 
+#endif // FU_DETECT_INLINE_ASM_SUPPORT_
+
+#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+
+/*  Loads: plain and acquire. `__iso_volatile_load*` is the plain load no optimizer may fold away,
+ *  spelled over the signed widths; `__ldar*` takes the unsigned ones directly. */
+
+inline std::uint8_t arm64_ldr_u8(std::uint8_t const *word) noexcept {
+    return static_cast<std::uint8_t>(__iso_volatile_load8(reinterpret_cast<char const volatile *>(word)));
+}
+inline std::uint32_t arm64_ldr_u32(std::uint32_t const *word) noexcept {
+    return static_cast<std::uint32_t>(__iso_volatile_load32(reinterpret_cast<int const volatile *>(word)));
+}
+inline std::uint64_t arm64_ldr_u64(std::uint64_t const *word) noexcept {
+    return static_cast<std::uint64_t>(__iso_volatile_load64(reinterpret_cast<__int64 const volatile *>(word)));
+}
+
+inline std::uint8_t arm64_ldar_u8(std::uint8_t const *word) noexcept { return __ldar8(word); }
+inline std::uint32_t arm64_ldar_u32(std::uint32_t const *word) noexcept { return __ldar32(word); }
+inline std::uint64_t arm64_ldar_u64(std::uint64_t const *word) noexcept { return __ldar64(word); }
+
+/*  Stores: plain and release. */
+
+inline void arm64_str_u8(std::uint8_t *word, std::uint8_t value) noexcept {
+    __iso_volatile_store8(reinterpret_cast<char volatile *>(word), static_cast<char>(value));
+}
+inline void arm64_str_u32(std::uint32_t *word, std::uint32_t value) noexcept {
+    __iso_volatile_store32(reinterpret_cast<int volatile *>(word), static_cast<int>(value));
+}
+inline void arm64_str_u64(std::uint64_t *word, std::uint64_t value) noexcept {
+    __iso_volatile_store64(reinterpret_cast<__int64 volatile *>(word), static_cast<__int64>(value));
+}
+
+inline void arm64_stlr_u8(std::uint8_t *word, std::uint8_t value) noexcept { __stlr8(word, value); }
+inline void arm64_stlr_u32(std::uint32_t *word, std::uint32_t value) noexcept { __stlr32(word, value); }
+inline void arm64_stlr_u64(std::uint64_t *word, std::uint64_t value) noexcept { __stlr64(word, value); }
+
+/*  LSE exchanges: the intrinsic's name carries the acquire/release flavor the mnemonic's suffix
+ *  does, so the order picks the spelling and the switches fold away at every constant call site. */
+
+inline std::uint8_t arm64_swp_u8(std::uint8_t *word, std::uint8_t desired, std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __swp8(word, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __swpa8(word, desired);
+    case std::memory_order_release: return __swpl8(word, desired);
+    default: return __swpal8(word, desired);
+    }
+}
+inline std::uint32_t arm64_swp_u32(std::uint32_t *word, std::uint32_t desired, std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __swp32(word, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __swpa32(word, desired);
+    case std::memory_order_release: return __swpl32(word, desired);
+    default: return __swpal32(word, desired);
+    }
+}
+inline std::uint64_t arm64_swp_u64(std::uint64_t *word, std::uint64_t desired, std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __swp64(word, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __swpa64(word, desired);
+    case std::memory_order_release: return __swpl64(word, desired);
+    default: return __swpal64(word, desired);
+    }
+}
+
+/** `cas` compares against `expected` and returns what the word held; equality means it swapped. */
+inline std::uint8_t arm64_cas_u8(std::uint8_t *word, std::uint8_t expected, std::uint8_t desired,
+                                 std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __cas8(word, expected, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __casa8(word, expected, desired);
+    case std::memory_order_release: return __casl8(word, expected, desired);
+    default: return __casal8(word, expected, desired);
+    }
+}
+inline std::uint32_t arm64_cas_u32(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired,
+                                   std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __cas32(word, expected, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __casa32(word, expected, desired);
+    case std::memory_order_release: return __casl32(word, expected, desired);
+    default: return __casal32(word, expected, desired);
+    }
+}
+inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired,
+                                   std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __cas64(word, expected, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __casa64(word, expected, desired);
+    case std::memory_order_release: return __casl64(word, expected, desired);
+    default: return __casal64(word, expected, desired);
+    }
+}
+
+/*  LSE arithmetic: `ldadd`, `ldclr`, `ldset` and `ldeor` have no intrinsic of their own, so the
+ *  `_Interlocked*` family carries them - one instruction under `/arch:armv8.1`, and a call into the
+ *  CRT without it, which `FU_DETECT_ARM64_ATOMIC_INTRINSICS_` has already refused. */
+
+inline std::uint32_t arm64_ldadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+    long volatile *target = reinterpret_cast<long volatile *>(word);
+    long const addend = static_cast<long>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint32_t>(_InterlockedExchangeAdd_nf(target, addend));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint32_t>(_InterlockedExchangeAdd_acq(target, addend));
+    case std::memory_order_release: return static_cast<std::uint32_t>(_InterlockedExchangeAdd_rel(target, addend));
+    default: return static_cast<std::uint32_t>(_InterlockedExchangeAdd(target, addend));
+    }
+}
+inline std::uint64_t arm64_ldadd_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+    __int64 volatile *target = reinterpret_cast<__int64 volatile *>(word);
+    __int64 const addend = static_cast<__int64>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint64_t>(_InterlockedExchangeAdd64_nf(target, addend));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint64_t>(_InterlockedExchangeAdd64_acq(target, addend));
+    case std::memory_order_release: return static_cast<std::uint64_t>(_InterlockedExchangeAdd64_rel(target, addend));
+    default: return static_cast<std::uint64_t>(_InterlockedExchangeAdd64(target, addend));
+    }
+}
+
+/** `ldclr` clears the operand's bits, `_InterlockedAnd` keeps the complement's, so the mask flips. */
+inline std::uint32_t arm64_ldclr_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+    long volatile *target = reinterpret_cast<long volatile *>(word);
+    long const kept = static_cast<long>(~bits);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint32_t>(_InterlockedAnd_nf(target, kept));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint32_t>(_InterlockedAnd_acq(target, kept));
+    case std::memory_order_release: return static_cast<std::uint32_t>(_InterlockedAnd_rel(target, kept));
+    default: return static_cast<std::uint32_t>(_InterlockedAnd(target, kept));
+    }
+}
+inline std::uint64_t arm64_ldclr_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+    __int64 volatile *target = reinterpret_cast<__int64 volatile *>(word);
+    __int64 const kept = static_cast<__int64>(~bits);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint64_t>(_InterlockedAnd64_nf(target, kept));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint64_t>(_InterlockedAnd64_acq(target, kept));
+    case std::memory_order_release: return static_cast<std::uint64_t>(_InterlockedAnd64_rel(target, kept));
+    default: return static_cast<std::uint64_t>(_InterlockedAnd64(target, kept));
+    }
+}
+
+inline std::uint32_t arm64_ldset_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+    long volatile *target = reinterpret_cast<long volatile *>(word);
+    long const bits = static_cast<long>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint32_t>(_InterlockedOr_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint32_t>(_InterlockedOr_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint32_t>(_InterlockedOr_rel(target, bits));
+    default: return static_cast<std::uint32_t>(_InterlockedOr(target, bits));
+    }
+}
+inline std::uint64_t arm64_ldset_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+    __int64 volatile *target = reinterpret_cast<__int64 volatile *>(word);
+    __int64 const bits = static_cast<__int64>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint64_t>(_InterlockedOr64_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint64_t>(_InterlockedOr64_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint64_t>(_InterlockedOr64_rel(target, bits));
+    default: return static_cast<std::uint64_t>(_InterlockedOr64(target, bits));
+    }
+}
+
+inline std::uint32_t arm64_ldeor_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+    long volatile *target = reinterpret_cast<long volatile *>(word);
+    long const bits = static_cast<long>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint32_t>(_InterlockedXor_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint32_t>(_InterlockedXor_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint32_t>(_InterlockedXor_rel(target, bits));
+    default: return static_cast<std::uint32_t>(_InterlockedXor(target, bits));
+    }
+}
+inline std::uint64_t arm64_ldeor_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+    __int64 volatile *target = reinterpret_cast<__int64 volatile *>(word);
+    __int64 const bits = static_cast<__int64>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint64_t>(_InterlockedXor64_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint64_t>(_InterlockedXor64_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint64_t>(_InterlockedXor64_rel(target, bits));
+    default: return static_cast<std::uint64_t>(_InterlockedXor64(target, bits));
+    }
+}
+
+/*  No-return forms: nothing spells `stadd`, `stclr` or `stset`, so the returning instruction runs
+ *  and its answer is dropped - one round trip the posted form would not have made. */
+
+inline void arm64_stadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint32_t const observed = arm64_ldadd_u32(word, operand, order);
+}
+inline void arm64_stadd_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint64_t const observed = arm64_ldadd_u64(word, operand, order);
+}
+inline void arm64_stclr_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint32_t const observed = arm64_ldclr_u32(word, bits, order);
+}
+inline void arm64_stclr_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint64_t const observed = arm64_ldclr_u64(word, bits, order);
+}
+inline void arm64_stset_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint32_t const observed = arm64_ldset_u32(word, bits, order);
+}
+inline void arm64_stset_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint64_t const observed = arm64_ldset_u64(word, bits, order);
+}
+
+/*  LSE maxima & minima: nothing spells `ldsmax` & kin either, and no `_Interlocked*` computes them,
+ *  so a `cas` loop stands in. It swaps on every pass, an unchanged word included, so the ordered
+ *  flavors stay the read-modify-write their callers were promised. */
+
+inline std::uint32_t arm64_ldumax_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+    std::uint32_t observed = arm64_ldr_u32(word);
+    while (true) {
+        std::uint32_t const wanted = observed < operand ? operand : observed;
+        std::uint32_t const seen = arm64_cas_u32(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::uint64_t arm64_ldumax_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+    std::uint64_t observed = arm64_ldr_u64(word);
+    while (true) {
+        std::uint64_t const wanted = observed < operand ? operand : observed;
+        std::uint64_t const seen = arm64_cas_u64(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::int32_t arm64_ldsmax_i32(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
+    std::uint32_t *target = reinterpret_cast<std::uint32_t *>(word);
+    std::int32_t observed = static_cast<std::int32_t>(arm64_ldr_u32(target));
+    while (true) {
+        std::int32_t const wanted = observed < operand ? operand : observed;
+        std::int32_t const seen = static_cast<std::int32_t>(
+            arm64_cas_u32(target, static_cast<std::uint32_t>(observed), static_cast<std::uint32_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::int64_t arm64_ldsmax_i64(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
+    std::uint64_t *target = reinterpret_cast<std::uint64_t *>(word);
+    std::int64_t observed = static_cast<std::int64_t>(arm64_ldr_u64(target));
+    while (true) {
+        std::int64_t const wanted = observed < operand ? operand : observed;
+        std::int64_t const seen = static_cast<std::int64_t>(
+            arm64_cas_u64(target, static_cast<std::uint64_t>(observed), static_cast<std::uint64_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+
+inline std::uint32_t arm64_ldumin_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+    std::uint32_t observed = arm64_ldr_u32(word);
+    while (true) {
+        std::uint32_t const wanted = operand < observed ? operand : observed;
+        std::uint32_t const seen = arm64_cas_u32(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::uint64_t arm64_ldumin_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+    std::uint64_t observed = arm64_ldr_u64(word);
+    while (true) {
+        std::uint64_t const wanted = operand < observed ? operand : observed;
+        std::uint64_t const seen = arm64_cas_u64(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::int32_t arm64_ldsmin_i32(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
+    std::uint32_t *target = reinterpret_cast<std::uint32_t *>(word);
+    std::int32_t observed = static_cast<std::int32_t>(arm64_ldr_u32(target));
+    while (true) {
+        std::int32_t const wanted = operand < observed ? operand : observed;
+        std::int32_t const seen = static_cast<std::int32_t>(
+            arm64_cas_u32(target, static_cast<std::uint32_t>(observed), static_cast<std::uint32_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::int64_t arm64_ldsmin_i64(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
+    std::uint64_t *target = reinterpret_cast<std::uint64_t *>(word);
+    std::int64_t observed = static_cast<std::int64_t>(arm64_ldr_u64(target));
+    while (true) {
+        std::int64_t const wanted = operand < observed ? operand : observed;
+        std::int64_t const seen = static_cast<std::int64_t>(
+            arm64_cas_u64(target, static_cast<std::uint64_t>(observed), static_cast<std::uint64_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+
+#endif // FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+
 /**
  *  @brief `std::atomic_ref` over Armv8.1 LSE: `ldar`/`stlr` for the ordered loads & stores, one
  *      instruction per read-modify-write in the acquire/release flavor the order asks for. Same
@@ -1469,6 +1786,8 @@ struct arm64_lse_atomic_ref {
 
 /*  RCpc acquire loads: ordered against later loads and stores, not against earlier stores. */
 
+#if FU_DETECT_INLINE_ASM_SUPPORT_
+
 inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept {
     std::uint8_t value;
     __asm__ __volatile__(".arch_extension rcpc\n\tldaprb %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
@@ -1484,6 +1803,16 @@ inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept {
     __asm__ __volatile__(".arch_extension rcpc\n\tldapr %x0, [%1]" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
+
+#endif // FU_DETECT_INLINE_ASM_SUPPORT_
+
+#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+
+inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept { return __ldapr8(word); }
+inline std::uint32_t arm64_ldapr_u32(std::uint32_t const *word) noexcept { return __ldapr32(word); }
+inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept { return __ldapr64(word); }
+
+#endif // FU_DETECT_ARM64_ATOMIC_INTRINSICS_
 
 /**
  *  @brief Armv8.3 RCpc on top of LSE: acquiring loads are `ldapr`. Sequentially-consistent
