@@ -423,11 +423,22 @@ jobs:
           ctest --test-dir build_topo -C RelWithDebInfo -R '^forkunion_test_cpp20$' --output-on-failure
 
       # Windows ARM64 cross-compiles on the x64 host; the binary can't run here, so it is compile-only.
-      - name: Build C++ for ARM64 (compile-only)
+      # At the default `/arch` the LSE probe answers 0 and every reference falls back to `standard_atomic_ref`.
+      - name: Build C++ for ARM64
         run: |
           $ErrorActionPreference = "Stop"
           cmake -B build_arm64 -A ARM64
           cmake --build build_arm64 --config RelWithDebInfo
+
+      # `/arch:armv8.1` defines `__ARM_FEATURE_ATOMICS`, the macro that admits the MSVC spelling of
+      # `arm64_lse_atomic_ref` and `arm64_rcpc_atomic_ref`. Without this leg that path never compiles.
+      - name: Build C++ for ARM64 with LSE
+        env:
+          CXXFLAGS: /arch:armv8.1
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -B build_arm64_lse -A ARM64
+          cmake --build build_arm64_lse --config RelWithDebInfo
 
       - name: Set up Rust
         run: |
@@ -445,6 +456,34 @@ jobs:
           version: 0.16.0
       - name: Test Zig
         run: zig build test
+
+  # The only leg where the Arm64 references execute rather than merely compile: the cross-compile above
+  # proves MSVC emits them, and this proves they are correct under contention. The default `/arch` row
+  # keeps the fallback honest on the same silicon, and `cpu_capabilities` decides per rung what runs.
+  test_windows_arm64:
+    name: Windows (Arm64, ${{ matrix.variant }})
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: baseline, cxxflags: "" }
+          - { variant: armv8.1, cxxflags: "/arch:armv8.1" }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build C/C++
+        env:
+          CXXFLAGS: ${{ matrix.cxxflags }}
+        run: |
+          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build_artifacts --config RelWithDebInfo
+      - name: List build artifacts
+        run: Get-ChildItem -Recurse .\build_artifacts
+      - name: Test C++
+        run: ctest --test-dir build_artifacts -C RelWithDebInfo -R '^forkunion_test_' --output-on-failure
 
   test_windows_msvc_matrix:
     name: Windows MSVC Versions
