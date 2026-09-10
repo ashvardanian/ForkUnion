@@ -727,9 +727,10 @@ constexpr std::uint64_t arm64_id_field(std::uint64_t id_register, unsigned lsb) 
  *  @brief The instruction-level bits this AArch64 offers: the spin hint, the monitored wait, the
  *      cache-line hint, then the atomics - each a kernel attestation, never a bare silicon probe.
  *  @note Apple answers through `sysctl`. Linux and FreeBSD trap and emulate EL0 reads of the
- *      `ID_AA64*` registers, showing only the fields they enabled for user space; elsewhere nothing
- *      past the hint is claimed. The generic `S<op0>_<op1>_<Cn>_<Cm>_<op2>` encodings assemble
- *      without any `-march` bump, unlike the registers' names.
+ *      `ID_AA64*` registers, showing only the fields they enabled for user space; Windows answers
+ *      through `IsProcessorFeaturePresent`, which names the two atomic rungs and nothing else;
+ *      elsewhere nothing past the hint is claimed. The generic `S<op0>_<op1>_<Cn>_<Cm>_<op2>`
+ *      encodings assemble without any `-march` bump, unlike the registers' names.
  */
 inline capabilities_t arm64_cpu_capabilities() noexcept {
     capabilities_t caps = capability_arm64_yield_k;
@@ -748,6 +749,14 @@ inline capabilities_t arm64_cpu_capabilities() noexcept {
 #endif
     if (arm64_id_field(isar0, 20) >= 2) caps |= capability_arm64_lse_k;  // `Atomic`
     if (arm64_id_field(isar1, 20) >= 1) caps |= capability_arm64_rcpc_k; // `LRCPC`
+#elif FU_ON_WINDOWS
+    // A `PF_ARM_*` name this build's SDK predates is never asked for. There is no bit for `WFxT`.
+#if defined(PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE)
+    if (::IsProcessorFeaturePresent(PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE)) caps |= capability_arm64_lse_k;
+#endif
+#if defined(PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE)
+    if (::IsProcessorFeaturePresent(PF_ARM_V83_LRCPC_INSTRUCTIONS_AVAILABLE)) caps |= capability_arm64_rcpc_k;
+#endif
 #endif
     return caps;
 }
