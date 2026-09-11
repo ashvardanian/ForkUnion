@@ -227,12 +227,14 @@ pub const Pool = struct {
         return answer;
     }
 
-    /// Terminates all worker threads (pool can be respawned)
+    /// Terminates all worker threads (pool can be respawned).
+    /// Not thread-safe; call only when no dispatch is in flight, never as a sync point.
     pub fn terminate(self: Pool) void {
         fu_pool_terminate(self.handle);
     }
 
-    /// Puts worker threads into power-saving sleep state
+    /// Puts worker threads into power-saving sleep state.
+    /// Not thread-safe; call between task batches, and the next dispatch wakes the workers.
     pub fn sleep(self: Pool, microseconds: usize) void {
         fu_pool_sleep(self.handle, microseconds);
     }

@@ -353,7 +353,7 @@ class flat_pool {
 
     /**
      *  @brief Stops all threads and deallocates the thread-pool after the last call finishes.
-     *  @note Can be called from @b any thread at any time.
+     *  @note Can be called from @b any thread, after the last dispatch was joined.
      *  @note Must `spawn` again to re-use the pool.
      *
      *  When and how @b NOT to use this function:
@@ -498,7 +498,7 @@ class flat_pool {
         // logic for the workers also checks the epoch counter, no synchronization is needed and
         // no immediate wake-up is required.
         mood_t may_be_chilling = mood_t::chill_k;
-        mood_.compare_exchange_weak(          //
+        mood_.compare_exchange_strong(        //
             may_be_chilling, mood_t::grind_k, //
             std::memory_order_relaxed, std::memory_order_relaxed);
         return static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);

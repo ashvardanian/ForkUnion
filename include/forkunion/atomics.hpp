@@ -361,7 +361,9 @@ struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
 
 #pragma region x86 RAOINT
 
-/*  RAO-INT: the remote, no-return forms - weakly ordered, so only the relaxed callers take them.
+/*  RAO-INT: the remote, no-return forms - weakly ordered like write-combining stores, which only
+ *  SFENCE or MFENCE order and a C++ release fence never emits on x86, so only the relaxed callers
+ *  take them; a release order stays on the `lock`-prefixed base.
  *  Bytes for the same reason: map 0F38 opcode FC, the operation picked by the legacy prefix - none
  *  for add, 66 for and, F2 for or - `REX.W` for the 64-bit forms; the word in `rax`, the operand
  *  in `rcx`. */

@@ -331,13 +331,18 @@ struct Pool:
     def sleep(self, microseconds: Int):
         """Parks the workers; the next dispatch wakes them.
 
+        Not thread-safe: call it between task batches, never during a dispatch.
+
         Args:
             microseconds: How long a parked worker waits before re-checking for work, above zero.
         """
         self.library.symbols().pool_sleep(self.handle, c_size_t(microseconds))
 
     def terminate(self):
-        """Stops the workers but keeps the handle, so the pool can be spawned again."""
+        """Stops the workers but keeps the handle, so the pool can be spawned again.
+
+        Not thread-safe: call it only when no dispatch is in flight, never as a sync point.
+        """
         self.library.symbols().pool_terminate(self.handle)
 
     # endregion Queries

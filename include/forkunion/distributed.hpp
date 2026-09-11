@@ -103,7 +103,7 @@ struct alignas(default_alignment_k) pinned_thread_t {
  *  - implementation & API of `spawn`: uses POSIX APIs to allocate, name, & pin threads.
  *  - worker loop: using Linux-specific napping mechanism to reduce power consumption.
  *  - implementation `sleep`: informing the scheduler to move the thread to IDLE state.
- *  - availability of `terminate`: which can be called mid-air to shred the pool.
+ *  - availability of `terminate`: which shreds the pool after the last join, from any thread.
  *
  *  When not to use this thread-pool?
  *  - don't use outside of Linux or in UMA systems - Uniform Memory Access.
@@ -504,7 +504,7 @@ struct colocated_pool {
 
     /**
      *  @brief Stops all threads and deallocates the thread-pool after the last call finishes.
-     *  @note Can be called from @b any thread at any time.
+     *  @note Can be called from @b any thread, after the last dispatch was joined.
      *  @note Must `spawn` again to re-use the pool.
      *
      *  When and how @b NOT to use this function:
@@ -570,6 +570,12 @@ struct colocated_pool {
         // On Linux we can update the thread's scheduling class to IDLE,
         // which will reduce the power consumption:
 #if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
+#if FU_ON_LINUX
+        // A thread leaves `SCHED_IDLE` only under `CAP_SYS_NICE` or an `RLIMIT_NICE` admitting nice 0,
+        // so demote only where the next dispatch can bring the workers back; the nap stays either way.
+        rlimit nice_limit {};
+        if (::geteuid() != 0 && (::getrlimit(RLIMIT_NICE, &nice_limit) != 0 || nice_limit.rlim_cur < 20)) return;
+#endif
         bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
         for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
             std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
@@ -676,9 +682,10 @@ struct colocated_pool {
         // let's wake up from the "chilling" state with relaxed semantics. Assuming the sleeping
         // logic for the workers also checks the epoch counter, no synchronization is needed and
         // no immediate wake-up is required.
+        // Strong, since this is the one store a worker still in its startup wait after a `sleep` waits on.
         mood_t may_be_chilling = mood_t::chill_k;
-        bool const was_chilling = mood_.compare_exchange_weak( //
-            may_be_chilling, mood_t::grind_k,                  //
+        bool const was_chilling = mood_.compare_exchange_strong( //
+            may_be_chilling, mood_t::grind_k,                    //
             std::memory_order_relaxed, std::memory_order_relaxed);
         generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
 
@@ -696,8 +703,10 @@ struct colocated_pool {
                 struct ::rtprio rtp {RTP_PRIO_NORMAL, 0};
                 ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
 #else
+                // Back to the time-sharing class the worker started on: `SCHED_FIFO | SCHED_RR` is
+                // `SCHED_BATCH`, and a real-time class would be a boost, not a wake.
                 sched_param param {};
-                ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_FIFO | SCHED_RR, &param);
+                ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_OTHER, &param);
 #endif
             }
         }
@@ -1452,7 +1461,7 @@ struct distributed_pool {
 
     /**
      *  @brief Stops all threads and deallocates the thread-pool after the last call finishes.
-     *  @note Can be called from @b any thread at any time.
+     *  @note Can be called from @b any thread, after the last dispatch was joined.
      *  @note Must `spawn` again to re-use the pool.
      *
      *  When and how @b NOT to use this function:

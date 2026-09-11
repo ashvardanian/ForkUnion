@@ -268,7 +268,11 @@
 #endif
 
 #if FU_ON_POSIX
-#include <unistd.h> // `gettid`, `sysconf`
+#include <unistd.h> // `gettid`, `sysconf`, `geteuid`
+#endif
+
+#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS && FU_ON_LINUX
+#include <sys/resource.h> // `getrlimit`, `RLIMIT_NICE` - whether a worker may leave `SCHED_IDLE`
 #endif
 
 #if FU_ON_APPLE
