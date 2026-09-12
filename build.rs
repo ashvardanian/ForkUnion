@@ -35,12 +35,9 @@ fn main() -> Result<(), cc::Error> {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let portable = std::env::var("CARGO_FEATURE_PORTABLE").is_ok();
     let force_topology = std::env::var("CARGO_FEATURE_TOPOLOGY").is_ok();
-    let force_place_memory_on_domain =
-        std::env::var("CARGO_FEATURE_PLACE_MEMORY_ON_DOMAIN").is_ok();
-    let force_place_huge_pages_on_domain =
-        std::env::var("CARGO_FEATURE_PLACE_HUGE_PAGES_ON_DOMAIN").is_ok();
-    let force_place_threads_by_affinity =
-        std::env::var("CARGO_FEATURE_PLACE_THREADS_BY_AFFINITY").is_ok();
+    let force_place_memory_on_domain = std::env::var("CARGO_FEATURE_PLACE_MEMORY_ON_DOMAIN").is_ok();
+    let force_place_huge_pages_on_domain = std::env::var("CARGO_FEATURE_PLACE_HUGE_PAGES_ON_DOMAIN").is_ok();
+    let force_place_threads_by_affinity = std::env::var("CARGO_FEATURE_PLACE_THREADS_BY_AFFINITY").is_ok();
 
     build
         .cpp(true) // Enable C++ support
@@ -49,6 +46,11 @@ fn main() -> Result<(), cc::Error> {
         .include("include")
         .flag_if_supported("-pedantic") // Only for GCC/Clang
         .warnings(false);
+
+    // The default `noeh` libc++abi has no `__cxa_throw`, so exceptions stay off.
+    if target_os == "wasi" {
+        build.flag("-fno-exceptions");
+    }
 
     if portable {
         assert!(
@@ -83,18 +85,26 @@ fn main() -> Result<(), cc::Error> {
         build.define("NDEBUG", None);
     }
 
-    // Compile the C++ library first, so Cargo emits
-    // `-lstatic=forkunion` before we add dependent libs.
     if let Err(e) = build.try_compile("forkunion") {
         print!("cargo:warning={e}");
         return Err(e);
     }
 
-    // Important: add dependent system libraries AFTER the static lib.
-    // For GNU ld, static libraries are resolved left-to-right, so
-    // `-lpthread` must appear after `-lforkunion` to satisfy symbols.
-    if target_os == "linux" {
-        println!("cargo:rustc-link-lib=pthread");
+    // The compiler names the directory of its `noeh` libc++; `WASI_SYSROOT` would make `cc` list a
+    // libc there too, shadowing Rust's own.
+    if target_os == "wasi" {
+        let print_file_name = build
+            .get_compiler()
+            .to_command()
+            .arg("-print-file-name=libc++.a")
+            .output()
+            .expect("the compiler that built the core runs");
+        let libcxx_archive = String::from_utf8_lossy(&print_file_name.stdout).into_owned();
+        let directory = Path::new(libcxx_archive.trim()).parent();
+        if let Some(directory) = directory.filter(|path| !path.as_os_str().is_empty()) {
+            println!("cargo:rustc-link-search=native={}", directory.display());
+            println!("cargo:rustc-link-lib=static=c++abi");
+        }
     }
 
     // Hand dependents the headers, so a crate compiling its own C against the `fu_*` ABI need not
@@ -102,11 +112,9 @@ fn main() -> Result<(), cc::Error> {
     // Anchored to the manifest, not the cwd, so it resolves inside a published crate too.
     println!(
         "cargo:include={}",
-        Path::new(
-            &std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR")
-        )
-        .join("include")
-        .display()
+        Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR"))
+            .join("include")
+            .display()
     );
 
     println!("cargo:rerun-if-changed=c/forkunion.cpp");

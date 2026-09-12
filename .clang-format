@@ -5,6 +5,7 @@ TabWidth: 4
 NamespaceIndentation: None
 ColumnLimit: 120
 ReflowComments: true
+CommentPragmas: '^ IWYU pragma:|https?://'
 UseTab: Never
 IndentPPDirectives: None
 

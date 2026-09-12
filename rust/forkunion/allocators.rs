@@ -18,11 +18,7 @@ extern "C" {
         bytes_per_page: *mut usize,
         memory_out: *mut *mut c_void,
     ) -> c_int;
-    fn fu_allocate_on_domain_id(
-        memory_domain_id: i32,
-        bytes: usize,
-        memory_out: *mut *mut c_void,
-    ) -> c_int;
+    fn fu_allocate_on_domain_id(memory_domain_id: i32, bytes: usize, memory_out: *mut *mut c_void) -> c_int;
     fn fu_free_on_domain_id(memory_domain_id: i32, pointer: *mut c_void, bytes: usize);
     fn fu_allocate_symmetric(
         topology: *mut c_void,
@@ -573,10 +569,10 @@ impl<T> PinnedVec<T> {
     /// assert!(vec.capacity() >= 10);
     /// ```
     pub fn reserve(&mut self, additional: usize) -> Result<()> {
-        let needed_capacity = self.len.checked_add(additional).ok_or(Error::new(
-            Status::InvalidArgument,
-            "the reserved capacity would wrap",
-        ))?;
+        let needed_capacity = self
+            .len
+            .checked_add(additional)
+            .ok_or(Error::new(Status::InvalidArgument, "the reserved capacity would wrap"))?;
         if needed_capacity <= self.capacity {
             return Ok(());
         }
@@ -780,10 +776,7 @@ impl<T> PinnedVec<T> {
     /// Returns an error if allocation fails when growing the vector.
     pub fn insert(&mut self, index: usize, element: T) -> Result<()> {
         if index > self.len {
-            panic!(
-                "insertion index (is {}) should be <= len (is {})",
-                index, self.len
-            );
+            panic!("insertion index (is {}) should be <= len (is {})", index, self.len);
         }
 
         if self.len >= self.capacity {
@@ -811,10 +804,7 @@ impl<T> PinnedVec<T> {
     #[must_use]
     pub fn remove(&mut self, index: usize) -> T {
         if index >= self.len {
-            panic!(
-                "removal index (is {}) should be < len (is {})",
-                index, self.len
-            );
+            panic!("removal index (is {}) should be < len (is {})", index, self.len);
         }
 
         unsafe {
@@ -855,10 +845,7 @@ impl<T> PinnedVec<T> {
     }
 
     /// Returns a mutable reference to an element or subslice depending on the type of index.
-    pub fn get_mut<I>(
-        &mut self,
-        index: I,
-    ) -> Option<&mut <I as core::slice::SliceIndex<[T]>>::Output>
+    pub fn get_mut<I>(&mut self, index: I) -> Option<&mut <I as core::slice::SliceIndex<[T]>>::Output>
     where
         I: core::slice::SliceIndex<[T]>,
     {
@@ -1056,10 +1043,8 @@ impl SymmetricAllocation {
             },
             "fu_allocate_symmetric",
         )?;
-        let base = NonNull::new(base as *mut u8).ok_or(Error::new(
-            Status::BadAlloc,
-            "fu_allocate_symmetric answered NULL",
-        ))?;
+        let base =
+            NonNull::new(base as *mut u8).ok_or(Error::new(Status::BadAlloc, "fu_allocate_symmetric answered NULL"))?;
         Ok(Self {
             base,
             stride_bytes,
@@ -1134,17 +1119,13 @@ impl<T: Copy> ReplicatedArray<T> {
     /// The number of per-domain replicas.
     #[must_use]
     pub fn memory_domains_count(&self) -> usize {
-        self.allocation
-            .as_ref()
-            .map_or(0, |allocation| allocation.domains)
+        self.allocation.as_ref().map_or(0, |allocation| allocation.domains)
     }
 
     /// The page-aligned byte distance between consecutive replicas.
     #[must_use]
     pub fn stride_bytes(&self) -> usize {
-        self.allocation
-            .as_ref()
-            .map_or(0, |allocation| allocation.stride_bytes)
+        self.allocation.as_ref().map_or(0, |allocation| allocation.stride_bytes)
     }
 
     /// Raw start of the replica on `memory_domain`, for concurrent first-touch fills through a raw pointer.
@@ -1251,17 +1232,13 @@ impl<T: Copy> ShardedArray<T> {
     /// The number of shards, one per memory domain.
     #[must_use]
     pub fn memory_domains_count(&self) -> usize {
-        self.allocation
-            .as_ref()
-            .map_or(0, |allocation| allocation.domains)
+        self.allocation.as_ref().map_or(0, |allocation| allocation.domains)
     }
 
     /// The page-aligned byte distance between consecutive shards.
     #[must_use]
     pub fn stride_bytes(&self) -> usize {
-        self.allocation
-            .as_ref()
-            .map_or(0, |allocation| allocation.stride_bytes)
+        self.allocation.as_ref().map_or(0, |allocation| allocation.stride_bytes)
     }
 
     /// The contiguous logical segment size per domain - `ceil(n / memory_domains_count())`.
@@ -1354,8 +1331,7 @@ mod tests {
     fn replicated_array_per_domain_buffer() {
         let topology = Topology::new().unwrap();
         let n = 4096usize;
-        let mut replicas: ReplicatedArray<u32> =
-            ReplicatedArray::new_in(&topology, n).expect("replicated array");
+        let mut replicas: ReplicatedArray<u32> = ReplicatedArray::new_in(&topology, n).expect("replicated array");
         assert_eq!(replicas.len(), n);
         assert_eq!(
             replicas.memory_domains_count(),
@@ -1373,10 +1349,7 @@ mod tests {
 
         for domain in 0..domains {
             for index in 0..n {
-                assert_eq!(
-                    *replicas.at(MemoryDomain(domain), index),
-                    (domain * n + index) as u32
-                );
+                assert_eq!(*replicas.at(MemoryDomain(domain), index), (domain * n + index) as u32);
             }
         }
     }
@@ -1388,8 +1361,7 @@ mod tests {
     fn sharded_array_segment_round_trip() {
         let topology = Topology::new().unwrap();
         let n = 4096usize;
-        let mut shards: ShardedArray<u32> =
-            ShardedArray::new_in(&topology, n).expect("sharded array");
+        let mut shards: ShardedArray<u32> = ShardedArray::new_in(&topology, n).expect("sharded array");
         let domains = shards.memory_domains_count();
         let segment = shards.segment();
         assert_eq!(shards.len(), n);
@@ -1412,10 +1384,7 @@ mod tests {
                 shards.logical_index_of(location.memory_domain, location.local_index),
                 logical
             );
-            assert_eq!(
-                *shards.at(location.memory_domain, location.local_index),
-                logical as u32
-            );
+            assert_eq!(*shards.at(location.memory_domain, location.local_index), logical as u32);
         }
     }
 
@@ -1424,15 +1393,11 @@ mod tests {
     fn pinned_allocator_creation() {
         let topology = Topology::new().unwrap();
         let memory_domains = topology.memory_domains_count().unwrap();
-        assert!(
-            memory_domains > 0,
-            "system should have at least one memory domain"
-        );
+        assert!(memory_domains > 0, "system should have at least one memory domain");
 
         // Valid memory domain
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("memory domain 0 should be available");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("memory domain 0 should be available");
         assert_eq!(allocator.memory_domain_id().get(), 0);
 
         // An index this machine does not have is now a reported refusal rather than a `-1` that
@@ -1449,12 +1414,9 @@ mod tests {
     #[test]
     fn basic_allocation() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
-        let allocation = allocator
-            .allocate(1024)
-            .expect("Failed to allocate 1024 bytes");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
+        let allocation = allocator.allocate(1024).expect("Failed to allocate 1024 bytes");
 
         assert_eq!(allocation.allocated_bytes(), 1024);
         assert_eq!(allocation.memory_domain_id().get(), 0);
@@ -1468,9 +1430,8 @@ mod tests {
     #[test]
     fn allocate_zero_bytes() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         assert!(
             allocator.allocate(0).is_err(),
             "Allocating 0 bytes is a refused request, not an empty one"
@@ -1481,9 +1442,8 @@ mod tests {
     #[test]
     fn allocate_at_least() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let allocation = allocator
             .allocate_at_least(1000)
             .expect("Failed to allocate at least 1000 bytes");
@@ -1501,9 +1461,8 @@ mod tests {
     #[test]
     fn pinned_vec_creation() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 0);
@@ -1515,9 +1474,8 @@ mod tests {
     #[test]
     fn pinned_vec_with_capacity() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let vec = PinnedVec::<i32>::with_capacity_in(allocator, 10).expect("Failed to create vec");
         assert_eq!(vec.len(), 0);
         assert_eq!(vec.capacity(), 10);
@@ -1529,9 +1487,8 @@ mod tests {
     #[test]
     fn pinned_vec_push_pop() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
         // Test push
@@ -1556,9 +1513,8 @@ mod tests {
     #[test]
     fn pinned_vec_indexing() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(10).expect("Failed to push");
         vec.push(20).expect("Failed to push");
@@ -1578,9 +1534,8 @@ mod tests {
     #[test]
     fn pinned_vec_clear() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
         vec.push(2).expect("Failed to push");
@@ -1596,9 +1551,8 @@ mod tests {
     #[test]
     fn pinned_vec_insert_remove() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         vec.push(1).expect("Failed to push");
         vec.push(3).expect("Failed to push");
@@ -1622,9 +1576,8 @@ mod tests {
     #[test]
     fn pinned_vec_reserve() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         assert_eq!(vec.capacity(), 0);
 
@@ -1643,9 +1596,8 @@ mod tests {
     #[test]
     fn pinned_vec_extend_from_slice() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         let data = [1, 2, 3, 4, 5];
 
@@ -1660,9 +1612,8 @@ mod tests {
     #[test]
     fn pinned_vec_iterators() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
             vec.push(i).expect("Failed to push");
@@ -1688,9 +1639,8 @@ mod tests {
     #[test]
     fn pinned_vec_slices() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
         for i in 0..5 {
             vec.push(i).expect("Failed to push");
@@ -1711,9 +1661,8 @@ mod tests {
     #[test]
     fn pinned_vec_growth() {
         let topology = Topology::new().unwrap();
-        let allocator =
-            DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
-                .expect("Failed to create alloc");
+        let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
+            .expect("Failed to create alloc");
         let mut vec = PinnedVec::<i32>::new_in(allocator);
 
         // Push many elements to test growth

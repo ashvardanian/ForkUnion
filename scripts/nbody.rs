@@ -175,25 +175,17 @@ fn apply_force(b: &mut Body, f: &Vector3) {
 /// Return the number of logical CPUs visible to this process.
 #[inline]
 fn hardware_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
 /// Parses a fractional environment variable, or `fallback` when unset or unparseable.
 fn env_f64(name: &str, fallback: f64) -> f64 {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
+    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
 }
 
 /// Parses an unsigned environment variable, or `fallback` when unset or unparseable.
 fn env_usize(name: &str, fallback: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
+    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
 }
 
 /// Reads an environment variable as a string, or `fallback` when unset.
@@ -246,11 +238,7 @@ impl Placement for Replicated {
 }
 
 /// The same all-to-all sweep, driven through the Rayon-style parallel-iterator adapters.
-fn iteration_fu_iter_static(
-    pool: &mut fu::ThreadPool,
-    bodies: &mut [Body],
-    forces: &mut [Vector3],
-) {
+fn iteration_fu_iter_static(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
     let n = bodies.len();
     {
         let bodies_ref = &*bodies;
@@ -274,11 +262,7 @@ fn iteration_fu_iter_static(
 }
 
 /// The parallel-iterator sweep, work-stolen instead of split statically.
-fn iteration_fu_iter_dynamic(
-    pool: &mut fu::ThreadPool,
-    bodies: &mut [Body],
-    forces: &mut [Vector3],
-) {
+fn iteration_fu_iter_dynamic(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
     let n = bodies.len();
     {
         let bodies_ref = &*bodies;
@@ -336,11 +320,9 @@ fn refresh_replicas(
                 }
                 threads_on_memory_domain += view.threads_count_in(other);
             }
-            local_index_on_memory_domain +=
-                view.locate_thread_in(thread_index, compute_domain_index);
+            local_index_on_memory_domain += view.locate_thread_in(thread_index, compute_domain_index);
 
-            let range = fu::IndexedSplit::new(n, threads_on_memory_domain)
-                .get(local_index_on_memory_domain);
+            let range = fu::IndexedSplit::new(n, threads_on_memory_domain).get(local_index_on_memory_domain);
             if range.is_empty() {
                 return;
             }
@@ -511,11 +493,7 @@ fn iteration_rayon_dynamic(pool: &RayonPool, bodies: &mut [Body], forces: &mut [
 }
 
 /// One `spawn_blocking` task per body over a shared read-only snapshot, joined into `forces`.
-async fn iteration_tokio_blocking(
-    set: &mut JoinSet<(usize, Vector3)>,
-    bodies: &mut [Body],
-    forces: &mut [Vector3],
-) {
+async fn iteration_tokio_blocking(set: &mut JoinSet<(usize, Vector3)>, bodies: &mut [Body], forces: &mut [Vector3]) {
     debug_assert!(set.is_empty());
     let n = bodies.len();
     let bodies_ptr = fu::SyncConstPtr::new(bodies.as_ptr());

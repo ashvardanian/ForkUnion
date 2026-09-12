@@ -784,6 +784,15 @@ struct colocated_pool {
     }
 
     /**
+     *  @brief Returns the first global thread index of a @b compute_domain.
+     *  @return Same value as `first_thread()`, as we only support one compute_domain.
+     */
+    thread_index_t first_thread(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+        assert(compute_domain_index == 0 && "Only one compute_domain is supported");
+        return first_thread();
+    }
+
+    /**
      *  @brief Converts a @p global_thread_index to a local thread index within a @b compute_domain.
      *  @return Same value as @p global_thread_index, as we only support one compute_domain.
      */
@@ -1678,6 +1687,20 @@ struct distributed_pool {
     }
 };
 
+using colocated_pool_t = colocated_pool<>;
+using distributed_pool_t = distributed_pool<>;
+
+#if FU_DETECT_CONCEPTS_
+static_assert(is_unsafe_pool<flat_pool_t> && is_unsafe_pool<colocated_pool_t>,
+              "These thread pools must be flexible and support unsafe operations");
+static_assert(is_pool<flat_pool_t> && is_pool<colocated_pool_t> && is_pool<distributed_pool_t>,
+              "These thread pools must be fully compatible with the high-level APIs");
+#endif // FU_DETECT_CONCEPTS_
+
+#pragma endregion Distributed Pool
+
+#endif // FU_WITH_OS_THREADS
+
 #pragma region Measured Memory Distances
 
 /**
@@ -1956,8 +1979,8 @@ FU_MAYBE_UNUSED_ static std::size_t derive_memory_levels_(measured_edge_t const 
  *      pool itself, independent of any initiator.
  *
  *  Completes the `harvest` pipeline: a `machine_topology` is harvested first and stays
- *  immutable, a `distributed_pool` spawns on it, and the fabric then harvests through that pool's
- *  pinned workers, snapshotting what it needs so the topology may be freed after. `harvest`
+ *  immutable, a pool spawns on it, and the fabric then harvests through that pool's workers,
+ *  snapshotting what it needs so the topology may be freed after. `harvest`
  *  is the only mutator and replaces the whole snapshot; before it, every query answers 0 and
  *  `memory_levels_count` answers 1.
  */
@@ -2091,18 +2114,18 @@ class measured_fabric {
 
     /**
      *  @brief Harvests every reachable edge and the tiers derived from them through @p pool's
-     *      pinned workers, replacing any previous snapshot. The @p topology is only read.
-     *  @return false when the pool spans no memory domains or a probe buffer cannot be allocated;
-     *      the fabric is then left empty, never half-written.
+     *      workers, replacing any previous snapshot. The @p topology is only read.
+     *  @return `config_mismatch_k` when the pool cannot place pages on every domain it would walk, as a
+     *      terminated pool or an unpinned one on a machine of several domains cannot, or the status of a
+     *      failed allocation; the fabric is then left empty, never half-written.
      *  @note Not thread-safe: dispatches on the pool and rebuilds this fabric, so call it between
      *      task batches and do not query concurrently. Expect seconds of runtime on large fabrics.
      *
      *  Targets are the memory domains some worker can first-touch; @b cpuless domains, like CXL
      *  expanders, stay unwalked, since portable first-touch cannot place pages there.
      */
-    template <typename micro_yield_type_, typename cache_hints_type_, std::size_t alignment_>
-    [[nodiscard]] status_t harvest(machine_topology_t const &topology,
-                                   distributed_pool<micro_yield_type_, cache_hints_type_, alignment_> &pool) noexcept {
+    template <typename pool_type_>
+    [[nodiscard]] status_t harvest(machine_topology_t const &topology, pool_type_ &pool) noexcept {
         reset();
         status_t const measured = harvest_(topology, pool);
         if (succeeded(measured)) return measured;
@@ -2111,9 +2134,14 @@ class measured_fabric {
     }
 
   private:
-    template <typename micro_yield_type_, typename cache_hints_type_, std::size_t alignment_>
-    [[nodiscard]] status_t harvest_(machine_topology_t const &topology,
-                                    distributed_pool<micro_yield_type_, cache_hints_type_, alignment_> &pool) noexcept {
+    template <typename pool_type_>
+    [[nodiscard]] status_t harvest_(machine_topology_t const &topology, pool_type_ &pool) noexcept {
+
+        // Unpinned threads place pages wherever they run, so only a distributed pool walks several domains.
+        if (pool.threads_count() == 0) return status_t::config_mismatch_k;
+        if (pool_type_::kind_k != pool_kind_t::distributed_k &&
+            (topology.compute_domains_count() != 1 || topology.memory_domains_count() != 1))
+            return status_t::config_mismatch_k;
 
         // Snapshot the coordinate system, so the topology can be freed once this call returns.
         std::size_t const compute_domains = topology.compute_domains_count();
@@ -2201,20 +2229,6 @@ class measured_fabric {
 using measured_fabric_t = measured_fabric<>;
 
 #pragma endregion Measured Memory Distances
-
-using colocated_pool_t = colocated_pool<>;
-using distributed_pool_t = distributed_pool<>;
-
-#if FU_DETECT_CONCEPTS_
-static_assert(is_unsafe_pool<flat_pool_t> && is_unsafe_pool<colocated_pool_t>,
-              "These thread pools must be flexible and support unsafe operations");
-static_assert(is_pool<flat_pool_t> && is_pool<colocated_pool_t> && is_pool<distributed_pool_t>,
-              "These thread pools must be fully compatible with the high-level APIs");
-#endif // FU_DETECT_CONCEPTS_
-
-#endif // FU_WITH_OS_THREADS
-
-#pragma endregion Distributed Pool
 
 } // namespace forkunion
 } // namespace ashvardanian

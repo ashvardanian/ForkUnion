@@ -267,8 +267,8 @@ class flat_pool {
      *  @brief Creates a thread-pool with the given number of threads.
      *  @param[in] threads The number of threads to be used.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
-     *  @return False if the number of threads is zero or the "workers" allocation failed, true if the
-     *      thread-pool was created successfully, started, and is ready to use.
+     *  @return `success_k` once the pool is ready; `unsupported_k` for a caller-exclusive or multi-thread
+     *      pool in a build without OS threads; otherwise the reason it could not start.
      *  @note This is the de-facto @b constructor - you only call it again after `terminate`.
      */
     [[nodiscard]] status_t spawn(     //
@@ -278,11 +278,10 @@ class flat_pool {
         if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
         if (threads_count_ != 0) return status_t::already_spawned_k;
 
+        // ! Without OS threads the caller is the only thread
+        if (!FU_WITH_OS_THREADS && (threads > 1 || exclusivity == caller_exclusive_k)) return status_t::unsupported_k;
+
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
-        if (threads == 1 && use_caller_thread) {
-            threads_count_ = 1;
-            return status_t::success_k; // ! The caller is the pool, and allocates nothing
-        }
 
         // Allocate the thread pool: one padded cell per thread, holding its worker and its cursor.
         // This is the pool's only allocation, and `for_n_dynamic` performs none of its own. Striding
@@ -368,10 +367,6 @@ class flat_pool {
 
         caller_exclusivity_t const exclusivity = caller_exclusivity();
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
-        if (threads_count_ == 1 && use_caller_thread) {
-            threads_count_ = 0;
-            return; // ? No worker threads to join, and nothing was allocated
-        }
         assert(threads_to_sync_.load(std::memory_order_seq_cst) == 0); // ! No tasks must be running
         assert((epoch_.load(std::memory_order_seq_cst) & 1u) == 0);    // ! Last dispatch must be joined
 
@@ -569,6 +564,15 @@ class flat_pool {
     thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return threads_count();
+    }
+
+    /**
+     *  @brief Returns the first global thread index of a @b compute_domain.
+     *  @return Same value as `first_thread()`, as we only support one compute_domain.
+     */
+    constexpr thread_index_t first_thread(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+        assert(compute_domain_index == 0 && "Only one compute_domain is supported");
+        return first_thread();
     }
 
     /**

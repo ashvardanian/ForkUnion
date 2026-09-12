@@ -103,13 +103,7 @@ impl ParallelSchedule for DynamicScheduler {
         F: Fn(TasksRange, ThreadInDomain) + Sync,
     {
         self.dispatch(pool, tasks, move |task, at| {
-            function(
-                TasksRange {
-                    first: task,
-                    count: 1,
-                },
-                at,
-            )
+            function(TasksRange { first: task, count: 1 }, at)
         })
     }
 }
@@ -156,18 +150,12 @@ pub trait ParallelIterator: Sized {
     where
         P: Fn(&Self::Item) -> bool + Sync,
     {
-        Filter {
-            base: self,
-            predicate,
-        }
+        Filter { base: self, predicate }
     }
 }
 
 pub trait ParallelIteratorExt: ParallelIterator + Sized {
-    fn with_pool<'pool>(
-        self,
-        pool: &'pool mut ThreadPool,
-    ) -> ParallelRunner<'pool, Self, StaticScheduler> {
+    fn with_pool<'pool>(self, pool: &'pool mut ThreadPool) -> ParallelRunner<'pool, Self, StaticScheduler> {
         ParallelRunner {
             pool,
             iterator: self,
@@ -175,11 +163,7 @@ pub trait ParallelIteratorExt: ParallelIterator + Sized {
         }
     }
 
-    fn with_schedule<'pool, S>(
-        self,
-        pool: &'pool mut ThreadPool,
-        schedule: S,
-    ) -> ParallelRunner<'pool, Self, S>
+    fn with_schedule<'pool, S>(self, pool: &'pool mut ThreadPool, schedule: S) -> ParallelRunner<'pool, Self, S>
     where
         S: ParallelSchedule,
     {
@@ -226,9 +210,7 @@ where
             iterator,
             schedule,
         } = self;
-        iterator.drive(pool, schedule, &move |item, task, at| {
-            function(item, task, at)
-        })
+        iterator.drive(pool, schedule, &move |item, task, at| function(item, task, at))
     }
 
     pub fn fold_with_scratch<T, F>(self, scratch: &mut [T], fold: F) -> Result<()>
@@ -290,9 +272,7 @@ where
         fold_with_scratch(pool, iterator, schedule, scratch, fold)?;
 
         // Combine phase: merge all slots into first slot in-place
-        let (first, rest) = scratch
-            .split_first_mut()
-            .expect("scratch must not be empty");
+        let (first, rest) = scratch.split_first_mut().expect("scratch must not be empty");
         for slot in rest {
             let value = core::mem::take(slot);
             combine(first, value);
@@ -340,11 +320,7 @@ where
     ///
     /// assert!(result.is_ok());
     /// ```
-    pub fn fold_with_scratch_fallible<T, F, E>(
-        self,
-        scratch: &mut [T],
-        fold: F,
-    ) -> Result<core::result::Result<(), E>>
+    pub fn fold_with_scratch_fallible<T, F, E>(self, scratch: &mut [T], fold: F) -> Result<core::result::Result<(), E>>
     where
         T: Send,
         F: Fn(&mut T, I::Item, usize, ThreadInDomain) -> core::result::Result<(), E> + Sync,
@@ -830,12 +806,7 @@ where
     /// ```
     pub fn sum<T>(self) -> Result<T>
     where
-        T: Send
-            + Sync
-            + Default
-            + Copy
-            + core::ops::AddAssign<I::Item>
-            + core::ops::Add<Output = T>,
+        T: Send + Sync + Default + Copy + core::ops::AddAssign<I::Item> + core::ops::Add<Output = T>,
     {
         self.reduce(T::default, |acc, item, _, _| *acc += item, |a, b| a + b)
     }
@@ -917,8 +888,7 @@ where
         F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
     {
         let Map { base, mapper } = self;
-        let mapped =
-            move |item: I::Item, task: usize, at: ThreadInDomain| consumer(mapper(item), task, at);
+        let mapped = move |item: I::Item, task: usize, at: ThreadInDomain| consumer(mapper(item), task, at);
 
         base.drive(pool, schedule, &mapped)
     }
@@ -1206,8 +1176,7 @@ where
 
 pub mod prelude {
     pub use super::{
-        DynamicScheduler, IntoParallelIterator, ParallelIterator, ParallelIteratorExt,
-        ParallelRunner, StaticScheduler,
+        DynamicScheduler, IntoParallelIterator, ParallelIterator, ParallelIteratorExt, ParallelRunner, StaticScheduler,
     };
 }
 
@@ -1267,8 +1236,7 @@ mod tests {
         let mut pool = spawn(&topology, hw_threads());
         let a: Vec<usize> = (0..128).collect();
         let b: Vec<usize> = (0..128).rev().collect();
-        let sums: Arc<Vec<AtomicUsize>> =
-            Arc::new((0..hw_threads()).map(|_| AtomicUsize::new(0)).collect());
+        let sums: Arc<Vec<AtomicUsize>> = Arc::new((0..hw_threads()).map(|_| AtomicUsize::new(0)).collect());
         let shared = Arc::clone(&sums);
 
         (&a[..])
@@ -1333,8 +1301,7 @@ mod tests {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1024).collect();
-        let mut scratch: Vec<CacheAligned<u64>> =
-            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
+        let mut scratch: Vec<CacheAligned<u64>> = (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 
         let total = (&data[..])
             .into_par_iter()
@@ -1355,17 +1322,12 @@ mod tests {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1000).collect();
-        let mut scratch: Vec<CacheAligned<usize>> =
-            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
+        let mut scratch: Vec<CacheAligned<usize>> = (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 
         let total = (&data[..])
             .into_par_iter()
             .with_schedule(&mut pool, DynamicScheduler)
-            .reduce_with_scratch(
-                scratch.as_mut_slice(),
-                |a, v, _, _| a.0 += *v,
-                |x, y| x.0 += y.0,
-            )
+            .reduce_with_scratch(scratch.as_mut_slice(), |a, v, _, _| a.0 += *v, |x, y| x.0 += y.0)
             .unwrap();
 
         assert_eq!(total.0, data.iter().sum());
@@ -1377,11 +1339,7 @@ mod tests {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (1..=1000).collect();
-        let total: u64 = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .sum()
-            .unwrap();
+        let total: u64 = (&data[..]).into_par_iter().with_pool(&mut pool).sum().unwrap();
         assert_eq!(total, data.iter().sum());
     }
 
@@ -1391,11 +1349,7 @@ mod tests {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1000).collect();
-        let count = (&data[..])
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .count()
-            .unwrap();
+        let count = (&data[..]).into_par_iter().with_pool(&mut pool).count().unwrap();
         assert_eq!(count, 1000);
     }
 
@@ -1420,11 +1374,7 @@ mod tests {
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
         assert_eq!(
-            (&data[..])
-                .into_par_iter()
-                .with_pool(&mut pool)
-                .sum::<u64>()
-                .unwrap(),
+            (&data[..]).into_par_iter().with_pool(&mut pool).sum::<u64>().unwrap(),
             0
         );
     }
@@ -1434,11 +1384,7 @@ mod tests {
     fn reduce_range() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
-        let total: usize = (0..10_000)
-            .into_par_iter()
-            .with_pool(&mut pool)
-            .sum()
-            .unwrap();
+        let total: usize = (0..10_000).into_par_iter().with_pool(&mut pool).sum().unwrap();
         assert_eq!(total, (0..10_000).sum::<usize>());
     }
 
@@ -1483,9 +1429,7 @@ mod tests {
         let result = (&data[..])
             .into_par_iter()
             .with_pool(&mut pool)
-            .for_each_fallible(|&_x, _, _| -> core::result::Result<(), &str> {
-                Err("should not run")
-            })
+            .for_each_fallible(|&_x, _, _| -> core::result::Result<(), &str> { Err("should not run") })
             .unwrap();
         assert!(result.is_ok());
     }
@@ -1496,8 +1440,7 @@ mod tests {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
-        let mut scratch: Vec<CacheAligned<u64>> =
-            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
+        let mut scratch: Vec<CacheAligned<u64>> = (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 
         let result = (&data[..])
             .into_par_iter()
@@ -1519,8 +1462,7 @@ mod tests {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
-        let mut scratch: Vec<CacheAligned<u64>> =
-            (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
+        let mut scratch: Vec<CacheAligned<u64>> = (0..pool.threads_count()).map(|_| CacheAligned(0)).collect();
 
         let result = (&data[..])
             .into_par_iter()
@@ -1582,22 +1524,14 @@ mod tests {
                 .with_pool(&mut pool)
                 .find_first(|&&x| x >= 100 && x % 2 == 0)
                 .unwrap();
-            assert_eq!(
-                first,
-                Some(&100),
-                "find_first must return the lowest matching index"
-            );
+            assert_eq!(first, Some(&100), "find_first must return the lowest matching index");
 
             let last = (&data[..])
                 .into_par_iter()
                 .with_pool(&mut pool)
                 .find_last(|&&x| x <= 9_000 && x % 2 == 0)
                 .unwrap();
-            assert_eq!(
-                last,
-                Some(&9_000),
-                "find_last must return the highest matching index"
-            );
+            assert_eq!(last, Some(&9_000), "find_last must return the highest matching index");
         }
     }
 

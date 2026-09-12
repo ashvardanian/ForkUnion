@@ -11,61 +11,24 @@ extern "C" {
     fn fu_version_patch() -> c_int;
     fn fu_comptime_capabilities() -> u32;
     fn fu_runtime_capabilities() -> u32;
-    fn fu_name_capabilities(
-        caps: u32,
-        buf: *mut c_char,
-        len: usize,
-        written_out: *mut usize,
-    ) -> c_int;
+    fn fu_name_capabilities(caps: u32, buf: *mut c_char, len: usize, written_out: *mut usize) -> c_int;
 
     fn fu_topology_new(topology_out: *mut *mut c_void) -> c_int;
     fn fu_topology_delete(topology: *mut c_void);
-    fn fu_logical_cores_count_in(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        cores_out: *mut usize,
-    ) -> c_int;
+    fn fu_logical_cores_count_in(topology: *mut c_void, compute_domain_index: usize, cores_out: *mut usize) -> c_int;
     fn fu_logical_cores_count(topology: *mut c_void, cores_out: *mut usize) -> c_int;
     fn fu_compute_domains_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
-    fn fu_compute_level_in(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        level_out: *mut usize,
-    ) -> c_int;
+    fn fu_compute_level_in(topology: *mut c_void, compute_domain_index: usize, level_out: *mut usize) -> c_int;
     fn fu_compute_levels_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
-    fn fu_compute_capacity_in(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        capacity_out: *mut usize,
-    ) -> c_int;
-    fn fu_compute_cache_bytes_in(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        bytes_out: *mut usize,
-    ) -> c_int;
+    fn fu_compute_capacity_in(topology: *mut c_void, compute_domain_index: usize, capacity_out: *mut usize) -> c_int;
+    fn fu_compute_cache_bytes_in(topology: *mut c_void, compute_domain_index: usize, bytes_out: *mut usize) -> c_int;
     fn fu_memory_domains_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
-    fn fu_local_memory_of(
-        topology: *mut c_void,
-        compute_domain_index: usize,
-        memory_domain_out: *mut usize,
-    ) -> c_int;
-    fn fu_volume_ram_in(
-        topology: *mut c_void,
-        memory_domain_index: usize,
-        bytes_out: *mut usize,
-    ) -> c_int;
+    fn fu_local_memory_of(topology: *mut c_void, compute_domain_index: usize, memory_domain_out: *mut usize) -> c_int;
+    fn fu_volume_ram_in(topology: *mut c_void, memory_domain_index: usize, bytes_out: *mut usize) -> c_int;
     fn fu_volume_ram(topology: *mut c_void, bytes_out: *mut usize) -> c_int;
-    fn fu_volume_huge_pages_in(
-        topology: *mut c_void,
-        memory_domain_index: usize,
-        bytes_out: *mut usize,
-    ) -> c_int;
+    fn fu_volume_huge_pages_in(topology: *mut c_void, memory_domain_index: usize, bytes_out: *mut usize) -> c_int;
     fn fu_volume_huge_pages(topology: *mut c_void, bytes_out: *mut usize) -> c_int;
-    fn fu_huge_pages_count_in(
-        topology: *mut c_void,
-        memory_domain_index: usize,
-        pages_out: *mut usize,
-    ) -> c_int;
+    fn fu_huge_pages_count_in(topology: *mut c_void, memory_domain_index: usize, pages_out: *mut usize) -> c_int;
     fn fu_huge_pages_count(topology: *mut c_void, pages_out: *mut usize) -> c_int;
     fn fu_memory_domain_id_at_index(
         topology: *mut c_void,
@@ -191,14 +154,7 @@ pub fn name_capabilities(caps: Capabilities) -> Result<std::string::String> {
     let mut buf = [0u8; 512];
     let mut written = 0usize;
     Error::check(
-        unsafe {
-            fu_name_capabilities(
-                caps.0,
-                buf.as_mut_ptr() as *mut c_char,
-                buf.len(),
-                &mut written,
-            )
-        },
+        unsafe { fu_name_capabilities(caps.0, buf.as_mut_ptr() as *mut c_char, buf.len(), &mut written) },
         "fu_name_capabilities",
     )?;
     let len = core::cmp::min(written, buf.len());
@@ -210,10 +166,7 @@ pub fn name_capabilities(caps: Capabilities) -> Result<std::string::String> {
     };
     match core::str::from_utf8(bytes) {
         Ok(text) => Ok(std::string::String::from(text)),
-        Err(_) => Err(Error::new(
-            Status::Unknown,
-            "fu_name_capabilities wrote invalid UTF-8",
-        )),
+        Err(_) => Err(Error::new(Status::Unknown, "fu_name_capabilities wrote invalid UTF-8")),
     }
 }
 
@@ -482,10 +435,7 @@ impl Topology {
     /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
     pub fn volume_ram(&self) -> Result<usize> {
         let mut answer = usize::MAX;
-        Error::check(
-            unsafe { fu_volume_ram(self.inner, &mut answer) },
-            "fu_volume_ram",
-        )?;
+        Error::check(unsafe { fu_volume_ram(self.inner, &mut answer) }, "fu_volume_ram")?;
         Ok(answer)
     }
 
@@ -574,8 +524,7 @@ pub(crate) mod tests {
         // The aggregate is implied, never hand-set: pools need threads and a topology to spawn onto.
         assert_eq!(
             comptime.contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN),
-            comptime.contains(Capabilities::OS_THREADS)
-                && comptime.contains(Capabilities::TOPOLOGY)
+            comptime.contains(Capabilities::OS_THREADS) && comptime.contains(Capabilities::TOPOLOGY)
         );
 
         // Placing pages on a node presumes we discovered the nodes.
@@ -604,9 +553,7 @@ pub(crate) mod tests {
         let compute_domains = topology.compute_domains_count().unwrap();
         let qos = topology.compute_levels_count().unwrap();
 
-        std::println!(
-            "Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}"
-        );
+        std::println!("Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}");
         assert!(cores > 0);
     }
 
@@ -638,8 +585,6 @@ pub(crate) mod tests {
         assert!(topology
             .compute_cache_bytes_in(ComputeDomain(compute_domains + 64))
             .is_err());
-        assert!(topology
-            .local_memory_of(ComputeDomain(compute_domains + 64))
-            .is_err());
+        assert!(topology.local_memory_of(ComputeDomain(compute_domains + 64)).is_err());
     }
 }

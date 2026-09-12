@@ -95,6 +95,15 @@
 #define FU_ON_FREEBSD 0
 #endif
 
+/*  A sandbox rather than a kernel: the module is compiled once and run by whichever runtime loads it,
+ *  so there is no affinity, no `/proc`, and no memory domain to place onto. What it does have depends
+ *  on how it was built, which is `FU_WITH_SHARED_MEMORY` below rather than anything here.  */
+#if defined(__wasm__) || defined(__EMSCRIPTEN__)
+#define FU_ON_WASM 1
+#else
+#define FU_ON_WASM 0
+#endif
+
 #define FU_ON_POSIX (FU_ON_LINUX || FU_ON_APPLE || FU_ON_FREEBSD)
 
 #if FU_ON_LINUX && __has_include(<features.h>)
@@ -133,9 +142,25 @@
  *  A build system may @b override, never re-derive: that keeps the default in exactly one place,
  *  instead of duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift.  */
 
+/**
+ *  @brief Do several threads see one address space, so atomics and parks mean anything?
+ *  @note Always true where a kernel schedules the threads. On WebAssembly it is a build-time choice:
+ *      @c -pthread puts each worker on its own Web Worker over a shared memory. Without it a module
+ *      has one thread, and @c std::atomic degenerates to plain loads because nothing can contend.
+ */
+#if !defined(FU_WITH_SHARED_MEMORY)
+#if !FU_ON_WASM
+#define FU_WITH_SHARED_MEMORY 1
+#elif defined(__EMSCRIPTEN_PTHREADS__) || defined(_REENTRANT)
+#define FU_WITH_SHARED_MEMORY 1
+#else
+#define FU_WITH_SHARED_MEMORY 0
+#endif
+#endif
+
 /** Can we create operating-system threads directly, rather than through `std::thread`? */
 #if !defined(FU_WITH_OS_THREADS)
-#define FU_WITH_OS_THREADS (FU_ON_POSIX || FU_ON_WINDOWS)
+#define FU_WITH_OS_THREADS (FU_ON_POSIX || FU_ON_WINDOWS || (FU_ON_WASM && FU_WITH_SHARED_MEMORY))
 #endif
 
 /** Can we enumerate this machine's cores, compute domains, and memory domains? */
@@ -253,7 +278,7 @@
 #include <dirent.h> // `opendir`, `readdir`, `closedir`
 #endif
 
-#if FU_WITH_OS_THREADS && FU_ON_POSIX
+#if FU_WITH_OS_THREADS && (FU_ON_POSIX || FU_ON_WASM)
 #include <pthread.h> // `pthread_create`, `pthread_setname_np`
 #include <ctime>     // `nanosleep`, `clock_nanosleep`
 #endif
@@ -267,7 +292,7 @@
 #include <sys/qos.h> // `qos_class_t`, `pthread_attr_set_qos_class_np`
 #endif
 
-#if FU_ON_POSIX
+#if FU_ON_POSIX || FU_ON_WASM
 #include <unistd.h> // `gettid`, `sysconf`, `geteuid`
 #endif
 

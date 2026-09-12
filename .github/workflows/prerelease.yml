@@ -14,6 +14,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  EMSCRIPTEN_VERSION: 6.0.9
+  WASI_SDK_VERSION: "34"
+  # wasi-threads runs on Wasmtime 46 and older, so the threaded rows take the 36 LTS line.
+  WASMTIME_VERSION: v36.0.15
+
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
@@ -98,7 +104,7 @@ jobs:
           path: genmc
       - name: Restore the GenMC build
         id: genmc
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: genmc/build
           key: genmc-fe124db-clang-20
@@ -601,6 +607,72 @@ jobs:
             | grep -aE ' = -1 errno=' | sed -E 's/^[0-9]+ +//; s/\([^)]*\) = -1/() = -1/' \
             | sort | uniq -c | sort -rn | head -40 || true
 
+  # One row per WebAssembly shape; wasm32 Emscripten has one thread, so only its C suite runs.
+  test_wasm:
+    name: WebAssembly (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: wasm32-emscripten, sdk: emscripten, toolchain: toolchain-wasm32-emscripten, node: 22, tests: c11 }
+          - { name: wasm64-emscripten, sdk: emscripten, toolchain: toolchain-wasm64-emscripten, node: 24, tests: '(cpp17|cpp20|c11)' }
+          - { name: wasm32-wasi-threads, sdk: wasi, toolchain: toolchain-wasm32-wasi-threads, tests: '(cpp17|cpp20|c11)' }
+    env:
+      WASI_SDK_PATH: ${{ github.workspace }}/wasi-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Emscripten
+        if: matrix.sdk == 'emscripten'
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+
+      - name: Install Node.js
+        if: matrix.sdk == 'emscripten'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install the WASI SDK and Wasmtime
+        if: matrix.sdk == 'wasi'
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "${{ github.workspace }}"
+          mv "${{ github.workspace }}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" "$WASI_SDK_PATH"
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Configure and build
+        run: |
+          set -eux
+          if [ "${{ matrix.sdk }}" = emscripten ]; then
+            wrapper=emcmake
+            emulator="-DCMAKE_CROSSCOMPILING_EMULATOR=$(command -v node)"
+          else
+            wrapper=
+          fi
+          $wrapper cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/${{ matrix.toolchain }}.cmake ${emulator:-} \
+            -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_TEST_SKIP_STRESS=ON
+          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+
+      - name: Test
+        run: ctest --test-dir build -R '^forkunion_test_${{ matrix.tests }}$' --output-on-failure
+
+      - name: Build and link the Rust crate for wasm32-wasip1-threads
+        if: matrix.sdk == 'wasi'
+        env:
+          CC_wasm32_wasip1_threads: ${{ github.workspace }}/wasi-sdk/bin/clang
+          CXX_wasm32_wasip1_threads: ${{ github.workspace }}/wasi-sdk/bin/clang++
+          AR_wasm32_wasip1_threads: ${{ github.workspace }}/wasi-sdk/bin/llvm-ar
+        run: |
+          rustup update stable
+          rustup target add wasm32-wasip1-threads
+          cargo test --target wasm32-wasip1-threads --no-run
+
   # The two libc floors the downstream wheels must clear: musl and manylinux2014's glibc 2.17. Toolchain
   # install precedes checkout because Alpine ships no git.
   test_containers:
@@ -758,7 +830,7 @@ jobs:
       - name: Await the verdict
         run: |
           timeout 1800 sh -c 'until grep -q FU_VM_DONE serial.log 2>/dev/null; do sleep 10; done' || true
-          echo "=== guest serial tail ==="
+          echo "guest serial tail"
           tail -n 100 serial.log || true
           grep -q "FU_VM_NODES=${{ matrix.expect }} nodes" serial.log
           # ? The harvest's own count, not sysfs's: a collapsed enumeration would otherwise pass every

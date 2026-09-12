@@ -127,32 +127,29 @@ fn generate_necklace(scale: usize, communities: usize, edge_factor: usize) -> Cs
     // The pair of slots `2e, 2e+1` belongs to edge `e`; self-loops stay sentinels.
     let mut edges: Vec<(u32, u32)> = vec![SENTINEL_EDGE; raw_edges * 2 + bridges * 2];
     let (rmat_slots, bridge_slots) = edges.split_at_mut(raw_edges * 2);
-    rmat_slots
-        .par_chunks_mut(2)
-        .enumerate()
-        .for_each(|(e, slots)| {
-            let mut row = 0u32;
-            let mut column = 0u32;
-            for bit in (0..scale).rev() {
-                let r = random_percent((e * 64 + bit) as u64); // a=57 b=19 c=19 d=5, integer and portable
-                let step = 1u32 << bit;
-                if r < 57 {
-                    continue; // Stay in the dense quadrant
-                } else if r < 76 {
-                    column |= step;
-                } else if r < 95 {
-                    row |= step;
-                } else {
-                    row |= step;
-                    column |= step;
-                }
+    rmat_slots.par_chunks_mut(2).enumerate().for_each(|(e, slots)| {
+        let mut row = 0u32;
+        let mut column = 0u32;
+        for bit in (0..scale).rev() {
+            let r = random_percent((e * 64 + bit) as u64); // a=57 b=19 c=19 d=5, integer and portable
+            let step = 1u32 << bit;
+            if r < 57 {
+                continue; // Stay in the dense quadrant
+            } else if r < 76 {
+                column |= step;
+            } else if r < 95 {
+                row |= step;
+            } else {
+                row |= step;
+                column |= step;
             }
-            if row != column {
-                let base = ((e / raw_local) << scale) as u32; // This community's vertex range
-                slots[0] = (base + row, base + column); // Symmetrize; self-loops stay sentinels
-                slots[1] = (base + column, base + row);
-            }
-        });
+        }
+        if row != column {
+            let base = ((e / raw_local) << scale) as u32; // This community's vertex range
+            slots[0] = (base + row, base + column); // Symmetrize; self-loops stay sentinels
+            slots[1] = (base + column, base + row);
+        }
+    });
 
     // Bridges: endpoints in each community's first 64 vertices - R-MAT's quadrant bias piles the
     // hubs at low indices, so a low endpoint is essentially guaranteed well-connected.
@@ -160,8 +157,7 @@ fn generate_necklace(scale: usize, communities: usize, edge_factor: usize) -> Cs
     let bridge_base = raw_edges as u64 * 64;
     for j in 0..bridges {
         let u = ((j << scale) as u32) + random_index(bridge_base + 2 * j as u64, hub_core);
-        let v = ((((j + 1) % communities) << scale) as u32)
-            + random_index(bridge_base + 2 * j as u64 + 1, hub_core);
+        let v = ((((j + 1) % communities) << scale) as u32) + random_index(bridge_base + 2 * j as u64 + 1, hub_core);
         bridge_slots[j * 2] = (u, v);
         bridge_slots[j * 2 + 1] = (v, u);
     }
@@ -320,11 +316,9 @@ fn replicate_into<T: Copy + Sync>(
                 }
                 threads_on_memory_domain += view.threads_count_in(other);
             }
-            local_index_on_memory_domain +=
-                view.locate_thread_in(thread_index, compute_domain_index);
+            local_index_on_memory_domain += view.locate_thread_in(thread_index, compute_domain_index);
 
-            let range = fu::IndexedSplit::new(n, threads_on_memory_domain)
-                .get(local_index_on_memory_domain);
+            let range = fu::IndexedSplit::new(n, threads_on_memory_domain).get(local_index_on_memory_domain);
             if range.is_empty() {
                 return;
             }
@@ -333,11 +327,7 @@ fn replicate_into<T: Copy + Sync>(
             // only, and both it and `replicas` outlive the join.
             let replica = replicas.replica_ptr(memory_domain);
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    source.get(range.start),
-                    replica.add(range.start),
-                    range.len(),
-                );
+                core::ptr::copy_nonoverlapping(source.get(range.start), replica.add(range.start), range.len());
             }
         });
     });
@@ -568,34 +558,25 @@ const BACKENDS: &[Backend] = &[
 
 /// Parses a fractional environment variable, or `fallback` when unset or unparseable.
 fn env_f64(name: &str, fallback: f64) -> f64 {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
+    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
 }
 
 /// Parses an unsigned environment variable, or `fallback` when unset or unparseable.
 fn env_usize(name: &str, fallback: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
+    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let scale = env_usize("PROPAGATION_SCALE", 14);
     let communities = env_usize("PROPAGATION_COMMUNITIES", 64);
     let edge_factor = env_usize("PROPAGATION_EDGE_FACTOR", 16);
-    let backend =
-        env::var("PROPAGATION_BACKEND").unwrap_or_else(|_| "forkunion_static_shared".into());
+    let backend = env::var("PROPAGATION_BACKEND").unwrap_or_else(|_| "forkunion_static_shared".into());
     let mut threads = env_usize("PROPAGATION_THREADS", 0);
     let budget_seconds = env_f64("PROPAGATION_SECONDS", 10.0); // ? The primary knob: a fixed window
     let iterations = env_usize("PROPAGATION_ITERATIONS", 0); // ? Overrides with an exact count when set
     let check = env::var("PROPAGATION_CHECK").is_ok();
     if threads == 0 {
-        threads = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1);
+        threads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
     }
     assert!(
         (communities << scale) <= (1usize << 32),
@@ -648,19 +629,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let csr = ReplicatedCsr {
                     row_offsets: fu::ReplicatedArray::new_in(&probed, graph.row_offsets.len())
                         .expect("Failed to allocate per-domain row-offset replicas"),
-                    column_indices: fu::ReplicatedArray::new_in(
-                        &probed,
-                        graph.column_indices.len(),
-                    )
-                    .expect("Failed to allocate per-domain column-index replicas"),
+                    column_indices: fu::ReplicatedArray::new_in(&probed, graph.column_indices.len())
+                        .expect("Failed to allocate per-domain column-index replicas"),
                 };
                 replicate_into(&probed, &mut pool, &csr.row_offsets, graph.row_offsets);
-                replicate_into(
-                    &probed,
-                    &mut pool,
-                    &csr.column_indices,
-                    graph.column_indices,
-                );
+                replicate_into(&probed, &mut pool, &csr.column_indices, graph.column_indices);
                 replicas = Some(csr);
             }
             fu_pool = Some(pool);

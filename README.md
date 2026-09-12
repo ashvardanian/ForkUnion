@@ -17,6 +17,7 @@ It is exhaustively tested for boundary-condition scheduling with miniaturized `u
 The core is a C++ 17 library; the C 99, Rust, Zig, and Mojo APIs bind it, and all five can pin threads to [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual cores and allocate node-local memory.
 Despite being far more deeply tied to hardware and the OS than most alternatives, ForkUnion runs on __six operating systems__ — Linux, FreeBSD, Windows, macOS, Android, and iOS — including asymmetric compute and memory topologies.
 Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux, FreeBSD, and Windows, and elsewhere allocation falls back to a single memory domain.
+It also compiles to __WebAssembly__, where the pools are real in the two shapes that carry threads — Emscripten with `-pthread` over a shared memory, and `wasm32-wasip1-threads` under a runtime like Wasmtime — and collapse to the calling thread in a plain single-threaded module.
 
 ## Basic Usage
 
@@ -612,6 +613,7 @@ Hardware implements it differently:
 
 - x86 is built around the "Total Store Order" (TSO) [memory consistency model](https://en.wikipedia.org/wiki/Memory_ordering) and provides `LOCK` variants of the `ADD` and `CMPXCHG`, which act as full-blown "fences" - no loads or stores can be reordered across it.
 - Arm, on the other hand, has a "weak" memory model and provides a set of atomic instructions that are not fences, that match the C++ concurrency model, offering `acquire`, `release`, and `acq_rel` variants of each atomic instruction—such as `LDADD`, `STADD`, and `CAS` - which allow precise control over visibility and order, especially with the introduction of "Large System Extension" (LSE) instructions in Armv8.1.
+- WebAssembly with a shared memory has its own `i32.atomic.rw.add`, `i32.atomic.rw.cmpxchg` and kin, which the engine compiles to the host's atomic instructions; a module without shared memory runs one thread, so its atomics compile to plain loads and stores.
 
 In practice, a locked atomic on x86 requires the cache line in the Exclusive state in the requester's L1 cache.
 This would incur a Read-for-Ownership coherence transaction if some other core had the line.
@@ -810,6 +812,7 @@ Works in tight loops.
 The `TPAUSE`, `WFET`, and `WRS.NTO` wrappers go a step further than a spin hint: they are _timed_ light-sleep waits, so the pool parks a worker in a low-power state with a per-loop upper bound rather than burning the core.
 The waiter is also thread-aware — `micro_yield(thread_id)` lets each worker back off on its own schedule.
 These same wrappers back `spin_mutex_t`, or `SpinMutex` in Rust, a syscall-free `std::mutex` alternative that spins on a yield hint instead of trapping into a futex - it is the lock used in the NUMA example above.
+On WebAssembly the waiter is `standard_yield_t`, since the instruction set has no spin hint and `memory.atomic.wait32` parks a worker only until a `memory.atomic.notify` that none of the pool's lock-free writers send.
 
 ### Rayon-style Parallel Iterators
 
@@ -1025,6 +1028,17 @@ cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D BUILD_TESTING=ON
 cmake --build build_debug --config Debug        # build with Debug symbols
 build_debug/forkunion_test_cpp20                # run a single test executable
 ```
+
+To cross-compile for WebAssembly, pick the toolchain file for the shape you need, and `ctest` runs the binaries through Node or Wasmtime:
+
+```bash
+emcmake cmake -B build_wasm32 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake      # one thread, loads in any page
+emcmake cmake -B build_wasm64 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm64-emscripten.cmake      # shared memory and 64-bit addressing
+cmake -B build_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi-threads.cmake              # wasi-threads under Wasmtime
+cmake --build build_wasm64 && ctest --test-dir build_wasm64
+```
+
+The wasm32 module has one thread, so its pool spawns caller-inclusive and the multi-threaded tests only compile there; the other two shapes run the whole suite.
 
 To run static analysis:
 

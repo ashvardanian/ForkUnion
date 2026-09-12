@@ -33,7 +33,7 @@ name = "forkunion"
 path = "rust/forkunion.rs"
 
 [build-dependencies]
-cc = "1.2.40"
+cc = "1.4.5"
 
 [features]
 default = ["std"]

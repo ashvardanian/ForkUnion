@@ -26,6 +26,7 @@ template <typename yield_type_, typename cache_hints_type_>
 struct pool_for<fu::pool_kind_t::flat_k, yield_type_, cache_hints_type_> {
     using type = fu::flat_pool<thread_allocator_t, yield_type_, cache_hints_type_>;
 };
+#if FU_WITH_OS_THREADS
 template <typename yield_type_, typename cache_hints_type_>
 struct pool_for<fu::pool_kind_t::colocated_k, yield_type_, cache_hints_type_> {
     using type = fu::colocated_pool<yield_type_, cache_hints_type_>;
@@ -34,6 +35,7 @@ template <typename yield_type_, typename cache_hints_type_>
 struct pool_for<fu::pool_kind_t::distributed_k, yield_type_, cache_hints_type_> {
     using type = fu::distributed_pool<yield_type_, cache_hints_type_>;
 };
+#endif
 
 /**
  *  @brief Custom variant implementation to avoid MSVC `std::variant` alignment issues.
@@ -80,6 +82,7 @@ struct pool_variants_t {
         fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
 
+#if FU_WITH_OS_THREADS
         fu::colocated_pool<fu::standard_yield_t, fu::standard_cache_hints_t>,   // Single-compute-domain pools
         fu::distributed_pool<fu::standard_yield_t, fu::standard_cache_hints_t>, // Whole-machine pools
 #if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
@@ -114,6 +117,7 @@ struct pool_variants_t {
         fu::colocated_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
+#endif // FU_WITH_OS_THREADS
 
         fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
         >;
@@ -150,7 +154,7 @@ struct pool_variants_t {
 
 /** Carries a concrete pool type into a generic action through overload resolution. */
 template <typename pool_type_>
-struct pool_type_tag_t {
+struct pool_type_tag {
     using type = pool_type_;
 };
 
@@ -177,45 +181,43 @@ static auto select_pool(FU_MAYBE_UNUSED_ fu::capabilities_t const bits, action_t
     // (pause + cldemote) cell has no silicon and is deliberately not offered.
 #if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
     if (selects<fu::x86_tpause_t, fu::x86_cache_hints_t>(bits))
-        return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_tpause_t, fu::x86_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::x86_tpause_t, fu::x86_cache_hints_t>::type> {});
 #endif
 #if FU_TARGET_X86_TPAUSE
     if (selects<fu::x86_tpause_t, fu::standard_cache_hints_t>(bits))
-        return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_tpause_t, fu::standard_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::x86_tpause_t, fu::standard_cache_hints_t>::type> {});
 #endif
 #if FU_TARGET_X86_PAUSE
     if (selects<fu::x86_pause_t, fu::standard_cache_hints_t>(bits))
-        return action(pool_type_tag_t<typename pool_for<kind_, fu::x86_pause_t, fu::standard_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::x86_pause_t, fu::standard_cache_hints_t>::type> {});
 #endif
     // `DC CVAC` legality is an OS property (`SCTLR_EL1.UCI`), so the hints half is decided at
     // compile time by `preferred_cache_hints_t` - the clean on Linux, a no-op elsewhere - and the
     // runtime axis stays the waiter alone.
 #if FU_TARGET_ARM64_WFET
     if (selects<fu::arm64_wfet_t, fu::preferred_cache_hints_t>(bits))
-        return action(
-            pool_type_tag_t<typename pool_for<kind_, fu::arm64_wfet_t, fu::preferred_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_wfet_t, fu::preferred_cache_hints_t>::type> {});
 #endif
 #if FU_TARGET_ARM64_YIELD
     if (selects<fu::arm64_yield_t, fu::preferred_cache_hints_t>(bits))
-        return action(
-            pool_type_tag_t<typename pool_for<kind_, fu::arm64_yield_t, fu::preferred_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::preferred_cache_hints_t>::type> {});
 #endif
     // RVA23 mandates Zawrs and Zicbom together, so the monitored waiter travels with the
     // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space
     // `prefetch.w` promotion that can never fault.
 #if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
     if (selects<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>(bits))
-        return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
 #endif
 #if FU_TARGET_RISC5_WRS
     if (selects<fu::risc5_wrs_t, fu::risc5_cache_hints_t>(bits))
-        return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cache_hints_t>::type> {});
 #endif
 #if FU_TARGET_RISC5_PAUSE
     if (selects<fu::risc5_pause_t, fu::risc5_cache_hints_t>(bits))
-        return action(pool_type_tag_t<typename pool_for<kind_, fu::risc5_pause_t, fu::risc5_cache_hints_t>::type> {});
+        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_pause_t, fu::risc5_cache_hints_t>::type> {});
 #endif
-    return action(pool_type_tag_t<typename pool_for<kind_, fu::standard_yield_t, fu::standard_cache_hints_t>::type> {});
+    return action(pool_type_tag<typename pool_for<kind_, fu::standard_yield_t, fu::standard_cache_hints_t>::type> {});
 }
 
 /**
@@ -248,8 +250,13 @@ inline fu_status_t lower(fu::status_t status) noexcept { return static_cast<fu_s
 template <typename visitor_type_, typename result_type_>
 result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_type_ empty) {
     switch (variants.kind_) {
+#if FU_WITH_OS_THREADS
     case fu::pool_kind_t::colocated_k: return visit_kind<fu::pool_kind_t::colocated_k>(visitor, variants);
     case fu::pool_kind_t::distributed_k: return visit_kind<fu::pool_kind_t::distributed_k>(visitor, variants);
+#else
+    case fu::pool_kind_t::colocated_k:
+    case fu::pool_kind_t::distributed_k: return empty;
+#endif
     case fu::pool_kind_t::flat_k: return visit_kind<fu::pool_kind_t::flat_k>(visitor, variants);
     case fu::pool_kind_t::unknown_k: return empty;
     }
@@ -260,8 +267,13 @@ result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_ty
 template <typename visitor_type_>
 void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
     switch (variants.kind_) {
+#if FU_WITH_OS_THREADS
     case fu::pool_kind_t::colocated_k: visit_kind<fu::pool_kind_t::colocated_k>(visitor, variants); break;
     case fu::pool_kind_t::distributed_k: visit_kind<fu::pool_kind_t::distributed_k>(visitor, variants); break;
+#else
+    case fu::pool_kind_t::colocated_k:
+    case fu::pool_kind_t::distributed_k: break;
+#endif
     case fu::pool_kind_t::flat_k: visit_kind<fu::pool_kind_t::flat_k>(visitor, variants); break;
     case fu::pool_kind_t::unknown_k: break; // No pool spawned yet
     }
@@ -763,6 +775,77 @@ fu_status_t fu_pool_capabilities(fu_pool_t pool, fu_capabilities_t *capabilities
     return fu_success_k;
 }
 
+/** Rebuilds @p opaque as a flat pool if it holds another shape, then spawns it. */
+static fu_status_t spawn_flat(opaque_pool_t *opaque, size_t threads, fu::caller_exclusivity_t exclusivity) {
+    if (opaque->variants.kind_ != fu::pool_kind_t::flat_k) {
+        destroy_variant(opaque->variants);
+        construct_pool<fu::pool_kind_t::flat_k>(opaque->variants, opaque->effective);
+    }
+    return lower(visit_kind<fu::pool_kind_t::flat_k>([&](auto &variant) { return variant.spawn(threads, exclusivity); },
+                                                     opaque->variants));
+}
+
+#if FU_WITH_OS_THREADS
+
+/** Rebuilds @p opaque as a distributed pool if it holds another shape, then spawns across the whole machine. */
+static fu_status_t spawn_distributed(opaque_pool_t *opaque, fu::machine_topology_t const &machine, size_t threads,
+                                     fu::caller_exclusivity_t exclusivity) {
+    if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) {
+        destroy_variant(opaque->variants);
+        construct_pool<fu::pool_kind_t::distributed_k>(opaque->variants, opaque->effective, opaque->name);
+    }
+    return lower(visit_kind<fu::pool_kind_t::distributed_k>(
+        [&](auto &variant) { return variant.spawn(machine, threads, exclusivity); }, opaque->variants));
+}
+
+/** Rebuilds @p opaque as a colocated pool if it holds another shape, then spawns on one compute domain. */
+static fu_status_t spawn_colocated(opaque_pool_t *opaque, fu::machine_topology_t const &machine,
+                                   fu::compute_domain_index_t compute_domain_index, size_t threads,
+                                   fu::caller_exclusivity_t exclusivity) {
+    if (opaque->variants.kind_ != fu::pool_kind_t::colocated_k) {
+        destroy_variant(opaque->variants);
+        construct_pool<fu::pool_kind_t::colocated_k>(opaque->variants, opaque->effective, opaque->name);
+    }
+    return lower(visit_kind<fu::pool_kind_t::colocated_k>(
+        [&](auto &variant) {
+            return variant.spawn(machine.compute_domain_at(compute_domain_index), threads, exclusivity);
+        },
+        opaque->variants));
+}
+
+/** Rebuilds @p opaque as a distributed pool if it holds another shape, then spawns near one memory domain. */
+static fu_status_t spawn_distributed_near(opaque_pool_t *opaque, fu::machine_topology_t const &machine,
+                                          fu::memory_domain_id_t memory_domain_id, size_t threads,
+                                          fu::caller_exclusivity_t exclusivity) {
+    if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) {
+        destroy_variant(opaque->variants);
+        construct_pool<fu::pool_kind_t::distributed_k>(opaque->variants, opaque->effective, opaque->name);
+    }
+    return lower(visit_kind<fu::pool_kind_t::distributed_k>(
+        [&](auto &variant) {
+            return variant.spawn_near_memory_domain(machine, memory_domain_id, threads, exclusivity);
+        },
+        opaque->variants));
+}
+
+#else
+
+/* Without OS threads the whole machine is one compute domain over one memory domain. */
+static fu_status_t spawn_distributed(opaque_pool_t *opaque, fu::machine_topology_t const &, size_t threads,
+                                     fu::caller_exclusivity_t exclusivity) {
+    return spawn_flat(opaque, threads, exclusivity);
+}
+static fu_status_t spawn_colocated(opaque_pool_t *opaque, fu::machine_topology_t const &, fu::compute_domain_index_t,
+                                   size_t threads, fu::caller_exclusivity_t exclusivity) {
+    return spawn_flat(opaque, threads, exclusivity);
+}
+static fu_status_t spawn_distributed_near(opaque_pool_t *opaque, fu::machine_topology_t const &, fu::memory_domain_id_t,
+                                          size_t threads, fu::caller_exclusivity_t exclusivity) {
+    return spawn_flat(opaque, threads, exclusivity);
+}
+
+#endif
+
 fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads,
                           fu_caller_exclusivity_t c_exclusivity) {
     if (!pool || !topology) return fu_invalid_argument_k;
@@ -771,23 +854,9 @@ fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads
     auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
 
     // A whole-machine pool is distributed when the mask allows placing memory on domains, else flat.
-    // Rebuild to that shape if an earlier spawn left another, then spawn: `visit_kind` fixes the shape
-    // and dispatches on the waiter alone, so each branch instantiates only its own `spawn`.
-    if (opaque->effective & fu::capability_place_memory_on_domain_k) {
-        if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) {
-            destroy_variant(opaque->variants);
-            construct_pool<fu::pool_kind_t::distributed_k>(opaque->variants, opaque->effective, opaque->name);
-        }
-        return lower(visit_kind<fu::pool_kind_t::distributed_k>(
-            [&](auto &variant) { return variant.spawn(*upcast_topology(topology), threads, exclusivity); },
-            opaque->variants));
-    }
-    if (opaque->variants.kind_ != fu::pool_kind_t::flat_k) {
-        destroy_variant(opaque->variants);
-        construct_pool<fu::pool_kind_t::flat_k>(opaque->variants, opaque->effective);
-    }
-    return lower(visit_kind<fu::pool_kind_t::flat_k>([&](auto &variant) { return variant.spawn(threads, exclusivity); },
-                                                     opaque->variants));
+    if (opaque->effective & fu::capability_place_memory_on_domain_k)
+        return spawn_distributed(opaque, *upcast_topology(topology), threads, exclusivity);
+    return spawn_flat(opaque, threads, exclusivity);
 }
 
 fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t compute_domain_index, size_t threads,
@@ -801,18 +870,8 @@ fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comp
     // A refused spawn and an out-of-range domain are distinct answers here.
     if (compute_domain_index >= machine.compute_domains_count()) return fu_invalid_argument_k;
 
-    // Pin to a single compute domain: ensure the variant is colocated, rebuilding if it is not.
-    if (opaque->variants.kind_ != fu::pool_kind_t::colocated_k) {
-        destroy_variant(opaque->variants);
-        construct_pool<fu::pool_kind_t::colocated_k>(opaque->variants, opaque->effective, opaque->name);
-    }
-    return lower(visit_kind<fu::pool_kind_t::colocated_k>(
-        [&](auto &variant) {
-            return variant.spawn(
-                machine.compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index)), threads,
-                exclusivity);
-        },
-        opaque->variants));
+    return spawn_colocated(opaque, machine, static_cast<fu::compute_domain_index_t>(compute_domain_index), threads,
+                           exclusivity);
 }
 
 fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t pool,
@@ -834,16 +893,8 @@ fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t p
         if (machine.memory_domains_count() > 1) return fu_unsupported_k;
         return fu_pool_spawn(topology, pool, threads, c_exclusivity);
     }
-    if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) {
-        destroy_variant(opaque->variants);
-        construct_pool<fu::pool_kind_t::distributed_k>(opaque->variants, opaque->effective, opaque->name);
-    }
-    return lower(visit_kind<fu::pool_kind_t::distributed_k>(
-        [&](auto &variant) {
-            return variant.spawn_near_memory_domain(machine, static_cast<fu::memory_domain_id_t>(memory_domain_id),
-                                                    threads, exclusivity);
-        },
-        opaque->variants));
+    return spawn_distributed_near(opaque, machine, static_cast<fu::memory_domain_id_t>(memory_domain_id), threads,
+                                  exclusivity);
 }
 
 /** Safely cast `fu_fabric_t` to `fu::measured_fabric_t*` avoiding alignment violation warnings. */
@@ -869,12 +920,9 @@ void fu_fabric_delete(fu_fabric_t fabric) {
 
 fu_status_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_t fabric) {
     if (!pool || !fabric || !topology) return fu_invalid_argument_k;
-    opaque_pool_t *opaque = upcast_pool(pool);
-    // Only the distributed pool spans memory domains; a flat or colocated pool has no fabric to walk.
-    if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) return fu_config_mismatch_k;
-    return lower(visit_kind<fu::pool_kind_t::distributed_k>(
-        [&](auto &variant) { return upcast_fabric(fabric)->harvest(*upcast_topology(topology), variant); },
-        opaque->variants));
+    return lower(
+        visit([&](auto &variant) { return upcast_fabric(fabric)->harvest(*upcast_topology(topology), variant); },
+              upcast_pool(pool)->variants, fu::status_t::config_mismatch_k));
 }
 
 fu_status_t fu_fabric_memory_latency(fu_fabric_t fabric, size_t compute_domain_index, size_t memory_domain_index,

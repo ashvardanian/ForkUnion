@@ -657,9 +657,8 @@ mod tests {
         let topology = Topology::new().unwrap();
         // On exclusive pools the work is dispatched at guard construction:
         // the caller can overlap its own work and poll `is_complete`.
-        let mut pool =
-            ThreadPool::spawn_with_exclusivity(&topology, 4, CallerExclusivity::Exclusive)
-                .expect("Failed to create exclusive thread pool");
+        let mut pool = ThreadPool::spawn_with_exclusivity(&topology, 4, CallerExclusivity::Exclusive)
+            .expect("Failed to create exclusive thread pool");
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
 
@@ -679,10 +678,7 @@ mod tests {
 
         // Join blocks on the workers; the completion query is only meaningful after it.
         operation.join();
-        assert!(
-            operation.is_complete(),
-            "join must leave the operation complete"
-        );
+        assert!(operation.is_complete(), "join must leave the operation complete");
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 
@@ -705,11 +701,7 @@ mod tests {
             "Inclusive pools defer dispatch to join"
         );
         assert!(!operation.is_complete());
-        assert_eq!(
-            counter.load(Ordering::Relaxed),
-            0,
-            "No work must start before join"
-        );
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "No work must start before join");
 
         operation.join();
         assert!(operation.is_complete());

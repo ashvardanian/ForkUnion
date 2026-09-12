@@ -1,3 +1,9 @@
+/**
+ *  @brief Tests the `fu_*` C ABI: spawns, parallel loops, generation tokens, topology, fabric and allocation.
+ *  @author Ash Vardanian
+ *  @file scripts/test.c
+ *  @date August 23, 2026
+ */
 #include <stdio.h>     // `printf`, `fprintf`
 #include <stdlib.h>    // `EXIT_FAILURE`, `EXIT_SUCCESS`
 #include <stdatomic.h> // `atomic_size_t`, `atomic_fetch_add`
@@ -14,27 +20,39 @@ static const size_t default_parallel_tasks_k = 10000; // 10K
  */
 static fu_topology_t machine_topology = NULL;
 
+/** Caller-exclusive where OS threads can take the caller's place, else caller-inclusive. */
+static fu_caller_exclusivity_t preferred_exclusivity(void) {
+    return (fu_comptime_capabilities() & fu_capability_os_threads_k) ? fu_caller_exclusive_k : fu_caller_inclusive_k;
+}
+
+/** @p wanted where OS threads exist, else the caller alone. */
+static size_t spawnable_threads(size_t wanted) {
+    return (fu_comptime_capabilities() & fu_capability_os_threads_k) ? wanted : 1;
+}
+
 /** Creates a pool from @p mask and spawns a default-sized crew, or returns NULL on failure. */
 static fu_pool_t spawn_default_pool(char const *name, fu_capabilities_t mask, fu_caller_exclusivity_t mode) {
     fu_pool_t pool = NULL;
     if (fu_pool_new(name, mask, &pool) != fu_success_k) return NULL;
     size_t threads = 0;
     if (fu_logical_cores_count(machine_topology, &threads) != fu_success_k || threads == 0) threads = 4;
-    if (fu_pool_spawn(machine_topology, pool, threads, mode) == fu_success_k) return pool;
+    if (fu_pool_spawn(machine_topology, pool, spawnable_threads(threads), mode) == fu_success_k) return pool;
     fu_pool_delete(pool);
     return NULL;
 }
 
-/** @brief Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
+/** Zero threads is not a pool, nor is more than one without OS threads: both spawns are refused cleanly. */
 static bool test_spawn_zero(fu_capabilities_t mask) {
     fu_pool_t pool = NULL;
     if (fu_pool_new("test_zero", mask, &pool) != fu_success_k) return false;
     bool result = fu_pool_spawn(machine_topology, pool, 0u, fu_caller_inclusive_k) == fu_invalid_argument_k;
+    if (!(fu_comptime_capabilities() & fu_capability_os_threads_k))
+        result = result && fu_pool_spawn(machine_topology, pool, 2u, fu_caller_inclusive_k) == fu_unsupported_k;
     fu_pool_delete(pool);
     return result;
 }
 
-/** @brief The default spawn - one thread per logical core - must succeed and tear down cleanly. */
+/** The default spawn - one thread per logical core - must succeed and tear down cleanly. */
 static bool test_spawn_success(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_spawn", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -47,14 +65,14 @@ struct for_threads_context_t {
     atomic_bool *visited;
 };
 
-/** @brief Marks the calling worker's slot in the shared `visited` array. */
+/** Marks the calling worker's slot in the shared `visited` array. */
 static void for_threads_callback(void *context_punned, size_t thread, size_t compute_domain) {
     (void)compute_domain;
     struct for_threads_context_t *context = (struct for_threads_context_t *)context_punned;
     atomic_store(&context->visited[thread], true);
 }
 
-/** @brief One `for_threads` broadcast must visit every worker exactly once, none skipped. */
+/** One `for_threads` broadcast must visit every worker exactly once, none skipped. */
 static bool test_for_threads(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_threads", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -81,7 +99,8 @@ static bool test_for_threads(fu_capabilities_t mask) {
 }
 
 /**
- *  @brief The pool reports the exclusivity it was spawned with, even across a terminate-and-respawn.
+ *  @brief The pool reports the exclusivity it was spawned with, even across a terminate-and-respawn,
+ *      and a build without OS threads refuses an exclusive spawn.
  *
  *  Callers branch on `fu_pool_caller_exclusivity` to decide who owes a slice of every dispatch, so
  *  a stale answer after a mode change would deadlock a join or double-run a slice.
@@ -94,14 +113,18 @@ static bool test_caller_exclusivity_query(fu_capabilities_t mask) {
     if (fu_logical_cores_count(machine_topology, &threads) != fu_success_k || threads == 0) threads = 4;
 
     // The pool is the single source of truth, even after a re-spawn with a different mode.
+    bool const os_threads = (fu_comptime_capabilities() & fu_capability_os_threads_k) != 0;
     fu_caller_exclusivity_t reported = fu_caller_inclusive_k;
     bool result = true;
-    if (fu_pool_spawn(machine_topology, pool, threads, fu_caller_inclusive_k) != fu_success_k) result = false;
+    if (fu_pool_spawn(machine_topology, pool, spawnable_threads(threads), fu_caller_inclusive_k) != fu_success_k)
+        result = false;
     else if (fu_pool_caller_exclusivity(pool, &reported) != fu_success_k) result = false;
     else if (reported != fu_caller_inclusive_k) result = false;
     else {
         fu_pool_terminate(pool);
-        if (fu_pool_spawn(machine_topology, pool, threads, fu_caller_exclusive_k) != fu_success_k) result = false;
+        fu_status_t const respawned = fu_pool_spawn(machine_topology, pool, threads, fu_caller_exclusive_k);
+        if (!os_threads) result = respawned == fu_unsupported_k;
+        else if (respawned != fu_success_k) result = false;
         else if (fu_pool_caller_exclusivity(pool, &reported) != fu_success_k) result = false;
         else if (reported != fu_caller_exclusive_k) result = false;
     }
@@ -127,6 +150,7 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
         size_t cores = 0;
         if (fu_logical_cores_count_in(machine_topology, compute_domain, &cores) != fu_success_k || cores == 0)
             cores = 2; /* Non-NUMA build reports via hardware_concurrency */
+        cores = spawnable_threads(cores);
 
         fu_pool_t pool = NULL;
         if (fu_pool_new("compute_domain", mask, &pool) != fu_success_k) {
@@ -134,7 +158,7 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
             break;
         }
         size_t spawned = 0;
-        if (fu_pool_spawn_on(machine_topology, pool, compute_domain, cores, fu_caller_exclusive_k) != fu_success_k)
+        if (fu_pool_spawn_on(machine_topology, pool, compute_domain, cores, preferred_exclusivity()) != fu_success_k)
             result = false;
         else if (fu_pool_threads_count(pool, &spawned) != fu_success_k || spawned == 0) result = false;
         fu_pool_delete(pool);
@@ -143,7 +167,7 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
     // Out-of-range compute domain must fail cleanly, not crash.
     fu_pool_t out_of_range = NULL;
     if (fu_pool_new("bad", mask, &out_of_range) == fu_success_k &&
-        fu_pool_spawn_on(machine_topology, out_of_range, compute_domains + 100, 2, fu_caller_exclusive_k) ==
+        fu_pool_spawn_on(machine_topology, out_of_range, compute_domains + 100, 2, preferred_exclusivity()) ==
             fu_success_k)
         result = false;
     fu_pool_delete(out_of_range);
@@ -158,7 +182,7 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
  */
 static bool test_generation_polling(fu_capabilities_t mask) {
     // Polling before join is the caller-exclusive pattern: no caller slice is owed.
-    fu_pool_t pool = spawn_default_pool("test_generation", mask, fu_caller_exclusive_k);
+    fu_pool_t pool = spawn_default_pool("test_generation", mask, preferred_exclusivity());
     if (!pool) return false;
 
     size_t threads_count = 0;
@@ -174,10 +198,10 @@ static bool test_generation_polling(fu_capabilities_t mask) {
 
     if (result && (generation & 1u) == 0) result = false; /* Tokens are always odd */
     else if (result) {
-        fu_bool_t complete = 0;
-        while (!complete && fu_pool_is_complete(pool, generation, &complete) == fu_success_k) {
-            /* Spin until the workers finish */
-        }
+        fu_caller_exclusivity_t exclusivity = fu_caller_inclusive_k;
+        if (fu_pool_caller_exclusivity(pool, &exclusivity) != fu_success_k) result = false;
+        fu_bool_t complete = exclusivity == fu_caller_inclusive_k;
+        while (!complete && fu_pool_is_complete(pool, generation, &complete) == fu_success_k) {}
         fu_pool_unsafe_join(pool, generation);
         for (size_t i = 0; i < threads_count; ++i)
             if (!atomic_load(&visited[i])) {
@@ -197,7 +221,7 @@ struct uncomfortable_context_t {
     atomic_bool out_of_bounds;
 };
 
-/** @brief Raises the shared flag on any task index at or past the requested bound. */
+/** Raises the shared flag on any task index at or past the requested bound. */
 static void uncomfortable_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
@@ -245,7 +269,7 @@ struct aligned_visit_t {
     _Alignas(64) size_t task;
 };
 
-/** @brief `qsort` comparator ordering visit records by task index, so a sorted pass can assert iota coverage. */
+/** `qsort` comparator ordering visit records by task index, so a sorted pass can assert iota coverage. */
 static int compare_visits(const void *a, const void *b) {
     const struct aligned_visit_t *va = (const struct aligned_visit_t *)a;
     const struct aligned_visit_t *vb = (const struct aligned_visit_t *)b;
@@ -254,7 +278,7 @@ static int compare_visits(const void *a, const void *b) {
     return 0;
 }
 
-/** @brief Sorts the visit records in place and checks they cover [0, @p size) exactly once. */
+/** Sorts the visit records in place and checks they cover [0, @p size) exactly once. */
 static bool contains_iota(struct aligned_visit_t *visited, size_t size) {
     qsort(visited, size, sizeof(struct aligned_visit_t), compare_visits);
 
@@ -269,7 +293,7 @@ struct for_n_context_t {
     struct aligned_visit_t *visited;
 };
 
-/** @brief Appends the task index to the shared visit log at the next free slot. */
+/** Appends the task index to the shared visit log at the next free slot. */
 static void for_n_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
@@ -279,7 +303,7 @@ static void for_n_callback(void *context_punned, size_t task, size_t thread, siz
     context->visited[count_populated].task = task;
 }
 
-/** @brief `for_n` must execute each of N tasks exactly once - and again on a repeated dispatch. */
+/** `for_n` must execute each of N tasks exactly once - and again on a repeated dispatch. */
 static bool test_for_n(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_n", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -306,7 +330,7 @@ static bool test_for_n(fu_capabilities_t mask) {
     return result;
 }
 
-/** @brief `for_n_dynamic` work-stealing must still cover each task exactly once, dispatch after dispatch. */
+/** `for_n_dynamic` work-stealing must still cover each task exactly once, dispatch after dispatch. */
 static bool test_for_n_dynamic(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_n_dynamic", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -333,7 +357,7 @@ static bool test_for_n_dynamic(fu_capabilities_t mask) {
     return result;
 }
 
-/** @brief Like `for_n_callback`, but burns a task-dependent amount of work to skew the timing. */
+/** Like `for_n_callback`, but burns a task-dependent amount of work to skew the timing. */
 static void oversubscribed_callback(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     (void)thread;
     (void)compute_domain;
@@ -362,7 +386,8 @@ static bool test_oversubscribed_threads(fu_capabilities_t mask) {
     size_t threads = 0;
     if (fu_logical_cores_count(machine_topology, &threads) != fu_success_k || threads == 0) threads = 4;
 
-    if (fu_pool_spawn(machine_topology, pool, threads * oversubscription, fu_caller_inclusive_k) != fu_success_k) {
+    if (fu_pool_spawn(machine_topology, pool, spawnable_threads(threads * oversubscription), fu_caller_inclusive_k) !=
+        fu_success_k) {
         fu_pool_delete(pool);
         return false;
     }
@@ -388,7 +413,7 @@ struct for_slices_context_t {
     atomic_bool bounds_violated;
 };
 
-/** @brief Bumps a per-index execution counter for the run, flagging out-of-bounds ones. */
+/** Bumps a per-index execution counter for the run, flagging out-of-bounds ones. */
 static void for_slices_callback(void *context_punned, size_t first, size_t count, size_t thread,
                                 size_t compute_domain) {
     (void)thread;
@@ -402,7 +427,7 @@ static void for_slices_callback(void *context_punned, size_t first, size_t count
     for (size_t i = 0; i != count; ++i) atomic_fetch_add(&context->executions[first + i], 1);
 }
 
-/** @brief `for_slices` partitions [0, N) into in-bounds runs, calling every thread exactly once. */
+/** `for_slices` partitions [0, N) into in-bounds runs, calling every thread exactly once. */
 static bool test_for_slices(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_slices", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -479,7 +504,7 @@ static bool test_topology_counts(fu_capabilities_t mask) {
     return cores_across_domains == cores;
 }
 
-/** @brief Every memory domain id must be a valid allocator input, its RAM within the machine total. */
+/** Every memory domain id must be a valid allocator input, its RAM within the machine total. */
 static bool test_topology_memory_bounds(fu_capabilities_t mask) {
     (void)mask;
     size_t memory_domains = 0, total_ram = 0;
@@ -502,12 +527,12 @@ static bool test_topology_memory_bounds(fu_capabilities_t mask) {
 }
 
 /**
- *  @brief `fu_fabric_harvest` must fill every reachable edge with sane numbers and keep the SLIT
- *      convention: no row's distance may undercut its own local domain. Runs once from `main`,
- *      not in the battery - the harvest takes seconds and is identical under every mask.
+ *  `fu_fabric_harvest` must fill every reachable edge with sane numbers and keep the SLIT
+ *  convention: no row's distance may undercut its own local domain. Runs once from `main`,
+ *  not in the battery - the harvest takes seconds and is identical under every mask.
  */
 static bool test_fabric_harvest(fu_capabilities_t mask) {
-    fu_pool_t pool = spawn_default_pool("test_fabric", mask, fu_caller_exclusive_k);
+    fu_pool_t pool = spawn_default_pool("test_fabric", mask, preferred_exclusivity());
     if (!pool) return false;
     fu_fabric_t fabric = NULL;
     if (fu_fabric_new(&fabric) != fu_success_k) {
@@ -523,10 +548,14 @@ static bool test_fabric_harvest(fu_capabilities_t mask) {
         result = false; // ? ... and a single tier
 
     if (fu_fabric_harvest(machine_topology, pool, fabric) != fu_success_k) {
-        // ? Only the distributed pool spans memory domains - flat pools decline, they never lie
+        // ? An unpinned pool declines a machine of several domains, and must measure a machine of one
         fu_capabilities_t spawned_with = 0;
+        size_t memory_domains = 0, compute_domains = 0;
         result = result && fu_pool_capabilities(pool, &spawned_with) == fu_success_k &&
-                 (spawned_with & fu_capability_place_memory_on_domain_k) == 0;
+                 (spawned_with & fu_capability_place_memory_on_domain_k) == 0 &&
+                 fu_memory_domains_count(machine_topology, &memory_domains) == fu_success_k &&
+                 fu_compute_domains_count(machine_topology, &compute_domains) == fu_success_k &&
+                 (memory_domains > 1 || compute_domains > 1);
     }
     else {
         size_t local = 0;
@@ -616,7 +645,7 @@ static bool test_pool_domain_accounting(fu_capabilities_t mask) {
     return result;
 }
 
-/** @brief Round-trips both allocation shapes of @p bytes on every memory domain in turn. */
+/** Round-trips both allocation shapes of @p bytes on every memory domain in turn. */
 static bool test_allocations_on_domains_of_size(size_t bytes) {
     size_t domains = 0;
     if (fu_memory_domains_count(machine_topology, &domains) != fu_success_k) return false;
@@ -692,7 +721,7 @@ static bool test_allocation_symmetric(fu_capabilities_t mask) {
 // GCC nested functions extension test
 #if defined(__GNUC__) && !defined(__clang__)
 
-/** @brief The C ABI accepts a GCC nested function as the callback, trampoline and all. */
+/** The C ABI accepts a GCC nested function as the callback, trampoline and all. */
 static bool test_gcc_nested_functions(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_gcc_nested", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -728,13 +757,13 @@ struct block_wrapper {
     task_block_t block;
 };
 
-/** @brief Unwraps the heap-copied block from the context pointer and invokes it. */
+/** Unwraps the heap-copied block from the context pointer and invokes it. */
 static void block_callback_wrapper(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
     struct block_wrapper *wrapper = (struct block_wrapper *)context_punned;
     wrapper->block(NULL, task, thread, compute_domain);
 }
 
-/** @brief The C ABI accepts a heap-copied Clang block through a small wrapper callback. */
+/** The C ABI accepts a heap-copied Clang block through a small wrapper callback. */
 static bool test_clang_blocks(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_clang_blocks", mask, fu_caller_inclusive_k);
     if (!pool) return false;
@@ -816,10 +845,6 @@ int main(void) {
 
     fu_capabilities_t const comptime_mask = fu_comptime_capabilities();
     fu_capabilities_t const runtime_mask = fu_runtime_capabilities();
-    if (!(comptime_mask & fu_capability_os_threads_k)) {
-        fprintf(stderr, "Thread pool not supported on this platform\n");
-        return EXIT_FAILURE;
-    }
 
     if (fu_topology_new(&machine_topology) != fu_success_k) {
         fprintf(stderr, "Failed to probe machine topology\n");
@@ -864,7 +889,7 @@ int main(void) {
     };
 
     fu_capabilities_t const topology_variants[] = {
-        fu_capability_os_threads_k,
+        comptime_mask & fu_capability_os_threads_k,
         fu_capability_os_threads_k | fu_capability_topology_k | fu_capability_place_memory_on_domain_k,
     };
 

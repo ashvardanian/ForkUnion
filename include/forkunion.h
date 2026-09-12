@@ -724,8 +724,9 @@ fu_status_t fu_pool_capabilities(fu_pool_t pool, fu_capabilities_t *capabilities
  *  @param[in] exclusivity Whether the calling thread also executes tasks.
  *  @return `fu_success_k` once every worker started; `fu_invalid_argument_k` for a NULL handle, an
  *      unnamed exclusivity, or @p threads of 0; `fu_already_spawned_k` while the pool still holds
- *      workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated; and
- *      `fu_thread_refused_k` when the OS declines a thread.
+ *      workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated;
+ *      `fu_thread_refused_k` when the OS declines a thread; and `fu_unsupported_k` for a caller-exclusive
+ *      or multi-thread pool in a build without OS threads.
  *  @note Not thread-safe; call once per pool, or again after `fu_pool_terminate`.
  *
  *  Covers every compute domain. If a prior @ref fu_pool_spawn_on left the pool pinned to a single
@@ -745,7 +746,8 @@ fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads
  *      `fu_invalid_argument_k` for a NULL handle, an unnamed exclusivity, @p threads of 0, or a
  *      @p compute_domain_index at or past `fu_compute_domains_count`; `fu_already_spawned_k` while the
  *      pool still holds workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated;
- *      and `fu_thread_refused_k` when the OS declines a thread.
+ *      `fu_thread_refused_k` when the OS declines a thread; and `fu_unsupported_k` for a caller-exclusive
+ *      or multi-thread pool in a build without OS threads.
  *  @note Not thread-safe; call once per pool.
  *
  *  Placement lives here, not in creation: @ref fu_pool_new allocates the handle, and this binds it to
@@ -768,8 +770,9 @@ fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comp
  *      `fu_invalid_argument_k` for a NULL handle, an unnamed exclusivity, @p threads of 0, or a
  *      @p memory_domain_id no compute domain is local to; `fu_unsupported_k` where placement is masked
  *      off on a machine with several memory domains; `fu_already_spawned_k` while the pool still holds
- *      workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated; and
- *      `fu_thread_refused_k` when the OS declines a thread.
+ *      workers; `fu_bad_alloc_k` when the per-domain bookkeeping cannot be allocated;
+ *      `fu_thread_refused_k` when the OS declines a thread; and `fu_unsupported_k` for a caller-exclusive
+ *      or multi-thread pool in a build without OS threads.
  *  @note Not thread-safe; call once per pool.
  *
  *  Sits between the extremes: @ref fu_pool_spawn_on binds one compute domain and @ref fu_pool_spawn
@@ -864,7 +867,7 @@ void fu_pool_terminate(fu_pool_t pool);
  *  @return An opaque fabric handle, or NULL on allocation failure.
  *
  *  Completes the library's pipeline: build a `fu_topology_t` first, spawn a `fu_pool_t` on it,
- *  then harvest the fabric through that pool's pinned workers with @ref fu_fabric_harvest. Before
+ *  then harvest the fabric through that pool's workers with @ref fu_fabric_harvest. Before
  *  a harvest every query on the handle answers 0, and `fu_fabric_memory_levels_count` answers 1.
  *  @sa `fu_fabric_harvest`, `fu_fabric_delete`.
  */
@@ -878,17 +881,17 @@ fu_status_t fu_fabric_new(fu_fabric_t *fabric_out);
 void fu_fabric_delete(fu_fabric_t fabric);
 
 /**
- *  @brief Measures the memory fabric through the pool's pinned workers, rebuilding @p fabric.
+ *  @brief Measures the memory fabric through the pool's workers, rebuilding @p fabric.
  *  @param[in] topology Read only; may be freed once this returns - the fabric snapshots what it needs.
  *  @param[in] pool Pool handle, must not be NULL and spawned across the machine via `fu_pool_spawn`.
  *  @param[out] fabric Receives the observations, replacing any previous harvest; must not be NULL,
  *      and a failed harvest leaves it empty, never half-written.
  *  @return `fu_success_k` once every reachable edge was walked and @p fabric holds the observations;
- *      `fu_invalid_argument_k` for a NULL handle; `fu_config_mismatch_k` when the pool spans no memory
- *      domains - flat, pinned to a single compute domain, or terminated; `fu_bad_alloc_k` when the edge
- *      or scratch storage cannot be allocated; `fu_unsupported_k` where this build or machine cannot
- *      measure the fabric; `fu_permission_denied_k` when the OS declines a probe the walk needs; and
- *      `fu_topology_unavailable_k` when the machine cannot be described.
+ *      `fu_invalid_argument_k` for a NULL handle; `fu_config_mismatch_k` when the pool cannot place pages
+ *      on every domain it would walk - unspawned, terminated, or unpinned on a machine of several domains;
+ *      `fu_bad_alloc_k` when the edge or scratch storage cannot be allocated; `fu_unsupported_k` where this
+ *      build or machine cannot measure the fabric; `fu_permission_denied_k` when the OS declines a probe the
+ *      walk needs; and `fu_topology_unavailable_k` when the machine cannot be described.
  *  @note Not thread-safe: dispatches on the pool and rebuilds the fabric, so call it between task
  *        batches and do not query @p fabric concurrently. Expect seconds of runtime on large fabrics.
  *
