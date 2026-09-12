@@ -654,7 +654,7 @@ The pipeline is `harvest` all the way down: a `Topology` harvests the declared s
 A memory level is a property of the medium, independent of the querying core: it keys on the best bandwidth any initiator sustains to the pool, ties split by the best latency, so a 3 TB/s HBM pool outranks DDR even at equal latency.
 
 |                   | Compute axis            | Memory axis            |
-| ----------------- | ----------------------- | ---------------------- |
+| :---------------- | :---------------------- | :--------------------- |
 | Count domains     | `compute_domains_count` | `memory_domains_count` |
 | Count levels      | `compute_levels_count`  | `memory_levels_count`  |
 | Level of a domain | `compute_level_in`      | `memory_level_in`      |
@@ -797,7 +797,7 @@ Instead, you can replace the `standard_yield_t` wrapper with a platform-specific
 Those instructions, like [`WFET` on Arm](https://developer.arm.com/documentation/ddi0602/2025-03/Base-Instructions/WFET--Wait-for-event-with-timeout-), generally hint the CPU to transition to a low-power state.
 
 | Wrapper         | ISA          | Instruction | Privileges |
-| --------------- | ------------ | ----------- | ---------- |
+| :-------------- | :----------- | :---------- | :--------- |
 | `x86_pause_t`   | x86          | `PAUSE`     | R3         |
 | `x86_tpause_t`  | x86+WAITPKG  | `TPAUSE`    | R3         |
 | `arm64_yield_t` | AArch64      | `YIELD`     | EL0        |

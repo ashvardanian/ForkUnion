@@ -5,7 +5,7 @@ Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com)
 `./check.sh` runs everything and compares each verdict with the expected one.
 
 | File                      | What it is                                                                                                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| :------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `weak_memory.pml`         | The C++ memory model as views, for Promela: relaxed, acquire, release, `acq_rel`, both fences, release sequences.                                                        |
 | `weak_memory_litmus.pml`  | The calibration: the classic shapes, each asserting the outcome RC11 forbids. `check.sh` expects exactly RC11's verdicts.                                                |
 | `flat_pool.pml`           | `flat_pool`: the epoch clock, the countdown, what a completed join sees, the moods, a re-spawn, and a poll on a stale token; `-Dscenario=moods`, `respawn`, `polling`.   |

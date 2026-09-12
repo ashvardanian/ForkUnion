@@ -617,8 +617,19 @@ jobs:
       matrix:
         include:
           - { name: wasm32-emscripten, sdk: emscripten, toolchain: toolchain-wasm32-emscripten, node: 22, tests: c11 }
-          - { name: wasm64-emscripten, sdk: emscripten, toolchain: toolchain-wasm64-emscripten, node: 24, tests: '(cpp17|cpp20|c11)' }
-          - { name: wasm32-wasi-threads, sdk: wasi, toolchain: toolchain-wasm32-wasi-threads, tests: '(cpp17|cpp20|c11)' }
+          - {
+              name: wasm64-emscripten,
+              sdk: emscripten,
+              toolchain: toolchain-wasm64-emscripten,
+              node: 24,
+              tests: "(cpp17|cpp20|c11)",
+            }
+          - {
+              name: wasm32-wasi-threads,
+              sdk: wasi,
+              toolchain: toolchain-wasm32-wasi-threads,
+              tests: "(cpp17|cpp20|c11)",
+            }
     env:
       WASI_SDK_PATH: ${{ github.workspace }}/wasi-sdk
     steps:

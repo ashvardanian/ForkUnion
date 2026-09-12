@@ -1,18 +1,18 @@
 {
-    "recommendations": [
-        "llvm-vs-code-extensions.vscode-clangd",
-        "ms-vscode.cmake-tools",
-        "cheshirekow.cmake-format",
-        "rust-lang.rust-analyzer",
-        "ziglang.vscode-zig",
-        "modular-mojotools.vscode-mojo",
-        "ms-python.black-formatter",
-        "tamasfe.even-better-toml",
-        "dprint.dprint",
-        "dsvictor94.promela"
-    ],
-    "unwantedRecommendations": [
-        "ms-vscode.cpptools-extension-pack",
-        "xaver.clang-format"
-    ]
+  "recommendations": [
+    "cheshirekow.cmake-format",
+    "dprint.dprint",
+    "dsvictor94.promela",
+    "llvm-vs-code-extensions.vscode-clangd",
+    "modular-mojotools.vscode-mojo",
+    "ms-python.black-formatter",
+    "ms-vscode.cmake-tools",
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml",
+    "ziglang.vscode-zig"
+  ],
+  "unwantedRecommendations": [
+    "ms-vscode.cpptools-extension-pack",
+    "xaver.clang-format"
+  ]
 }

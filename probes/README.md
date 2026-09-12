@@ -15,13 +15,13 @@ Whether the CPU has the instruction is the runtime's question, answered by `cpu_
 
 The OS-level bits - owned threads, topology, placements, transparent huge pages - have no probe: the `FU_WITH_*` tri-states and the runtime answer those.
 
-| bit | probe | needs |
-|---|---|---|
-| `x86_pause`, `x86_tpause`, `x86_cldemote` | encodings, or `_mm_pause`, `_umonitor`/`_umwait`, `_mm_cldemote`/`_m_prefetchw` | nothing |
-| `x86_cmpccxadd`, `x86_raoint` | raw bytes | inline assembly |
-| `arm64_yield` | `yield`, or `__yield` | nothing |
-| `arm64_wfet`, `risc5_pause`, `risc5_wrs`, `risc5_zicbom`, `risc5_zacas` | raw words | inline assembly |
-| `arm64_dc_cvac` | `dc cvac` | inline assembly |
-| `risc5_atomic` | `amoswap`, `lr` and `sc` | inline assembly and the A extension in `-march` |
-| `arm64_rcpc` | `.arch_extension` and a mnemonic, or `__ldapr32` | nothing |
-| `arm64_lse` | `.arch_extension` and a mnemonic, or `__swp32` | `/arch:armv8.1` on MSVC, nothing elsewhere |
+| bit                                                                     | probe                                                                           | needs                                           |
+| :---------------------------------------------------------------------- | :------------------------------------------------------------------------------ | :---------------------------------------------- |
+| `x86_pause`, `x86_tpause`, `x86_cldemote`                               | encodings, or `_mm_pause`, `_umonitor`/`_umwait`, `_mm_cldemote`/`_m_prefetchw` | nothing                                         |
+| `x86_cmpccxadd`, `x86_raoint`                                           | raw bytes                                                                       | inline assembly                                 |
+| `arm64_yield`                                                           | `yield`, or `__yield`                                                           | nothing                                         |
+| `arm64_wfet`, `risc5_pause`, `risc5_wrs`, `risc5_zicbom`, `risc5_zacas` | raw words                                                                       | inline assembly                                 |
+| `arm64_dc_cvac`                                                         | `dc cvac`                                                                       | inline assembly                                 |
+| `risc5_atomic`                                                          | `amoswap`, `lr` and `sc`                                                        | inline assembly and the A extension in `-march` |
+| `arm64_rcpc`                                                            | `.arch_extension` and a mnemonic, or `__ldapr32`                                | nothing                                         |
+| `arm64_lse`                                                             | `.arch_extension` and a mnemonic, or `__swp32`                                  | `/arch:armv8.1` on MSVC, nothing elsewhere      |
