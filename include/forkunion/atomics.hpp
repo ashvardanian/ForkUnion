@@ -36,9 +36,9 @@
  *  references are spelled over `__ldar`/`__stlr`/`__ldapr`, `__swp*`, `__cas*` and the `_Interlocked*`
  *  arithmetic, which stays inline only under `/arch:armv8.1`; the x86 and RISC-V references have no
  *  intrinsic for their instructions, so those targets keep `standard_atomic_ref`.
- *  `preferred_atomic_ref`, at the bottom, is the newest reference the build target guarantees through
- *  its predefined macros - the `preferred_yield_t` rule - for callers picking at compile time rather
- *  than per CPU class.
+ *  `preferred_atomic_ref`, at the bottom, is the newest reference this unit may run with no runtime
+ *  probe, reading `FU_TARGET_<BIT>` alone - the compilation target's promise in a unit that dispatches
+ *  nothing - for callers picking at compile time rather than per CPU class.
  *
  *  The header needs the library's `std::atomic_ref` and `std::bit_cast`, so it is empty without
  *  them - a C++17 translation unit including the umbrella sees nothing here.
@@ -2352,27 +2352,28 @@ struct risc5_zacas_atomic_ref : public risc5_atomic_ref<value_type_> {
 #endif // FU_TARGET_RISC5_ZACAS
 
 /**
- *  The newest reference the build target guarantees through its predefined macros - the
- *  `preferred_yield_t` rule: if the compiler says the instruction is there, running it can never
- *  be illegal; otherwise the standard reference, whose lowering the same flags decide. Callers
- *  dispatching per CPU class at runtime name the references directly instead.
+ *  The newest reference this translation unit may run with no runtime probe, reading each rung's
+ *  `FU_TARGET_<BIT>` alone - in a unit that dispatches nothing the compilation target's promise, so
+ *  the pick can never be illegal there. In a unit that dispatches at runtime - one with the probe
+ *  lists or `FU_RUNTIME_DISPATCH` - the bit is what the toolchain builds and the alias resolves to
+ *  the newest buildable rung, so such a unit names its reference per CPU class instead.
  */
-#if FU_TARGET_ARM64_RCPC && defined(__ARM_FEATURE_ATOMICS) && defined(__ARM_FEATURE_RCPC)
+#if FU_TARGET_ARM64_RCPC
 template <typename value_type_>
 using preferred_atomic_ref = arm64_rcpc_atomic_ref<value_type_>;
-#elif FU_TARGET_ARM64_LSE && defined(__ARM_FEATURE_ATOMICS)
+#elif FU_TARGET_ARM64_LSE
 template <typename value_type_>
 using preferred_atomic_ref = arm64_lse_atomic_ref<value_type_>;
-#elif FU_TARGET_X86_RAOINT && defined(__CMPCCXADD__) && defined(__RAOINT__)
+#elif FU_TARGET_X86_RAOINT
 template <typename value_type_>
 using preferred_atomic_ref = x86_raoint_atomic_ref<value_type_>;
-#elif FU_TARGET_X86_CMPCCXADD && defined(__CMPCCXADD__)
+#elif FU_TARGET_X86_CMPCCXADD
 template <typename value_type_>
 using preferred_atomic_ref = x86_cmpccxadd_atomic_ref<value_type_>;
-#elif FU_TARGET_RISC5_ZACAS && defined(__riscv_zacas)
+#elif FU_TARGET_RISC5_ZACAS
 template <typename value_type_>
 using preferred_atomic_ref = risc5_zacas_atomic_ref<value_type_>;
-#elif FU_TARGET_RISC5_ATOMIC && defined(__riscv_atomic)
+#elif FU_TARGET_RISC5_ATOMIC
 template <typename value_type_>
 using preferred_atomic_ref = risc5_atomic_ref<value_type_>;
 #else

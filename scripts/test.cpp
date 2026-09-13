@@ -343,7 +343,7 @@ static void test_fabric_level_derivation() noexcept {
  */
 static void test_measured_fabric() noexcept {
     fu::machine_topology_t const &topology = machine_topology;
-    alignas(fu::default_alignment_k) fu::distributed_pool<fu::preferred_yield_t> pool;
+    alignas(fu::default_alignment_k) fu::distributed_pool<> pool;
     expect(fu::succeeded(pool.spawn(topology)));
 
     fu::measured_fabric_t fabric;

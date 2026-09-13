@@ -1,8 +1,8 @@
 # Toolchain probes
 
 One probe per instruction-level capability bit of `capabilities_t`, each emitting exactly what the header emits for that bit: a mnemonic, a raw encoding, or the intrinsic MSVC reaches it through.
-The per-architecture `cmake/fu_<arch>_isa_probes.cmake` files compile them at configure time and publish the verdicts on `forkunion::header` as `FU_TARGET_<BIT>=0/1`, build interface only, so a consumer building against the headers compiles the same paths the pre-compiled libraries do.
-A consumer without the probes gets the same answer the header derives on its own from the architecture and the compiler.
+The `cmake/fu_<arch>_isa_probes.cmake` files compile them at configure time into one `fu_compile_definitions_` list of `FU_TARGET_<BIT>=0/1`, handed privately to the compiled libraries and the tests, never to `forkunion::header`.
+A consumer's own unit derives each bit in `types.hpp` - what the toolchain builds when it sets `FU_RUNTIME_DISPATCH`, what the compilation target promises otherwise.
 
 The verdict answers one question: can this toolchain build this bit's path.
 Every extension instruction is a raw encoding, so those probes fail only where `__asm__` is missing.

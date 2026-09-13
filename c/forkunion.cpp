@@ -4,6 +4,8 @@
  *  @file c/forkunion.cpp
  *  @date June 27, 2025
  */
+#define FU_RUNTIME_DISPATCH 1 // every rung the toolchain builds; `select_pool` admits them at runtime
+
 #include <cstdint> // `std::uint8_t`
 
 #include <algorithm>   // `std::max`

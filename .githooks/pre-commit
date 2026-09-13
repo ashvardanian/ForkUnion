@@ -257,19 +257,19 @@ check_region_dashes() {
         "$file has a dash in a #pragma region label - clang-format mishandles it, drop the dash:"
 }
 
-# Platform identity belongs to the FU_* vocabulary: types.hpp resolves the raw OS/libc/arch predefines
-# once - see its Layer 1 - into FU_ON_* / FU_GLIBC_PREREQ_ / FU_DETECT_ARCH_*, and nothing else may ask
-# `__linux__` again. A genuine exception carries an inline `// FU-ALLOW: <reason>`.
+# Platform identity belongs to the FU_* vocabulary: types.hpp resolves the raw OS/libc/arch/ISA predefines
+# once - see its Layer 1 - into FU_ON_* / FU_GLIBC_PREREQ_ / FU_DETECT_ARCH_* / FU_TARGET_*, and nothing
+# else may ask `__linux__` again. A genuine exception carries an inline `// FU-ALLOW: <reason>`.
 check_raw_macros() {
     [ "$file" != include/forkunion/types.hpp ] || return 0 # ? The one file that derives them
     case "$file" in probes/*) return 0 ;; esac # ? The probes ask the bare compiler, before the vocabulary exists
     local raw
     raw=$(printf '%s\n' "$added" | grep -vE 'FU-ALLOW' |
-        grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b' |
+        grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b|__WAITPKG__|__CLDEMOTE__|__CMPCCXADD__|__RAOINT__|__ARM_FEATURE_ATOMICS|__ARM_FEATURE_RCPC|__riscv_atomic|__riscv_zawrs|__riscv_zicbom|__riscv_zacas' |
         sort -u || true)
     [ -z "$raw" ] || fail "$raw" \
         "$file asks a raw platform macro - use the FU_* vocabulary types.hpp derives" \
-        "            (FU_ON_*, FU_GLIBC_PREREQ_, FU_DETECT_ARCH_*), or mark a real exception // FU-ALLOW:"
+        "            (FU_ON_*, FU_GLIBC_PREREQ_, FU_DETECT_ARCH_*, FU_TARGET_*), or mark a real exception // FU-ALLOW:"
 }
 
 # Capability gates are flat: one `#if FU_TARGET_<BIT>` region per bit, never inside another bit's region

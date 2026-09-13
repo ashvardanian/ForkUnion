@@ -528,25 +528,22 @@ struct risc5_wrs_t {
 #endif // FU_TARGET_RISC5_WRS
 
 /**
- *  @brief The fastest waiter this build may use with @b no runtime feature probe.
+ *  @brief The fastest waiter this translation unit may use with @b no runtime feature probe.
  *
- *  Upgrades to the monitored waiter - `x86_tpause_t`, `risc5_wrs_t` - exactly when the compiler
- *  @b guarantees the feature through a predefined macro, so the choice needs no runtime check: if
- *  `__WAITPKG__` or `__riscv_zawrs` is defined, the build targets a CPU that has the instruction, and
- *  running it can never be illegal. Otherwise it stays on the plain architectural hint every CPU runs.
- *
- *  AArch64 has no such upgrade: neither GCC nor Clang defines a `WFxT` feature macro - not even under
- *  `-march=armv8.7-a+wfxt` - so there is nothing to key on, and it stays `arm64_yield_t`. `FEAT_WFxT`
- *  is a runtime fact there, detected via `sysctl` on Apple or `HWCAP2_WFXT` on Linux, so a caller
- *  reaches `arm64_wfet_t` through the C ABI's runtime capability dispatch rather than at compile time.
+ *  Reads each rung's `FU_TARGET_<BIT>` alone, which in a unit that dispatches nothing is the
+ *  compilation target's promise, so the pick can never be illegal there. In a unit that dispatches
+ *  at runtime - one with the probe lists or `FU_RUNTIME_DISPATCH` - the bit is what the toolchain
+ *  builds and the alias resolves to the newest buildable rung, so such a unit names its waiter per
+ *  CPU class instead. AArch64 has no monitored rung here because no compiler publishes a macro for
+ *  `WFxT`, so `arm64_wfet_t` is reached only by a caller that admits it at runtime.
  */
-#if FU_TARGET_X86_TPAUSE && defined(__WAITPKG__)
+#if FU_TARGET_X86_TPAUSE
 using preferred_yield_t = x86_tpause_t;
 #elif FU_TARGET_X86_PAUSE
 using preferred_yield_t = x86_pause_t;
 #elif FU_TARGET_ARM64_YIELD
 using preferred_yield_t = arm64_yield_t;
-#elif FU_TARGET_RISC5_WRS && defined(__riscv_zawrs)
+#elif FU_TARGET_RISC5_WRS
 using preferred_yield_t = risc5_wrs_t;
 #elif FU_TARGET_RISC5_PAUSE
 using preferred_yield_t = risc5_pause_t;

@@ -452,27 +452,49 @@
 #define FU_DETECT_ARM64_ATOMIC_INTRINSICS_ 0
 #endif
 
-/*  The toolchain's verdict per instruction-level capability bit - `FU_TARGET_<BIT>` - what the build's
- *  probes publish on `forkunion::header`. Without a probe the bit derives here: the architecture, and
- *  inline assembly where the path is a raw encoding or a mnemonic, or nothing more where MSVC reaches the
- *  same instruction through an intrinsic. Every extension instruction is a raw encoding; the LSE and
- *  RCpc mnemonics ride `.arch_extension`, which every assembler of the last decade takes, MSVC reaches
- *  the same two rungs through intrinsics whose arithmetic tail asks for `/arch:armv8.1`, and the
- *  RISC-V A extension's mnemonics need the `-march` the compiler reports as `__riscv_atomic`. */
+/*  Set by a translation unit that admits rungs at runtime - the C library, a consumer's own dispatch
+ *  unit built without the probes - so every path the toolchain builds is defined below. */
+#if !defined(FU_RUNTIME_DISPATCH)
+#define FU_RUNTIME_DISPATCH 0
+#endif
+
+/*  Whether this translation unit may use the bit's path - `FU_TARGET_<BIT>`. A unit with the build's
+ *  probe lists or `FU_RUNTIME_DISPATCH` takes the toolchain's verdict, can it build the path: the
+ *  architecture, plus inline assembly for a raw encoding or a mnemonic, or nothing more where MSVC
+ *  reaches the instruction through an intrinsic. A unit without them derives the bits a compile-time
+ *  default can pick from what the compilation target promises through the compiler's macro for the
+ *  extension, since `preferred_yield_t` runs its pick unchecked. The trap-free hints - PAUSE, YIELD,
+ *  Zihintpause, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and Zicbom,
+ *  which no default ever picks and a caller admits at runtime, stay on the toolchain's verdict, WFET
+ *  having no compiler macro at all. The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches
+ *  the two through intrinsics whose arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A
+ *  extension's mnemonics need the `-march` the compiler reports. */
 #if !defined(FU_TARGET_X86_PAUSE)
 #define FU_TARGET_X86_PAUSE FU_DETECT_ARCH_X86_64_
 #endif
 #if !defined(FU_TARGET_X86_TPAUSE)
-#define FU_TARGET_X86_TPAUSE FU_DETECT_ARCH_X86_64_
+#if FU_DETECT_ARCH_X86_64_ && (FU_RUNTIME_DISPATCH || defined(__WAITPKG__))
+#define FU_TARGET_X86_TPAUSE 1
+#else
+#define FU_TARGET_X86_TPAUSE 0
+#endif
 #endif
 #if !defined(FU_TARGET_X86_CLDEMOTE)
 #define FU_TARGET_X86_CLDEMOTE (FU_DETECT_ARCH_X86_64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_))
 #endif
 #if !defined(FU_TARGET_X86_CMPCCXADD)
-#define FU_TARGET_X86_CMPCCXADD (FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__CMPCCXADD__))
+#define FU_TARGET_X86_CMPCCXADD 1
+#else
+#define FU_TARGET_X86_CMPCCXADD 0
+#endif
 #endif
 #if !defined(FU_TARGET_X86_RAOINT)
-#define FU_TARGET_X86_RAOINT (FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__RAOINT__))
+#define FU_TARGET_X86_RAOINT 1
+#else
+#define FU_TARGET_X86_RAOINT 0
+#endif
 #endif
 #if !defined(FU_TARGET_ARM64_YIELD)
 #define FU_TARGET_ARM64_YIELD FU_DETECT_ARCH_ARM64_
@@ -484,18 +506,30 @@
 #define FU_TARGET_ARM64_DC_CVAC (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
 #endif
 #if !defined(FU_TARGET_ARM64_LSE)
-#define FU_TARGET_ARM64_LSE \
-    (FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_))
+#if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_) && \
+    (FU_RUNTIME_DISPATCH || defined(__ARM_FEATURE_ATOMICS))
+#define FU_TARGET_ARM64_LSE 1
+#else
+#define FU_TARGET_ARM64_LSE 0
+#endif
 #endif
 #if !defined(FU_TARGET_ARM64_RCPC)
-#define FU_TARGET_ARM64_RCPC \
-    (FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_))
+#if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_) && \
+    (FU_RUNTIME_DISPATCH || defined(__ARM_FEATURE_RCPC))
+#define FU_TARGET_ARM64_RCPC 1
+#else
+#define FU_TARGET_ARM64_RCPC 0
+#endif
 #endif
 #if !defined(FU_TARGET_RISC5_PAUSE)
 #define FU_TARGET_RISC5_PAUSE (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
 #endif
 #if !defined(FU_TARGET_RISC5_WRS)
-#define FU_TARGET_RISC5_WRS (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__riscv_zawrs))
+#define FU_TARGET_RISC5_WRS 1
+#else
+#define FU_TARGET_RISC5_WRS 0
+#endif
 #endif
 #if !defined(FU_TARGET_RISC5_ZICBOM)
 #define FU_TARGET_RISC5_ZICBOM (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
@@ -508,7 +542,11 @@
 #endif
 #endif
 #if !defined(FU_TARGET_RISC5_ZACAS)
-#define FU_TARGET_RISC5_ZACAS (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__riscv_zacas))
+#define FU_TARGET_RISC5_ZACAS 1
+#else
+#define FU_TARGET_RISC5_ZACAS 0
+#endif
 #endif
 
 /*  RCpc extends LSE, RAO-INT extends CMPCCXADD and Zacas extends the A extension, so a rung without

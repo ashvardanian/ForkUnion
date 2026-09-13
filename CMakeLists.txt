@@ -90,18 +90,11 @@ target_include_directories(
 # themselves to 20.
 target_compile_features(forkunion_header INTERFACE cxx_std_17)
 
-# The toolchain's verdict per instruction-level capability bit, `FU_TARGET_<BIT>`, one probe each under `probes/`. The
-# header-only target hands the answers to every consumer - the same paths the compiled libraries take - build interface
-# only, so an installed package never pins the compiler that built it. Without them the header derives each bit from the
-# architecture and the compiler. `probes/README.md` has the table.
+# One compile probe per capability bit under `probes/`, `FU_TARGET_<BIT>=0/1`: the verdicts reach the units that admit
+# rungs at runtime, never `forkunion_header`, whose consumers read the compilation target's promise in `types.hpp`.
 include(cmake/fu_x86_isa_probes.cmake)
 include(cmake/fu_arm64_isa_probes.cmake)
 include(cmake/fu_risc5_isa_probes.cmake)
-target_compile_definitions(
-    forkunion_header
-    INTERFACE "$<BUILD_INTERFACE:${fu_x86_compile_defs_}>" "$<BUILD_INTERFACE:${fu_arm64_compile_defs_}>"
-              "$<BUILD_INTERFACE:${fu_risc5_compile_defs_}>"
-)
 
 # Strictest possible compilation flags with fatal warnings
 if (FORKUNION_STRICT)
@@ -172,10 +165,10 @@ add_library(forkunion_static STATIC c/forkunion.cpp)
 
 # What a consumer picks between, spelled as what they get:
 #
-# forkunion::header - the C++ core alone. Capabilities are baked in by the `FU_WITH_*` macros and `preferred_yield_t` at
-# compile time, so the binary is only as capable as the machine that built it. forkunion::static - the C ABI,
-# dispatching on `fu_runtime_capabilities()`, linked into the consumer's binary. forkunion::shared - the same C ABI, one
-# copy per process rather than one per consumer.
+# forkunion::header - the C++ core alone. Capabilities are baked in by the `FU_WITH_*` macros, and each
+# `FU_TARGET_<BIT>` reads what the compilation target promises, so `preferred_yield_t` is as capable as the target the
+# consumer compiled for. forkunion::static - the C ABI, dispatching on `fu_runtime_capabilities()`, linked into the
+# consumer's binary. forkunion::shared - the same C ABI, one copy per process rather than one per consumer.
 #
 # The `static`/`shared` split is linkage, not dispatch: both run the same runtime-dispatched TU above, and a process
 # that links two static copies gets two pools and two topologies. `EXPORT_NAME` carries these spellings into the
@@ -215,6 +208,10 @@ set_target_properties(forkunion_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 # Re-use the public interface of the header-only target
 target_link_libraries(forkunion_shared PUBLIC forkunion_header)
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
+
+# Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `c/forkunion.cpp`.
+target_compile_definitions(forkunion_shared PRIVATE ${fu_compile_definitions_})
+target_compile_definitions(forkunion_static PRIVATE ${fu_compile_definitions_})
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
