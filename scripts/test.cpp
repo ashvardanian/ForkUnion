@@ -1385,7 +1385,8 @@ static void check_atomic_ref_words() noexcept {
     atomic_ref_<std::uint64_t> bits_reference(bits);
     expect_eq(bits_reference.fetch_and(0xFF00ull, std::memory_order_acq_rel), 0xF0F0ull);
     expect_eq(bits_reference.fetch_or(0x1ull, std::memory_order_acq_rel), 0xF000ull);
-    expect_eq(bits, 0xF001ull);
+    expect_eq(bits_reference.fetch_xor(0xFFull, std::memory_order_acq_rel), 0xF001ull);
+    expect_eq(bits, 0xF0FEull);
 
     bool flag = false;
     atomic_ref_<bool> flag_reference(flag);

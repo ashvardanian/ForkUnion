@@ -165,27 +165,73 @@ value_type_ atomic_fetch_sub_if_at_least(reference_type_ reference, value_type_ 
  *  satisfies the condition returns without writing, so losers never take the line.
  */
 template <typename value_type_>
-struct standard_atomic_ref : public std::atomic_ref<value_type_> {
-    using base_t = std::atomic_ref<value_type_>;
-    using base_t::base_t;
+struct standard_atomic_ref {
+    using value_t = value_type_;
     /** The runtime bits a reference needs admitted before it may run - none here. */
     static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
+
+    explicit standard_atomic_ref(value_type_ &word) noexcept : word_(&word) {}
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().load(order);
+    }
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        reference_().store(desired, order);
+    }
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().exchange(desired, order);
+    }
+
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        return reference_().compare_exchange_strong(expected, desired, success, failure);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired, std::memory_order success,
+                               std::memory_order failure) const noexcept {
+        return reference_().compare_exchange_weak(expected, desired, success, failure);
+    }
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired,
+                                 std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().compare_exchange_strong(expected, desired, order);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().compare_exchange_weak(expected, desired, order);
+    }
+
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().fetch_add(operand, order);
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().fetch_sub(operand, order);
+    }
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().fetch_and(mask, order);
+    }
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().fetch_or(bits, order);
+    }
+    value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return reference_().fetch_xor(bits, order);
+    }
 
     /** C++26's `fetch_max`: the value held before, whether or not the operand replaced it. */
     value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        value_type_ observed = base_t::load(std::memory_order_acquire);
+        std::atomic_ref<value_type_> const reference = reference_();
+        value_type_ observed = reference.load(std::memory_order_acquire);
         while (observed < operand &&
-               !base_t::compare_exchange_weak(observed, operand, order, std::memory_order_acquire)) {}
+               !reference.compare_exchange_weak(observed, operand, order, std::memory_order_acquire)) {}
         return observed;
     }
     value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        value_type_ observed = base_t::load(std::memory_order_acquire);
+        std::atomic_ref<value_type_> const reference = reference_();
+        value_type_ observed = reference.load(std::memory_order_acquire);
         while (observed > operand &&
-               !base_t::compare_exchange_weak(observed, operand, order, std::memory_order_acquire)) {}
+               !reference.compare_exchange_weak(observed, operand, order, std::memory_order_acquire)) {}
         return observed;
     }
 
@@ -198,7 +244,8 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return atomic_fetch_add_if_at_most(static_cast<base_t const &>(*this), operand, limit, order);
+        // A plain `std::atomic_ref`, or the free verb would post straight back through this one.
+        return atomic_fetch_add_if_at_most(reference_(), operand, limit, order);
     }
     /** Subtracts @p operand only if the difference stays at least @p floor - the semaphore
      *  acquire. Returns the value held before; the outcome is `observed >= floor + operand`. */
@@ -206,7 +253,8 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
                                       std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return atomic_fetch_sub_if_at_least(static_cast<base_t const &>(*this), operand, floor, order);
+        // A plain `std::atomic_ref`, or the free verb would post straight back through this one.
+        return atomic_fetch_sub_if_at_least(reference_(), operand, floor, order);
     }
 
     /** No-return read-modify-writes: the op is posted, nothing is waited for - `stadd`, `stclr`,
@@ -215,23 +263,56 @@ struct standard_atomic_ref : public std::atomic_ref<value_type_> {
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        base_t::fetch_add(operand, order);
+        reference_().fetch_add(operand, order);
     }
     void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        base_t::fetch_sub(operand, order);
+        reference_().fetch_sub(operand, order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        base_t::fetch_or(bits, order);
+        reference_().fetch_or(bits, order);
     }
     void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        base_t::fetch_and(static_cast<value_type_>(~bits), order);
+        reference_().fetch_and(static_cast<value_type_>(~bits), order);
     }
+
+  private:
+    value_type_ *word_;
+
+    /** A `std::atomic_ref` wraps a pointer and nothing else, so one per operation costs nothing. */
+    std::atomic_ref<value_type_> reference_() const noexcept { return std::atomic_ref<value_type_>(*word_); }
+};
+
+/**
+ *  @brief Read-only access to a word other threads may be writing: the loads of @ref
+ *      standard_atomic_ref, reached down a path that may not write.
+ *
+ *  `const` is a permission on the path, never a promise that the word holds still - a reader
+ *  holding a const handle still shares the storage a writer mutates. This is the one reference
+ *  that cannot reach its word without a cast: `std::atomic_ref` binds no const word before
+ *  P3323, and no other standard spelling loads atomically from a plain word. Every ISA reference
+ *  below binds its own const pointer and needs none.
+ */
+template <typename value_type_>
+struct standard_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
+
+    explicit standard_atomic_ref(value_type_ const &word) noexcept : word_(&word) {}
+    /** A temporary would die before the reference does. */
+    standard_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return std::atomic_ref<value_type_>(const_cast<value_type_ &>(*word_)).load(order);
+    }
+
+  private:
+    value_type_ const *word_;
 };
 
 #if FU_TARGET_X86_CMPCCXADD
@@ -309,19 +390,93 @@ inline std::int64_t x86_cmpgexadd_i64(std::int64_t *word, std::int64_t bound, st
  *  @sa `capability_x86_cmpccxadd_k` - the bit admitting it; `x86_raoint_atomic_ref` - the same with RAO-INT.
  */
 template <typename value_type_>
-struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
-    using base_t = standard_atomic_ref<value_type_>;
+struct x86_cmpccxadd_atomic_ref {
+    using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k;
 
-    explicit x86_cmpccxadd_atomic_ref(value_type_ &word) noexcept : base_t(word), word_(&word) {}
+    explicit x86_cmpccxadd_atomic_ref(value_type_ &word) noexcept : word_(&word) {}
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().load(order);
+    }
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        portable_().store(desired, order);
+    }
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().exchange(desired, order);
+    }
+
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        return portable_().compare_exchange_strong(expected, desired, success, failure);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired, std::memory_order success,
+                               std::memory_order failure) const noexcept {
+        return portable_().compare_exchange_weak(expected, desired, success, failure);
+    }
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired,
+                                 std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().compare_exchange_strong(expected, desired, order);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().compare_exchange_weak(expected, desired, order);
+    }
+
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().fetch_add(operand, order);
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().fetch_sub(operand, order);
+    }
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().fetch_and(mask, order);
+    }
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().fetch_or(bits, order);
+    }
+    value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_().fetch_xor(bits, order);
+    }
+    value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return portable_().fetch_max(operand, order);
+    }
+    value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return portable_().fetch_min(operand, order);
+    }
+
+    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        portable_().add(operand, order);
+    }
+    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        portable_().sub(operand, order);
+    }
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        portable_().set_bits(bits, order);
+    }
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        portable_().clear_bits(bits, order);
+    }
 
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
         // Adds while `word <= limit - operand`: below-or-equal unsigned, less-or-equal signed.
-        if (operand > limit) return base_t::load(std::memory_order_acquire); // ? Nothing could be admitted
+        if (operand > limit) return portable_().load(std::memory_order_acquire); // ? Nothing could be admitted
         value_type_ const bound = static_cast<value_type_>(limit - operand);
         if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
             return x86_cmplexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, operand);
@@ -338,7 +493,7 @@ struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
         // Subtracts while `word >= floor + operand`: above-or-equal unsigned, greater-or-equal signed.
         value_type_ const bound = static_cast<value_type_>(floor + operand);
         if (bound < floor)
-            return base_t::load(std::memory_order_acquire); // ? The bound wrapped: nothing could be taken
+            return portable_().load(std::memory_order_acquire); // ? The bound wrapped: nothing could be taken
         value_type_ const negated = static_cast<value_type_>(value_type_ {0} - operand);
         if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
             return x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, negated);
@@ -349,8 +504,30 @@ struct x86_cmpccxadd_atomic_ref : public standard_atomic_ref<value_type_> {
         else return x86_cmpaexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, negated);
     }
 
-  protected:
+  private:
+    /** The portable floor, built on demand: it holds this same pointer and nothing else. */
+    standard_atomic_ref<value_type_> portable_() const noexcept { return standard_atomic_ref<value_type_>(*word_); }
+
     value_type_ *word_;
+};
+
+/** @brief Read-only access through @ref x86_cmpccxadd_atomic_ref, which specializes no load.
+ *  @sa `standard_atomic_ref<value_type_ const>` */
+template <typename value_type_>
+struct x86_cmpccxadd_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k;
+
+    explicit x86_cmpccxadd_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+    /** A temporary would die before the reference does. */
+    x86_cmpccxadd_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_.load(order);
+    }
+
+  private:
+    standard_atomic_ref<value_type_ const> portable_;
 };
 
 #pragma endregion x86 CMPCCXADD
@@ -407,22 +584,90 @@ inline void x86_aor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
 
 /**
  *  @brief The above plus RAO-INT for the relaxed no-return forms: `aadd`, `aand`, `aor` execute
- *      at the shared cache. Anything ordered keeps the `lock`-prefixed base, already a full
+ *      at the shared cache. Anything ordered keeps the `lock`-prefixed instruction, already a full
  *      fence. `CPUID.(7,1):EAX[3]` says so at runtime.
  *  @sa `capability_x86_raoint_k` - the bit admitting it, on top of `capability_x86_cmpccxadd_k`.
  */
 template <typename value_type_>
-struct x86_raoint_atomic_ref : public x86_cmpccxadd_atomic_ref<value_type_> {
-    using base_t = x86_cmpccxadd_atomic_ref<value_type_>;
-    using base_t::base_t;
-    using typename base_t::word_t;
+struct x86_raoint_atomic_ref {
+    using value_t = value_type_;
+    using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k | capability_x86_raoint_k;
+
+    explicit x86_raoint_atomic_ref(value_type_ &word) noexcept : word_(&word) {}
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().load(order);
+    }
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        weaker_().store(desired, order);
+    }
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().exchange(desired, order);
+    }
+
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        return weaker_().compare_exchange_strong(expected, desired, success, failure);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired, std::memory_order success,
+                               std::memory_order failure) const noexcept {
+        return weaker_().compare_exchange_weak(expected, desired, success, failure);
+    }
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired,
+                                 std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().compare_exchange_strong(expected, desired, order);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().compare_exchange_weak(expected, desired, order);
+    }
+
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_add(operand, order);
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_sub(operand, order);
+    }
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_and(mask, order);
+    }
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_or(bits, order);
+    }
+    value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_xor(bits, order);
+    }
+    value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_max(operand, order);
+    }
+    value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_min(operand, order);
+    }
+
+    /** The conditional adds stay one `cmpccxadd`: RAO-INT spells no comparing form. */
+    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
+                                     std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        return weaker_().fetch_add_if_at_most(operand, limit, order);
+    }
+    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        return weaker_().fetch_sub_if_at_least(operand, floor, order);
+    }
 
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        if (order != std::memory_order_relaxed) return base_t::add(operand, order);
-        word_t *word = reinterpret_cast<word_t *>(this->word_);
+        if (order != std::memory_order_relaxed) return weaker_().add(operand, order);
+        word_t *word = reinterpret_cast<word_t *>(word_);
         if constexpr (sizeof(value_type_) == 4) x86_aadd_u32(word, std::bit_cast<word_t>(operand));
         else x86_aadd_u64(word, std::bit_cast<word_t>(operand));
     }
@@ -434,20 +679,47 @@ struct x86_raoint_atomic_ref : public x86_cmpccxadd_atomic_ref<value_type_> {
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        if (order != std::memory_order_relaxed) return base_t::set_bits(bits, order);
-        word_t *word = reinterpret_cast<word_t *>(this->word_);
+        if (order != std::memory_order_relaxed) return weaker_().set_bits(bits, order);
+        word_t *word = reinterpret_cast<word_t *>(word_);
         if constexpr (sizeof(value_type_) == 4) x86_aor_u32(word, std::bit_cast<word_t>(bits));
         else x86_aor_u64(word, std::bit_cast<word_t>(bits));
     }
     void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        if (order != std::memory_order_relaxed) return base_t::clear_bits(bits, order);
-        word_t *word = reinterpret_cast<word_t *>(this->word_);
+        if (order != std::memory_order_relaxed) return weaker_().clear_bits(bits, order);
+        word_t *word = reinterpret_cast<word_t *>(word_);
         word_t const mask = static_cast<word_t>(~std::bit_cast<word_t>(bits));
         if constexpr (sizeof(value_type_) == 4) x86_aand_u32(word, mask);
         else x86_aand_u64(word, mask);
     }
+
+  private:
+    /** The previous rung, built on demand: it holds this same pointer and nothing else. */
+    x86_cmpccxadd_atomic_ref<value_type_> weaker_() const noexcept {
+        return x86_cmpccxadd_atomic_ref<value_type_>(*word_);
+    }
+
+    value_type_ *word_;
+};
+
+/** @brief Read-only access through @ref x86_raoint_atomic_ref, which specializes no load.
+ *  @sa `standard_atomic_ref<value_type_ const>` */
+template <typename value_type_>
+struct x86_raoint_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k | capability_x86_raoint_k;
+
+    explicit x86_raoint_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+    /** A temporary would die before the reference does. */
+    x86_raoint_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_.load(order);
+    }
+
+  private:
+    standard_atomic_ref<value_type_ const> portable_;
 };
 
 #pragma endregion x86 RAOINT
@@ -1765,7 +2037,7 @@ struct arm64_lse_atomic_ref {
         return observed;
     }
 
-  protected:
+  private:
     word_t *word_;
 
     static constexpr std::memory_order stronger_(std::memory_order success, std::memory_order failure) noexcept {
@@ -1776,6 +2048,34 @@ struct arm64_lse_atomic_ref {
         if (release) return std::memory_order_release;
         return std::memory_order_relaxed;
     }
+};
+
+/** @brief Read-only access through @ref arm64_lse_atomic_ref: the same `LDR` and `LDAR` over a
+ *      const pointer, so no cast exists.
+ *  @sa `standard_atomic_ref<value_type_ const>` */
+template <typename value_type_>
+struct arm64_lse_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    using word_t = atomic_word<value_type_>;
+    static constexpr capabilities_t capabilities_k = capability_arm64_lse_k;
+
+    explicit arm64_lse_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {}
+    /** A temporary would die before the reference does. */
+    arm64_lse_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        if (order == std::memory_order_relaxed) {
+            if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldr_u8(word_));
+            else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldr_u32(word_));
+            else return std::bit_cast<value_type_>(arm64_ldr_u64(word_));
+        }
+        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldar_u8(word_));
+        else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldar_u32(word_));
+        else return std::bit_cast<value_type_>(arm64_ldar_u64(word_));
+    }
+
+  private:
+    word_t const *word_;
 };
 
 #pragma endregion Arm64 LSE
@@ -1822,17 +2122,150 @@ inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept { retur
  *  @sa `capability_arm64_rcpc_k` - the bit admitting it, on top of `capability_arm64_lse_k`.
  */
 template <typename value_type_>
-struct arm64_rcpc_atomic_ref : public arm64_lse_atomic_ref<value_type_> {
-    using base_t = arm64_lse_atomic_ref<value_type_>;
-    using base_t::base_t;
+struct arm64_rcpc_atomic_ref {
+    using value_t = value_type_;
+    using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k | capability_arm64_rcpc_k;
 
+    explicit arm64_rcpc_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {}
+
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        if (order != std::memory_order_acquire && order != std::memory_order_consume) return base_t::load(order);
-        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldapr_u8(this->word_));
-        else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldapr_u32(this->word_));
-        else return std::bit_cast<value_type_>(arm64_ldapr_u64(this->word_));
+        if (order != std::memory_order_acquire && order != std::memory_order_consume) return weaker_().load(order);
+        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldapr_u8(word_));
+        else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldapr_u32(word_));
+        else return std::bit_cast<value_type_>(arm64_ldapr_u64(word_));
     }
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        weaker_().store(desired, order);
+    }
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().exchange(desired, order);
+    }
+
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        return weaker_().compare_exchange_strong(expected, desired, success, failure);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired, std::memory_order success,
+                               std::memory_order failure) const noexcept {
+        return weaker_().compare_exchange_weak(expected, desired, success, failure);
+    }
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired,
+                                 std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().compare_exchange_strong(expected, desired, order);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().compare_exchange_weak(expected, desired, order);
+    }
+
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_add(operand, order);
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_sub(operand, order);
+    }
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_and(mask, order);
+    }
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_or(bits, order);
+    }
+    value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_xor(bits, order);
+    }
+    value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_max(operand, order);
+    }
+    value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_min(operand, order);
+    }
+
+    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().add(operand, order);
+    }
+    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().sub(operand, order);
+    }
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().set_bits(bits, order);
+    }
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().clear_bits(bits, order);
+    }
+
+    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
+                                     std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_add_if_at_most(operand, limit, order);
+    }
+    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_sub_if_at_least(operand, floor, order);
+    }
+
+  private:
+    /** The previous rung, built on demand: it holds this same pointer and nothing else. */
+    arm64_lse_atomic_ref<value_type_> weaker_() const noexcept {
+        return arm64_lse_atomic_ref<value_type_>(*reinterpret_cast<value_type_ *>(word_));
+    }
+
+    word_t *word_;
+};
+
+/** @brief Read-only access through @ref arm64_rcpc_atomic_ref: `LDAPR` for the acquiring
+ *      orders, the LSE loads for the rest.
+ *  @sa `standard_atomic_ref<value_type_ const>` */
+template <typename value_type_>
+struct arm64_rcpc_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    using word_t = atomic_word<value_type_>;
+    static constexpr capabilities_t capabilities_k = capability_arm64_lse_k | capability_arm64_rcpc_k;
+
+    explicit arm64_rcpc_atomic_ref(value_type_ const &word) noexcept : word_(&word) {}
+    /** A temporary would die before the reference does. */
+    arm64_rcpc_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        if (order != std::memory_order_acquire && order != std::memory_order_consume) return weaker_().load(order);
+        word_t const *word = reinterpret_cast<word_t const *>(word_);
+        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldapr_u8(word));
+        else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldapr_u32(word));
+        else return std::bit_cast<value_type_>(arm64_ldapr_u64(word));
+    }
+
+  private:
+    /** The previous rung, built on demand: it holds this same pointer and nothing else. */
+    arm64_lse_atomic_ref<value_type_ const> weaker_() const noexcept {
+        return arm64_lse_atomic_ref<value_type_ const>(*word_);
+    }
+
+    value_type_ const *word_;
 };
 
 #pragma endregion Arm64 RCpc
@@ -2272,8 +2705,35 @@ struct risc5_atomic_ref {
         return observed;
     }
 
-  protected:
+  private:
     word_t *word_;
+};
+
+/** @brief Read-only access through @ref risc5_atomic_ref: the same loads over a const pointer,
+ *      so no cast exists.
+ *  @sa `standard_atomic_ref<value_type_ const>` */
+template <typename value_type_>
+struct risc5_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    using word_t = atomic_word<value_type_>;
+    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k;
+
+    explicit risc5_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {}
+    /** A temporary would die before the reference does. */
+    risc5_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        if (order == std::memory_order_seq_cst) risc5_fence_rw_rw();
+        word_t word;
+        if constexpr (sizeof(value_type_) == 1) word = risc5_lbu(word_);
+        else if constexpr (sizeof(value_type_) == 4) word = risc5_lw(word_);
+        else word = risc5_ld(word_);
+        if (acquires(order)) risc5_fence_r_rw();
+        return std::bit_cast<value_type_>(word);
+    }
+
+  private:
+    word_t const *word_;
 };
 
 #pragma endregion RISC5 A
@@ -2313,14 +2773,25 @@ inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected,
 
 /**
  *  @brief `Zacas` on top of the base: compare-exchange as one `amocas` instead of an `lr`/`sc` loop.
- *  @sa `capability_risc5_zacas_k` - the bit admitting it; `risc5_atomic_ref` - the base it extends.
+ *  @sa `capability_risc5_zacas_k` - the bit admitting it; `risc5_atomic_ref` - the reference it composes.
  */
 template <typename value_type_>
-struct risc5_zacas_atomic_ref : public risc5_atomic_ref<value_type_> {
-    using base_t = risc5_atomic_ref<value_type_>;
-    using base_t::base_t;
-    using typename base_t::word_t;
+struct risc5_zacas_atomic_ref {
+    using value_t = value_type_;
+    using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k | capability_risc5_zacas_k;
+
+    explicit risc5_zacas_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {}
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().load(order);
+    }
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        weaker_().store(desired, order);
+    }
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().exchange(desired, order);
+    }
 
     bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order,
                                  std::memory_order) const noexcept {
@@ -2328,8 +2799,8 @@ struct risc5_zacas_atomic_ref : public risc5_atomic_ref<value_type_> {
         word_t const wanted = std::bit_cast<word_t>(expected);
         word_t observed;
         if constexpr (sizeof(value_type_) == 4)
-            observed = risc5_amocas_w(this->word_, wanted, std::bit_cast<word_t>(desired));
-        else observed = risc5_amocas_d(this->word_, wanted, std::bit_cast<word_t>(desired));
+            observed = risc5_amocas_w(word_, wanted, std::bit_cast<word_t>(desired));
+        else observed = risc5_amocas_d(word_, wanted, std::bit_cast<word_t>(desired));
         expected = std::bit_cast<value_type_>(observed);
         return observed == wanted;
     }
@@ -2345,6 +2816,103 @@ struct risc5_zacas_atomic_ref : public risc5_atomic_ref<value_type_> {
                                std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return compare_exchange_strong(expected, desired, order, failure_order(order));
     }
+
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_add(operand, order);
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_sub(operand, order);
+    }
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_and(mask, order);
+    }
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_or(bits, order);
+    }
+    value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_xor(bits, order);
+    }
+    value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_max(operand, order);
+    }
+    value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_min(operand, order);
+    }
+
+    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().add(operand, order);
+    }
+    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().sub(operand, order);
+    }
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().set_bits(bits, order);
+    }
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().clear_bits(bits, order);
+    }
+
+    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
+                                     std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_add_if_at_most(operand, limit, order);
+    }
+    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_sub_if_at_least(operand, floor, order);
+    }
+
+  private:
+    /** The previous rung, built on demand: it holds this same pointer and nothing else. */
+    risc5_atomic_ref<value_type_> weaker_() const noexcept {
+        return risc5_atomic_ref<value_type_>(*reinterpret_cast<value_type_ *>(word_));
+    }
+
+    word_t *word_;
+};
+
+/** @brief Read-only access through @ref risc5_zacas_atomic_ref, which specializes no load.
+ *  @sa `standard_atomic_ref<value_type_ const>` */
+template <typename value_type_>
+struct risc5_zacas_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k | capability_risc5_zacas_k;
+
+    explicit risc5_zacas_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+    /** A temporary would die before the reference does. */
+    risc5_zacas_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_.load(order);
+    }
+
+  private:
+    risc5_atomic_ref<value_type_ const> portable_;
 };
 
 #pragma endregion RISC5 Zacas
