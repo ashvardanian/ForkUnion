@@ -1421,6 +1421,8 @@ static void check_atomic_ref_extensions() noexcept {
     bits_reference.clear_bits(0xF0u, std::memory_order_release);
     bits_reference.set_bits(0x0Fu, std::memory_order_relaxed);
     expect_eq(bits, 0xF00Full);
+    bits_reference.flip_bits(0xFF00u, std::memory_order_release);
+    expect_eq(bits, 0x0F0Full);
 
     std::int64_t signed_word = -5;
     atomic_ref_<std::int64_t> signed_reference(signed_word);
@@ -1441,6 +1443,9 @@ static void check_atomic_verbs() noexcept {
     fu::atomic_set_bits(std::atomic_ref<std::uint32_t>(word), 8u, std::memory_order_relaxed);
     fu::atomic_clear_bits(fu::standard_atomic_ref<std::uint32_t>(word), 1u, std::memory_order_relaxed);
     expect_eq(word, 14u); // ? 5 + 4 - 2 = 7, then 7 | 8 = 15, then 15 & ~1 = 14
+    fu::atomic_flip_bits(std::atomic_ref<std::uint32_t>(word), 6u, std::memory_order_relaxed);
+    fu::atomic_flip_bits(fu::standard_atomic_ref<std::uint32_t>(word), 6u, std::memory_order_relaxed);
+    expect_eq(word, 14u); // ? 14 ^ 6 ^ 6, once through each spelling
     expect_eq(fu::atomic_fetch_add_if_at_most(std::atomic_ref<std::uint32_t>(word), 2u, 16u, std::memory_order_acq_rel),
               14u);
     expect_eq(fu::atomic_fetch_add_if_at_most(fu::standard_atomic_ref<std::uint32_t>(word), 1u, 16u,

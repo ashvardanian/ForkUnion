@@ -8,7 +8,7 @@
  *
  *  `standard_atomic_ref` is the in-house `std::atomic_ref`: the standard operations verbatim plus
  *  the ones the standard lacks - `fetch_max`/`fetch_min` ahead of C++26, the no-return `add`/`sub`/
- *  `set_bits`/`clear_bits`, and the conditional `fetch_add_if_at_most`/`fetch_sub_if_at_least` - spelled
+ *  `set_bits`/`clear_bits`/`flip_bits`, and the conditional `fetch_add_if_at_most`/`fetch_sub_if_at_least` - spelled
  *  portably over compare-exchange. The instruction-set references share that interface and replace
  *  the loops and the compiler's flag-dependent lowering with instructions:
  *
@@ -97,6 +97,7 @@ concept extended_atomic_ref = requires(reference_type_ reference, value_type_ va
     reference.sub(value, std::memory_order_relaxed);
     reference.set_bits(value, std::memory_order_relaxed);
     reference.clear_bits(value, std::memory_order_relaxed);
+    reference.flip_bits(value, std::memory_order_relaxed);
     reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
     reference.fetch_sub_if_at_least(value, value, std::memory_order_relaxed);
 };
@@ -122,6 +123,11 @@ template <typename reference_type_, typename value_type_>
 void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
     if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.clear_bits(bits, order);
     else reference.fetch_and(static_cast<value_type_>(~bits), order);
+}
+template <typename reference_type_, typename value_type_>
+void atomic_flip_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.flip_bits(bits, order);
+    else reference.fetch_xor(bits, order);
 }
 
 /** The bounded read-modify-writes for any reference: adds @p operand only if the sum stays at
@@ -279,6 +285,11 @@ struct standard_atomic_ref {
         requires atomic_integer<value_type_>
     {
         reference_().fetch_and(static_cast<value_type_>(~bits), order);
+    }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        reference_().fetch_xor(bits, order);
     }
 
   private:
@@ -470,6 +481,11 @@ struct x86_cmpccxadd_atomic_ref {
     {
         portable_().clear_bits(bits, order);
     }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        portable_().flip_bits(bits, order);
+    }
 
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order = std::memory_order_seq_cst) const noexcept
@@ -542,7 +558,7 @@ struct x86_cmpccxadd_atomic_ref<value_type_ const> {
  *  SFENCE or MFENCE order and a C++ release fence never emits on x86, so only the relaxed callers
  *  take them; a release order stays on the `lock`-prefixed base.
  *  Bytes for the same reason: map 0F38 opcode FC, the operation picked by the legacy prefix - none
- *  for add, 66 for and, F2 for or - `REX.W` for the 64-bit forms; the word in `rax`, the operand
+ *  for add, 66 for and, F2 for or, F3 for xor - `REX.W` for the 64-bit forms; the word in `rax`, the operand
  *  in `rcx`. */
 
 inline void x86_aadd_u32(std::uint32_t *word, std::uint32_t operand) noexcept {
@@ -581,9 +597,21 @@ inline void x86_aor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
                          : "c"(bits), "a"(word)
                          : "memory"); // ? `aor %rcx, (%rax)`
 }
+inline void x86_axor_u32(std::uint32_t *word, std::uint32_t bits) noexcept {
+    __asm__ __volatile__(".byte 0xf3, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(bits), "a"(word)
+                         : "memory"); // ? `axor %ecx, (%rax)`
+}
+inline void x86_axor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
+    __asm__ __volatile__(".byte 0xf3, 0x48, 0x0f, 0x38, 0xfc, 0x08"
+                         :
+                         : "c"(bits), "a"(word)
+                         : "memory"); // ? `axor %rcx, (%rax)`
+}
 
 /**
- *  @brief The above plus RAO-INT for the relaxed no-return forms: `aadd`, `aand`, `aor` execute
+ *  @brief The above plus RAO-INT for the relaxed no-return forms: `aadd`, `aand`, `aor`, `axor` execute
  *      at the shared cache. Anything ordered keeps the `lock`-prefixed instruction, already a full
  *      fence. `CPUID.(7,1):EAX[3]` says so at runtime.
  *  @sa `capability_x86_raoint_k` - the bit admitting it, on top of `capability_x86_cmpccxadd_k`.
@@ -692,6 +720,14 @@ struct x86_raoint_atomic_ref {
         word_t const mask = static_cast<word_t>(~std::bit_cast<word_t>(bits));
         if constexpr (sizeof(value_type_) == 4) x86_aand_u32(word, mask);
         else x86_aand_u64(word, mask);
+    }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
+    {
+        if (order != std::memory_order_relaxed) return weaker_().flip_bits(bits, order);
+        word_t *word = reinterpret_cast<word_t *>(word_);
+        if constexpr (sizeof(value_type_) == 4) x86_axor_u32(word, std::bit_cast<word_t>(bits));
+        else x86_axor_u64(word, std::bit_cast<word_t>(bits));
     }
 
   private:
@@ -1176,6 +1212,16 @@ inline void arm64_stset_u32(std::uint32_t *word, std::uint32_t bits, std::memory
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__(".arch_extension lse\n\tstset %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
     else __asm__ __volatile__(".arch_extension lse\n\tstsetl %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
+inline void arm64_steor_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tsteor %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tsteorl %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
+inline void arm64_steor_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tsteor %x0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tsteorl %x0, [%1]" : : "r"(bits), "r"(word) : "memory");
 }
 
 /*  LSE maxima & minima - signed and unsigned are different instructions, the width is the register. */
@@ -1730,7 +1776,7 @@ inline std::uint64_t arm64_ldeor_u64(std::uint64_t *word, std::uint64_t operand,
     }
 }
 
-/*  No-return forms: nothing spells `stadd`, `stclr` or `stset`, so the returning instruction runs
+/*  No-return forms: nothing spells `stadd`, `stclr`, `stset` or `steor`, so the returning instruction runs
  *  and its answer is dropped - one round trip the posted form would not have made. */
 
 inline void arm64_stadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
@@ -1750,6 +1796,12 @@ inline void arm64_stset_u32(std::uint32_t *word, std::uint32_t bits, std::memory
 }
 inline void arm64_stset_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint64_t const observed = arm64_ldset_u64(word, bits, order);
+}
+inline void arm64_steor_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint32_t const observed = arm64_ldeor_u32(word, bits, order);
+}
+inline void arm64_steor_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint64_t const observed = arm64_ldeor_u64(word, bits, order);
 }
 
 /*  LSE maxima & minima: nothing spells `ldsmax` & kin either, and no `_Interlocked*` computes them,
@@ -2015,6 +2067,14 @@ struct arm64_lse_atomic_ref {
         if constexpr (sizeof(value_type_) == 4) arm64_stclr_u32(word_, word, order);
         else arm64_stclr_u64(word_, word, order);
     }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        static_assert(sizeof(value_type_) != 1, "Byte no-return flip is not spelled yet");
+        word_t const word = std::bit_cast<word_t>(bits);
+        if constexpr (sizeof(value_type_) == 4) arm64_steor_u32(word_, word, order);
+        else arm64_steor_u64(word_, word, order);
+    }
 
     /** The conditional forms: Arm has no `cmpccxadd`, so a read-first `cas` loop - one
      *  acquiring load, then one instruction per attempt. */
@@ -2214,6 +2274,11 @@ struct arm64_rcpc_atomic_ref {
         requires atomic_integer<value_type_>
     {
         weaker_().clear_bits(bits, order);
+    }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().flip_bits(bits, order);
     }
 
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
@@ -2470,6 +2535,16 @@ inline void risc5_amoor_d_x0(std::uint64_t *word, std::uint64_t bits, std::memor
         __asm__ __volatile__("amoor.d zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoor.d.rl zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
 }
+inline void risc5_amoxor_w_x0(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__("amoxor.w zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
+    else __asm__ __volatile__("amoxor.w.rl zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
+}
+inline void risc5_amoxor_d_x0(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__("amoxor.d zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
+    else __asm__ __volatile__("amoxor.d.rl zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
+}
 
 /*  Load-reserved / store-conditional loops: the reservation must live inside one assembly block.
  *  `lr.w` sign-extends, so the 32-bit comparands travel sign-extended too. */
@@ -2684,6 +2759,14 @@ struct risc5_atomic_ref {
         if constexpr (sizeof(value_type_) == 4) risc5_amoand_w_x0(word_, mask, order);
         else risc5_amoand_d_x0(word_, mask, order);
     }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        static_assert(sizeof(value_type_) != 1, "Byte no-return flip is not spelled yet");
+        word_t const word = std::bit_cast<word_t>(bits);
+        if constexpr (sizeof(value_type_) == 4) risc5_amoxor_w_x0(word_, word, order);
+        else risc5_amoxor_d_x0(word_, word, order);
+    }
 
     /** The conditional forms: a read-first compare-exchange loop, `amocas` where the extension is. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
@@ -2872,6 +2955,11 @@ struct risc5_zacas_atomic_ref {
         requires atomic_integer<value_type_>
     {
         weaker_().clear_bits(bits, order);
+    }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().flip_bits(bits, order);
     }
 
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
