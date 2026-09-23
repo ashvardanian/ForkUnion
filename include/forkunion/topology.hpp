@@ -2203,9 +2203,9 @@ struct machine_topology {
         // Allocate the committed arrays. `compute_domains_` is sized to the core count - at most one
         // domain per core. `resize` value-initializes, so the members the fill below does not touch
         // - the `page_sizes` inventory - hold their zeroed defaults rather than garbage.
-        if (!nodes.resize(counted_nodes)) goto failed_harvest;    // ! Out of memory
-        if (!core_ids.resize(counted_cores)) goto failed_harvest; // ! Out of memory
-        if (!domains.resize(counted_cores)) goto failed_harvest;  // ! Out of memory
+        if (failed(nodes.resize(counted_nodes))) goto failed_harvest;    // ! Out of memory
+        if (failed(core_ids.resize(counted_cores))) goto failed_harvest; // ! Out of memory
+        if (failed(domains.resize(counted_cores))) goto failed_harvest;  // ! Out of memory
         domains_outb = nodes.data();
         core_ids_ptr = core_ids.data();
         domains_ptr = domains.data();
