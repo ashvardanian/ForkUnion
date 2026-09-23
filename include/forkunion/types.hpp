@@ -251,6 +251,22 @@
 #error \
     "Retired capability macro. Use FU_WITH_PLACE_MEMORY_ON_DOMAIN, FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN, or FU_WITH_PLACE_THREADS_BY_AFFINITY"
 #endif
+
+/** The `alignas` width that keeps two threads' words off one line: 256-byte lines on s390x, 64 on
+ *  wasm, which has no coherence to protect, and 128 elsewhere - x86 pairs its 64-byte lines in the
+ *  adjacent-line prefetcher, and Apple's cores carry 128 outright. Neoverse lands there too:
+ *  `aarch64-unknown-linux-gnu` cannot be told from Asahi Linux on Apple silicon, and under-padding
+ *  costs far more than the bytes over-padding wastes. */
+#if !defined(FU_DEFAULT_ALIGNMENT)
+#if defined(__s390x__)
+#define FU_DEFAULT_ALIGNMENT 256
+#elif FU_ON_WASM
+#define FU_DEFAULT_ALIGNMENT 64
+#else
+#define FU_DEFAULT_ALIGNMENT 128
+#endif
+#endif
+
 #pragma endregion Platform Capabilities
 
 #pragma region Platform Headers
@@ -351,6 +367,13 @@
 #define FU_DETECT_CPP_17_ 1
 #else
 #define FU_DETECT_CPP_17_ 0
+#endif
+#if FU_DETECT_CPP_20_ && defined(__cpp_concepts)
+#define FU_DETECT_CONCEPTS_ 1
+#define FU_REQUIRES_(condition) requires(condition)
+#else
+#define FU_DETECT_CONCEPTS_ 0
+#define FU_REQUIRES_(condition)
 #endif
 
 /*  C++17 is the floor: `if constexpr`, inline variables, and `std::is_nothrow_invocable_r_v` have no
@@ -1044,8 +1067,13 @@ inline capabilities_t capability_named(char const *name) noexcept {
  *  That however results into all kinds of ABI warnings with GCC, and suboptimal alignment choice,
  *  unless you hard-code `--param hardware_destructive_interference_size=64` or disable the warning
  *  with `-Wno-interference-size`.
+ *
+ *  So the width is `FU_DEFAULT_ALIGNMENT`, picked from the target. Only `alignas` rests on this
+ *  guess; a per-thread stride takes `destructive_interference_bytes()`, which asks the machine.
  */
-static constexpr std::size_t default_alignment_k = 128;
+static constexpr std::size_t default_alignment_k = FU_DEFAULT_ALIGNMENT;
+static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignment_k - 1)) == 0,
+              "FU_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
 
 /**
  *  @brief Bytes occupied by @p count elements of @p element_bytes each.
@@ -1107,6 +1135,13 @@ constexpr std::size_t div_ceil(std::size_t value, std::size_t divisor) noexcept 
  */
 constexpr std::size_t round_up_to_multiple(std::size_t value, std::size_t multiple) noexcept {
     return div_ceil(value, multiple) * multiple;
+}
+
+/** Smallest power of two that is not less than @p value; one for zero. */
+constexpr std::size_t round_up_to_pow2(std::size_t value) noexcept {
+    std::size_t power = 1;
+    while (power < value) power <<= 1;
+    return power;
 }
 
 /**
@@ -2276,14 +2311,6 @@ constexpr bool can_be_for_slice_callback() noexcept {
     return true;
 #endif
 }
-
-#if FU_DETECT_CPP_20_ && defined(__cpp_concepts)
-#define FU_DETECT_CONCEPTS_ 1
-#define FU_REQUIRES_(condition) requires(condition)
-#else
-#define FU_DETECT_CONCEPTS_ 0
-#define FU_REQUIRES_(condition)
-#endif // FU_DETECT_CPP_20_
 #pragma endregion Callback Concepts
 
 #pragma region Dummy Pool

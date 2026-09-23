@@ -7,6 +7,7 @@
  */
 #pragma once
 #include "types.hpp"
+#include "topology.hpp" // `destructive_interference_bytes` - the stride `spawn` pads cells by
 
 namespace ashvardanian {
 namespace forkunion {
@@ -173,7 +174,6 @@ class flat_pool {
         /** The worker thread; default-constructed, and left so for the caller's own cell. */
         std::thread worker {};
     };
-    static_assert(sizeof(worker_cell_t) <= alignment_k, "A worker cell must fit within one stride");
 
     /** The pool's allocator rebound to the padded per-thread cells. */
     using worker_cell_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<worker_cell_t>;
@@ -284,9 +284,15 @@ class flat_pool {
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
 
         // Allocate the thread pool: one padded cell per thread, holding its worker and its cursor.
-        // This is the pool's only allocation, and `for_n_dynamic` performs none of its own. Striding
-        // by `alignment_k` is what keeps two threads' cursors off a shared cache line.
-        worker_cells_t cells {worker_cell_allocator_t {allocator_}, alignment_k};
+        // This is the pool's only allocation, and `for_n_dynamic` performs none of its own. The
+        // stride is what keeps two threads' cursors off a shared cache line, and it is a runtime
+        // argument - so the width the machine reports wins over the compiled guess, which stands
+        // in only where no platform source names a line. Both widths are powers of two, so a cell
+        // rounded up to one both fits its slot and lands on its own alignment.
+        std::size_t const measured = destructive_interference_bytes();
+        std::size_t const stride =
+            (std::max)(measured ? measured : alignment_k, round_up_to_pow2(sizeof(worker_cell_t)));
+        worker_cells_t cells {worker_cell_allocator_t {allocator_}, stride};
         if (status_t const grew = cells.resize(threads); failed(grew)) return grew;
 
         // Before we start the threads, make sure we set some of the shared

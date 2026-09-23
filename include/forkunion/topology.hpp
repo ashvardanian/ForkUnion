@@ -1043,6 +1043,86 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
 #endif
 }
 
+/**
+ *  @brief Bytes in one cache line - what a single access transfers.
+ *  @return The line size, or 0 when no platform source names it.
+ *
+ *  Exact sources only, no measurement: Linux's `coherency_line_size` - the only source on Arm,
+ *  where `CCSIDR_EL1` is EL1-only - Apple's `hw.cachelinesize`, Windows' `CACHE_RELATIONSHIP`,
+ *  and x86 CPUID leaf 0x4, whose line field `cache_bytes_of_core` above already decodes for its
+ *  size arithmetic. Every source is gated to a power of two in [16, 1024], so a bogus reading
+ *  falls through to the caller's compiled default rather than sizing an arena.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
+#if FU_ON_LINUX
+    if (FILE *file = ::fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r")) {
+        unsigned long long parsed = 0;
+        bool const parsed_one = ::fscanf(file, "%llu", &parsed) == 1;
+        ::fclose(file);
+        if (parsed_one && parsed >= 16 && parsed <= 1024 && is_power_of_two(parsed))
+            return static_cast<std::size_t>(parsed);
+    }
+#endif
+#if FU_ON_APPLE
+    // The widest line across both core tiers, so a P-core's 128 is never rounded down to an
+    // E-core's 64. Spelled out rather than routed through `apple_sysctl_uint`, which the
+    // Platform Probes region below defines only after this one.
+    unsigned long long apple_line = 0;
+    std::size_t apple_length = sizeof(apple_line);
+    if (::sysctlbyname("hw.cachelinesize", &apple_line, &apple_length, nullptr, 0) == 0 && //
+        apple_line >= 16 && apple_line <= 1024 && is_power_of_two(apple_line))
+        return static_cast<std::size_t>(apple_line);
+#endif
+#if FU_ON_WINDOWS
+    DWORD windows_length = 0;
+    ::GetLogicalProcessorInformationEx(RelationCache, nullptr, &windows_length);
+    if (windows_length)
+        if (BYTE *buffer = static_cast<BYTE *>(std::malloc(windows_length))) {
+            std::size_t widest = 0;
+            if (::GetLogicalProcessorInformationEx(RelationCache,
+                                                   reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buffer),
+                                                   &windows_length))
+                for (DWORD offset = 0; offset < windows_length;) {
+                    auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buffer + offset);
+                    if (record->Relationship == RelationCache && record->Cache.LineSize > widest)
+                        widest = record->Cache.LineSize;
+                    if (record->Size == 0) break;
+                    offset += record->Size;
+                }
+            std::free(buffer);
+            if (widest >= 16 && widest <= 1024 && is_power_of_two(widest)) return widest;
+        }
+#endif
+#if FU_DETECT_ARCH_X86_64_
+    // EBX[11:0] of the deterministic leaf holds the line size less one; AMD mirrors leaf 0x4 at
+    // 0x8000001D. Subleaf 0 is L1D, whose line every other level shares on every x86 part.
+    std::uint32_t const line_deterministic_leaf = 0x8000'001Du;
+    std::uint32_t const line_max_extended = cpuid(0x8000'0000u, 0).eax;
+    bool const line_has_deterministic = line_max_extended >= line_deterministic_leaf;
+    if (line_has_deterministic || cpuid(0, 0).eax >= 0x4u) {
+        std::uint32_t const leaf = line_has_deterministic ? line_deterministic_leaf : 0x4u;
+        std::size_t const bytes = (cpuid(leaf, 0).ebx & 0xFFFu) + 1;
+        if (bytes >= 16 && bytes <= 1024 && is_power_of_two(bytes)) return bytes;
+    }
+#endif
+    return 0;
+}
+
+/**
+ *  @brief Bytes two cores can invalidate for each other - what padding must span.
+ *  @return The destructive-interference width, or 0 where the line size is unknown.
+ *
+ *  Not the same question as @ref cache_line_bytes: x86's adjacent-line prefetcher pulls lines in
+ *  pairs, so two 64-byte lines behave as one 128-byte unit of coherence traffic and padding must
+ *  cover both. Everywhere else the line is the unit. This is the quantity `default_alignment_k`
+ *  guesses from the target when no probe can run.
+ */
+FU_MAYBE_UNUSED_ static inline std::size_t destructive_interference_bytes() noexcept {
+    std::size_t const line = cache_line_bytes();
+    if (line == 0) return 0;
+    return FU_DETECT_ARCH_X86_64_ ? line * 2 : line;
+}
+
 #pragma endregion Cache Hierarchy
 
 #pragma region Platform Probes

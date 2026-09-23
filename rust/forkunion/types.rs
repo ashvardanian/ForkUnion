@@ -139,12 +139,20 @@ pub fn bytes_for_elements(count: usize, element_bytes: usize) -> Result<usize> {
 
 /// Default alignment for preventing false sharing between threads.
 ///
-/// Set to 128 bytes to account for adjacent cache-line prefetching on modern CPUs.
-/// This matches the C++ `default_alignment_k` constant defined in `forkunion.hpp`.
+/// Picked from the target the way `FU_DEFAULT_ALIGNMENT` is in `types.hpp`: 256 bytes on s390x, 64 on
+/// wasm, 128 elsewhere.
 ///
 /// On x86, most CPUs fetch 2 cache lines (128 bytes) at once with spatial prefetching enabled.
 /// This conservative padding prevents false sharing even with aggressive prefetch settings.
-pub const DEFAULT_ALIGNMENT: usize = 128;
+/// Only padding rests on this - a thread pool strides its cells by the width the machine itself
+/// reports at spawn, which is exact where this is a guess.
+pub const DEFAULT_ALIGNMENT: usize = if cfg!(target_arch = "s390x") {
+    256
+} else if cfg!(any(target_arch = "wasm32", target_arch = "wasm64")) {
+    64
+} else {
+    128
+};
 
 /// Cache-line aligned wrapper to prevent false sharing between threads.
 ///
@@ -152,7 +160,7 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 /// modifications by one thread invalidate the cache line for all others, causing
 /// performance degradation known as "false sharing".
 ///
-/// This wrapper ensures each wrapped value occupies its own cache line (128 bytes),
+/// This wrapper ensures each wrapped value occupies its own [`DEFAULT_ALIGNMENT`] bytes,
 /// eliminating false sharing at the cost of increased memory usage.
 ///
 /// # Examples
@@ -176,11 +184,17 @@ pub const DEFAULT_ALIGNMENT: usize = 128;
 ///
 /// let total: usize = scratch.iter().map(|a| a.0).sum();
 /// ```
-#[repr(align(128))]
+#[cfg_attr(target_arch = "s390x", repr(align(256)))]
+#[cfg_attr(any(target_arch = "wasm32", target_arch = "wasm64"), repr(align(64)))]
+#[cfg_attr(
+    not(any(target_arch = "s390x", target_arch = "wasm32", target_arch = "wasm64")),
+    repr(align(128))
+)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CacheAligned<T>(pub T);
 
-// Compile-time assertion that alignment matches DEFAULT_ALIGNMENT
+// `repr(align(..))` takes only a literal, so the arms above restate `DEFAULT_ALIGNMENT`; this holds them to it.
 const _: () = assert!(
     core::mem::align_of::<CacheAligned<u8>>() == DEFAULT_ALIGNMENT,
     "CacheAligned alignment must match DEFAULT_ALIGNMENT"
@@ -216,11 +230,21 @@ const _: () = assert!(
 ///
 /// Fast for short critical sections but spins continuously. Use when latency matters
 /// more than CPU usage. Avoid for long critical sections or high contention scenarios.
-#[repr(align(128))]
+#[cfg_attr(target_arch = "s390x", repr(align(256)))]
+#[cfg_attr(any(target_arch = "wasm32", target_arch = "wasm64"), repr(align(64)))]
+#[cfg_attr(
+    not(any(target_arch = "s390x", target_arch = "wasm32", target_arch = "wasm64")),
+    repr(align(128))
+)]
 pub struct BasicSpinMutex<T, const PAUSE: bool> {
     locked: AtomicBool,
     data: UnsafeCell<T>,
 }
+
+const _: () = assert!(
+    core::mem::align_of::<BasicSpinMutex<u8, false>>() == DEFAULT_ALIGNMENT,
+    "BasicSpinMutex alignment must match DEFAULT_ALIGNMENT"
+);
 
 impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     /// Creates a new spin mutex in the unlocked state.

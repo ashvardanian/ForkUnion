@@ -76,7 +76,15 @@ pub fn check(raw: c_int) Error!void {
 ///
 /// The core spells this `default_alignment_k` and deliberately does not use
 /// `std::hardware_destructive_interference_size`, which trips GCC ABI warnings and picks worse.
-pub const default_alignment = 128;
+///
+/// Derived from the target the same way the header and `build.rs` derive it, so all three agree
+/// without copying a number between them. Only padding rests on it - a pool strides its cells by
+/// the width the machine reports at spawn.
+pub const default_alignment: usize = switch (@import("builtin").cpu.arch) {
+    .s390x => 256,
+    .wasm32, .wasm64 => 64,
+    else => 128,
+};
 
 /// A dense compute-domain index, in `0..Topology.computeDomainsCount()`.
 ///
