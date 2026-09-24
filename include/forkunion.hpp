@@ -57,8 +57,7 @@
  *
  *  @sa arm64_yield_t, arm64_wfet_t, x86_pause_t, x86_tpause_t, risc5_pause_t.
  *
- *  The library uses modern C++ features and requires @b C++17 or newer.
- *  Using C++20 will enable additional compile-time checks with concepts where available.
+ *  The library requires @b C++20 or newer.
  */
 #pragma once
 

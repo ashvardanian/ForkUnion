@@ -37,9 +37,9 @@ function (set_target_properties_for_forkunion_script target_name)
     endif ()
 endfunction ()
 
-# Test targets for C++17 & C++20
+# Test targets for C++20 & C++23
 set(TEST_SOURCES test.cpp)
-set(CXX_STANDARDS 17 20 23)
+set(CXX_STANDARDS 20 23)
 foreach (STD IN LISTS CXX_STANDARDS)
     # Derive a unique target name
     set(TGT forkunion_test_cpp${STD})
@@ -61,8 +61,8 @@ foreach (STD IN LISTS CXX_STANDARDS)
     # `check_atomic_ref` admits each reference through `runtime_capabilities()`, so the tests take every buildable rung.
     target_compile_definitions(${TGT} PRIVATE ${fu_compile_definitions_})
 
-    # test.cpp uses no GNU extensions, so -pedantic-errors rejects a C++20 language feature that slips into a lower
-    # standard - the conformance check, on the comprehensive source, not a separate lean TU. Only the C++ tests: the C
+    # test.cpp uses no GNU extensions, so -pedantic-errors rejects a C++23 language feature that slips into the C++20
+    # build - the conformance check, on the comprehensive source, not a separate lean TU. Only the C++ tests: the C
     # tests use nested functions and blocks, and the benchmarks pull Taskflow.
     target_compile_options(${TGT} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-pedantic-errors>)
 
@@ -157,7 +157,7 @@ endif ()
 # compile-time C++ `preferred_yield_t`.
 function (add_forkunion_benchmark target source)
     add_executable(${target} ${source})
-    # C++20 for the benchmark harness (the library itself stays C++17); Taskflow v4 requires C++20 concepts.
+    # C++20 for the benchmark harness, as for the library; Taskflow v4 requires C++20 concepts.
     set_target_properties(
         ${target}
         PROPERTIES CXX_STANDARD 20

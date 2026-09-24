@@ -44,15 +44,14 @@ namespace fu = ashvardanian::forkunion;
 /** Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
 template <typename value_type_>
 static void format_value_(char *buffer, std::size_t capacity, value_type_ const &value) noexcept {
-    if constexpr (std::is_same<value_type_, bool>::value)
-        std::snprintf(buffer, capacity, "%s", value ? "true" : "false");
-    else if constexpr (std::is_enum<value_type_>::value)
-        format_value_(buffer, capacity, static_cast<typename std::underlying_type<value_type_>::type>(value));
-    else if constexpr (std::is_pointer<value_type_>::value)
+    if constexpr (std::same_as<value_type_, bool>) std::snprintf(buffer, capacity, "%s", value ? "true" : "false");
+    else if constexpr (std::is_enum_v<value_type_>)
+        format_value_(buffer, capacity, static_cast<std::underlying_type_t<value_type_>>(value));
+    else if constexpr (std::is_pointer_v<value_type_>)
         std::snprintf(buffer, capacity, "%p", static_cast<void const *>(value));
-    else if constexpr (std::is_integral<value_type_>::value && std::is_signed<value_type_>::value)
+    else if constexpr (std::signed_integral<value_type_>)
         std::snprintf(buffer, capacity, "%lld", static_cast<long long>(value));
-    else if constexpr (std::is_integral<value_type_>::value)
+    else if constexpr (std::integral<value_type_>)
         std::snprintf(buffer, capacity, "%llu", static_cast<unsigned long long>(value));
     else std::snprintf(buffer, capacity, "?");
 }
@@ -852,9 +851,7 @@ static void test_concurrent_caller_threads() noexcept {
 /** Convenience structure to ensure we output match locations to independent cache lines. */
 struct alignas(fu::default_alignment_k) aligned_visit_t {
     std::size_t task = 0;
-    bool operator<(aligned_visit_t const &other) const noexcept { return task < other.task; }
-    bool operator==(aligned_visit_t const &other) const noexcept { return task == other.task; }
-    bool operator!=(std::size_t other_index) const noexcept { return task != other_index; }
+    auto operator<=>(aligned_visit_t const &) const noexcept = default;
     bool operator==(std::size_t other_index) const noexcept { return task == other_index; }
 };
 
@@ -1208,7 +1205,7 @@ static void test_replicated_array() noexcept {
 
     // Fill every replica with a domain-dependent pattern, so replicas that aliased would be caught.
     for (std::size_t domain = 0; domain < replicas.memory_domains_count(); ++domain) {
-        fu::span<std::uint32_t> const replica =
+        std::span<std::uint32_t> const replica =
             replicas.on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
         expect_eq(replica.size(), n);
         for (std::size_t i = 0; i < n; ++i) replica[i] = static_cast<std::uint32_t>(domain * n + i);

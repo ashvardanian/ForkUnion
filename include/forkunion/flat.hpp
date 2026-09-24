@@ -135,11 +135,11 @@ class flat_pool {
 
     /** Alignment isolating the pool's atomics onto their own cache lines. */
     static constexpr std::size_t alignment_k = alignment_;
-    static_assert(is_power_of_two(alignment_k), "Alignment must be a power of 2");
+    static_assert(std::has_single_bit(alignment_k), "Alignment must be a power of 2");
 
     /** Unsigned counter width; narrow it below @c std::size_t only to debug wrap-around. */
     using index_t = index_type_;
-    static_assert(std::is_unsigned<index_t>::value, "Index type must be an unsigned integer");
+    static_assert(std::unsigned_integral<index_t>, "Index type must be an unsigned integer");
 
     /**
      *  @brief Number of previous API calls, in [0, UINT_MAX).
@@ -299,7 +299,7 @@ class flat_pool {
      *      multi-thread pool without OS threads; otherwise the reason it could not start.
      *  @note This is the de-facto @b constructor - you only call it again after @c terminate.
      */
-    [[nodiscard]] status_t spawn(     //
+    status_t spawn(                   //
         thread_index_t const threads, //
         caller_exclusivity_t const exclusivity = caller_inclusive_k) noexcept {
 
@@ -374,8 +374,7 @@ class flat_pool {
      *  @note Even in the @c caller_exclusive_k mode, can be called from just one thread!
      *  @sa For advanced resource management, consider @c unsafe_for_threads and @c unsafe_join.
      */
-    template <typename fork_type_>
-    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    template <is_thread_callback<index_t> fork_type_>
     broadcast_join<flat_pool, fork_type_> for_threads(fork_type_ &&fork) noexcept {
         return {*this, std::forward<fork_type_>(fork)};
     }
@@ -450,10 +449,9 @@ class flat_pool {
      *  @param[in] n The total length of the range to split between threads.
      *  @param[in] fork The callback, receiving a @b tasks_range_t and a @b thread_in_domain_t.
      */
-    template <typename fork_type_ = dummy_lambda_t>
-    FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
+    template <is_slice_callback<index_t> fork_type_ = dummy_lambda_t>
     broadcast_join<flat_pool, invoke_for_slices<fork_type_, index_t>> //
-        for_slices(index_t const n, fork_type_ &&fork) noexcept {
+    for_slices(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
     }
@@ -469,10 +467,9 @@ class flat_pool {
      *  @sa for_n_dynamic for a more dynamic workload.
      *  @sa for_slices if you prefer to receive workload slices over individual indices.
      */
-    template <typename fork_type_ = dummy_lambda_t>
-    FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
+    template <is_task_callback<index_t> fork_type_ = dummy_lambda_t>
     broadcast_join<flat_pool, invoke_for_n<fork_type_, index_t>> //
-        for_n(index_t const n, fork_type_ &&fork) noexcept {
+    for_n(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
     }
@@ -483,10 +480,9 @@ class flat_pool {
      *  @param[in] fork The callback object, receiving a task index and a @b thread_in_domain_t.
      *  @sa for_n for a more "balanced" evenly-splittable workload.
      */
-    template <typename fork_type_ = dummy_lambda_t>
-    FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
+    template <is_task_callback<index_t> fork_type_ = dummy_lambda_t>
     broadcast_join<flat_pool, invoke_for_n_dynamic<flat_pool, fork_type_, index_t>> //
-        for_n_dynamic(index_t const n, fork_type_ &&fork) noexcept {
+    for_n_dynamic(index_t const n, fork_type_ &&fork) noexcept {
 
         return {*this, {*this, n, threads_count(), std::forward<fork_type_>(fork)}};
     }
@@ -501,8 +497,7 @@ class flat_pool {
      *  @return A @c generation_t token identifying this dispatch.
      *  @sa Use in conjunction with @c unsafe_join.
      */
-    template <typename fork_type_>
-    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    template <is_thread_callback<index_t> fork_type_>
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
 
         thread_index_t const threads = threads_count();
@@ -595,7 +590,7 @@ class flat_pool {
      *  @note Shape parity with @c distributed_pool: generic callers - the C ABI's @c visit and the
      *      distributed invokers - call `pool.threads_count(domain)` on every pool kind.
      */
-    thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+    thread_index_t threads_count([[maybe_unused]] index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return threads_count();
     }
@@ -604,7 +599,7 @@ class flat_pool {
      *  @brief Returns the first global thread index of a @b compute_domain.
      *  @return Same value as `first_thread()`, as we only support one compute_domain.
      */
-    constexpr thread_index_t first_thread(FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+    constexpr thread_index_t first_thread([[maybe_unused]] index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return first_thread();
     }
@@ -614,7 +609,7 @@ class flat_pool {
      *  @return Same value as @p global_thread_index, as we only support one compute_domain.
      */
     constexpr thread_index_t thread_local_index(thread_index_t global_thread_index,
-                                                FU_MAYBE_UNUSED_ index_t compute_domain_index) const noexcept {
+                                                [[maybe_unused]] index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
         return global_thread_index;
     }
@@ -661,8 +656,9 @@ class flat_pool {
                    (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
                 micro_yield(epoch_, last_epoch, thread_index);
 
-            if (fu_unlikely_(mood == mood_t::die_k)) break;
-            if (fu_unlikely_(mood == mood_t::chill_k) && (new_epoch == last_epoch)) {
+            if (mood == mood_t::die_k) [[unlikely]]
+                break;
+            if (mood == mood_t::chill_k && new_epoch == last_epoch) [[unlikely]] {
                 std::this_thread::sleep_for(std::chrono::microseconds(sleep_length_micros_));
                 continue;
             }
@@ -688,43 +684,33 @@ class flat_pool {
 using flat_pool_t = flat_pool<>;
 
 #pragma region Concepts
-#if FU_DETECT_CONCEPTS_
 
 /** Does nothing on every thread, the default fork for a @c broadcast_join needing only a join. */
 struct broadcasted_noop_t {
-    template <typename index_type_>
-    void operator()(index_type_) const noexcept
-        requires(std::unsigned_integral<index_type_> && std::convertible_to<index_type_, std::size_t>)
-    {}
+    template <std::unsigned_integral index_type_>
+    void operator()(index_type_) const noexcept {}
 };
 
+/** A pool the high-level APIs accept: it counts threads and broadcasts a fork however passed. */
 template <typename pool_type_>
-concept is_pool = //
-    std::unsigned_integral<decltype(std::declval<pool_type_ const &>().threads_count())> &&
-    std::convertible_to<decltype(std::declval<pool_type_ const &>().threads_count()), std::size_t> &&
-    requires(pool_type_ &p) {
-        { p.for_threads(broadcasted_noop_t {}) }; // Passing the callback by value
-    } &&                                          //
-    requires(pool_type_ &p, broadcasted_noop_t const &noop) {
-        { p.for_threads(noop) }; // Passing the callback by const reference
-    } &&                         //
-    requires(pool_type_ &p, broadcasted_noop_t &noop) {
-        { p.for_threads(noop) }; // Passing the callback by non-const reference
-    };
+concept is_pool = requires(pool_type_ &pool, pool_type_ const &const_pool, broadcasted_noop_t &noop,
+                           broadcasted_noop_t const &const_noop) {
+    { const_pool.threads_count() } -> std::unsigned_integral;
+    pool.for_threads(broadcasted_noop_t {});
+    pool.for_threads(const_noop);
+    pool.for_threads(noop);
+};
 
+/** A pool that also splits a broadcast into a launch and a join, keyed by a generation. */
 template <typename pool_type_>
-concept is_unsafe_pool =   //
-    is_pool<pool_type_> && //
-    requires(pool_type_ &p, broadcasted_noop_t &noop) {
-        { p.unsafe_for_threads(noop) } -> std::same_as<typename pool_type_::generation_t>;
-    } && //
-    requires(pool_type_ &p, typename pool_type_::generation_t generation) {
-        { p.unsafe_join() } -> std::same_as<void>;
-        { p.unsafe_join(generation) } -> std::same_as<void>;
-        { p.is_complete(generation) } -> std::same_as<bool>;
-    };
+concept is_unsafe_pool = is_pool<pool_type_> && requires(pool_type_ &pool, broadcasted_noop_t &noop,
+                                                         typename pool_type_::generation_t generation) {
+    { pool.unsafe_for_threads(noop) } -> std::same_as<typename pool_type_::generation_t>;
+    { pool.unsafe_join() } -> std::same_as<void>;
+    { pool.unsafe_join(generation) } -> std::same_as<void>;
+    { pool.is_complete(generation) } -> std::same_as<bool>;
+};
 
-#endif // FU_DETECT_CONCEPTS_
 #pragma endregion Concepts
 
 } // namespace forkunion

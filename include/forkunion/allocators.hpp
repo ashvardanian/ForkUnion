@@ -19,8 +19,7 @@ namespace forkunion {
  *  @brief Tries binding the given address range to a specific NUMA @p memory_domain_id.
  *  @return True if binding succeeded, false otherwise.
  */
-FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t linux_numa_bind(void *ptr, std::size_t size_bytes,
-                                                                      memory_domain_id_t memory_domain_id) noexcept {
+inline status_t linux_numa_bind(void *ptr, std::size_t size_bytes, memory_domain_id_t memory_domain_id) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     // ! `MPOL_F_STATIC_NODES` is a @b mode flag - it belongs OR-ed into the policy, not in the
     // ! trailing `flags` argument, which only accepts `MPOL_MF_*`. Those flags are 0: this memory
@@ -40,8 +39,8 @@ FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t linux_numa_bind(void *ptr,
  *  @return A pointer to the allocated memory, or nullptr when the allocation failed or the page
  *      size stays unsupported.
  */
-FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
-                                                         memory_domain_id_t memory_domain_id) noexcept {
+inline void *linux_numa_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
+                                 memory_domain_id_t memory_domain_id) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
@@ -84,7 +83,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_numa_allocate(std::size_t size_bytes,
 #endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
-FU_MAYBE_UNUSED_ static inline void linux_numa_free(void *ptr, std::size_t size_bytes) noexcept {
+inline void linux_numa_free(void *ptr, std::size_t size_bytes) noexcept {
     assert(ptr != nullptr && "Pointer must not be null");
     assert(size_bytes > 0 && "Size must be greater than zero");
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
@@ -219,11 +218,6 @@ struct linux_numa_allocator {
     bool operator==(linux_numa_allocator<other_type_> const &o) const noexcept {
         return memory_domain_id_ == o.memory_domain_id_ && default_page_size_ == o.default_page_size_;
     }
-
-    template <typename other_type_>
-    bool operator!=(linux_numa_allocator<other_type_> const &o) const noexcept {
-        return memory_domain_id_ != o.memory_domain_id_ || default_page_size_ != o.default_page_size_;
-    }
 };
 
 using linux_numa_allocator_t = linux_numa_allocator<>;
@@ -236,9 +230,8 @@ using linux_numa_allocator_t = linux_numa_allocator<>;
  *  contiguous virtual range and @c mbinds each equal-stride slice to its own node - a symmetric
  *  layout where the MMU then serves every slice from its local memory.
  */
-FU_MAYBE_UNUSED_ static inline void *linux_symmetric_allocate(machine_topology_t const &topology,
-                                                              std::size_t stride_bytes,
-                                                              std::size_t page_size_bytes) noexcept {
+inline void *linux_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes,
+                                      std::size_t page_size_bytes) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     std::size_t const domains = topology.memory_domains_count();
     if (domains == 0 || stride_bytes == 0) return nullptr;
@@ -277,7 +270,7 @@ FU_MAYBE_UNUSED_ static inline void *linux_symmetric_allocate(machine_topology_t
 #endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
-FU_MAYBE_UNUSED_ static inline void linux_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
+inline void linux_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
     if (ptr) ::munmap(ptr, total_bytes);
 #else
@@ -357,9 +350,8 @@ using linux_symmetric_allocator_t = linux_symmetric_allocator<>;
  *  @brief Restores the calling thread's memory-domain policy saved by @c freebsd_domain_prefer.
  *  @note A no-op where the save failed, so a refused @c getdomain never widens the policy.
  */
-FU_MAYBE_UNUSED_ static inline void freebsd_domain_restore(FU_MAYBE_UNUSED_ void const *saved_set,
-                                                           FU_MAYBE_UNUSED_ int saved_policy,
-                                                           FU_MAYBE_UNUSED_ bool have_saved) noexcept {
+inline void freebsd_domain_restore([[maybe_unused]] void const *saved_set, [[maybe_unused]] int saved_policy,
+                                   [[maybe_unused]] bool have_saved) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     if (!have_saved) return;
     ::cpuset_setdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
@@ -375,8 +367,7 @@ FU_MAYBE_UNUSED_ static inline void freebsd_domain_restore(FU_MAYBE_UNUSED_ void
  *  @brief First-touches every page in [ @p ptr, @p ptr + @p size_bytes ) so PREFER binds them.
  *  @note Anonymous pages are already zero, so writing a zero changes nothing but the residency.
  */
-FU_MAYBE_UNUSED_ static inline void freebsd_first_touch(FU_MAYBE_UNUSED_ void *ptr,
-                                                        FU_MAYBE_UNUSED_ std::size_t size_bytes) noexcept {
+inline void freebsd_first_touch([[maybe_unused]] void *ptr, [[maybe_unused]] std::size_t size_bytes) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     std::size_t const stride = static_cast<std::size_t>(ram_page_size());
     if (stride == 0) return;
@@ -396,9 +387,8 @@ FU_MAYBE_UNUSED_ static inline void freebsd_first_touch(FU_MAYBE_UNUSED_ void *p
  *  fault on the preferred domain, then restores the saved policy - the domainset analogue of
  *  Linux's per-mapping @c mbind.
  */
-FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t freebsd_domain_prefer(
-    FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id, FU_MAYBE_UNUSED_ void *saved_set,
-    FU_MAYBE_UNUSED_ int *saved_policy) noexcept {
+inline status_t freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory_domain_id,
+                                      [[maybe_unused]] void *saved_set, [[maybe_unused]] int *saved_policy) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     bool const have_saved = ::cpuset_getdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
                                                static_cast<domainset_t *>(saved_set), saved_policy) == 0;
@@ -426,8 +416,8 @@ FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t freebsd_domain_prefer(
  *  super-aligned map retries with base pages so the allocator stays total, matching the Linux
  *  @c nullptr-on-unsupported contract.
  */
-FU_MAYBE_UNUSED_ static inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
-                                                             memory_domain_id_t memory_domain_id) noexcept {
+inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
+                                     memory_domain_id_t memory_domain_id) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     if (size_bytes == 0) return nullptr;
@@ -466,7 +456,7 @@ FU_MAYBE_UNUSED_ static inline void *freebsd_domain_allocate(std::size_t size_by
 #endif
 }
 
-FU_MAYBE_UNUSED_ static inline void freebsd_domain_free(void *ptr, std::size_t size_bytes) noexcept {
+inline void freebsd_domain_free(void *ptr, std::size_t size_bytes) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     if (ptr) ::munmap(ptr, size_bytes);
 #else
@@ -546,10 +536,6 @@ struct freebsd_numa_allocator {
     bool operator==(freebsd_numa_allocator<other_type_> const &o) const noexcept {
         return memory_domain_id_ == o.memory_domain_id() && default_page_size_ == o.default_page_size();
     }
-    template <typename other_type_>
-    bool operator!=(freebsd_numa_allocator<other_type_> const &o) const noexcept {
-        return !(*this == o);
-    }
 };
 
 using freebsd_numa_allocator_t = freebsd_numa_allocator<>;
@@ -559,9 +545,8 @@ using freebsd_numa_allocator_t = freebsd_numa_allocator<>;
  *  @return nullptr if the mapping failed or the page size is unsupported.
  *  @sa linux_symmetric_allocate is the Linux counterpart; FreeBSD places slices by thread policy.
  */
-FU_MAYBE_UNUSED_ static inline void *freebsd_symmetric_allocate(machine_topology_t const &topology,
-                                                                std::size_t stride_bytes,
-                                                                std::size_t page_size_bytes) noexcept {
+inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes,
+                                        std::size_t page_size_bytes) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     std::size_t const domains = topology.memory_domains_count();
     if (domains == 0 || stride_bytes == 0) return nullptr;
@@ -611,7 +596,7 @@ FU_MAYBE_UNUSED_ static inline void *freebsd_symmetric_allocate(machine_topology
 #endif
 }
 
-FU_MAYBE_UNUSED_ static inline void freebsd_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
+inline void freebsd_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
     if (ptr) ::munmap(ptr, total_bytes);
 #else
@@ -687,7 +672,7 @@ using freebsd_symmetric_allocator_t = freebsd_symmetric_allocator<>;
  *  @c SeLockMemoryPrivilege - typically by an admin. Call once at start-up, then construct a
  *  @c windows_numa_allocator with `large_pages = true`.
  */
-FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t windows_enable_lock_memory_privilege() noexcept {
+inline status_t windows_enable_lock_memory_privilege() noexcept {
 #if FU_ON_WINDOWS
     HANDLE token = nullptr;
     if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
@@ -717,8 +702,8 @@ FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t windows_enable_lock_memory
  *  and can still fail under memory fragmentation; a caller wanting a soft failure should retry with
  *  @p large_pages false.
  */
-FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_bytes, memory_domain_id_t memory_domain_id,
-                                                           bool large_pages = false) noexcept {
+inline void *windows_numa_allocate(std::size_t size_bytes, memory_domain_id_t memory_domain_id,
+                                   bool large_pages = false) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
     if (size_bytes == 0) return nullptr;
@@ -739,7 +724,7 @@ FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_byte
 #endif
 }
 
-FU_MAYBE_UNUSED_ static inline void windows_numa_free(void *ptr) noexcept {
+inline void windows_numa_free(void *ptr) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
     if (ptr) ::VirtualFree(ptr, 0, MEM_RELEASE); // ? Size must be 0 with MEM_RELEASE
 #else
@@ -756,8 +741,7 @@ FU_MAYBE_UNUSED_ static inline void windows_numa_free(void *ptr) noexcept {
  *  fault in on its own node. Base pages only - large pages cannot be reserved and committed across
  *  two separate mapping steps.
  */
-FU_MAYBE_UNUSED_ static inline void *windows_symmetric_allocate(machine_topology_t const &topology,
-                                                                std::size_t stride_bytes) noexcept {
+inline void *windows_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
     std::size_t const domains = topology.memory_domains_count();
     if (domains == 0 || stride_bytes == 0) return nullptr;
@@ -784,7 +768,7 @@ FU_MAYBE_UNUSED_ static inline void *windows_symmetric_allocate(machine_topology
 #endif
 }
 
-FU_MAYBE_UNUSED_ static inline void windows_symmetric_free(void *ptr) noexcept {
+inline void windows_symmetric_free(void *ptr) noexcept {
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
     if (ptr) ::VirtualFree(ptr, 0, MEM_RELEASE);
 #else
@@ -859,10 +843,6 @@ struct windows_numa_allocator {
     bool operator==(windows_numa_allocator<other_type_> const &o) const noexcept {
         return memory_domain_id_ == o.memory_domain_id() && default_page_size_ == o.default_page_size() &&
                large_pages_ == o.large_pages();
-    }
-    template <typename other_type_>
-    bool operator!=(windows_numa_allocator<other_type_> const &o) const noexcept {
-        return !(*this == o);
     }
 };
 
@@ -1061,45 +1041,6 @@ using symmetric_memory_allocator_t = portable_symmetric_allocator_t;
 
 #pragma region Distributed Arrays
 
-/** A tiny @c std::span-like non-owning view over a contiguous range - C++17 has no @c std::span. */
-template <typename value_type_>
-class span {
-    value_type_ *data_ {nullptr};
-    std::size_t size_ {0};
-
-  public:
-    using element_type = value_type_;
-    using value_type = std::remove_cv_t<value_type_>;
-    using size_type = std::size_t;
-    using pointer = value_type_ *;
-    using reference = value_type_ &;
-    using iterator = value_type_ *;
-
-    constexpr span() noexcept = default;
-    constexpr span(value_type_ *data, std::size_t size) noexcept : data_(data), size_(size) {}
-
-    /** Widens a mutable span to @c const, the qualification conversion @c std::span allows. */
-    template <typename other_type_,
-              typename = std::enable_if_t<std::is_convertible<other_type_ (*)[], value_type_ (*)[]>::value>>
-    constexpr span(span<other_type_> const &other) noexcept : data_(other.data()), size_(other.size()) {}
-
-    constexpr value_type_ *data() const noexcept { return data_; }
-    constexpr std::size_t size() const noexcept { return size_; }
-    constexpr std::size_t size_bytes() const noexcept { return size_ * sizeof(value_type_); }
-    constexpr bool empty() const noexcept { return size_ == 0; }
-
-    constexpr value_type_ &operator[](std::size_t index) const noexcept { return data_[index]; }
-    constexpr value_type_ &front() const noexcept { return data_[0]; }
-    constexpr value_type_ &back() const noexcept { return data_[size_ - 1]; }
-
-    constexpr value_type_ *begin() const noexcept { return data_; }
-    constexpr value_type_ *end() const noexcept { return data_ + size_; }
-
-    constexpr span subspan(std::size_t offset, std::size_t count) const noexcept { return {data_ + offset, count}; }
-    constexpr span first(std::size_t count) const noexcept { return {data_, count}; }
-    constexpr span last(std::size_t count) const noexcept { return {data_ + (size_ - count), count}; }
-};
-
 /**
  *  @brief One uninitialized replica of a sequence per memory domain - a domain-local buffer.
  *  @tparam value_type_ The element type; treated as raw storage - the container runs no
@@ -1115,8 +1056,8 @@ template <typename value_type_, typename allocator_type_ = symmetric_memory_allo
 struct replicated_array {
     using value_type = value_type_;
     using allocator_type = allocator_type_;
-    using span_type = span<value_type_>;
-    using const_span_type = span<value_type_ const>;
+    using span_type = std::span<value_type_>;
+    using view_type = std::span<value_type_ const>;
     using symmetric_allocator_type =
         typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_type_>;
 
@@ -1156,7 +1097,7 @@ struct replicated_array {
 
     /** Allocates one uninitialized length @p n replica per memory domain; the caller first-touches
      *  them. */
-    [[nodiscard]] status_t resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
+    status_t resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
         reset();
         if (n == 0) return status_t::success_k;
         symmetric_allocator_type allocator(topology);
@@ -1184,7 +1125,7 @@ struct replicated_array {
     span_type on_memory_domain(memory_domain_index_t memory_domain) noexcept {
         return {allocation_.slice(static_cast<std::size_t>(memory_domain)), size_};
     }
-    const_span_type on_memory_domain(memory_domain_index_t memory_domain) const noexcept {
+    view_type on_memory_domain(memory_domain_index_t memory_domain) const noexcept {
         return {allocation_.slice(static_cast<std::size_t>(memory_domain)), size_};
     }
 };
@@ -1206,8 +1147,8 @@ template <typename value_type_, typename allocator_type_ = symmetric_memory_allo
 struct sharded_array {
     using value_type = value_type_;
     using allocator_type = allocator_type_;
-    using span_type = span<value_type_>;
-    using const_span_type = span<value_type_ const>;
+    using span_type = std::span<value_type_>;
+    using view_type = std::span<value_type_ const>;
     using symmetric_allocator_type =
         typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_type_>;
 
@@ -1252,7 +1193,7 @@ struct sharded_array {
     }
 
     /** Allocates uninitialized storage for @p n elements in contiguous per-domain segments. */
-    [[nodiscard]] status_t resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
+    status_t resize_uninitialized(machine_topology_t const &topology, std::size_t n) noexcept {
         reset();
         if (n == 0) return status_t::success_k;
         std::size_t const domains = topology.memory_domains_count();
@@ -1308,7 +1249,7 @@ struct sharded_array {
     span_type on_memory_domain(memory_domain_index_t memory_domain) noexcept {
         return {allocation_.slice(static_cast<std::size_t>(memory_domain)), length_on_memory_domain(memory_domain)};
     }
-    const_span_type on_memory_domain(memory_domain_index_t memory_domain) const noexcept {
+    view_type on_memory_domain(memory_domain_index_t memory_domain) const noexcept {
         return {allocation_.slice(static_cast<std::size_t>(memory_domain)), length_on_memory_domain(memory_domain)};
     }
 };

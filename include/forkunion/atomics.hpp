@@ -44,7 +44,7 @@
  *  dispatches nothing - for compile-time callers, not per CPU class.
  *
  *  The header needs the library's @c std::atomic_ref and @c std::bit_cast, so it is empty without
- *  them - a C++17 translation unit including the umbrella sees nothing here.
+ *  them - a C++20 language mode over a library that still lacks them sees nothing here.
  */
 #pragma once
 #include <cstdint> // `std::uint8_t`, `std::uint32_t`, `std::uint64_t`, their signed twins

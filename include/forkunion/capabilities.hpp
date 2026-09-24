@@ -217,8 +217,9 @@ inline bool x86_arm_monitor(std::atomic<value_type_> const &watched, value_type_
 template <typename value_type_>
 inline bool x86_arm_monitor(value_type_ const *watched, value_type_ const observed) noexcept {
     x86_arm_address(watched);
-    // Acquire-load the bare word: `std::atomic_ref` where it exists, else the compiler's own load,
-    // since C++17 has no portable `atomic_ref` and this waiter already needs GCC/Clang's opcodes.
+    // Acquire-load the bare word through `std::atomic_ref` where the library has it, else
+    // through the compiler's own load: some C++20 libraries still lack it, and this waiter
+    // needs GCC or Clang anyway.
 #if defined(__cpp_lib_atomic_ref)
     value_type_ const current =
         std::atomic_ref<value_type_>(*const_cast<value_type_ *>(watched)).load(std::memory_order_acquire);
@@ -879,9 +880,8 @@ inline capabilities_t cpu_capabilities() noexcept {
  *  @note Lives here, not beside its allocator callers, because this is the last header both
  *      `topology.hpp` and `allocators.hpp` see - so the @c maxnode quirk below is spelled once.
  */
-FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t linux_bind_range_to_domain(void *ptr, std::size_t size_bytes,
-                                                                                 memory_domain_id_t memory_domain_id,
-                                                                                 int mode) noexcept {
+inline status_t linux_bind_range_to_domain(void *ptr, std::size_t size_bytes, memory_domain_id_t memory_domain_id,
+                                           int mode) noexcept {
     if (memory_domain_id < 0 || static_cast<std::size_t>(memory_domain_id) >= max_memory_domains_k)
         return status_t::invalid_argument_k;
     std::size_t const bit = static_cast<std::size_t>(memory_domain_id);

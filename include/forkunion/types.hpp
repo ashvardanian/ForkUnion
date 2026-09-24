@@ -7,7 +7,6 @@
  */
 #pragma once
 #if defined(_MSC_VER)
-#pragma warning(disable : 4505) // unreferenced function with internal linkage has been removed
 #pragma warning(disable : 4324) // structure was padded due to alignment specifier
 /*  @c strncpy etc. flagged "unsafe"; a preceding CRT include may have already marked them
  *  deprecated, so the define below cannot undo it. */
@@ -33,12 +32,17 @@
 #include <cstdlib> // `std::strtoull`
 #include <cstring> // `std::strlen`
 
-#include <array>   // `std::array`
-#include <atomic>  // `std::atomic`
-#include <memory>  // `std::allocator`
-#include <new>     // `std::hardware_destructive_interference_size`
-#include <thread>  // `std::thread`
-#include <utility> // `std::exchange`, `std::addressof`
+#include <array>       // `std::array`
+#include <atomic>      // `std::atomic`
+#include <bit>         // `std::has_single_bit`
+#include <concepts>    // `std::same_as`, `std::unsigned_integral`
+#include <iterator>    // `std::default_sentinel_t`
+#include <memory>      // `std::allocator`
+#include <new>         // `std::hardware_destructive_interference_size`
+#include <span>        // `std::span`
+#include <thread>      // `std::thread`
+#include <type_traits> // `std::is_nothrow_invocable_r_v`
+#include <utility>     // `std::exchange`, `std::addressof`
 
 #include <forkunion.h> // `fu_status_t`, so the C++ mirror cannot drift from the ABI
 
@@ -363,39 +367,11 @@
 
 #pragma region Language and Architecture
 
-/** On C++17 and later we can detect misuse of lambdas that are not properly annotated, and on C++20
- *  and later we can use concepts for cleaner compile-time checks. MSVC pins @c __cplusplus at
- *  `199711L` unless given `/Zc:__cplusplus`, and reports the real standard through @c _MSVC_LANG
- *  instead - so read that where it is larger, or every gate below collapses to pre-C++17 on MSVC
- *  even under `/std:c++20`. */
-#if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
-#define FU_CPLUSPLUS_ _MSVC_LANG
-#else
-#define FU_CPLUSPLUS_ __cplusplus
-#endif
-
-#if FU_CPLUSPLUS_ >= 202002L
-#define FU_DETECT_CPP_20_ 1
-#else
-#define FU_DETECT_CPP_20_ 0
-#endif
-#if FU_CPLUSPLUS_ >= 201703L
-#define FU_DETECT_CPP_17_ 1
-#else
-#define FU_DETECT_CPP_17_ 0
-#endif
-#if FU_DETECT_CPP_20_ && defined(__cpp_concepts)
-#define FU_DETECT_CONCEPTS_ 1
-#define FU_REQUIRES_(condition) requires(condition)
-#else
-#define FU_DETECT_CONCEPTS_ 0
-#define FU_REQUIRES_(condition)
-#endif
-
-/*  C++17 is the floor: `if constexpr`, inline variables, and @c std::is_nothrow_invocable_r_v have
- *  no fallback here. Say so once, rather than let a C++14 build fail deeper in a cascade. */
-#if !FU_DETECT_CPP_17_
-#error "ForkUnion requires C++17 or later"
+/*  C++20 is the floor: concepts, @c std::span and `<bit>` have no fallback here. Say so once,
+ *  rather than let an older build fail deeper in a cascade. MSVC pins @c __cplusplus at `199711L`
+ *  unless given `/Zc:__cplusplus`, and reports the real standard through @c _MSVC_LANG instead. */
+#if !(__cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L))
+#error "ForkUnion requires C++20 or later"
 #endif
 
 /** The target architecture - each in its 64-bit form: x86-64, AArch64, RV64 - which the inline
@@ -433,36 +409,10 @@
 #define FU_DETECT_ARCH_X86_32_ 0
 #endif
 
-#if FU_DETECT_CPP_17_
-#include <type_traits> // `std::is_nothrow_invocable_r`
-#endif
-
-#if FU_DETECT_CPP_20_
-#include <concepts> // `std::same_as`, `std::invocable`
-#include <bit>      // `std::popcount`
-#endif
 #pragma endregion Language and Architecture
 
 #pragma region Compiler Intrinsics
-#if FU_DETECT_CPP_17_
-#define FU_MAYBE_UNUSED_ [[maybe_unused]]
-#else
-#if defined(__GNUC__) || defined(__clang__)
-#define FU_MAYBE_UNUSED_ __attribute__((unused))
-#elif defined(_MSC_VER)
-#define FU_MAYBE_UNUSED_ __pragma(warning(suppress : 4100 4189))
-#else
-#define FU_MAYBE_UNUSED_
-#endif
-#endif
-
 #define fu_unused_(x) ((void)(x))
-
-#if defined(__GNUC__) || defined(__clang__)
-#define fu_unlikely_(x) __builtin_expect(!!(x), 0)
-#else
-#define fu_unlikely_(x) (x)
-#endif
 
 /**
  *  @brief GNU-style @c __asm__ inline assembly is available: GCC and Clang have it, MSVC does not
@@ -667,10 +617,10 @@ using core_quality_t = int;
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
 /** @c MPOL_BIND - allocate strictly from the mask. */
-static constexpr int mpol_bind_k = 2;
+inline constexpr int mpol_bind_k = 2;
 
 /** @c MPOL_F_STATIC_NODES - literal ids, not cpuset-relative. */
-static constexpr int mpol_static_nodes_k = 1 << 15;
+inline constexpr int mpol_static_nodes_k = 1 << 15;
 
 #if defined(MPOL_BIND)
 static_assert(mpol_bind_k == MPOL_BIND, "MPOL_BIND is the kernel's; ours must match it");
@@ -683,10 +633,10 @@ static_assert(mpol_static_nodes_k == MPOL_F_STATIC_NODES, "MPOL_F_STATIC_NODES i
  *      An id at or past this is one the kernel cannot represent, so declining it declines nothing.
  *      Bounds @b domains, never cores - those are a @c core_mask, which grows.
  */
-static constexpr std::size_t max_memory_domains_k = 1024;
+inline constexpr std::size_t max_memory_domains_k = 1024;
 
 /** The node mask's width in `unsigned long` words, as the @c mbind syscall counts it. */
-static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
+inline constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
 #endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
 /**
@@ -728,7 +678,7 @@ enum memory_domain_index_t : std::size_t {};
  *  @note A refused affinity is not here. The pool still partitions work by domain when the kernel
  *      declines to pin; `all_threads_pinned()` is where that is reported.
  */
-enum class status_t : int {
+enum class [[nodiscard]] status_t : int {
 
     /** The call completed and any output holds a meaningful value. */
     success_k = fu_success_k,
@@ -1156,8 +1106,8 @@ inline capabilities_t capability_named(char const *name) noexcept {
  *  So the width is @c FU_DEFAULT_ALIGNMENT, picked from the target. Only @c alignas rests on this
  *  guess; a per-thread stride takes `destructive_interference_bytes()`, which asks the machine.
  */
-static constexpr std::size_t default_alignment_k = FU_DEFAULT_ALIGNMENT;
-static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignment_k - 1)) == 0,
+inline constexpr std::size_t default_alignment_k = FU_DEFAULT_ALIGNMENT;
+static_assert(default_alignment_k >= 8 && std::has_single_bit(default_alignment_k),
               "FU_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
 
 /**
@@ -1184,27 +1134,6 @@ inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
     unsigned char *to_bytes = reinterpret_cast<unsigned char *>(to);
     for (std::size_t byte_index = 0; byte_index < sizeof(value_type_); ++byte_index)
         to_bytes[byte_index] = from_bytes[byte_index];
-}
-
-/** Checks if the @p x is a power of two. */
-constexpr bool is_power_of_two(std::size_t x) noexcept { return x && ((x & (x - 1)) == 0); }
-
-/**
- *  @brief Counts the set bits in @p value.
- *  @see https://en.cppreference.com/w/cpp/numeric/popcount
- */
-template <typename scalar_type_>
-constexpr int popcount(scalar_type_ value) noexcept {
-    static_assert(std::is_unsigned<scalar_type_>::value, "Scalar type must be an unsigned integer");
-#if defined(__cpp_lib_bitops)
-    return std::popcount(value); // In C++20
-#else
-    // Kernighan's trick: each `value &= value - 1` clears the lowest set bit, so the loop runs once
-    // per set bit rather than once per bit width.
-    int count = 0;
-    for (; value; value &= static_cast<scalar_type_>(value - 1)) ++count;
-    return count;
-#endif
 }
 
 /**
@@ -1431,13 +1360,9 @@ struct symmetric_allocation_result {
  *  only @c ptr and @c count, so a probe on the name alone would match it and then fail to compile
  *  on the absent @c bytes member.
  */
-template <typename allocator_type_, typename = void>
-struct has_sized_allocate_at_least : std::false_type {};
-
 template <typename allocator_type_>
-struct has_sized_allocate_at_least<
-    allocator_type_, std::void_t<decltype(std::declval<allocator_type_ &>().allocate_at_least(std::size_t {}).bytes)>>
-    : std::true_type {};
+concept has_sized_allocate_at_least =
+    requires(allocator_type_ &allocator) { allocator.allocate_at_least(std::size_t {}).bytes; };
 
 #pragma endregion Pool Vocabulary
 
@@ -1470,7 +1395,7 @@ class limited_array {
     constexpr limited_array() noexcept = default;
 
     /** @return capacity_exhausted_k when already at the fixed ceiling; the value is not stored. */
-    [[nodiscard]] status_t push_back(value_t const &value) noexcept {
+    status_t push_back(value_t const &value) noexcept {
         if (size_ == capacity_k) return status_t::capacity_exhausted_k;
         values_[size_++] = value;
         return status_t::success_k;
@@ -1560,7 +1485,7 @@ class dynamic_array {
      *  @brief Reallocates to @p new_size value-initialized elements, discarding any prior contents.
      *  @return false on allocation failure, leaving the array empty rather than half-built.
      */
-    [[nodiscard]] status_t resize(std::size_t const new_size) noexcept {
+    status_t resize(std::size_t const new_size) noexcept {
         reset();
         if (new_size == 0) return status_t::success_k;
         value_t *fresh = allocator_.allocate(new_size);
@@ -1583,7 +1508,7 @@ class dynamic_array {
      *      before it is read.
      *  @sa sharded_array::resize_uninitialized, the same contract.
      */
-    [[nodiscard]] status_t resize_uninitialized(std::size_t const new_size) noexcept {
+    status_t resize_uninitialized(std::size_t const new_size) noexcept {
         static_assert(std::is_trivially_default_constructible_v<value_t> && std::is_trivially_destructible_v<value_t>,
                       "Uninitialized storage is only safe for trivial value types");
         reset();
@@ -1597,7 +1522,7 @@ class dynamic_array {
     }
 
     /** Grows capacity to at least @p new_capacity, preserving the live elements. */
-    [[nodiscard]] status_t reserve(std::size_t const new_capacity) noexcept {
+    status_t reserve(std::size_t const new_capacity) noexcept {
         static_assert(std::is_trivially_copyable_v<value_t> || std::is_nothrow_move_constructible_v<value_t>,
                       "reserve moves elements; the value type must be trivially copyable or nothrow-movable");
         if (new_capacity <= capacity_) return status_t::success_k;
@@ -1618,7 +1543,7 @@ class dynamic_array {
     }
 
     /** Appends @p value, doubling capacity when full. */
-    [[nodiscard]] status_t push_back(value_t const &value) noexcept {
+    status_t push_back(value_t const &value) noexcept {
         static_assert(std::is_nothrow_copy_constructible_v<value_t>,
                       "push_back copies the value; the value type must be nothrow-copy-constructible");
         if (size_ == capacity_) {
@@ -1735,7 +1660,7 @@ class dynamic_padded_array {
         deallocate();
     }
 
-    [[nodiscard]] status_t resize(std::size_t new_objects_count) noexcept {
+    status_t resize(std::size_t new_objects_count) noexcept {
         destroy_all();
         deallocate();
 
@@ -1754,7 +1679,7 @@ class dynamic_padded_array {
         // `std::allocator` cannot, so take exactly `total` and remember that as the size to free.
         char *raw = nullptr;
         std::size_t bytes = 0;
-        if constexpr (has_sized_allocate_at_least<raw_allocator_t>::value) {
+        if constexpr (has_sized_allocate_at_least<raw_allocator_t>) {
             auto new_result = allocator_.allocate_at_least(total);
             if (!new_result) return status_t::bad_alloc_k;
             raw = new_result.ptr;
@@ -1967,8 +1892,7 @@ struct tasks_range {
 
         constexpr index_t operator*() const noexcept { return task; }
         constexpr iterator &operator++() noexcept { return ++task, *this; }
-        constexpr bool operator!=(iterator const &other) const noexcept { return task != other.task; }
-        constexpr bool operator==(iterator const &other) const noexcept { return task == other.task; }
+        constexpr bool operator==(iterator const &) const noexcept = default;
     };
 
     constexpr iterator begin() const noexcept { return iterator {first}; }
@@ -2036,12 +1960,6 @@ struct indexed_split {
 using indexed_split_t = indexed_split<>;
 
 /**
- *  @brief Pre-C++20 sentinel type for iterators.
- *  @see https://en.cppreference.com/w/cpp/iterator/default_sentinel.html
- */
-struct default_sentinel_t {};
-
-/**
  *  @brief Iterator range over integers using a stride that is co-prime with length.
  *
  *  - Constant-time dereference: two integer ops and a branchless wrap-around.
@@ -2100,8 +2018,7 @@ struct coprime_permutation_range {
             return tmp;
         }
 
-        inline bool operator==(default_sentinel_t) const noexcept { return elements_left_ == 0; }
-        inline bool operator!=(default_sentinel_t s) const noexcept { return !(*this == s); }
+        bool operator==(std::default_sentinel_t) const noexcept { return elements_left_ == 0; }
 
       private:
         friend struct coprime_permutation_range;
@@ -2145,7 +2062,7 @@ struct coprime_permutation_range {
      *      would descend on that one victim together before their strides pulled them apart.
      */
     iterator begin() const noexcept { return iterator(start_, length_, stride_, first_offset_, length_); }
-    default_sentinel_t end() const noexcept { return {}; }
+    std::default_sentinel_t end() const noexcept { return {}; }
     index_t size() const noexcept { return length_; }
 
   private:
@@ -2342,7 +2259,7 @@ class invoke_for_n_dynamic {
         // `first_offset_ = seed % length` with `seed = thread < threads_` - so the uncontended line
         // drains first, needing no self-guard.
         coprime_permutation_range<index_type_> victims(0, threads_, thread);
-        for (auto victim = victims.begin(); victim != default_sentinel_t {}; ++victim)
+        for (auto victim = victims.begin(); victim != std::default_sentinel; ++victim)
             drain_claim(pool_, *victim, at, fork_);
     }
 
@@ -2428,39 +2345,19 @@ struct broadcast_join {
 
 #pragma region Callback Concepts
 
+/** A @c for_threads fork: @c noexcept, and handed either a @c thread_in_domain or a bare index. */
 template <typename fork_type_, typename index_type_ = std::size_t>
-constexpr bool can_be_for_thread_callback() noexcept {
-    using fork_t = fork_type_;
-    using index_t = index_type_;
-#if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, thread_in_domain<index_t>> ||
-           std::is_nothrow_invocable_r_v<void, fork_t, index_t>;
-#else
-    return true;
-#endif
-}
+concept is_thread_callback = std::is_nothrow_invocable_r_v<void, fork_type_, thread_in_domain<index_type_>> ||
+                             std::is_nothrow_invocable_r_v<void, fork_type_, index_type_>;
 
+/** A @c for_n fork: @c noexcept, handed a task index and its @c thread_in_domain. */
 template <typename fork_type_, typename index_type_ = std::size_t>
-constexpr bool can_be_for_task_callback() noexcept {
-    using fork_t = fork_type_;
-    using index_t = index_type_;
-#if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, index_t, thread_in_domain<index_t>>;
-#else
-    return true;
-#endif
-}
+concept is_task_callback = std::is_nothrow_invocable_r_v<void, fork_type_, index_type_, thread_in_domain<index_type_>>;
 
+/** A @c for_slices fork: @c noexcept, handed a @c tasks_range and its @c thread_in_domain. */
 template <typename fork_type_, typename index_type_ = std::size_t>
-constexpr bool can_be_for_slice_callback() noexcept {
-    using fork_t = fork_type_;
-    using index_t = index_type_;
-#if FU_DETECT_CPP_17_ && defined(__cpp_lib_is_invocable)
-    return std::is_nothrow_invocable_r_v<void, fork_t, tasks_range<index_t>, thread_in_domain<index_t>>;
-#else
-    return true;
-#endif
-}
+concept is_slice_callback =
+    std::is_nothrow_invocable_r_v<void, fork_type_, tasks_range<index_type_>, thread_in_domain<index_type_>>;
 #pragma endregion Callback Concepts
 
 #pragma region Dummy Pool
@@ -2487,41 +2384,36 @@ struct dummy_pool_t {
     thread_index_t threads_count() const noexcept { return 1; }
     caller_exclusivity_t caller_exclusivity() const noexcept { return caller_inclusive_k; }
     index_t compute_domains_count() const noexcept { return 1; }
-    thread_index_t threads_count(FU_MAYBE_UNUSED_ index_t compute_domain) const noexcept { return 1; }
-    index_t thread_compute_domain(FU_MAYBE_UNUSED_ thread_index_t thread) const noexcept { return 0; }
-    thread_index_t thread_local_index(FU_MAYBE_UNUSED_ thread_index_t thread,
-                                      FU_MAYBE_UNUSED_ index_t compute_domain) const noexcept {
+    thread_index_t threads_count([[maybe_unused]] index_t compute_domain) const noexcept { return 1; }
+    index_t thread_compute_domain([[maybe_unused]] thread_index_t thread) const noexcept { return 0; }
+    thread_index_t thread_local_index([[maybe_unused]] thread_index_t thread,
+                                      [[maybe_unused]] index_t compute_domain) const noexcept {
         return 0;
     }
 
-    template <typename fork_type_>
-    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    template <is_thread_callback<index_t> fork_type_>
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
         fork(thread_index_t {0});
         return 1; // ! Tokens are always odd; the work already ran
     }
-    void unsafe_join(FU_MAYBE_UNUSED_ generation_t generation) noexcept {}
+    void unsafe_join([[maybe_unused]] generation_t generation) noexcept {}
     void unsafe_join() noexcept {}
-    bool is_complete(FU_MAYBE_UNUSED_ generation_t generation) const noexcept { return true; }
+    bool is_complete([[maybe_unused]] generation_t generation) const noexcept { return true; }
 
-    template <typename fork_type_ = dummy_lambda_t>
-    FU_REQUIRES_((can_be_for_thread_callback<fork_type_, index_t>()))
+    template <is_thread_callback<index_t> fork_type_ = dummy_lambda_t>
     broadcast_join<dummy_pool_t, fork_type_> for_threads(fork_type_ &&fork) noexcept {
         return {*this, std::forward<fork_type_>(fork)};
     }
-    template <typename fork_type_ = dummy_lambda_t>
-    FU_REQUIRES_((can_be_for_slice_callback<fork_type_, index_t>()))
+    template <is_slice_callback<index_t> fork_type_ = dummy_lambda_t>
     broadcast_join<dummy_pool_t, invoke_for_slices<fork_type_, index_t>> for_slices(index_t n,
                                                                                     fork_type_ &&fork) noexcept {
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
     }
-    template <typename fork_type_ = dummy_lambda_t>
-    FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
+    template <is_task_callback<index_t> fork_type_ = dummy_lambda_t>
     broadcast_join<dummy_pool_t, invoke_for_n<fork_type_, index_t>> for_n(index_t n, fork_type_ &&fork) noexcept {
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};
     }
-    template <typename fork_type_ = dummy_lambda_t>
-    FU_REQUIRES_((can_be_for_task_callback<fork_type_, index_t>()))
+    template <is_task_callback<index_t> fork_type_ = dummy_lambda_t>
     broadcast_join<dummy_pool_t, invoke_for_n<fork_type_, index_t>> for_n_dynamic(index_t n,
                                                                                   fork_type_ &&fork) noexcept {
         return {*this, {n, threads_count(), std::forward<fork_type_>(fork)}};

@@ -103,8 +103,8 @@ using label_t = std::uint32_t;
 
 /** A read-only CSR as two spans - the interface every kernel takes. */
 struct csr_view_t {
-    fu::span<edge_offset_t const> row_offsets;
-    fu::span<vertex_t const> column_indices;
+    std::span<edge_offset_t const> row_offsets;
+    std::span<vertex_t const> column_indices;
 
     vertex_t vertices() const noexcept { return static_cast<vertex_t>(row_offsets.size() - 1); }
     edge_offset_t edges() const noexcept { return column_indices.size(); }
@@ -290,7 +290,7 @@ struct replicated_csr_t {
                           fu::machine_topology_t const &topology) noexcept {
         if (failed(destination.resize_uninitialized(topology, host.size()))) return false;
         for (std::size_t domain = 0; domain < destination.memory_domains_count(); ++domain) {
-            fu::span<value_type_> const slice =
+            std::span<value_type_> const slice =
                 destination.on_memory_domain(static_cast<fu::memory_domain_index_t>(domain));
             std::memcpy(slice.data(), host.data(), host.size() * sizeof(value_type_));
         }
@@ -336,13 +336,13 @@ struct run_context_t {
     fu::machine_topology_t const &topology;
 
     /** Per-thread change tallies, zeroed each round. */
-    fu::span<counter_t> counters;
+    std::span<counter_t> counters;
 
     /** The labels a round reads, seeded with each vertex's own index. */
-    fu::span<label_t> labels_a;
+    std::span<label_t> labels_a;
 
     /** The labels a round writes. */
-    fu::span<label_t> labels_b;
+    std::span<label_t> labels_b;
 
     /** Worker count the @c counters span is sized to. */
     std::size_t threads;
@@ -371,10 +371,10 @@ static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_
 }
 
 /** Zeroes the per-thread tallies and sums them - the tiny serial bookends of every round. */
-static void zero_counters(fu::span<counter_t> counters) noexcept {
+static void zero_counters(std::span<counter_t> counters) noexcept {
     for (std::size_t t = 0; t < counters.size(); ++t) counters[t].value = 0;
 }
-static std::uint64_t sum_counters(fu::span<counter_t> counters) noexcept {
+static std::uint64_t sum_counters(std::span<counter_t> counters) noexcept {
     std::uint64_t total = 0;
     for (std::size_t t = 0; t < counters.size(); ++t) total += counters[t].value;
     return total;
@@ -459,7 +459,7 @@ static void run_openmp_dynamic(run_context_t &c) noexcept { run_openmp<true>(c);
 template <typename partitioner_>
 static void run_taskflow(run_context_t &c, partitioner_ partitioner) noexcept {
     csr_view_t const graph = c.graph;
-    fu::span<counter_t> const counters = c.counters;
+    std::span<counter_t> const counters = c.counters;
     tf::Executor &executor = *c.taskflow;
     vertex_t const vertices = graph.vertices();
     label_t *old_labels = c.labels_a.data(), *new_labels = c.labels_b.data();

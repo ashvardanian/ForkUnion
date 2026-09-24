@@ -25,7 +25,7 @@ namespace forkunion {
  *  and spells the same idea @c pthread_threadid_np, returning 64 bits. Both are the number a
  *  scheduler or a profiler will show you; neither is a @c pthread_t.
  */
-FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
+inline std::uint64_t current_thread_id() noexcept {
 #if FU_ON_LINUX && FU_WITH_OS_THREADS
     // The `gettid()` wrapper only appeared in glibc 2.30; the syscall reaches every libc.
     return static_cast<std::uint64_t>(::syscall(SYS_gettid));
@@ -51,7 +51,7 @@ FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
  *  Apple's takes only a name and always renames the caller. Rather than branch on that at every
  *  call, the worker names itself once it is running - the one shape both kernels agree on.
  */
-FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ char const *thread_name) noexcept {
+inline void set_current_thread_name([[maybe_unused]] char const *thread_name) noexcept {
 #if FU_ON_LINUX && FU_WITH_OS_THREADS
     (void)::pthread_setname_np(::pthread_self(), thread_name);
 #elif FU_ON_APPLE
@@ -86,7 +86,7 @@ FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ cha
  *  Not the same as `hardware_concurrency()` on Linux, where cores can be hot-plugged and the kernel
  *  reserves IDs for cores that are offline right now. Elsewhere the distinction does not exist.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
+inline std::size_t possible_cores() noexcept {
 #if FU_ON_WINDOWS
     DWORD const configured = ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     if (configured > 0) return static_cast<std::size_t>(configured);
@@ -109,23 +109,19 @@ FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
  *  so the index is 0..63); the remaining bits hold the group number. Everywhere else a @c core_id_t
  *  is still just an opaque, comparable id - only the pinning path decodes it. */
 #if FU_ON_WINDOWS
-static constexpr int win_core_group_shift_k = 6;
-static constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
+inline constexpr int win_core_group_shift_k = 6;
+inline constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
 
 /** Logical processors per Windows processor group - the @c KAFFINITY bit-width, a hard ABI cap of
  *  64 @b per @b group, never a cap on total cores - a machine with more uses several groups. */
-static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
+inline constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
 
-FU_MAYBE_UNUSED_ static inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
+inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
     return (static_cast<core_id_t>(group) << win_core_group_shift_k) |
            (static_cast<core_id_t>(bit) & win_core_index_mask_k);
 }
-FU_MAYBE_UNUSED_ static inline WORD win_core_group(core_id_t id) noexcept {
-    return static_cast<WORD>(id >> win_core_group_shift_k);
-}
-FU_MAYBE_UNUSED_ static inline unsigned win_core_index(core_id_t id) noexcept {
-    return static_cast<unsigned>(id & win_core_index_mask_k);
-}
+inline WORD win_core_group(core_id_t id) noexcept { return static_cast<WORD>(id >> win_core_group_shift_k); }
+inline unsigned win_core_index(core_id_t id) noexcept { return static_cast<unsigned>(id & win_core_index_mask_k); }
 #endif // FU_ON_WINDOWS
 
 /*  The unit each kernel writes its affinity mask in. Deliberately not @c std::uint64_t everywhere:
@@ -187,12 +183,10 @@ class core_mask {
     }
 
     /** @return bad_alloc_k on failure, leaving the mask unusable rather than half-sized. */
-    [[nodiscard]] status_t resize_for(std::size_t const cores) noexcept {
-        return words_.resize(div_ceil(cores, bits_per_word_k));
-    }
+    status_t resize_for(std::size_t const cores) noexcept { return words_.resize(div_ceil(cores, bits_per_word_k)); }
 
     /** Sizes the mask to hold every id this machine can produce, per @ref id_space. */
-    [[nodiscard]] status_t resize() noexcept { return resize_for(id_space()); }
+    status_t resize() noexcept { return resize_for(id_space()); }
 
     void reset() noexcept { words_.reset(); }
     void clear() noexcept { std::memset(words_.data(), 0, bytes()); }
@@ -218,7 +212,7 @@ class core_mask {
     std::size_t count() const noexcept {
         std::size_t total = 0;
         for (std::size_t i = 0; i < words_.size(); ++i)
-            total += static_cast<std::size_t>(popcount(static_cast<std::uint64_t>(words_[i])));
+            total += static_cast<std::size_t>(std::popcount(static_cast<std::uint64_t>(words_[i])));
         return total;
     }
 };
@@ -233,8 +227,7 @@ using core_mask_t = core_mask<>;
  *  @brief Reads the cores the calling thread may run on into @p cores.
  *  @return false where the platform exposes no such mask, which is @b not an error.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t capture_thread_cores(
-    FU_MAYBE_UNUSED_ core_mask_t &cores) noexcept {
+inline status_t capture_thread_cores([[maybe_unused]] core_mask_t &cores) noexcept {
 #if FU_ON_LINUX
     // A `cpu_set_t` is an array of `__cpu_mask`, exactly `core_mask_word_t` here. The kernel
     // rejects a buffer smaller than its cpumask; grow once instead of guessing `nr_cpu_ids`.
@@ -280,7 +273,7 @@ using core_mask_t = core_mask<>;
  *  @note Prefer this to @c std::thread::hardware_concurrency when sizing a pool: the latter counts
  *      the machine's cores, not the ones this process was given.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
+inline std::size_t allowed_cores_count() noexcept {
     core_mask_t allowed;
     if (succeeded(capture_thread_cores(allowed))) {
         std::size_t const allowed_count = allowed.count();
@@ -317,8 +310,8 @@ using native_thread_t = pthread_t;
  *
  *  @sa try_pin_thread_to_cores, the adaptor that builds a mask from a core list.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t apply_thread_cores(
-    FU_MAYBE_UNUSED_ native_thread_t thread, FU_MAYBE_UNUSED_ core_mask_t const &cores) noexcept {
+inline status_t apply_thread_cores([[maybe_unused]] native_thread_t thread,
+                                   [[maybe_unused]] core_mask_t const &cores) noexcept {
 #if FU_ON_WINDOWS
     // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them,
     // and a thread cannot span groups. Cores from another group are a caller error, not a mask.
@@ -369,9 +362,8 @@ using native_thread_t = pthread_t;
  *  @note A thin adaptor: it builds a @c core_mask and defers to @c try_apply_thread_cores, which is
  *      where the per-platform placement lives. It owns no platform logic of its own.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t pin_thread_to_cores(
-    FU_MAYBE_UNUSED_ native_thread_t thread, FU_MAYBE_UNUSED_ core_id_t const *cores,
-    FU_MAYBE_UNUSED_ std::size_t const count) noexcept {
+inline status_t pin_thread_to_cores([[maybe_unused]] native_thread_t thread, [[maybe_unused]] core_id_t const *cores,
+                                    [[maybe_unused]] std::size_t const count) noexcept {
 #if FU_WITH_PLACE_THREADS_BY_AFFINITY
     if (count == 0) return status_t::invalid_argument_k;
     core_mask_t mask;
@@ -398,8 +390,7 @@ using native_thread_t = pthread_t;
  *  through @c mbind on the allocation, not through the calling thread's policy, and
  *  @c numa_run_on_node would rewrite the very CPU mask we just restored.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t restore_thread_cores(
-    FU_MAYBE_UNUSED_ core_mask_t const &saved) noexcept {
+inline status_t restore_thread_cores([[maybe_unused]] core_mask_t const &saved) noexcept {
 #if FU_WITH_PLACE_THREADS_BY_AFFINITY
     if (!saved.valid()) return status_t::invalid_argument_k;
 #if FU_ON_WINDOWS
@@ -421,7 +412,7 @@ using native_thread_t = pthread_t;
  *  @brief Reads one unsigned integer out of a `/sys` or `/proc` file.
  *  @return false where the file is absent or holds no number - @p value is then untouched.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t read_uint_at_path(char const *path, std::size_t &value) noexcept {
+inline status_t read_uint_at_path(char const *path, std::size_t &value) noexcept {
     FILE *file = ::fopen(path, "r");
     if (!file) return status_t::topology_unavailable_k;
     unsigned long long parsed = 0;
@@ -438,8 +429,7 @@ using native_thread_t = pthread_t;
  *  @note Truncation is a failure, not a prefix: a clipped cpulist names fewer cores than the kernel
  *      does, and would read like a complete answer.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t read_line_at_path(char const *path, char *line,
-                                                                        std::size_t const line_capacity) noexcept {
+inline status_t read_line_at_path(char const *path, char *line, std::size_t const line_capacity) noexcept {
     FILE *file = ::fopen(path, "r");
     if (!file) return status_t::topology_unavailable_k;
     bool complete = ::fgets(line, static_cast<int>(line_capacity), file) != nullptr;
@@ -476,16 +466,16 @@ struct ram_page_setting_t {
     std::size_t free_pages {0};
 };
 
-static constexpr std::size_t page_size_4k_k = 4ull * 1024ull;                     // 4 KB
-static constexpr std::size_t page_size_2m_k = 2ull * 1024ull * 1024ull;           // 2 MB
-static constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull; // 1 GB
+inline constexpr std::size_t page_size_4k_k = 4ull * 1024ull;                     // 4 KB
+inline constexpr std::size_t page_size_2m_k = 2ull * 1024ull * 1024ull;           // 2 MB
+inline constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull; // 1 GB
 
 /**
  *  @brief Fetches the RAM page size in bytes.
  *  @return The size of a memory page in bytes, typically 4096 on most systems.
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t ram_page_size() noexcept {
+inline std::size_t ram_page_size() noexcept {
 #if FU_ON_POSIX
     return static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
 #elif FU_ON_WINDOWS
@@ -502,7 +492,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t ram_page_size() noexcept {
  *  @return Total system RAM in bytes, or 0 if detection fails.
  *  @note This function provides cross-platform detection of total physical memory.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t volume_ram() noexcept {
+inline std::size_t volume_ram() noexcept {
 #if FU_ON_LINUX
     // On Linux, read from /proc/meminfo
     FILE *meminfo_file = ::fopen("/proc/meminfo", "r");
@@ -608,7 +598,7 @@ class ram_page_settings {
      *  @brief Fetches all available huge page sizes for the given NUMA node.
      *  @note Kernel support doesn't mean that pages of that size have a valid mount point.
      */
-    [[nodiscard]] status_t harvest(FU_MAYBE_UNUSED_ memory_domain_id_t memory_domain_id) noexcept {
+    status_t harvest([[maybe_unused]] memory_domain_id_t memory_domain_id) noexcept {
         assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
 #if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
@@ -741,8 +731,7 @@ class ram_page_settings {
      *  @return true if reservation was successful, false otherwise
      *  @note Requires root privileges or appropriate capabilities
      */
-    [[nodiscard]] status_t change(memory_domain_id_t memory_domain_id, std::size_t page_size_bytes,
-                                  std::size_t num_pages) noexcept {
+    status_t change(memory_domain_id_t memory_domain_id, std::size_t page_size_bytes, std::size_t num_pages) noexcept {
         assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
         // Find the matching page size entry
@@ -883,7 +872,7 @@ struct compute_domain_t {
  *  @param[in] core_id The CPU core ID to query.
  *  @return Socket ID >= 0 if successful, or -1 if failed.
  */
-FU_MAYBE_UNUSED_ static inline socket_id_t socket_id_of_core(FU_MAYBE_UNUSED_ core_id_t core_id) noexcept {
+inline socket_id_t socket_id_of_core([[maybe_unused]] core_id_t core_id) noexcept {
 
     int socket_id = -1;
 
@@ -913,7 +902,7 @@ FU_MAYBE_UNUSED_ static inline socket_id_t socket_id_of_core(FU_MAYBE_UNUSED_ co
  *  performance cores report ~1024, efficiency cores less. A return of 0 means the core is
  *  homogeneous or the kernel does not expose capacities - the whole node is then one class.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t capacity_of_core(FU_MAYBE_UNUSED_ core_id_t core_id) noexcept {
+inline std::size_t capacity_of_core([[maybe_unused]] core_id_t core_id) noexcept {
 
     std::size_t capacity = 0;
 
@@ -941,7 +930,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t capacity_of_core(FU_MAYBE_UNUSED_ cor
  *      and `node/online`. Ranges arrive inclusive on both ends, as written.
  */
 template <typename visitor_type_>
-FU_MAYBE_UNUSED_ static inline void for_each_id_list_range(char const *line, visitor_type_ &&visit) noexcept {
+inline void for_each_id_list_range(char const *line, visitor_type_ &&visit) noexcept {
     for (char const *cursor = line; *cursor;) {
         char *next = nullptr;
         long const low = ::strtol(cursor, &next, 10);
@@ -958,8 +947,7 @@ FU_MAYBE_UNUSED_ static inline void for_each_id_list_range(char const *line, vis
  *  @brief Whether every core in a Linux cpulist line - "0", "0-3", "0,2-4" - belongs to @p cores.
  *  @note Pass only complete lines: a truncated tail could name cores the verdict never saw.
  */
-FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t const *cores,
-                                                    std::size_t const cores_count) noexcept {
+inline bool cpu_list_within(char const *line, core_id_t const *cores, std::size_t const cores_count) noexcept {
     bool within = true;
     for_each_id_list_range(line, [&](long const low, long const high) noexcept {
         for (long listed = low; listed <= high && within; ++listed) {
@@ -986,9 +974,9 @@ FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t 
  *  containment. Arm has no userspace cache-geometry registers - @c CCSIDR_EL1 is EL1-only - so
  *  sysfs is the only Arm source and other Arm hosts honestly report 0.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
-    FU_MAYBE_UNUSED_ core_id_t core_id, FU_MAYBE_UNUSED_ core_id_t const *domain_cores,
-    FU_MAYBE_UNUSED_ std::size_t domain_cores_count) noexcept {
+inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
+                                       [[maybe_unused]] core_id_t const *domain_cores,
+                                       [[maybe_unused]] std::size_t domain_cores_count) noexcept {
 #if FU_ON_LINUX
     std::size_t deepest_bytes = 0;
     for (int index = 0; index < 16; ++index) {
@@ -1083,13 +1071,13 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
  *  size arithmetic. Every source is gated to a power of two in [16, 1024], so a bogus reading falls
  *  through to the caller's compiled default rather than sizing an arena.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
+inline std::size_t cache_line_bytes() noexcept {
 #if FU_ON_LINUX
     if (FILE *file = ::fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r")) {
         unsigned long long parsed = 0;
         bool const parsed_one = ::fscanf(file, "%llu", &parsed) == 1;
         ::fclose(file);
-        if (parsed_one && parsed >= 16 && parsed <= 1024 && is_power_of_two(parsed))
+        if (parsed_one && parsed >= 16 && parsed <= 1024 && std::has_single_bit(parsed))
             return static_cast<std::size_t>(parsed);
     }
 #endif
@@ -1100,7 +1088,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
     unsigned long long apple_line = 0;
     std::size_t apple_length = sizeof(apple_line);
     if (::sysctlbyname("hw.cachelinesize", &apple_line, &apple_length, nullptr, 0) == 0 && //
-        apple_line >= 16 && apple_line <= 1024 && is_power_of_two(apple_line))
+        apple_line >= 16 && apple_line <= 1024 && std::has_single_bit(apple_line))
         return static_cast<std::size_t>(apple_line);
 #endif
 #if FU_ON_WINDOWS
@@ -1120,7 +1108,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
                     offset += record->Size;
                 }
             std::free(buffer);
-            if (widest >= 16 && widest <= 1024 && is_power_of_two(widest)) return widest;
+            if (widest >= 16 && widest <= 1024 && std::has_single_bit(widest)) return widest;
         }
 #endif
 #if FU_DETECT_ARCH_X86_64_
@@ -1132,7 +1120,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
     if (line_has_deterministic || cpuid(0, 0).eax >= 0x4u) {
         std::uint32_t const leaf = line_has_deterministic ? line_deterministic_leaf : 0x4u;
         std::size_t const bytes = (cpuid(leaf, 0).ebx & 0xFFFu) + 1;
-        if (bytes >= 16 && bytes <= 1024 && is_power_of_two(bytes)) return bytes;
+        if (bytes >= 16 && bytes <= 1024 && std::has_single_bit(bytes)) return bytes;
     }
 #endif
     return 0;
@@ -1147,7 +1135,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
  *  cover both. Everywhere else the line is the unit. This is the quantity @c default_alignment_k
  *  guesses from the target when no probe can run.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t destructive_interference_bytes() noexcept {
+inline std::size_t destructive_interference_bytes() noexcept {
     std::size_t const line = cache_line_bytes();
     if (line == 0) return 0;
     return FU_DETECT_ARCH_X86_64_ ? line * 2 : line;
@@ -1162,13 +1150,13 @@ FU_MAYBE_UNUSED_ static inline std::size_t destructive_interference_bytes() noex
  *  where @c libnuma read it from too. */
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
 
-static constexpr char const *sysfs_node_root_k = "/sys/devices/system/node";
+inline constexpr char const *sysfs_node_root_k = "/sys/devices/system/node";
 
 /**
  *  @brief Whether this kernel enumerates memory domains at all - what @c numa_available answered.
  *  @note A kernel built without @c CONFIG_NUMA mounts no such directory.
  */
-FU_MAYBE_UNUSED_ static inline bool linux_has_memory_domains() noexcept {
+inline bool linux_has_memory_domains() noexcept {
     DIR *node_dir = ::opendir(sysfs_node_root_k);
     if (!node_dir) return false;
     ::closedir(node_dir);
@@ -1179,7 +1167,7 @@ FU_MAYBE_UNUSED_ static inline bool linux_has_memory_domains() noexcept {
  *  @brief Highest online memory-domain id, or -1 if none can be read - what @c numa_max_node gives.
  *  @note `node/online` is a gappy id list after hot-unplug, e.g. "0,2", so this is a ceiling only.
  */
-FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcept {
+inline memory_domain_id_t max_memory_domain_id() noexcept {
     char path[256], line[256];
     int const path_result = std::snprintf(path, sizeof(path), "%s/online", sysfs_node_root_k);
     if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return -1; // ? Path too long
@@ -1199,8 +1187,7 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
  *      function's negative, while success with zero @p bytes is a memoryless domain, still real.
  *      Its @c free out-parameter is not mirrored - the only caller wrote it and never read it.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t read_ram_bytes_of_memory_domain(memory_domain_id_t const id,
-                                                                                      std::size_t &bytes) noexcept {
+inline status_t read_ram_bytes_of_memory_domain(memory_domain_id_t const id, std::size_t &bytes) noexcept {
     char path[256], line[256];
     int const path_result = std::snprintf(path, sizeof(path), "%s/node%d/meminfo", sysfs_node_root_k, id);
     if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path))
@@ -1229,8 +1216,7 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
  *  @note A @c core_mask, so the harvest's own allocator owns it - @c numa_allocate_cpumask malloc'd
  *      behind its back, the very thing @c core_mask refuses @c CPU_ALLOC over.
  */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t capture_memory_domain_cores(memory_domain_id_t const id,
-                                                                                  core_mask_t &cores) noexcept {
+inline status_t capture_memory_domain_cores(memory_domain_id_t const id, core_mask_t &cores) noexcept {
     char path[256], line[1024];
     int const path_result = std::snprintf(path, sizeof(path), "%s/node%d/cpulist", sysfs_node_root_k, id);
     if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path))
@@ -1270,12 +1256,8 @@ struct win_group_class_cell_t {
  *  @note Version macros are unreliable here - MinGW reports Windows 7 yet defines the member - so
  *      we probe the member itself. Older SDKs model a node as a single group, read by the fallback.
  */
-template <typename numa_relationship_type_, typename = void>
-struct win_numa_has_group_masks : std::false_type {};
 template <typename numa_relationship_type_>
-struct win_numa_has_group_masks<numa_relationship_type_,
-                                std::void_t<decltype(std::declval<numa_relationship_type_ &>().GroupMasks)>>
-    : std::true_type {};
+concept win_numa_has_group_masks = requires(numa_relationship_type_ &node) { node.GroupMasks; };
 
 /**
  *  @brief Invokes @p visitor with @b (group,mask) for every processor group a NUMA @p node owns.
@@ -1284,8 +1266,8 @@ struct win_numa_has_group_masks<numa_relationship_type_,
  *      is thus enumerated in full on new SDKs, and read through its single group on old ones.
  */
 template <typename numa_relationship_type_, typename visitor_type_>
-static inline void win_numa_for_each_group(numa_relationship_type_ const &node, visitor_type_ &&visitor) noexcept {
-    if constexpr (win_numa_has_group_masks<numa_relationship_type_>::value) {
+inline void win_numa_for_each_group(numa_relationship_type_ const &node, visitor_type_ &&visitor) noexcept {
+    if constexpr (win_numa_has_group_masks<numa_relationship_type_>) {
         if (node.GroupCount == 0) return visitor(node.GroupMask.Group, node.GroupMask.Mask);
         for (WORD g = 0; g < node.GroupCount; ++g) visitor(node.GroupMasks[g].Group, node.GroupMasks[g].Mask);
     }
@@ -1297,7 +1279,7 @@ static inline void win_numa_for_each_group(numa_relationship_type_ const &node, 
  *  @return @p fallback when package data is unavailable or no package matches.
  *  @note Packages and nodes are both few, so scanning the package buffer per node needs no scratch.
  */
-FU_MAYBE_UNUSED_ static inline socket_id_t win_socket_for_node( //
+inline socket_id_t win_socket_for_node( //
     BYTE const *package_buffer, DWORD package_len, NUMA_NODE_RELATIONSHIP const &node, socket_id_t fallback) noexcept {
     if (!package_buffer) return fallback;
     socket_id_t socket_index = 0;
@@ -1330,7 +1312,7 @@ FU_MAYBE_UNUSED_ static inline socket_id_t win_socket_for_node( //
  *  @brief Reads an unsigned integer @c sysctl by name, like "hw.nperflevels", or 0 if unavailable.
  *  @sa Used to harvest the Apple Silicon performance-level topology.
  */
-FU_MAYBE_UNUSED_ static inline std::size_t apple_sysctl_uint(char const *name) noexcept {
+inline std::size_t apple_sysctl_uint(char const *name) noexcept {
     unsigned long long value = 0;
     std::size_t length = sizeof(value);
     if (::sysctlbyname(name, &value, &length, nullptr, 0) != 0) return 0;
@@ -1342,18 +1324,16 @@ FU_MAYBE_UNUSED_ static inline std::size_t apple_sysctl_uint(char const *name) n
  *  spawn, so that capability gates it: disabling it drops producer, field, and consumer alike. */
 #if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
 
-/** Reads a string @c sysctl by name into @p out - always NUL-terminated - returning success. */
-[[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t apple_sysctl_string(char const *name, char *out,
-                                                                          std::size_t cap) noexcept {
-    if (cap == 0) return status_t::invalid_argument_k;
+/** Reads a string @c sysctl by name into @p out, NUL-terminated, and empty where it is missing. */
+inline void apple_sysctl_string(char const *name, char *out, std::size_t cap) noexcept {
+    if (cap == 0) return;
     std::size_t length = cap;
     if (::sysctlbyname(name, out, &length, nullptr, 0) != 0) {
         out[0] = '\0';
-        return status_t::topology_unavailable_k;
+        return;
     }
     // ? A value that exactly filled the buffer arrives unterminated
     out[cap - 1] = '\0';
-    return status_t::success_k;
 }
 
 /**
@@ -1371,7 +1351,7 @@ enum apple_core_quality_t : core_quality_t {
  *  @brief The name Apple gives an absolute core class, or @c nullptr for an unknown one.
  *  @note The one source of truth for the names; @c apple_core_quality_from_name inverts it.
  */
-FU_MAYBE_UNUSED_ static inline char const *apple_core_quality_name(core_quality_t const quality) noexcept {
+inline char const *apple_core_quality_name(core_quality_t const quality) noexcept {
     switch (quality) {
     case apple_efficiency_k: return "Efficiency";
     case apple_performance_k: return "Performance";
@@ -1384,7 +1364,7 @@ FU_MAYBE_UNUSED_ static inline char const *apple_core_quality_name(core_quality_
  *  @brief Maps a `hw.perflevelN.name` to its absolute class; inverts @c apple_core_quality_name.
  *  @return apple_performance_k for a null or unrecognised name, so @c UTILITY is never guessed.
  */
-FU_MAYBE_UNUSED_ static inline core_quality_t apple_core_quality_from_name(char const *name) noexcept {
+inline core_quality_t apple_core_quality_from_name(char const *name) noexcept {
     if (name == nullptr) return apple_performance_k;
     for (core_quality_t quality = apple_efficiency_k; quality <= apple_super_k; ++quality) {
         char const *const candidate = apple_core_quality_name(quality);
@@ -1494,7 +1474,7 @@ struct machine_topology {
      *  @return true on success, with the current instance owning a deep copy, or bad_alloc_k when
      *      an allocation failed and the current instance is unchanged.
      */
-    [[nodiscard]] status_t assign(machine_topology const &other) noexcept {
+    status_t assign(machine_topology const &other) noexcept {
         if (this == &other) return status_t::success_k; // ? Self-assignment is a no-op
 
         // Prepare scratch. Any `resize` that fails frees whatever the others took, on the way out.
@@ -1578,7 +1558,7 @@ struct machine_topology {
      *  sensible whole-machine answer and a @c distributed_pool degenerates to one domain, so
      *  @c fu_topology_t is usable anywhere.
      */
-    [[nodiscard]] status_t harvest_portable() noexcept {
+    status_t harvest_portable() noexcept {
         reset();
 
         // Name the allowed cores, never just count them: a dense `0..n-1` iota over the count would
@@ -1651,7 +1631,7 @@ struct machine_topology {
      *  be scheduled on. Cores are not ranked by class here - FreeBSD publishes no per-core capacity
      *  - so each memory domain yields exactly one compute domain.
      */
-    [[nodiscard]] status_t harvest_freebsd() noexcept {
+    status_t harvest_freebsd() noexcept {
         reset();
 
         core_mask_t allowed;
@@ -1766,7 +1746,7 @@ struct machine_topology {
      *  Falls back to @c try_harvest_portable whenever no richer source is available, so a spawned
      *  pool always sees at least one compute and one memory domain.
      */
-    [[nodiscard]] status_t harvest() noexcept {
+    status_t harvest() noexcept {
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
         reset();
 
@@ -1988,7 +1968,7 @@ struct machine_topology {
      *      @c KERN_NOT_SUPPORTED on arm64, and QoS classes are the only placement lever. These
      *      domains are therefore descriptive: @c spawn_on reports them, the kernel still migrates.
      */
-    [[nodiscard]] status_t harvest_apple() noexcept {
+    status_t harvest_apple() noexcept {
         std::size_t const total_cores = apple_sysctl_uint("hw.logicalcpu");
         if (total_cores == 0) return status_t::topology_unavailable_k;
         std::size_t const memory_size = apple_sysctl_uint("hw.memsize");
@@ -2129,7 +2109,7 @@ struct machine_topology {
      *      full where the SDK exposes `GroupMasks[]`.
      *  @sa win_numa_for_each_group
      */
-    [[nodiscard]] status_t harvest_windows() noexcept {
+    status_t harvest_windows() noexcept {
         // Pull one relationship class into a heap buffer the caller frees. The record layout is
         // variable-length: every entry carries its own `Size`, and iteration advances by it.
         auto query = [](LOGICAL_PROCESSOR_RELATIONSHIP relationship, DWORD &out_len) -> BYTE * {
@@ -2245,7 +2225,7 @@ struct machine_topology {
                 win_numa_for_each_group(record->NumaNode, [&](WORD group, KAFFINITY node_mask) noexcept {
                     if (group >= group_span) return; // ? Beyond the cell grid; skip as the fill does
                     for (std::size_t c = 0; c < class_count; ++c)
-                        counted_cores += popcount(static_cast<KAFFINITY>(
+                        counted_cores += std::popcount(static_cast<KAFFINITY>(
                             node_mask & cells[static_cast<std::size_t>(group) * class_count + c].mask));
                 });
             }

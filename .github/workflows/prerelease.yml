@@ -892,7 +892,7 @@ jobs:
           set -euxo pipefail
           g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude scripts/test.cpp -o test_cpp -latomic
           ./test_cpp
-          g++ -std=c++17 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
           # The artifact must name no library but the C one: a `numa_*` here is a build host's packages
           # leaking into a binary that has to load on hosts without them.
           ! nm -u forkunion.o | grep -E 'numa_|mbind'
@@ -991,14 +991,13 @@ jobs:
   # linked and run on a booted simulator. A simulator reads the *host* Mac's topology, so this proves
   # the Apple path under the iOS ABI, not any particular phone's layout.
   build_ios:
-    name: iOS (${{ matrix.sdk }}, ${{ matrix.std }})
+    name: iOS ${{ matrix.sdk }}
     runs-on: macos-15
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         sdk: [iphoneos, iphonesimulator]
-        std: [c++17, c++20]
         include:
           - { sdk: iphoneos, triple: arm64-apple-ios17.0 }
           - { sdk: iphonesimulator, triple: arm64-apple-ios17.0-simulator }
@@ -1009,9 +1008,9 @@ jobs:
       - name: Compile the C++ test and the C shim
         run: |
           SYSROOT=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
-          clang++ -std=${{ matrix.std }} -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
+          clang++ -std=c++20 -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
             -isysroot "$SYSROOT" -Iinclude scripts/test.cpp -o forkunion_test_ios
-          clang++ -std=${{ matrix.std }} -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
+          clang++ -std=c++20 -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
             -isysroot "$SYSROOT" -Iinclude -c c/forkunion.cpp -o forkunion_ios.o
 
       # GitHub's macOS images pre-create simulators for their Xcode; boot the first iPhone, don't mint one.

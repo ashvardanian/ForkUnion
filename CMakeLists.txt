@@ -83,12 +83,10 @@ target_include_directories(
     forkunion_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 
-# C++17 is the floor consumers must clear, not a ceiling: `cxx_std_17` raises a consumer below it up to 17 and leaves
-# one already at 20/23 alone, so the C++20 fast paths - concepts, the `atomic_ref` monitor, `std::popcount` - stay
-# available to whoever asks for them. No `CXX_STANDARD` property here - it governs only a target's own compilation, and
-# an INTERFACE library has none, so it would be a no-op that reads like a cap. The pre-compiled libraries below pin
-# themselves to 20.
-target_compile_features(forkunion_header INTERFACE cxx_std_17)
+# C++20 is the floor consumers must clear, not a ceiling: `cxx_std_20` raises a consumer below it and leaves one at 23
+# alone. No `CXX_STANDARD` property here - it governs only a target's own compilation, and an INTERFACE library has
+# none, so it would be a no-op that reads like a cap.
+target_compile_features(forkunion_header INTERFACE cxx_std_20)
 
 # One compile probe per capability bit under `probes/`, `FU_TARGET_<BIT>=0/1`: the verdicts reach the units that admit
 # rungs at runtime, never `forkunion_header`, whose consumers read the compilation target's promise in `types.hpp`.
@@ -183,13 +181,8 @@ add_library(forkunion::header ALIAS forkunion_header)
 add_library(forkunion::static ALIAS forkunion_static)
 add_library(forkunion::shared ALIAS forkunion_shared)
 
-# Prefer C++20 for library builds
-set_target_properties(
-    forkunion_shared forkunion_static
-    PROPERTIES CXX_STANDARD 20
-               CXX_STANDARD_REQUIRED ON
-               CXX_EXTENSIONS OFF
-)
+# The pre-compiled libraries inherit C++20 from the header target; keep it strict, without GNU extensions
+set_target_properties(forkunion_shared forkunion_static PROPERTIES CXX_EXTENSIONS OFF)
 
 # `SOVERSION` carries the major alone - the only break the C ABI admits, matching `SameMajorVersion` below.
 set_target_properties(forkunion_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
@@ -292,7 +285,7 @@ if (CPPCHECK_EXECUTABLE)
     add_custom_target(
         cppcheck
         COMMAND
-            ${CPPCHECK_EXECUTABLE} --enable=all --std=c++17 --verbose --quiet --error-exitcode=1
+            ${CPPCHECK_EXECUTABLE} --enable=all --std=c++20 --verbose --quiet --error-exitcode=1
             --suppress=missingIncludeSystem --suppress=unusedFunction --suppress=unmatchedSuppression
             --suppress=ConfigurationNotChecked --suppress=knownConditionTrueFalse --suppress=shadowFunction
             --suppress=shadowVariable --suppress=useStlAlgorithm --suppress=noExplicitConstructor
@@ -308,7 +301,7 @@ if (CLANG_TIDY_EXECUTABLE)
         COMMAND
             ${CLANG_TIDY_EXECUTABLE} --config-file=${CMAKE_CURRENT_SOURCE_DIR}/.clang-tidy --quiet
             ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp ${CMAKE_CURRENT_SOURCE_DIR}/c/*.cpp --
-            -I${CMAKE_CURRENT_SOURCE_DIR}/include -std=c++17
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include -std=c++20
         COMMENT "Running clang-tidy static analysis"
     )
 endif ()

@@ -191,7 +191,7 @@ using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t, fu::prefe
  *  all its threads so no element is copied twice.
  */
 void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t &pool,
-                      fu::replicated_array<body_t> &replicas, fu::span<body_t const> bodies) noexcept {
+                      fu::replicated_array<body_t> &replicas, std::span<body_t const> bodies) noexcept {
     std::size_t const n = bodies.size();
     pool.for_threads([&](fu::thread_in_domain_t at) noexcept {
         std::size_t const compute_domain = static_cast<std::size_t>(at.compute_domain);
@@ -210,7 +210,7 @@ void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t
 
         fu::tasks_range_t const range = fu::indexed_split_t {n, threads_on_memory_domain}[local_index_on_memory_domain];
         if (range.count == 0) return; // ? A past-the-end slice when the node has more threads than `n` bodies
-        fu::span<body_t> const replica = replicas.on_memory_domain(memory_domain);
+        std::span<body_t> const replica = replicas.on_memory_domain(memory_domain);
         std::memcpy(&replica[range.first], &bodies[range.first], range.count * sizeof(body_t));
     });
 }
@@ -224,10 +224,10 @@ void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t
 struct nbody_context_t {
 
     /** Canonical positions, updated in place each step. */
-    fu::span<body_t> bodies;
+    std::span<body_t> bodies;
 
     /** Scratch for the accumulated force per body. */
-    fu::span<vector3_t> forces;
+    std::span<vector3_t> forces;
 
     /** Per-node position replicas, filled only for `replicated_*`. */
     fu::replicated_array<body_t> &replicas;
@@ -272,8 +272,8 @@ template <schedule_k schedule_, placement_k placement_>
 static void run(nbody_context_t &c) noexcept {
 
     std::size_t const n = c.bodies.size();
-    fu::span<body_t> const bodies = c.bodies;
-    fu::span<vector3_t> const forces = c.forces;
+    std::span<body_t> const bodies = c.bodies;
+    std::span<vector3_t> const forces = c.forces;
 
     if constexpr (placement_ == placement_k::replicated_k) refresh_replicas(c.topology, *c.pool, c.replicas, bodies);
 
@@ -303,8 +303,8 @@ static void run(nbody_context_t &c) noexcept {
 /** The OpenMP baselines - the same all-to-all sweep under an `omp parallel for`. */
 static void run_openmp_static(nbody_context_t &c) noexcept {
     std::size_t const n = c.bodies.size();
-    fu::span<body_t> const bodies = c.bodies;
-    fu::span<vector3_t> const forces = c.forces;
+    std::span<body_t> const bodies = c.bodies;
+    std::span<vector3_t> const forces = c.forces;
 #pragma omp parallel for schedule(static)
     for (std::size_t i = 0; i < n; ++i) { forces[i] = net_force(bodies[i], bodies.data(), n); }
 #pragma omp parallel for schedule(static)
@@ -312,8 +312,8 @@ static void run_openmp_static(nbody_context_t &c) noexcept {
 }
 static void run_openmp_dynamic(nbody_context_t &c) noexcept {
     std::size_t const n = c.bodies.size();
-    fu::span<body_t> const bodies = c.bodies;
-    fu::span<vector3_t> const forces = c.forces;
+    std::span<body_t> const bodies = c.bodies;
+    std::span<vector3_t> const forces = c.forces;
 #pragma omp parallel for schedule(dynamic, 1)
     for (std::size_t i = 0; i < n; ++i) { forces[i] = net_force(bodies[i], bodies.data(), n); }
 #pragma omp parallel for schedule(dynamic, 1)
@@ -335,8 +335,8 @@ static void run_taskflow(nbody_context_t &c, partitioner_ partitioner) noexcept 
     tf::Executor &executor = *c.taskflow;
     if (!c.force_pass) {
         std::size_t const n = c.bodies.size();
-        fu::span<body_t> const bodies = c.bodies;
-        fu::span<vector3_t> const forces = c.forces;
+        std::span<body_t> const bodies = c.bodies;
+        std::span<vector3_t> const forces = c.forces;
         c.force_pass.emplace();
         c.force_pass->for_each_index(
             std::size_t(0), n, std::size_t(1),
@@ -446,8 +446,8 @@ int main() {
         bodies[i].mass = 1e10f + random_unit(counter + 6) * (1e15f - 1e10f);
     }
 
-    fu::span<body_t> const bodies_view {bodies.data(), n};
-    fu::span<vector3_t> const forces_view {forces.data(), n};
+    std::span<body_t> const bodies_view {bodies.data(), n};
+    std::span<vector3_t> const forces_view {forces.data(), n};
 
     backend_t const *selected = nullptr;
     for (backend_t const &entry : backends_k)
