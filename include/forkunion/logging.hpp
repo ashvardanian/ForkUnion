@@ -1,7 +1,7 @@
 /**
  *  @file include/forkunion/logging.hpp
  *  @author Ash Vardanian
- *  @date July 10, 2026
+ *  @date June 29, 2025
  *  @brief Human-readable dumps of the harvested topology and capabilities.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
@@ -79,7 +79,7 @@ struct logging_colors_t {
 struct log_memory_volume_t {
 
     /**
-     *  @brief Prints @p bytes into @p buffer with binary units, switching at every 1024-fold boundary.
+     *  @brief Prints @p bytes into @p buffer in binary units, switching at every 1024-fold step.
      *  @param[in] bytes Volume to format, rendered with one decimal place from a KiB upwards.
      *  @param[out] buffer Destination for the NUL-terminated string.
      *  @param[in] buffer_size Capacity of @p buffer in bytes, including the terminator.
@@ -132,7 +132,7 @@ struct log_core_range_t {
      *  @param[in] colors Palette tinting the numbers.
      *  @note An empty set prints "none", a contiguous one prints "first-last", and beyond 8 cores
      *      the middle is elided with an ellipsis.
-     *  @note Output is truncated to fit and always NUL-terminated; allow 256 bytes for colored output.
+     *  @note Truncated to fit and always NUL-terminated; allow 256 bytes for colored output.
      */
     void operator()(                                  //
         core_id_t const *core_ids, std::size_t count, //

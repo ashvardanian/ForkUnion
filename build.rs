@@ -9,7 +9,7 @@
 //!
 //! Features are additive, which is an awkward fit for a switch that wants three positions, so:
 //!
-//! - default: AUTO. The header decides, and this script says nothing.
+//! - `default`: AUTO. The header decides, and this script says nothing.
 //! - `topology`, `place-memory-on-domain`, `place-huge-pages-on-domain`,
 //!   `place-threads-by-affinity`: force the capability on. A build that cannot honour it - or a
 //!   prerequisite it needs, like huge pages needing on-domain placement - stops at the `#error` in

@@ -3,7 +3,7 @@
 [![`ForkUnion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
 
 __ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, Zig, and Mojo — built for the tightest `#pragma omp parallel for`-style loops, not task queues. 🍴
-It already powers NUMA-sharded vector search with [USearch](https://github.com/unum-cloud/usearch), LLM KV-cache and attention kernels with [NumKong](https://github.com/ashvardanian/NumKong), and unbalanced bioinformatics workloads — thousands of combinatorial tasks per core — with [StringZilla](https://github.com/ashvardanian/StringZilla).
+It already powers NUMA-sharded vector search with [USearch](https://github.com/unum-cloud/USearch), LLM KV-cache and attention kernels with [NumKong](https://github.com/ashvardanian/NumKong), and unbalanced bioinformatics workloads — thousands of combinatorial tasks per core — with [StringZilla](https://github.com/ashvardanian/StringZilla).
 
 On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks-and-mutexes), __zero__ [CAS operations](#atomics-and-cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
 So dispatch latency stays flat into the hundreds of cores, precisely where task-queue runtimes like Rayon collapse and even OpenMP begins to slip.
@@ -684,7 +684,7 @@ Where no topology is harvested, every query degrades to a single compute domain 
 Placing memory on a chosen domain is implemented on Linux via the `mbind` syscall, on FreeBSD via `domainset` policies, and on Windows via `VirtualAllocExNuma`, and degrades to a single domain elsewhere.
 The portable `domain_allocator_t` alias picks the right backend per platform - `linux_numa_allocator_t`, `freebsd_numa_allocator_t`, `windows_numa_allocator_t`, or a plain aligned fallback - each an STL-compatible allocator that reads the machine through the `forkunion::machine_topology` template.
 
-Let's say you are building a Big Data application — brute-forcing Vector Search with the [NumKong](https://github.com/ashvardanian/NumKong) library — on a 2 dual-socket CPU system, the kind that powers production [USearch](https://github.com/unum-cloud/usearch/pulls) deployments.
+Let's say you are building a Big Data application — brute-forcing Vector Search with the [NumKong](https://github.com/ashvardanian/NumKong) library — on a 2 dual-socket CPU system, the kind that powers production [USearch](https://github.com/unum-cloud/USearch/pulls) deployments.
 The first part of that program may be responsible for sharding the incoming stream of data between distinct memory regions.
 That part, in our simple example will be single-threaded:
 

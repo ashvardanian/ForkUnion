@@ -1,7 +1,7 @@
 /**
  *  @file include/forkunion/allocators.hpp
  *  @author Ash Vardanian
- *  @date July 13, 2026
+ *  @date June 6, 2025
  *  @brief NUMA-aware allocators and the domain-distributed containers built on them.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  *
@@ -290,10 +290,10 @@ FU_MAYBE_UNUSED_ static inline void linux_symmetric_free(void *ptr, std::size_t 
  *  @brief Allocator for a @b symmetric mapping - one range striped across every memory domain.
  *
  *  A sibling of @c linux_numa_allocator, but instead of a block on a single node it returns a
- *  `symmetric_allocation_result` carrying the base pointer @b and the per-slice `stride_bytes`, so
- *  slice `d` of element `i` lives at `ptr + d * stride_bytes + i * sizeof(value_type)`. It borrows
- *  the @ref machine_topology it stripes across; hand it the one you harvested and let it outlive
- *  the whole mapping.
+ *  @c symmetric_allocation_result carrying the base pointer @b and the per-slice @c stride_bytes,
+ *  so slice @c d of element @c i lives at `ptr + d * stride_bytes + i * sizeof(value_type)`. It
+ *  borrows the @ref machine_topology it stripes across; hand it the one you harvested and let it
+ *  outlive the whole mapping.
  */
 template <typename value_type_ = char>
 struct linux_symmetric_allocator {
@@ -479,8 +479,8 @@ FU_MAYBE_UNUSED_ static inline void freebsd_domain_free(void *ptr, std::size_t s
  *  @brief STL-compatible allocator bound to a single memory domain on FreeBSD.
  *  @sa linux_numa_allocator is the Linux counterpart; both satisfy the pool's allocator needs.
  *
- *  Mirrors `linux_numa_allocator`'s huge-page ladder, but every placement is a thread-policy PREFER
- *  plus a first-touch rather than a per-mapping @c mbind, and larger pages are the
+ *  Mirrors @c linux_numa_allocator's huge-page ladder, but every placement is a thread-policy
+ *  PREFER plus a first-touch rather than a per-mapping @c mbind, and larger pages are the
  *  @c MAP_ALIGNED_SUPER hint.
  */
 template <typename value_type_ = char>
@@ -712,9 +712,9 @@ FU_MAYBE_UNUSED_ [[nodiscard]] static inline status_t windows_enable_lock_memory
  *  @return nullptr if allocation failed, the size is zero, or NUMA memory is unavailable.
  *
  *  @c VirtualAllocExNuma reserves and commits a range whose pages the kernel will fault in on the
- *  requested node - the Windows analogue of Linux's `mbind`, folded into the allocation call. Large
- *  pages need `SeLockMemoryPrivilege` - see `windows_enable_lock_memory_privilege` - and can still
- *  fail under memory fragmentation; a caller wanting a soft failure should retry with
+ *  requested node - the Windows analogue of Linux's @c mbind, folded into the allocation call.
+ *  Large pages need @c SeLockMemoryPrivilege, which @c windows_enable_lock_memory_privilege grants,
+ *  and can still fail under memory fragmentation; a caller wanting a soft failure should retry with
  *  @p large_pages false.
  */
 FU_MAYBE_UNUSED_ static inline void *windows_numa_allocate(std::size_t size_bytes, memory_domain_id_t memory_domain_id,
@@ -799,8 +799,8 @@ FU_MAYBE_UNUSED_ static inline void windows_symmetric_free(void *ptr) noexcept {
  *
  *  Deliberately plainer than the Linux allocator: it exposes only @c allocate and @c deallocate, so
  *  @c dynamic_padded_array takes its ordinary `allocate(total)` path rather than the sized
- *  `allocate_at_least` one. Large pages are opt-in per allocator instance through the `large_pages`
- *  ctor flag; they need @c SeLockMemoryPrivilege first, see @sa
+ *  @c allocate_at_least one. Large pages are opt-in per allocator instance through the
+ *  @c large_pages ctor flag; they need @c SeLockMemoryPrivilege first, see @sa
  *  @c windows_enable_lock_memory_privilege, and round every request up to `GetLargePageMinimum()`.
  *  The pool constructs the allocator without them, since its own state is small; a caller wanting
  *  large pages for bulk data opts in explicitly.
@@ -872,8 +872,8 @@ using windows_numa_allocator_t = windows_numa_allocator<>;
  *  @brief Allocator for a @b symmetric mapping on Windows - one reservation committed per node.
  *  @sa linux_symmetric_allocator is the Linux counterpart.
  *
- *  Reserves one range and commits each equal-stride slice on its own node via `VirtualAllocExNuma`,
- *  so slice @c d of element @c i lives at `ptr + d * stride_bytes + i * sizeof(value_type)`. Base
+ *  Reserves a range and commits each equal-stride slice on its own node via @c VirtualAllocExNuma.
+ *  Slice @c d of element @c i then lives at ptr + d × stride_bytes + i × sizeof(value_type). Base
  *  pages only - large pages cannot be reserved then committed in slices.
  *
  *  Borrows the @ref machine_topology it stripes across, which the caller must keep alive.
@@ -927,10 +927,10 @@ using windows_symmetric_allocator_t = windows_symmetric_allocator<>;
 /**
  *  @brief A heap-backed, cache-line-aligned stand-in for NUMA allocators, where no domains exist.
  *
- *  Mirrors `linux_numa_allocator`'s interface so `domain_allocator_t` stays uniform: it ignores the
- *  memory domain and reports the base page size, letting the domain-aware code paths compile and
- *  run everywhere while degenerating to plain heap allocation. Every block is aligned to at least
- *  @c default_alignment_k, so the NUMA backends' page alignment and this fallback offer one
+ *  Mirrors @c linux_numa_allocator's interface so @c domain_allocator_t stays uniform: it ignores
+ *  the memory domain and reports the base page size, letting the domain-aware code paths compile
+ *  and run everywhere while degenerating to plain heap allocation. Every block is aligned to at
+ *  least @c default_alignment_k, so the NUMA backends' page alignment and this fallback offer one
  *  alignment contract - over-aligned element types need no caller-side padding on any platform.
  */
 template <typename value_type_ = char>
@@ -982,10 +982,10 @@ using portable_aligned_allocator_t = portable_aligned_allocator<>;
  *  @sa linux_symmetric_allocator / windows_symmetric_allocator are the domain-pinning siblings.
  *
  *  Mirrors their `allocate_at_least(size) → symmetric_allocation_result` shape so the containers
- *  stay uniform, but the one contiguous block is merely `default_alignment_k`-aligned - no `mbind`,
- *  no @c VirtualAllocExNuma. The slice count still comes from the @ref machine_topology, so on a
- *  machine the platform reports as single-domain the mapping is one stride wide and the same
- *  addressing `ptr + d * stride_bytes + i * sizeof(value_type)` holds everywhere. Borrows the
+ *  stay uniform, but the one contiguous block is merely @c default_alignment_k-aligned - no
+ *  @c mbind, no @c VirtualAllocExNuma. The slice count still comes from the @ref machine_topology,
+ *  so on a machine the platform reports as single-domain the mapping is one stride wide and the
+ *  same addressing `ptr + d * stride_bytes + i * sizeof(value_type)` holds everywhere. Borrows the
  *  topology; hand it the one you harvested and let it outlive the mapping.
  */
 template <typename value_type_ = char>
@@ -1078,7 +1078,7 @@ class span {
     constexpr span() noexcept = default;
     constexpr span(value_type_ *data, std::size_t size) noexcept : data_(data), size_(size) {}
 
-    /** Widens a mutable span to a `const` one - the qualification conversion `std::span` allows. */
+    /** Widens a mutable span to @c const, the qualification conversion @c std::span allows. */
     template <typename other_type_,
               typename = std::enable_if_t<std::is_convertible<other_type_ (*)[], value_type_ (*)[]>::value>>
     constexpr span(span<other_type_> const &other) noexcept : data_(other.data()), size_(other.size()) {}

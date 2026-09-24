@@ -12,21 +12,22 @@
  *  share that interface and replace both the portable loops and the compiler's flag-dependent
  *  lowering with instructions:
  *
- *  - `x86_cmpccxadd_atomic_ref`: the conditional adds as one `cmpccxadd`; every other operation is
- *    the @c lock-prefixed instruction the compiler emits anyway.
- *  - `x86_raoint_atomic_ref`: the relaxed no-return forms as RAO-INT `aadd`/`aand`/`aor`, executed
- *    at the shared cache rather than pulling the line.
+ *  - @c x86_cmpccxadd_atomic_ref: the conditional adds as one @c cmpccxadd; every other operation
+ *    is the @c lock-prefixed instruction the compiler emits anyway.
+ *  - @c x86_raoint_atomic_ref: the relaxed no-return forms as RAO-INT @c aadd, @c aand, @c aor,
+ *    executed at the shared cache rather than pulling the line.
  *
  *  @c arm64_lse_atomic_ref swaps in Armv8.1 @c swp, @c cas, @c ldadd, @c ldclr, @c ldset, @c ldeor,
- *  `ldsmax` & kin - one instruction per read-modify-write, the no-return `st*` forms posted without
- *  a round trip; @c ldar and @c stlr for ordered loads & stores. Measured on an M5 Pro against the
- *  exclusive loops a baseline build gets: 5x uncontended, 3-4x with 18 threads on one word.
+ *  @c ldsmax & kin - one instruction per read-modify-write, the no-return `st*` forms posted
+ *  without a round trip; @c ldar and @c stlr for ordered loads & stores. Measured on an M5 Pro
+ *  against the exclusive loops of a baseline build: 5x uncontended, 3-4x with 18 threads on a word.
  *
  *  - @c arm64_rcpc_atomic_ref: the above with Armv8.3 @c ldapr for acquiring loads - RCpc, which
  *    needn't wait for the core's earlier release stores the way RCsc @c ldar may.
- *  - `risc5_atomic_ref`: the base A extension - `amoswap`, `amoadd`, `amoand`, `amoor`, `amomax`,
- *    @c amomin & the unsigned twins, with @c x0 as the destination for the no-return forms - and
- *    @c lr and @c sc loops for compare-exchange and byte exchanges; fences around loads & stores.
+ *  - @c risc5_atomic_ref: the base A extension - @c amoswap, @c amoadd, @c amoand, @c amoor,
+ *    @c amomax, @c amomin & the unsigned twins, with @c x0 as the destination for the no-return
+ *    forms - and @c lr and @c sc loops for compare-exchange and byte exchanges; fences around loads
+ *    & stores.
  *  - @c risc5_zacas_atomic_ref: compare-exchange as one @c amocas.
  *
  *  Only the widths & operations the indexes use are spelled: byte exchanges & compare-exchanges for
@@ -303,7 +304,7 @@ struct standard_atomic_ref {
   private:
     value_type_ *word_;
 
-    /** A `std::atomic_ref` wraps a pointer and nothing else, so one per operation costs nothing. */
+    /** A @c std::atomic_ref wraps just a pointer, so one per operation costs nothing. */
     std::atomic_ref<value_type_> reference_() const noexcept { return std::atomic_ref<value_type_>(*word_); }
 };
 
@@ -313,9 +314,9 @@ struct standard_atomic_ref {
  *
  *  @c const is a permission on the path, never a promise that the word holds still - a reader
  *  holding a const handle still shares the storage a writer mutates. This is the one reference that
- *  cannot reach its word without a cast: `std::atomic_ref` binds no const word before P3323, and no
- *  other standard spelling loads atomically from a plain word. Every ISA reference below binds its
- *  own const pointer and needs none.
+ *  cannot reach its word without a cast: @c std::atomic_ref binds no const word before P3323, and
+ *  no other standard spelling loads atomically from a plain word. Every ISA reference below binds
+ *  its own const pointer and needs none.
  */
 template <typename value_type_>
 struct standard_atomic_ref<value_type_ const> {
@@ -335,14 +336,12 @@ struct standard_atomic_ref<value_type_ const> {
     value_type_ const *word_;
 };
 
+/*  @c cmpccxadd: compares the word against @c bound - flags from `word - bound` - and adds
+ *  @c addend only when the condition holds; the register handed as @c bound receives what the word
+ *  held. Spelled as bytes, since binutils before 2.40 and LLVM before 16 have no mnemonic: the VEX
+ *  form in map 0F38, opcode E0 plus the condition, @c W set for the 64-bit forms; the word in
+ *  @c rax, the compare-and-return register in @c rcx, the addend in @c rdx. */
 #if FU_TARGET_X86_CMPCCXADD
-
-/*  `cmpccxadd`: compares the word against `bound` - flags from `word - bound` - and adds `addend`
- *  only when the condition holds; the register handed as @c bound receives what the word held.
- *  Spelled as bytes, since binutils before 2.40 and LLVM before 16 have no mnemonic: the VEX form
- *  in map 0F38, opcode E0 plus the condition, `W` set for the 64-bit forms; the word in `rax`, the
- *  compare-and-return register in @c rcx, the addend in @c rdx. */
-
 #pragma region x86 CMPCCXADD
 
 inline std::uint32_t x86_cmpbexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
@@ -563,14 +562,12 @@ struct x86_cmpccxadd_atomic_ref<value_type_ const> {
 
 #endif // FU_TARGET_X86_CMPCCXADD
 
-#if FU_TARGET_X86_RAOINT
-
 /*  RAO-INT: the remote, no-return forms - weakly ordered like write-combining stores, which only
  *  SFENCE or MFENCE order and a C++ release fence never emits on x86, so only the relaxed callers
  *  take them; a release order stays on the @c lock-prefixed base. Bytes for the same reason: map
  *  0F38 opcode FC, the operation picked by the legacy prefix - none for add, 66 for and, F2 for or,
  *  F3 for xor - `REX.W` for the 64-bit forms; the word in @c rax, the operand in @c rcx. */
-
+#if FU_TARGET_X86_RAOINT
 #pragma region x86 RAOINT
 
 inline void x86_aadd_u32(std::uint32_t *word, std::uint32_t operand) noexcept {
@@ -624,8 +621,8 @@ inline void x86_axor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
 
 /**
  *  @brief The above plus RAO-INT for the relaxed no-return forms: @c aadd, @c aand, @c aor, @c axor
- *      execute at the shared cache. Anything ordered keeps the `lock`-prefixed instruction, already
- *      a full fence. `CPUID.(7,1):EAX[3]` says so at runtime.
+ *      execute at the shared cache. Anything ordered keeps the @c lock-prefixed instruction,
+ *      already a full fence. `CPUID.(7,1):EAX[3]` says so at runtime.
  *  @sa capability_x86_raoint_k - the bit admitting it, on top of @c capability_x86_cmpccxadd_k.
  */
 template <typename value_type_>
@@ -1497,7 +1494,7 @@ inline std::int64_t arm64_ldsmin_i64(std::int64_t *word, std::int64_t operand, s
     return observed;
 }
 
-/** `cas` compares against @p expected and returns what the word held; equality means it swapped. */
+/** @c cas compares with @p expected and returns what the word held; equality means it swapped. */
 inline std::uint8_t arm64_cas_u8(std::uint8_t *word, std::uint8_t expected, std::uint8_t desired,
                                  std::memory_order order) noexcept {
     switch (order) {
@@ -1596,11 +1593,9 @@ inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, 
 
 #endif // FU_DETECT_INLINE_ASM_SUPPORT_
 
-#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
-
 /*  Loads: plain and acquire. `__iso_volatile_load*` is the plain load no optimizer may fold away,
  *  spelled over the signed widths; `__ldar*` takes the unsigned ones directly. */
-
+#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
 inline std::uint8_t arm64_ldr_u8(std::uint8_t const *word) noexcept {
     return static_cast<std::uint8_t>(__iso_volatile_load8(reinterpret_cast<char const volatile *>(word)));
 }
@@ -1662,7 +1657,7 @@ inline std::uint64_t arm64_swp_u64(std::uint64_t *word, std::uint64_t desired, s
     }
 }
 
-/** `cas` compares against @p expected and returns what the word held; equality means it swapped. */
+/** @c cas compares with @p expected and returns what the word held; equality means it swapped. */
 inline std::uint8_t arm64_cas_u8(std::uint8_t *word, std::uint8_t expected, std::uint8_t desired,
                                  std::memory_order order) noexcept {
     switch (order) {
@@ -1819,9 +1814,9 @@ inline void arm64_steor_u64(std::uint64_t *word, std::uint64_t bits, std::memory
     [[maybe_unused]] std::uint64_t const observed = arm64_ldeor_u64(word, bits, order);
 }
 
-/*  LSE maxima & minima: nothing spells `ldsmax` & kin either, and no `_Interlocked*` computes them,
- *  so a @c cas loop stands in. It swaps on every pass, an unchanged word included, so the ordered
- *  flavors stay the read-modify-write their callers were promised. */
+/*  LSE maxima & minima: nothing spells @c ldsmax & kin either, and no `_Interlocked*` computes
+ *  them, so a @c cas loop stands in. It swaps on every pass, an unchanged word included, so the
+ *  ordered flavors stay the read-modify-write their callers were promised. */
 
 inline std::uint32_t arm64_ldumax_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed = arm64_ldr_u32(word);
@@ -2161,10 +2156,8 @@ struct arm64_lse_atomic_ref<value_type_ const> {
 
 #endif // FU_TARGET_ARM64_LSE
 
-#if FU_TARGET_ARM64_RCPC
-
 /*  RCpc acquire loads: ordered against later loads and stores, not against earlier stores. */
-
+#if FU_TARGET_ARM64_RCPC
 #pragma region Arm64 RCpc
 
 #if FU_DETECT_INLINE_ASM_SUPPORT_
@@ -2359,11 +2352,9 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
 
 #endif // FU_TARGET_ARM64_RCPC
 
-#if FU_TARGET_RISC5_ATOMIC
-
 /*  Loads & stores carry their order as fences, per the RISC-V mapping: acquire is `fence r,rw`
  *  after the load, release `fence rw,w` before the store, sequential consistency both. */
-
+#if FU_TARGET_RISC5_ATOMIC
 #pragma region RISC5 A
 
 inline std::uint8_t risc5_lbu(std::uint8_t const *word) noexcept {
@@ -2848,15 +2839,13 @@ struct risc5_atomic_ref<value_type_ const> {
 
 #endif // FU_TARGET_RISC5_ATOMIC
 
-#if FU_TARGET_RISC5_ZACAS
-
 /*  @c Zacas: compare-and-swap as one instruction; the comparand register receives what the word
  *  held. Assemblers disagree on how to name the extension inline - @c zacas, @c zacas1p0, or not at
  *  all - and `.insn` is a directive older LLVM lacks, so the two are whole words with the registers
- *  pinned: the AMO opcode, funct5 `00101`, both `aq` and `rl` set, `a0` as the comparand, `a1` as
- *  the address, @c a2 as the desired value. A baseline @c rv64gc build then assembles them and the
- *  runtime bit decides. */
-
+ *  pinned: the AMO opcode, funct5 `00101`, both @c aq and @c rl set, @c a0 as the comparand, @c a1
+ *  as the address, @c a2 as the desired value. A baseline @c rv64gc build then assembles them and
+ *  the runtime bit decides. */
+#if FU_TARGET_RISC5_ZACAS
 #pragma region RISC5 Zacas
 
 inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {

@@ -6,8 +6,8 @@
  *      epoch clock, the countdown, and what a completed join sees.
  *
  *  Everything here is spelled line for line over @c std::atomic. The pool itself spawns through
- *  `std::thread`, which rides on the platform's `pthread_create` that GenMC does not intercept, so
- *  its words stand alone here.
+ *  @c std::thread, which rides on the platform's @c pthread_create that GenMC does not intercept,
+ *  so its words stand alone here.
  *
  *  A dispatcher runs one generation on a caller-inclusive pool with two workers, contributes its
  *  own slice inside the join, and after the completion step reads every worker's result.

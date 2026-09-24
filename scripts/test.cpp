@@ -4,10 +4,10 @@
  *  @date May 2, 2025
  *  @brief Unit and stress tests for the pools, the harvested topology, and the parallel algorithms.
  *
- *  Every test is a `static void test_*` reached through the `unit_tests` and `stress_tests` tables
- *  in @c main, so a test absent from its table does not run - the tables are the only index that
- *  cannot drift from what executes. Asserts stay live whatever the build type, which is what the
- *  `#undef NDEBUG` below buys: a failure that only reproduces in Release is the one worth catching.
+ *  Every test is a `static void test_*` reached through the @c unit_tests and @c stress_tests
+ *  tables in @c main, so a test absent from its table does not run - the tables are the only index
+ *  that cannot drift from what executes. Asserts stay live whatever the build type, which is what
+ *  the `#undef NDEBUG` below buys: a failure reproducing only in Release is the one worth catching.
  */
 #include <cstdio>  // `std::printf`, `std::fprintf`
 #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
@@ -24,7 +24,7 @@ namespace fu = ashvardanian::forkunion;
 
 #undef NDEBUG // ? Keep any library asserts live in the test binary
 
-/*  `backtrace` is glibc/Apple-specific; Bionic, FreeBSD and musl ship `<execinfo.h>` without it. */
+/*  @c backtrace is glibc or Apple only; Bionic, FreeBSD and musl ship `<execinfo.h>` without it. */
 #if FU_ON_POSIX
 #include <csignal>  // `std::signal`, `std::raise`
 #include <unistd.h> // `::write`, `STDERR_FILENO`
@@ -230,10 +230,10 @@ void test_coprime_permutation() noexcept {
 /**
  *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
  *
- *  Deliberately @b not gated on `FU_WITH_PLACE_MEMORY_ON_DOMAIN`: some platforms harvest a topology
- *  without compiling the NUMA pools, so gating this on the pools leaves their harvest wholly
- *  untested. A host with no harvest at all reports @c false and is skipped rather than failed - the
- *  absence of a topology is not a broken topology.
+ *  Deliberately @b not gated on @c FU_WITH_PLACE_MEMORY_ON_DOMAIN: some platforms harvest a
+ *  topology without compiling the NUMA pools, so gating this on the pools leaves their harvest
+ *  wholly untested. A host with no harvest at all reports @c false and is skipped rather than
+ *  failed - the absence of a topology is not a broken topology.
  */
 static void test_topology_invariants() noexcept {
     fu::machine_topology_t topology;
@@ -1094,8 +1094,8 @@ static void test_oversubscribed_threads() noexcept {
 /**
  *  @brief Naps the workers between batches; every wake must still dispatch exactly-once.
  *
- *  `sleep` flips the pool to `chill_k` and, where the platform allows, demotes workers to the idle
- *  scheduling class; the next dispatch must wake and restore them. Losing a worker to a missed
+ *  @c sleep flips the pool to @c chill_k and, where the platform allows, demotes workers to the
+ *  idle scheduling class; the next dispatch must wake and restore them. Losing a worker to a missed
  *  wake-up shows up here as a hung join, and a double-dispatched task as a broken iota.
  */
 template <typename make_pool_type_ = make_pool_t>
@@ -1329,10 +1329,10 @@ void log_numa_topology() noexcept {
 /**
  *  @brief A pool sizes itself from the cores we were given, and hands the caller back its own mask.
  *
- *  The process is narrowed here the way `taskset` or a cgroup `cpuset` would narrow it. A topology
- *  harvested from the machine rather than from the mask would report every core, the pool would
- *  oversubscribe them, and a "restore" that widens to the machine would leave the caller running on
- *  cores this process was never granted.
+ *  The process is narrowed here the way @c taskset or a cgroup @c cpuset would narrow it. A
+ *  topology harvested from the machine rather than from the mask would report every core, the pool
+ *  would oversubscribe them, and a "restore" that widens to the machine would leave the caller
+ *  running on cores this process was never granted.
  */
 static void test_caller_affinity_preserved() noexcept {
     fu::core_mask_t original;
@@ -1466,8 +1466,8 @@ static void check_atomic_verbs() noexcept {
 }
 
 /** The shapes the indexes lean on, under contention - a dispenser by the no-return add, a bounded
- *  claim by the conditional add, a high-water mark by `fetch_max`, a lock by `exchange` - each with
- *  an exact expected total. */
+ *  claim by the conditional add, a high-water mark by @c fetch_max, a lock by @c exchange - each
+ *  with an exact expected total. */
 template <template <typename> class atomic_ref_>
 static void check_atomic_ref_under_contention() noexcept {
     constexpr std::size_t threads_k = 8, rounds_k = 20'000, claim_limit_k = threads_k * rounds_k / 3;

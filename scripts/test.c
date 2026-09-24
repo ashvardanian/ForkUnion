@@ -1,7 +1,7 @@
 /**
  *  @file scripts/test.c
  *  @author Ash Vardanian
- *  @date August 23, 2026
+ *  @date October 11, 2025
  *  @brief Tests the `fu_*` C ABI: spawns, loops, generation tokens, topology, fabric, allocation.
  */
 #include <stdio.h>     // `printf`, `fprintf`

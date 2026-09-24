@@ -1,7 +1,7 @@
 /**
  *  @file include/forkunion.h
  *  @author Ash Vardanian
- *  @date June 17, 2025
+ *  @date June 11, 2025
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
  *
  *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel
@@ -12,9 +12,9 @@
  *  types, is safe to use even with the maximal @c size_t values, and compiles as C 99 and later.
  *
  *  @code{.c}
- *  #include <stdio.h> // `printf`
- *  #include <stdlib.h> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.h> // `fu_pool_t`
+ *  #include <stdio.h>      // `printf`
+ *  #include <stdlib.h>     // `EXIT_FAILURE`, `EXIT_SUCCESS`
+ *  #include <forkunion.h>  // `fu_pool_t`
  *
  *  struct print_args_context_t {
  *      size_t argc; // ? Number of arguments
@@ -76,8 +76,8 @@
  *
  *  @sa fu_compute_levels_count
  *
- *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
- *  exposes cheaper @b "busy-waiting" mechanisms, such as `tpause`, `wfet`, & `yield` instructions.
+ *  On x86, Arm, and RISC-V, depending on the CPU features available, the library also exposes
+ *  cheaper @b "busy-waiting" mechanisms, such as the @c tpause, @c wfet, and @c yield instructions.
  *
  *  @sa fu_runtime_capabilities
  *
@@ -261,8 +261,8 @@ typedef enum fu_capabilities_t {
     /** No bit set: nothing requested, and nothing yet found. */
     fu_capabilities_unknown_k = 0,
 
-    /** The `PAUSE` spin hint, on every x86 since the Pentium 4: a short pipeline stall that keeps a
-     *  busy-wait from flooding the load ports and eases the sibling hardware thread. */
+    /** The @c PAUSE spin hint, on every x86 since the Pentium 4: a short pipeline stall that keeps
+     *  a busy-wait from flooding the load ports and eases the sibling hardware thread. */
     fu_capability_x86_pause_k = 1 << 0,
 
     /**
@@ -289,8 +289,8 @@ typedef enum fu_capabilities_t {
     fu_capability_risc5_pause_k = 1 << 4,
 
     /**
-     *  @brief `WRS.STO` sleeps the hart until a reservation breaks or a short timeout - the `Zawrs`
-     *      extension, attested by the kernel's @c hwprobe.
+     *  @brief `WRS.STO` sleeps the hart until a reservation breaks or a short timeout - the
+     *      @c Zawrs extension, attested by the kernel's @c hwprobe.
      *  @sa fu_capability_risc5_pause_k - the spin it replaces.
      */
     fu_capability_risc5_wrs_k = 1 << 5,
@@ -369,8 +369,8 @@ typedef enum fu_capabilities_t {
      *  EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`. */
     fu_capability_arm64_dc_cvac_k = 1 << 16,
 
-    /** The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
-     *  hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet. */
+    /** The kernel enabled user-mode Zicbom cache-block management, attested through @c hwprobe -
+     *  the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet. */
     fu_capability_risc5_zicbom_k = 1 << 17,
 
     /** @c CMPCCXADD, the conditional atomic add - `CPUID.(7,1):EAX[7]`, on Sierra Forest, Diamond
@@ -390,9 +390,9 @@ typedef enum fu_capabilities_t {
      */
     fu_capability_x86_raoint_k = 1 << 19,
 
-    /** Armv8.1 `FEAT_LSE`: `swp`, `cas`, `ldadd` and the no-return `st*` forms, one instruction per
-     *  read-modify-write instead of a load-exclusive loop. Read from `ID_AA64ISAR0_EL1.Atomic` on
-     *  Linux and `hw.optional.arm.FEAT_LSE` on Apple. Admits @c arm64_lse_atomic_ref. */
+    /** Armv8.1 @c FEAT_LSE: @c swp, @c cas, @c ldadd and the no-return `st*` forms, one instruction
+     *  per read-modify-write instead of a load-exclusive loop. Read from `ID_AA64ISAR0_EL1.Atomic`
+     *  on Linux and `hw.optional.arm.FEAT_LSE` on Apple. Admits @c arm64_lse_atomic_ref. */
     fu_capability_arm64_lse_k = 1 << 20,
 
     /**
@@ -407,8 +407,9 @@ typedef enum fu_capabilities_t {
      *  attested by the kernel's @c hwprobe. Admits @c risc5_zacas_atomic_ref. */
     fu_capability_risc5_zacas_k = 1 << 22,
 
-    /** The A extension: `lr`/`sc` and the `amo*` read-modify-writes, RISC-V's baseline every Linux
-     *  ABI guarantees. Admits @c risc5_atomic_ref; @c fu_capability_risc5_zacas_k extends it. */
+    /** The A extension: @c lr, @c sc and the `amo*` read-modify-writes, RISC-V's baseline every
+     *  Linux ABI guarantees. Admits @c risc5_atomic_ref, and @c fu_capability_risc5_zacas_k
+     *  extends it with @c amocas. */
     fu_capability_risc5_atomic_k = 1 << 23,
 
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers
@@ -474,7 +475,7 @@ fu_status_t fu_logical_cores_count_in(fu_topology_t, size_t compute_domain_index
 
 /**
  *  @brief The number of logical cores the OS exposes - hyper-threads and every core class included.
- *  @return 0 if detection failed; else the count, suitable as the thread count for `fu_pool_spawn`.
+ *  @return 0 if detection failed; else the count, fit as the thread count for @c fu_pool_spawn.
  *  @sa fu_logical_cores_count_in for the per-compute-domain count.
  */
 fu_status_t fu_logical_cores_count(fu_topology_t, size_t *cores_out);
@@ -519,11 +520,11 @@ fu_status_t fu_compute_levels_count(fu_topology_t, size_t *count_out);
 /**
  *  @brief Returns the relative throughput of @b one core in a given compute domain.
  *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
- *  @return A magnitude on the Linux `cpu_capacity` scale where 1024 is the fastest core present, or
- *      0 when the index is out of range or the platform publishes no per-core throughput rating.
+ *  @return A magnitude on the Linux @c cpu_capacity scale where 1024 is the fastest core present,
+ *      or 0 when the index is out of range or the platform publishes no per-core throughput rating.
  *
- *  This is the number to weight work by; `fu_compute_level_in` is a dense ordinal and must never be
- *  divided by. When this reports 0, weigh compute domains by @c fu_logical_cores_count_in instead.
+ *  This is the number to weight work by; @c fu_compute_level_in is a dense ordinal and must never
+ *  be divided by; on 0, weigh compute domains by @c fu_logical_cores_count_in instead.
  *
  *  @sa fu_compute_level_in, fu_logical_cores_count_in.
  */
@@ -799,11 +800,10 @@ fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads
  *  @param[in] exclusivity Whether the calling thread also executes tasks.
  *  @return `fu_success_k` once every worker started pinned to @p compute_domain_index;
  *      @c fu_invalid_argument_k for a NULL handle, an unnamed exclusivity, @p threads of 0, or a
- *      @p compute_domain_index at or past `fu_compute_domains_count`; `fu_already_spawned_k` while
- *      the pool still holds workers; @c fu_bad_alloc_k when the per-domain bookkeeping cannot be
- *      allocated;
- *      @c fu_thread_refused_k when the OS declines a thread; and @c fu_unsupported_k for a
- *      caller-exclusive or multi-thread pool in a build without OS threads.
+ *      @p compute_domain_index at or past @c fu_compute_domains_count; @c fu_already_spawned_k
+ *      while the pool still holds workers; @c fu_bad_alloc_k when the per-domain bookkeeping cannot
+ *      be allocated; @c fu_thread_refused_k when the OS declines a thread; and @c fu_unsupported_k
+ *      for a caller-exclusive or multi-thread pool in a build without OS threads.
  *  @note Not thread-safe; call once per pool.
  *
  *  Placement lives here, not in creation: @ref fu_pool_new allocates the handle, and this binds it
@@ -929,9 +929,9 @@ void fu_pool_terminate(fu_pool_t pool);
  *  @brief Creates an empty, unharvested memory-fabric handle.
  *  @return An opaque fabric handle, or NULL on allocation failure.
  *
- *  Completes the library's pipeline: build a `fu_topology_t` first, spawn a `fu_pool_t` on it, then
- *  harvest the fabric through that pool's workers with @ref fu_fabric_harvest. Before a harvest
- *  every query on the handle answers 0, and @c fu_fabric_memory_levels_count answers 1.
+ *  Completes the library's pipeline: build a @c fu_topology_t first, spawn a @c fu_pool_t on it,
+ *  then harvest the fabric through that pool's workers with @ref fu_fabric_harvest. Before a
+ *  harvest every query on the handle answers 0, and @c fu_fabric_memory_levels_count answers 1.
  *
  *  @sa fu_fabric_harvest, fu_fabric_delete.
  */
@@ -1080,8 +1080,8 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback
  *  @param[in] context Shared context, may be NULL.
  *
  *  Tasks split into equal @b contiguous chunks per worker, keeping coordination near zero - the
- *  right choice when every task costs about the same, so a static split stays balanced. The
- *  callback receives @p context, `task` index in [0, @p n), `thread` index, and `compute_domain`.
+ *  right choice when tasks cost about the same, so a static split stays balanced. The callback
+ *  receives @p context, the @c task index in [0, @p n), the @c thread index, and @c compute_domain.
  *
  *  @code{.c}
  *  void double_each(void *array, size_t i, size_t thread, size_t compute_domain) {

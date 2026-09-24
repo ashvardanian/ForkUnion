@@ -1,7 +1,7 @@
 /**
  *  @file include/forkunion/distributed.hpp
  *  @author Ash Vardanian
- *  @date July 10, 2026
+ *  @date June 10, 2025
  *  @brief Pools that know about compute domains: @c colocated_pool and @c distributed_pool.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  *
@@ -23,8 +23,8 @@ namespace forkunion {
 
 /**
  *  @brief Sleeps the calling thread for @p micros microseconds.
- *  @note Linux's `clock_nanosleep` lets us name the clock; Darwin only has `nanosleep`, whose clock
- *      is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
+ *  @note Linux's @c clock_nanosleep lets us name the clock; Darwin only has @c nanosleep, whose
+ *      clock is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
  */
 FU_MAYBE_UNUSED_ static inline void sleep_for_micros(FU_MAYBE_UNUSED_ std::size_t const micros) noexcept {
 #if FU_ON_WINDOWS
@@ -74,11 +74,11 @@ enum pin_granularity_t {
  */
 struct alignas(default_alignment_k) pinned_thread_t {
 
-    /** The OS thread handle: `pthread_t` on POSIX, `HANDLE` on Windows. */
+    /** The OS thread handle: @c pthread_t on POSIX, @c HANDLE on Windows. */
     std::atomic<native_thread_t> handle {};
 
-    /** The OS thread id: `gettid` on Linux, `pthread_threadid_np` on Apple, `GetCurrentThreadId` on
-     *  Windows. */
+    /** The OS thread id: @c gettid on Linux, @c pthread_threadid_np on Apple, and
+     *  @c GetCurrentThreadId on Windows. */
     std::atomic<std::uint64_t> id {};
 
     /** The core this worker is pinned to, or -1 when unpinned. */
@@ -96,12 +96,12 @@ struct alignas(default_alignment_k) pinned_thread_t {
 #endif
 
     /**
-     *  @brief This thread's private cursor for `for_n_dynamic`. @sa `dynamic_claim`.
+     *  @brief This thread's private cursor for @c for_n_dynamic; see @ref dynamic_claim.
      *  @note Lives here, rather than in a second array, so the pool allocates once and the cursor
      *      inherits both this record's cache-line padding and its NUMA node.
-     *  @note Fixed to `std::size_t` because `colocated_pool` is not templated on an index width,
-     *      unlike `flat_pool`. The narrow-index debug configs, and the cursor's overflow argument,
-     *      therefore only ever exercise `flat_pool`.
+     *  @note Fixed to @c std::size_t because @c colocated_pool is not templated on an index width,
+     *      unlike @c flat_pool. The narrow-index debug configs, and the cursor's overflow argument,
+     *      therefore only ever exercise @c flat_pool.
      */
     dynamic_claim<std::size_t> claim {};
 };
@@ -553,7 +553,7 @@ struct colocated_pool {
      *  @note Can be called from @b any thread, after the last dispatch was joined.
      *  @note Must @c spawn again to re-use the pool.
      *
-     *  When and how @b NOT to use this function:
+     *  When and how @b not to use this function:
      *  - as a synchronization point between concurrent tasks.
      *
      *  When and how to use this function:
@@ -601,9 +601,8 @@ struct colocated_pool {
      *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
      *  @note Callable only @b between one thread's tasks; performs no synchronization.
      *
-     *  This function may be used in some batch-processing operations when we clearly understand
-     *  that the next task won't be arriving for a while and power can be saved without major
-     *  latency penalties.
+     *  Useful in batch processing when we clearly know the next task won't arrive for a while,
+     *  so power can be saved without major latency penalties.
      *
      *  It may also be used in a high-level Python or JavaScript library offloading some parallel
      *  operations to an underlying C++ engine, where latency is irrelevant.
@@ -768,8 +767,8 @@ struct colocated_pool {
      *  @brief Returns true if the generation identified by @p generation has completed.
      *  @note A @c true result synchronizes with all contributors: their writes are visible.
      *
-     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join` contributes the
-     *  calling thread's slice, so poll-then-join is reserved for @c caller_exclusive_k pools.
+     *  On @c caller_inclusive_k pools this can only turn @c true once @c unsafe_join contributes
+     *  the calling thread's slice, so poll-then-join is reserved for @c caller_exclusive_k pools.
      */
     bool is_complete(generation_t generation) const noexcept {
         return generation != epoch_.load(std::memory_order_acquire);
@@ -778,7 +777,8 @@ struct colocated_pool {
     /**
      *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
      *  @note On @c caller_inclusive_k pools, first executes the calling thread's slice.
-     *  Idempotent: returns immediately for already-joined or stale generations.
+     *
+     *  Idempotent, returning immediately for already-joined or stale generations.
      */
     void unsafe_join(generation_t generation) noexcept {
         assert((generation & 1u) == 1 && "Generation tokens are always odd");
@@ -995,7 +995,7 @@ struct colocated_pool {
      *  cannot decide that: the bottom rank is E-cores on an A18 but big cores on an M5 Pro, where
      *  @c UTILITY would banish two thirds of the machine. Checking rank first keeps an
      *  all-efficiency chip honest - its E-cores are the fastest thing present. A hidden or unknown
-     *  name parses to `apple_performance_k`, falling back to rank alone; never guessing `UTILITY`.
+     *  name parses to @c apple_performance_k, falling back to rank alone, never to @c UTILITY.
      */
     static qos_class_t _qos_for_domain(compute_domain_t const &domain, std::size_t const levels) noexcept {
         if (domain.compute_level + 1 >= levels) return QOS_CLASS_USER_INITIATED; // ? The fastest tier present
@@ -1088,17 +1088,17 @@ class invoke_distributed_for_n {
 
 /**
  *  @brief Wraps the metadata needed for @c for_n_dynamic APIs for @c broadcast_join compatibility.
- *  @note Similar to `invoke_for_n_dynamic`, but dynamically determines the threads' compute_domain.
+ *  @note Like @c invoke_for_n_dynamic, but determines each thread's compute domain at run time.
  *
  *  @section distributed_scheduling Scheduling Logic
  *
- *  The same protocol as `invoke_for_n_dynamic`, applied at two levels. Let's say we receive N tasks
- *  for T threads across C compute_domains. Each compute_domain takes (N/C) tasks, reserves one
- *  trailing static prong per local thread, and splits the rest into one contiguous slice per local
- *  thread - so every thread drains its own slice with an @b uncontended @c fetch_add on a cursor
- *  line nobody else touches. A drained thread first helps its same-domain neighbours, walking them
- *  in a coprime order, and only when the whole domain runs dry does it cross the interconnect -
- *  walking the other domains, then each domain's threads, in coprime order again.
+ *  The same protocol as @c invoke_for_n_dynamic, applied at two levels. Let's say we receive N
+ *  tasks for T threads across C compute_domains. Each compute_domain takes (N/C) tasks, reserves
+ *  one trailing static prong per local thread, and splits the rest into one contiguous slice per
+ *  local thread - so every thread drains its own slice with an @b uncontended @c fetch_add on a
+ *  cursor line nobody else touches. A drained thread first helps its same-domain neighbours,
+ *  walking them in a coprime order, and only when the whole domain runs dry does it cross the
+ *  interconnect - walking the other domains, then each domain's threads, in coprime order again.
  *
  *  Tasks are still claimed one at a time, so the makespan guarantee of greedy list scheduling
  *  survives; a cursor line is only ever shared once a thread actually runs dry, which is exactly
@@ -1111,8 +1111,8 @@ class invoke_distributed_for_n {
  *  domain - @c threads_local static prongs - while helping is pool-wide, so a slice may be visited
  *  by all T threads and its cursor may settle past @c n - by less than @c T increments. No
  *  out-of-range task is ever dispatched - `task >= end` guards every claim - and the read-only
- *  probe in `drain_claim` drives the drained-slice regime to zero overshoot, so wrapping would need
- *  @c n within a core-count of the index type's maximum.
+ *  probe in @c drain_claim drives the drained-slice regime to zero overshoot, so wrapping would
+ *  need @c n within a core-count of the index type's maximum.
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_distributed_for_n_dynamic {
@@ -1166,7 +1166,7 @@ class invoke_distributed_for_n_dynamic {
         index_type_ const compute_domains_count = pool_.compute_domains_count();
         assert(compute_domains_count > 0 && "There must be at least one compute_domain");
 
-        // The locator's compute_domain is INVARIANT across every steal: it names the domain THIS
+        // The locator's compute_domain is invariant across every steal: it names the domain this
         // thread is pinned to, never the victim's - so a stolen task still reads the thief's
         // node-local replica; replicas are identical, only their distances differ. The reported
         // value is the topology-wide index; the colocation index drives the layout math below.
@@ -1272,12 +1272,13 @@ struct distributed_pool {
      *  @brief One pinned sub-pool per compute domain, in one flat contiguous array.
      *
      *  The array lives on the first domain's node, and that is enough: a worker spinning on its
-     *  pool's `mood_` / `epoch_` holds a Shared copy in its own cache, and the `threads_to_sync_`
-     *  line ping-pongs between its sharers, not their directory home - per-domain placement of
-     *  these signal words measured as pure noise on a 2-socket machine. The hot per-task state -
-     *  every worker's @c dynamic_claim cursor inside @c pthreads_ - is node-local regardless, since
-     *  each @c colocated_pool allocates it with its own domain allocator in @c spawn. Entries are
-     *  sorted by compute-domain index, and the first one always contains the current thread.
+     *  pool's @c mood_ and @c epoch_ holds a Shared copy in its own cache, and the
+     *  @c threads_to_sync_ line ping-pongs between its sharers, not their directory home -
+     *  per-domain placement of these signal words measured as pure noise on a 2-socket machine. The
+     *  hot per-task state - every worker's @c dynamic_claim cursor inside @c pthreads_ - is
+     *  node-local regardless, since each @c colocated_pool allocates it with its own domain
+     *  allocator in @c spawn. Entries are sorted by compute-domain index, and the first one always
+     *  contains the current thread.
      */
     colocations_t colocations_ {};
 
@@ -1322,7 +1323,7 @@ struct distributed_pool {
         return colocations_[compute_domain].first_thread();
     }
 
-    /** Exposes one worker's private claim cursor, drained by `invoke_distributed_for_n_dynamic`. */
+    /** One worker's private claim cursor, drained by @c invoke_distributed_for_n_dynamic. */
     dynamic_claim<index_t> &unsafe_dynamic_claim_ref(thread_index_t const thread) noexcept {
         index_t const compute_domain = thread_compute_domain(thread);
         return colocations_[compute_domain].unsafe_dynamic_claim_ref(thread_local_index(thread, compute_domain));
@@ -1534,7 +1535,7 @@ struct distributed_pool {
      *  @note Can be called from @b any thread, after the last dispatch was joined.
      *  @note Must @c spawn again to re-use the pool.
      *
-     *  When and how @b NOT to use this function:
+     *  When and how @b not to use this function:
      *  - as a synchronization point between concurrent tasks.
      *
      *  When and how to use this function:
@@ -1555,9 +1556,8 @@ struct distributed_pool {
      *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
      *  @note Callable only @b between one thread's tasks; performs no synchronization.
      *
-     *  This function may be used in some batch-processing operations when we clearly understand
-     *  that the next task won't be arriving for a while and power can be saved without major
-     *  latency penalties.
+     *  Useful in batch processing when we clearly know the next task won't arrive for a while,
+     *  so power can be saved without major latency penalties.
      *
      *  It may also be used in a high-level Python or JavaScript library offloading some parallel
      *  operations to an underlying C++ engine, where latency is irrelevant.
@@ -1651,8 +1651,8 @@ struct distributed_pool {
      *  @brief Returns true once @p generation has completed on every sub-pool.
      *  @note A @c true result synchronizes with all contributors: their writes are visible.
      *
-     *  On `caller_inclusive_k` pools this can only turn `true` once `unsafe_join` contributes the
-     *  calling thread's slice, so poll-then-join is reserved for @c caller_exclusive_k pools.
+     *  On @c caller_inclusive_k pools this can only turn @c true once @c unsafe_join contributes
+     *  the calling thread's slice, so poll-then-join is reserved for @c caller_exclusive_k pools.
      */
     bool is_complete(generation_t generation) const noexcept {
         for (index_t i = 0; i < colocations_.size(); ++i)
@@ -1663,7 +1663,8 @@ struct distributed_pool {
     /**
      *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
      *  @note On @c caller_inclusive_k pools, first executes the calling thread's slice.
-     *  Idempotent: returns immediately for already-joined or stale generations.
+     *
+     *  Idempotent, returning immediately for already-joined or stale generations.
      */
     void unsafe_join(generation_t generation) noexcept {
         assert(colocations_ && "Thread pools must be initialized before broadcasting");
@@ -1726,7 +1727,7 @@ struct distributed_pool {
 
     /** One sub-pool's topology-wide compute-domain index. Equals @p colocation_index under a
      *  whole-machine spawn and diverges under @c spawn_near_memory_domain, which compacts the array
-     *  to one node's local domains - so callbacks get the index `compute_domain_at` understands. */
+     *  to one node's local domains, so callbacks get the index @c compute_domain_at takes. */
     index_t compute_domain_index_of(index_t const colocation_index) const noexcept {
         return colocation_index < colocations_.size() ? colocations_[colocation_index].compute_domain_index()
                                                       : colocation_index;
@@ -1768,8 +1769,8 @@ static_assert(is_pool<flat_pool_t> && is_pool<colocated_pool_t> && is_pool<distr
  *  @brief One recorded observation of a memory-fabric edge: what @p initiator's cores see when
  *      reaching memory resident on @p target.
  *
- *  The chase and the stream are separate experiments, so each record carries the metric its
- *  experiment produced, 0 for the other; `measured_fabric` folds the log into per-metric envelopes.
+ *  The chase and the stream are separate experiments, so each record carries its own experiment's
+ *  metric and 0 for the other; @c measured_fabric folds the log into per-metric envelopes.
  */
 struct measured_edge_t {
 
@@ -1783,22 +1784,22 @@ struct measured_edge_t {
     /** Dependent-load latency of a lone core, in nanoseconds; 0 if unobserved. */
     std::size_t nanoseconds {0};
 
-    /** Saturated read bandwidth of ALL the initiator's cores at once, in MB/s; 0 if unobserved. */
+    /** Saturated read bandwidth of all the initiator's cores at once, in MB/s; 0 if unobserved. */
     std::size_t megabytes_per_second {0};
 };
 
 /** One hop of the latency walk, padded to a cache line so consecutive slots never share one. */
 struct alignas(64) chase_slot_t {
 
-    /** Index of the slot the walk visits next; no initializer, as `resize_uninitialized` demands
-     *  trivial construction and `thread_chase_list_` writes every slot anyway. */
+    /** Index of the slot the walk visits next; no initializer, as @c resize_uninitialized demands
+     *  trivial construction and @c thread_chase_list_ writes every slot anyway. */
     std::uint32_t next_slot_index;
 };
 
 /**
  *  @brief Threads a single Sattolo cycle through @p slots - a linked list where each load's address
  *      depends on the one before it, defeating prefetch and paying true latency.
- *  @note Writing the links is also the FIRST touch of every page, which is what places the list on
+ *  @note Writing the links is also the first touch of every page, which is what places the list on
  *      the toucher's memory domain on every OS - no @c mbind, no @c libnuma, no ACPI.
  */
 inline void thread_chase_list_(chase_slot_t *slots, std::size_t const count) noexcept {
@@ -1855,7 +1856,7 @@ inline std::size_t chase_list_bytes_(memory_domain_t const &target) noexcept {
     return bytes;
 }
 
-/** Fills @p words with @c split_mix draws - the FIRST touch that places every page on the filling
+/** Fills @p words with @c split_mix draws - the first touch that places every page on the filling
  *  worker's memory domain, and data no reduction can constant-fold away. */
 inline void fill_stream_words_(std::uint64_t *words, std::size_t const count) noexcept {
     for (std::size_t i = 0; i != count; ++i) words[i] = split_mix(i);
@@ -1977,7 +1978,7 @@ template <typename pool_type_, typename edges_array_type_>
  *      into @p levels and returning the number of distinct tiers, at least 1.
  *  @param[out] scratch Caller-provided workspace of `4 * memory_domains_count` entries.
  *
- *  A tier is a property of the MEDIUM, independent of any initiator: each target is keyed by the
+ *  A tier is a property of the medium, independent of any initiator: each target is keyed by the
  *  best bandwidth any initiator sustained to it, ties split by the best latency - a 3 TB/s HBM pool
  *  outranks DDR even at equal latency. Targets cluster greedily along the sorted keys: a new tier
  *  opens where bandwidth trails its tier's anchor by over 1.25x, or, within one bandwidth band,
@@ -2044,11 +2045,11 @@ FU_MAYBE_UNUSED_ static std::size_t derive_memory_levels_(measured_edge_t const 
  *  @brief The measured memory fabric - what this process @b observed, as opposed to the structure
  *      the OS @b declared in @c machine_topology.
  *
- *  Two query families: EDGE queries `(initiator, target)` describe one interconnect link; MEDIUM
- *  queries `(target)` describe the memory pool itself, independent of any initiator.
+ *  Two query families: edge queries @b (initiator,target) describe one interconnect link; medium
+ *  queries @b (target) describe the memory pool itself, independent of any initiator.
  *
- *  Completes the `harvest` pipeline: a `machine_topology` is harvested first and stays immutable, a
- *  pool spawns on it, and the fabric then harvests through that pool's workers, snapshotting what
+ *  Completes the @c harvest pipeline: a @c machine_topology is harvested first and stays immutable,
+ *  a pool spawns on it, and the fabric then harvests through that pool's workers, snapshotting what
  *  it needs so the topology may be freed after. @c harvest is the only mutator and replaces the
  *  whole snapshot; before it, every query answers 0 and @c memory_levels_count answers 1.
  */
@@ -2067,7 +2068,7 @@ class measured_fabric {
     /** The observation log: sparse, only walked edges exist, each metric enveloped on query. */
     dynamic_array<measured_edge_t, edges_allocator_t> edges_;
 
-    /** Snapshot of `local_memory_of` per compute domain, so `memory_distance` needs no topology. */
+    /** Each compute domain's @c local_memory_of, cached so @c memory_distance needs no topology. */
     dynamic_array<std::size_t, indices_allocator_t> local_memory_;
 
     /** Derived memory-tier ordinal per memory domain, 0 = fastest. */
@@ -2263,7 +2264,7 @@ class measured_fabric {
             // still differ - efficiency cores trail performance cores to the very same DRAM.
             for (std::size_t initiator = 0; initiator != pool.compute_domains_count(); ++initiator) {
 
-                // Every edge gets a FRESH list, first-touched by the target's worker - that write
+                // Every edge gets a fresh list, first-touched by the target's worker - that write
                 // is the whole portable placement story - then evicted, since a chase must start
                 // cold or the previous walker's cached copies re-route it through the directory.
                 dynamic_array<chase_slot_t> list;

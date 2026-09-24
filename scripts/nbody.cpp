@@ -9,7 +9,8 @@
  *  - @c NBODY_COUNT - number of bodies in the simulation, defaulting to the number of threads.
  *  - @c NBODY_SECONDS - wall-clock budget per run, reporting the sustained rate - default 10.
  *  - @c NBODY_ITERATIONS - run an exact iteration count instead, when set.
- *  - `NBODY_BACKEND` - backend to use for the simulation, defaulting to `forkunion_static_shared`.
+ *  - @c NBODY_BACKEND - backend to use for the simulation, defaulting to
+ *    @c forkunion_static_shared.
  *  - @c NBODY_THREADS - number of threads to use, defaulting to the hardware thread count.
  *
  *  The backends include: `forkunion_{static,dynamic}_{shared,replicated}`,
@@ -57,8 +58,8 @@
 #include <chrono>   // `std::chrono::steady_clock`
 #include <optional> // `std::optional` - the executor, spawned only when chosen
 
-/*  Clang generally defines `_OPENMP` when OpenMP, but compiling it is tricky and the header may not
- *  be available. */
+/*  Clang generally defines @c _OPENMP when OpenMP, but compiling it is tricky and the header may
+ *  not be available. */
 #if defined(_OPENMP)
 #if __has_include(<omp.h>)
 #include <omp.h>
@@ -323,11 +324,11 @@ static void run_openmp_dynamic(nbody_context_t &c) noexcept {
 /**
  *  @brief The Taskflow baselines - the same all-to-all sweep under @c tf::for_each_index.
  *
- *  The executor is spawned once by `main`, and the two task graphs are built once on the first step
- *  and re-run thereafter - exactly how Taskflow is meant to be used. Rebuilding a @c tf::Taskflow
- *  every step, or spawning a fresh @c tf::Executor per dispatch, would measure graph construction,
- *  not the dispatch this benchmark isolates. The graphs capture the `bodies`/`forces` spans, whose
- *  pointers never move, so one build stays valid.
+ *  The executor is spawned once by @c main, and the two task graphs are built once on the first
+ *  step and re-run thereafter - exactly how Taskflow is meant to be used. Rebuilding a
+ *  @c tf::Taskflow every step, or spawning a fresh @c tf::Executor per dispatch, would measure
+ *  graph construction, not the dispatch this benchmark isolates. The graphs capture the @c bodies
+ *  and @c forces spans, whose pointers never move, so one build stays valid.
  */
 template <typename partitioner_>
 static void run_taskflow(nbody_context_t &c, partitioner_ partitioner) noexcept {

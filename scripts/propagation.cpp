@@ -39,7 +39,7 @@
  *  - @c PROPAGATION_THREADS - number of threads to use - default all hardware threads.
  *  - @c PROPAGATION_SECONDS - wall-clock budget per run, reporting the sustained rate - default 10.
  *  - @c PROPAGATION_ITERATIONS - run an exact pass count instead, when set.
- *  - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
+ *  - @c PROPAGATION_CHECK - also converge serially, failing unless labels and rounds agree exactly.
  *
  *  The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
  *  the baselines are `{openmp,taskflow}_{static,dynamic}`.
@@ -126,7 +126,7 @@ struct edge_t {
     bool operator==(edge_t const &o) const noexcept { return row == o.row && column == o.column; }
 };
 
-/** Sorts past every valid edge; marks dropped self-loops, trimmed together with `unique`'s tail. */
+/** Sorts past every valid edge, marking dropped self-loops, trimmed with what @c unique leaves. */
 static constexpr edge_t sentinel_edge_k {~vertex_t(0), ~vertex_t(0)};
 
 /** One quadrant choice in `[0, 100)` - same draw and counter scheme as every sibling benchmark. */
@@ -586,7 +586,7 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // One pinned pool spawns for EVERY backend - first to give the graph and label pages their
+    // One pinned pool spawns for every backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; the others drop it below.
     bool const needs_pool =
         selected->engine == engine_t::forkunion_k || selected->engine == engine_t::forkunion_replicated_k;

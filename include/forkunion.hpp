@@ -12,9 +12,9 @@
  *  types, and is safe to use even with the maximal @c std::size_t values.
  *
  *  @code{.cpp}
- *  #include <cstdio> // `std::printf`
- *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.hpp> // `fu::flat_pool_t`
+ *  #include <cstdio>         // `std::printf`
+ *  #include <cstdlib>        // `EXIT_FAILURE`, `EXIT_SUCCESS`
+ *  #include <forkunion.hpp>  // `fu::flat_pool_t`
  *
  *  using fu = ashvardanian::forkunion;
  *  int main(int argc, char *argv[]) {
@@ -52,8 +52,8 @@
  *  @sa core_quality_t
  *
  *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
- *  exposes cheaper @b "busy-waiting" mechanisms, such as `tpause`, `wfet`, & `yield` instructions.
- *  RISC-V is internally referred to as RISC5.
+ *  exposes cheaper @b "busy-waiting" mechanisms, such as the @c tpause, @c wfet, and @c yield
+ *  instructions. RISC-V is internally referred to as RISC5.
  *
  *  @sa arm64_yield_t, arm64_wfet_t, x86_pause_t, x86_tpause_t, risc5_pause_t.
  *

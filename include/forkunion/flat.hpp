@@ -1,7 +1,7 @@
 /**
  *  @file include/forkunion/flat.hpp
  *  @author Ash Vardanian
- *  @date July 10, 2026
+ *  @date May 2, 2025
  *  @brief The portable @c flat_pool, built on @c std::thread.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
@@ -27,20 +27,22 @@ namespace forkunion {
  *  and no expensive abstractions. It only uses @c std::thread and @c std::atomic, but avoids
  *  @c std::function, @c std::future, @c std::promise, @c std::condition_variable, that bring
  *  unnecessary overhead.
+ *
  *  @see https://ashvardanian.com/posts/beyond-openmp-in-cpp-rust/#four-horsemen-of-performance
  *
  *  Repeated operations are performed with a @b "weak" memory model, to leverage in-hardware support
  *  for atomic fence-less operations on Arm and IBM Power architectures. Most atomic counters use
  *  the "acquire-release" model, and some going further to "relaxed" model.
+ *
  *  @see https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
  *  @see https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2055r0.pdf
  *
  *  A minimal example, similar to `#pragma omp parallel` in OpenMP:
  *
  *  @code{.cpp}
- *  #include <cstdio> // `std::printf`
- *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.hpp> // `flat_pool_t`
+ *  #include <cstdio>         // `std::printf`
+ *  #include <cstdlib>        // `EXIT_FAILURE`, `EXIT_SUCCESS`
+ *  #include <forkunion.hpp>  // `flat_pool_t`
  *
  *  using fu = ashvardanian::forkunion;
  *  int main() {
@@ -56,9 +58,9 @@ namespace forkunion {
  *  between different NUMA nodes, between GUI and background tasks, etc. It may look like this:
  *
  *  @code{.cpp}
- *  #include <cstdio> // `std::printf`
- *  #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.hpp> // `flat_pool_t`
+ *  #include <cstdio>         // `std::printf`
+ *  #include <cstdlib>        // `EXIT_FAILURE`, `EXIT_SUCCESS`
+ *  #include <forkunion.hpp>  // `flat_pool_t`
  *
  *  using fu = ashvardanian::forkunion;
  *  int main() {
@@ -100,8 +102,8 @@ namespace forkunion {
  *     race with the previous completion, and generation tokens are always odd.
  *
  *  On @c caller_inclusive_k pools the calling thread owes a slice that only runs inside
- *  `unsafe_join`, so `is_complete` stays `false` until then: the poll-then-join pattern is reserved
- *  for @c caller_exclusive_k pools.
+ *  @c unsafe_join, so @c is_complete stays @c false until then: the poll-then-join pattern is
+ *  reserved for @c caller_exclusive_k pools.
  *
  *  @tparam allocator_type_ The type of the allocator to be used for the thread pool.
  *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
@@ -169,15 +171,15 @@ class flat_pool {
      *
      *  The claim cursor must not share a line with anything, or the dynamic scheduler reintroduces
      *  the very coherence traffic that giving each thread a private cursor exists to remove. Rather
-     *  than allocate a second array beside `std::thread`, both live in one padded cell, so the pool
-     *  still performs exactly one allocation - in @c spawn, never on a dispatch path.
+     *  than allocate a second array beside @c std::thread, both live in one padded cell, so the
+     *  pool still performs exactly one allocation - in @c spawn, never on a dispatch path.
      *
      *  Cells are indexed by @b thread @b index, so on inclusive pools cell 0 belongs to the caller
-     *  and holds no `std::thread`, costing one cell but buying `claim` and `worker` the same index.
+     *  and holds no @c std::thread, costing a cell but giving @c claim and @c worker one index.
      *
      *  @note Separation comes from the buffer's @b stride, not from an @c alignas on this type. A
-     *      `std::allocator` only promises `__STDCPP_DEFAULT_NEW_ALIGNMENT__`, so over-aligning the
-     *      cell would placement-new it into storage that cannot satisfy the request.
+     *      @c std::allocator only promises @c __STDCPP_DEFAULT_NEW_ALIGNMENT__, so over-aligning
+     *      the cell would placement-new it into storage that cannot satisfy the request.
      */
     struct worker_cell_t {
 
@@ -387,7 +389,7 @@ class flat_pool {
      *  @note Can be called from @b any thread, after the last dispatch was joined.
      *  @note Must @c spawn again to re-use the pool.
      *
-     *  When and how @b NOT to use this function:
+     *  When and how @b not to use this function:
      *  - as a synchronization point between concurrent tasks.
      *
      *  When and how to use this function:
@@ -424,9 +426,8 @@ class flat_pool {
      *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
      *  @note Callable only @b between tasks on a single thread; no synchronization runs.
      *
-     *  This function may be used in some batch-processing operations when we clearly understand
-     *  that the next task won't be arriving for a while and power can be saved without major
-     *  latency penalties.
+     *  Useful in batch processing when we clearly know the next task won't arrive for a while,
+     *  so power can be saved without major latency penalties.
      *
      *  It may also be used in a high-level Python or JavaScript library offloading some parallel
      *  operations to an underlying C++ engine, where latency is irrelevant.
@@ -546,7 +547,8 @@ class flat_pool {
     /**
      *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
      *  @note On @c caller_inclusive_k pools, first executes the calling thread's slice.
-     *  Idempotent: returns immediately for already-joined or stale generations.
+     *
+     *  Idempotent, returning immediately for already-joined or stale generations.
      */
     void unsafe_join(generation_t generation) noexcept {
         assert((generation & 1u) == 1 && "Generation tokens are always odd");

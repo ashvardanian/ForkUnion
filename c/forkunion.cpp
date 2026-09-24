@@ -57,8 +57,8 @@ struct pool_variants_t {
     };
 
     /*  Every (waiter, cache-hints) pair the @c select_pool cascade below may instantiate, spelled
-     *  out explicitly per shape. A missed entry cannot silently under-size the storage: `construct`
-     *  static-asserts every pool it places against these bounds, so drift fails the build.  */
+     *  out per shape. A missed entry cannot silently under-size the storage: @c construct
+     *  static-asserts every pool it places against these bounds, so drift fails the build. */
     using pool_traits_t = max_size_align< //
 #if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
         fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::x86_cache_hints_t>, //
@@ -125,13 +125,13 @@ struct pool_variants_t {
         fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
         >;
 
-    /** Raw aligned storage for the one live pool, reinterpreted per `kind_` and `capabilities_`. */
+    /** Raw aligned storage for the one live pool, read per @c kind_ and @c capabilities_. */
     alignas(pool_traits_t::alignment_k) std::uint8_t storage_[pool_traits_t::size_k];
 
     /** The stored pool's shape, or @c unknown_k when the storage is empty - no pool spawned yet. */
     fu::pool_kind_t kind_ {fu::pool_kind_t::unknown_k};
 
-    /** The busy-wait bit the stored pool uses; together with `kind_` it names the concrete type. */
+    /** The busy-wait bit the stored pool uses; with @c kind_ it names the concrete type. */
     fu::capabilities_t capabilities_ {fu::capabilities_unknown_k};
 
     pool_variants_t() = default;
@@ -171,12 +171,12 @@ static bool selects(fu::capabilities_t const bits) noexcept {
 }
 
 /**
- *  @brief The one capability→type cascade: walks the silicon-real waiter and cache-hints pairs,
+ *  @brief The one capability → type cascade: walks the silicon-real waiter and cache-hints pairs,
  *      most capable first, and invokes @p action with the tag of the first pair whose every
  *      declared bit is in @p bits.
  *
  *  Anything unexpected degrades to the nearest pair that only drops capabilities, down to the
- *  portable `(standard_yield_t, standard_cache_hints_t)` fallback.
+ *  portable @b (standard_yield_t,standard_cache_hints_t) fallback.
  *
  *  Serves both directions - @c construct_pool passes the probed machine capabilities, @c visit_kind
  *  passes the bits stored at construction - so selection and decoding can never disagree.
@@ -341,7 +341,7 @@ struct opaque_pool_t {
     }
 };
 
-/** Terminates and destroys the pool in @p variants, resetting it to the empty `unknown_k` state. */
+/** Terminates and destroys the pool in @p variants, resetting it to the empty @c unknown_k one. */
 static void destroy_variant(pool_variants_t &variants) noexcept {
     visit(
         [](auto &variant) {
