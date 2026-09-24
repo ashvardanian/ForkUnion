@@ -50,7 +50,7 @@ pub const AllocationResult = struct {
     }
 };
 
-/// Allocates memory on a memory domain with optimal page size; id from `Topology.memoryDomainIdAtIndex`.
+/// Allocates on a memory domain with optimal page size; id from `Topology.memoryDomainIdAtIndex`.
 pub fn allocateAtLeast(memory_domain_id: MemoryDomainId, minimum_bytes: usize) ?AllocationResult {
     var allocated_bytes: usize = undefined;
     var bytes_per_page: usize = undefined;
@@ -73,7 +73,7 @@ pub fn allocateAtLeast(memory_domain_id: MemoryDomainId, minimum_bytes: usize) ?
     };
 }
 
-/// Allocates exactly the requested bytes on a memory domain; id from `Topology.memoryDomainIdAtIndex`.
+/// Allocates exactly the requested bytes on a domain; id from `Topology.memoryDomainIdAtIndex`.
 pub fn allocate(memory_domain_id: MemoryDomainId, bytes: usize) ?[*]u8 {
     const ptr = fu_allocate_on_domain_id(memory_domain_id.identifier(), bytes) orelse return null;
     return @ptrCast(@alignCast(ptr));
@@ -102,14 +102,14 @@ pub const DomainAllocator = struct {
         .free = free,
     };
 
-    /// Binds to the memory domain named by @p memory_domain_id, which must name a real domain -
-    /// ask `isValid` first, since an out-of-range lookup answers `.none`.
+    /// Binds to the memory domain named by @p memory_domain_id, which must name a real domain - ask
+    /// `isValid` first, since an out-of-range lookup answers `.none`.
     pub fn init(memory_domain_id: MemoryDomainId) Self {
         std.debug.assert(memory_domain_id.isValid());
         return .{ .memory_domain_id = memory_domain_id };
     }
 
-    /// Allocates at least @p minimum_bytes on this domain with the optimal page size, or null on failure.
+    /// Allocates at least @p minimum_bytes on this domain at optimal page size, or null on failure.
     pub fn allocateAtLeast(self: Self, minimum_bytes: usize) ?AllocationResult {
         var allocated_bytes: usize = undefined;
         var bytes_per_page: usize = undefined;
@@ -244,12 +244,12 @@ pub const DomainAllocator = struct {
     }
 };
 
-/// One full length-`len` copy of a sequence per memory domain, so every thread reads a node-local replica.
+/// One full length-`len` copy of a sequence per domain, so every thread reads a node-local replica.
 ///
-/// A thin owner of one symmetric mapping the allocator stripes across the nodes - replica `d` lives at
-/// `base + d * stride_bytes` and holds `len` elements. Raw uninitialized storage: the caller fills every
-/// replica and keeps them coherent, mirroring the C++ `replicated_array`. `T` must be plain-old-data,
-/// since the container runs no constructors or destructors.
+/// A thin owner of one symmetric mapping the allocator stripes across the nodes - replica `d` lives
+/// at `base + d * stride_bytes` and holds `len` elements. Raw uninitialized storage: the caller
+/// fills every replica and keeps them coherent, mirroring the C++ `replicated_array`. `T` must be
+/// plain-old-data, since the container runs no constructors or destructors.
 pub fn ReplicatedArray(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -329,10 +329,10 @@ pub fn ReplicatedArray(comptime T: type) type {
 
 /// A sequence partitioned across memory domains as contiguous segments, each element stored once.
 ///
-/// Each domain owns a contiguous logical segment of `segment` elements, so element `i` lives at
-/// `{i / segment, i % segment}` - see `locationOf` - and a scan of a domain's shard is sequential in
-/// memory. Backed by one symmetric mapping; the trailing shard may be short. `T` must be plain-old-data,
-/// mirroring `ReplicatedArray`.
+/// Each domain owns a contiguous logical segment of `segment` elements, so element `i` lives at `{i
+/// / segment, i % segment}` - see `locationOf` - and a scan of a domain's shard is sequential in
+/// memory. Backed by one symmetric mapping; the trailing shard may be short. `T` must be
+/// plain-old-data, mirroring `ReplicatedArray`.
 pub fn ShardedArray(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -344,7 +344,7 @@ pub fn ShardedArray(comptime T: type) type {
         len: usize = 0,
         segment: usize = 0,
 
-        /// Allocates uninitialized storage for `n` elements partitioned round-robin across the domains.
+        /// Allocates uninitialized storage for `n` elements partitioned round-robin across domains.
         pub fn init(topology: Topology, n: usize) Error!Self {
             if (n == 0) return Self{};
             const domains = try topology.memoryDomainsCount();
@@ -416,7 +416,7 @@ pub fn ShardedArray(comptime T: type) type {
             };
         }
 
-        /// The logical index of the element at `local_index` on `memory_domain` - inverse of `locationOf`.
+        /// The logical index at `local_index` on `memory_domain` - the inverse of `locationOf`.
         pub fn logicalIndexOf(self: Self, memory_domain: MemoryDomain, local_index: usize) usize {
             return memory_domain.index() * self.segment + local_index;
         }

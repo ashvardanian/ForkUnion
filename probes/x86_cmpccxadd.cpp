@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the CMPCCXADD conditional add as raw bytes - inline assembly alone.
- *  @author Ash Vardanian
  *  @file probes/x86_cmpccxadd.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the CMPCCXADD conditional add as raw bytes - inline assembly alone.
  */
 #if !(defined(__x86_64__) || defined(_M_X64))
 #error "x86-64 only"

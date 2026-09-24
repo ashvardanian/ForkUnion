@@ -4,9 +4,9 @@
 //! parallelism, avoiding dynamic memory allocations, exceptions, system calls, and heavy
 //! Compare-And-Swap instructions on the hot path.
 //!
-//! Zig 0.16 removed std.Thread.Pool, and its replacement std.Io.Group allocates per task and has
-//! no notion of topology. ForkUnion is designed for data parallelism and tight parallel loops -
-//! think OpenMP's `#pragma omp parallel for` - with a fixed pool and no allocation on the hot path.
+//! Zig 0.16 removed std.Thread.Pool, and its replacement std.Io.Group allocates per task and has no
+//! notion of topology. ForkUnion is designed for data parallelism and tight parallel loops - think
+//! OpenMP's `#pragma omp parallel for` - with a fixed pool and no allocation on the hot path.
 //!
 //! Basic usage:
 //! ```zig
@@ -33,10 +33,10 @@
 //! Every dispatch takes the context before the callback and forwards it as a caller-owned pointer,
 //! so the callback sees the qualifiers the caller chose. Pass `{}` for a kernel that needs none.
 //!
-//! This root re-exports every public symbol from the modules that mirror the C++ core -
-//! `topology`, `types`, `allocators`, `scheduling` - so `@import("forkunion").X` resolves exactly
-//! as when the binding lived in one file. Each module carries its own FFI declarations at the top
-//! and its tests at the bottom.
+//! This root re-exports every public symbol from the modules that mirror the C++ core - `topology`,
+//! `types`, `allocators`, `scheduling` - so `@import("forkunion").X` resolves exactly as when the
+//! binding lived in one file. Each module carries its own FFI declarations at the top and its tests
+//! at the bottom.
 
 const topology = @import("forkunion/topology.zig");
 const types = @import("forkunion/types.zig");

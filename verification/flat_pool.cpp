@@ -1,17 +1,19 @@
 /**
- *  @brief GenMC client for `flat_pool`'s fork-join protocol in `include/forkunion/flat.hpp`: the
- *      epoch clock, the countdown, and what a completed join sees, spelled line for line over
- *      `std::atomic`. The pool itself spawns through `std::thread`, which rides on the
- *      platform's `pthread_create` GenMC does not intercept, so its words stand alone here.
- *  @author Ash Vardanian
  *  @file verification/flat_pool.cpp
+ *  @author Ash Vardanian
  *  @date September 9, 2026
+ *  @brief GenMC client for @c flat_pool's fork-join protocol in `include/forkunion/flat.hpp`: the
+ *      epoch clock, the countdown, and what a completed join sees.
  *
- *  A dispatcher runs one generation on a caller-inclusive pool with two workers, contributes
- *  its own slice inside the join, and after the completion step reads every worker's result.
- *  `-Dwithout_decrement_acquire` weakens the `acq_rel` decrements to release: the last contributor
- *  no longer acquires its peers, and the join reads a stale result. The same scenario is
- *  `flat_pool.pml`.
+ *  Everything here is spelled line for line over @c std::atomic. The pool itself spawns through
+ *  `std::thread`, which rides on the platform's `pthread_create` that GenMC does not intercept, so
+ *  its words stand alone here.
+ *
+ *  A dispatcher runs one generation on a caller-inclusive pool with two workers, contributes its
+ *  own slice inside the join, and after the completion step reads every worker's result.
+ *  `-Dwithout_decrement_acquire` weakens the @c acq_rel decrements to release: the last contributor
+ *  drops the acquire on its peers, and the join reads a stale result. The companion PlusCal script
+ *  models the same scenario in `flat_pool.pml`.
  */
 #include <cstddef> // `std::size_t`
 

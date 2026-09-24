@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the `amocas.w` word with its registers pinned - inline assembly alone.
- *  @author Ash Vardanian
  *  @file probes/risc5_zacas.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the `amocas.w` word with its registers pinned - inline assembly alone.
  */
 #if !(defined(__riscv) && __riscv_xlen == 64)
 #error "64-bit RISC-V only"

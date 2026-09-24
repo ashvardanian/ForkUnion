@@ -1,6 +1,9 @@
 //! Machine topology, capabilities, and library version - the read-only view of the hardware.
 //!
 //! Owns the `fu_topology_*`, capability, and version FFI; mirrors the C++ `topology` header.
+//!
+//! File: rust/forkunion/topology.rs
+//! Author: Ash Vardanian
 
 use crate::types::{Error, Result, Status};
 use core::ffi::{c_char, c_int, c_void};
@@ -99,8 +102,8 @@ impl Capabilities {
     /// `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
     /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
     pub const ARM64_DC_CVAC: Capabilities = Capabilities(1 << 16);
-    /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
-    /// the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+    /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
+    /// hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
     pub const RISC5_ZICBOM: Capabilities = Capabilities(1 << 17);
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
@@ -145,9 +148,8 @@ pub fn comptime_capabilities() -> Capabilities {
 
 /// Formats a capability bitset into a comma-separated name list, like `"threads,topology"`.
 ///
-/// POLISH: returns an owned `String` because `fu_name_capabilities` writes into a caller
-/// buffer rather than handing back a static pointer; a fixed-capacity stack type would avoid
-/// the allocation.
+/// POLISH: returns an owned `String`, since `fu_name_capabilities` writes into a caller buffer, not
+/// a static pointer; a fixed-capacity stack type would avoid this allocation.
 #[cfg(feature = "std")]
 pub fn name_capabilities(caps: Capabilities) -> Result<std::string::String> {
     // `FU_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
@@ -188,30 +190,30 @@ pub fn runtime_capabilities_string() -> Result<std::string::String> {
     name_capabilities(runtime_capabilities())
 }
 
-/// A position in the topology's array of **compute** domains, in `[0, compute_domains_count())`.
+/// A position in the topology's array of __compute__ domains, in `[0, compute_domains_count())`.
 ///
 /// Distinct from [`MemoryDomain`], and deliberately not interchangeable with it. The two axes are
-/// indexed independently: an Apple M5 Pro reports three compute domains over a single memory domain,
-/// so a compute index of `2` names no memory domain at all.
+/// indexed independently: an Apple M5 Pro reports three compute domains over a single memory
+/// domain, so a compute index of `2` names no memory domain at all.
 ///
-/// This is not hypothetical. Handing a compute-domain index to `DomainAllocator::new`, which expects a
-/// memory-domain index, compiles and works on every machine where the two counts happen to match, then
-/// misplaces memory where they diverge. Unlike a C++ `enum`, a newtype also refuses
-/// `slice[compute_domain]`, because `Index<usize>` will not accept it - which is the other half of the
-/// same bug.
+/// This is not hypothetical. Handing a compute-domain index to `DomainAllocator::new`, which
+/// expects a memory-domain index, compiles and works on every machine where the two counts happen
+/// to match, then misplaces memory where they diverge. Unlike a C++ `enum`, a newtype also refuses
+/// `slice[compute_domain]`, because `Index<usize>` will not accept it - which is the other half of
+/// the same bug.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComputeDomain(pub usize);
 
-/// A position in the topology's array of **memory** domains, in `[0, memory_domains_count())`.
-/// See [`ComputeDomain`] for why these are separate types.
+/// A position in the topology's array of __memory__ domains, in `[0, memory_domains_count())`, kept
+/// separate from [`ComputeDomain`] for the reasons given there.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomain(pub usize);
 
 /// An OS memory-domain id - a NUMA node - the allocators key off, obtained from
 /// [`Topology::memory_domain_id_at_index`]; `-1` when there is none.
 ///
-/// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS id the
-/// kernel labels a node with. A [`DomainAllocator`] holds only this id, so it - and every
+/// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS id
+/// the kernel labels a node with. A [`DomainAllocator`] holds only this id, so it - and every
 /// [`AllocationResult`] it hands out - is free of the topology handle and can outlive it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomainId(pub i32);
@@ -254,8 +256,8 @@ impl MemoryDomainId {
 ///
 /// The topology is discovered once, when [`Topology::new`] is called, and every affinity query,
 /// NUMA allocation, and pool spawn is answered against this handle rather than a process-wide
-/// singleton. Create one near the start of a program and share it (`&Topology`) with the pools
-/// and allocators that need it; it is [`Send`] + [`Sync`], so a single handle serves every thread.
+/// singleton. Create one near the start of a program and share it (`&Topology`) with the pools and
+/// allocators that need it; it is [`Send`] + [`Sync`], so a single handle serves every thread.
 ///
 /// # Examples
 ///
@@ -318,9 +320,9 @@ impl Topology {
     /// Returns the number of distinct thread compute_domains available.
     ///
     /// A "compute_domain" represents a group of threads that share the same:
-    /// - **NUMA memory domain** - threads with fast local memory access
-    /// - **Quality-of-Service level** - P-cores vs E-cores on heterogeneous CPUs
-    /// - **Cache hierarchy** - threads sharing L3 cache
+    /// - __NUMA memory domain__ - threads with fast local memory access
+    /// - __Quality-of-Service level__ - P-cores vs E-cores on heterogeneous CPUs
+    /// - __Cache hierarchy__ - threads sharing L3 cache
     ///
     /// # Typical Values
     ///
@@ -411,7 +413,7 @@ impl Topology {
         Ok(MemoryDomainId(raw))
     }
 
-    /// Returns the memory domain nearest a given compute domain (its local allocation target).
+    /// Returns the memory domain nearest a given compute domain, its local allocation target.
     ///
     /// Performance - tiers, latencies, bandwidths, distances - is not the topology's to declare:
     /// harvest a [`Fabric`](crate::Fabric) to measure it in-process.
@@ -422,7 +424,7 @@ impl Topology {
         Ok(MemoryDomain(answer))
     }
 
-    /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+    /// Returns the RAM volume, in bytes, held by a given memory domain (0 if out of range).
     pub fn volume_ram_in(&self, memory_domain: MemoryDomain) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
@@ -432,14 +434,14 @@ impl Topology {
         Ok(answer)
     }
 
-    /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
+    /// Returns the total RAM volume, in bytes, across all memory domains, regardless of page size.
     pub fn volume_ram(&self) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(unsafe { fu_volume_ram(self.inner, &mut answer) }, "fu_volume_ram")?;
         Ok(answer)
     }
 
-    /// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
+    /// Returns the huge-page volume, in bytes, on a given memory domain (0 if out of range).
     pub fn volume_huge_pages_in(&self, memory_domain: MemoryDomain) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
@@ -449,7 +451,7 @@ impl Topology {
         Ok(answer)
     }
 
-    /// Returns the total huge-page volume (bytes) across all memory domains.
+    /// Returns the total huge-page volume, in bytes, across all memory domains.
     pub fn volume_huge_pages(&self) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
@@ -491,9 +493,9 @@ impl Drop for Topology {
 /// Defines whether the calling thread participates in task execution.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CallerExclusivity {
-    /// The calling thread participates in the workload (spawns N-1 workers)
+    /// The calling thread participates in the workload, spawning N-1 workers
     Inclusive = 0,
-    /// The calling thread only coordinates, doesn't execute tasks (spawns N workers)
+    /// The calling thread only coordinates, doesn't execute tasks, spawning N workers
     Exclusive = 1,
 }
 
@@ -521,7 +523,7 @@ pub(crate) mod tests {
         // Threads are the one facility every supported platform has.
         assert!(comptime.contains(Capabilities::OS_THREADS));
 
-        // The aggregate is implied, never hand-set: pools need threads and a topology to spawn onto.
+        // The aggregate is implied, never hand-set: pools need threads and a topology to spawn.
         assert_eq!(
             comptime.contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN),
             comptime.contains(Capabilities::OS_THREADS) && comptime.contains(Capabilities::TOPOLOGY)
@@ -572,7 +574,7 @@ pub(crate) mod tests {
         for domain in (0..compute_domains).map(ComputeDomain) {
             assert!(topology.compute_level_in(domain).unwrap() < compute_levels.max(1));
             assert!(topology.local_memory_of(domain).unwrap().get() < memory_domains);
-            // Capacity and cache are magnitudes, unknown as 0 - never negative, never asserted nonzero.
+            // Capacity and cache are magnitudes; 0 is unknown, never negative, nonzero unasserted.
             let _capacity = topology.compute_capacity_in(domain).unwrap();
             let _cache_bytes = topology.compute_cache_bytes_in(domain).unwrap();
         }

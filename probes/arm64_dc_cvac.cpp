@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the `DC CVAC` clean to the coherency point.
- *  @author Ash Vardanian
  *  @file probes/arm64_dc_cvac.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the `DC CVAC` clean to the coherency point.
  */
 #if !(defined(__aarch64__) || defined(_M_ARM64))
 #error "AArch64 only"

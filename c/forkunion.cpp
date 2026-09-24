@@ -1,8 +1,8 @@
 /**
- *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
- *  @author Ash Vardanian
  *  @file c/forkunion.cpp
+ *  @author Ash Vardanian
  *  @date June 27, 2025
+ *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
  */
 #define FU_RUNTIME_DISPATCH 1 // every rung the toolchain builds; `select_pool` admits them at runtime
 
@@ -20,8 +20,8 @@ namespace fu = ashvardanian::forkunion;
 
 using thread_allocator_t = std::allocator<std::thread>;
 
-/** The concrete pool type for a shape, a waiter, and a cache-hints policy - the reverse map
- *  from a pool's `kind_k` and its stored capability bits. */
+/** The concrete pool type for a shape, a waiter, and a cache-hints policy - the reverse map from a
+ *  pool's @c kind_k and its stored capability bits. */
 template <fu::pool_kind_t kind_, typename yield_type_, typename cache_hints_type_>
 struct pool_for;
 template <typename yield_type_, typename cache_hints_type_>
@@ -40,22 +40,23 @@ struct pool_for<fu::pool_kind_t::distributed_k, yield_type_, cache_hints_type_> 
 #endif
 
 /**
- *  @brief Custom variant implementation to avoid MSVC `std::variant` alignment issues.
+ *  @brief Custom variant implementation to avoid MSVC @c std::variant alignment issues.
  *
- *  MSVC cannot handle alignas > 64 when objects are passed by value in `std::variant`.
- *  This custom implementation uses a tagged union with manual type management.
+ *  MSVC cannot handle alignas > 64 when objects are passed by value in @c std::variant, so this
+ *  implementation uses a tagged union with manual type management.
+ *
  *  @see https://github.com/ashvardanian/ForkUnion/issues/26
  */
 struct pool_variants_t {
 
-    /** The largest `sizeof` and the strictest `alignof` across @p types_, for the union's storage. */
+    /** The largest @c sizeof and strictest @c alignof across @p types_, for the union's storage. */
     template <typename... types_>
     struct max_size_align {
         static constexpr std::size_t size_k = std::max({sizeof(types_)...});
         static constexpr std::size_t alignment_k = std::max({alignof(types_)...});
     };
 
-    /*  Every (waiter, cache-hints) pair the `select_pool` cascade below may instantiate, spelled
+    /*  Every (waiter, cache-hints) pair the @c select_pool cascade below may instantiate, spelled
      *  out explicitly per shape. A missed entry cannot silently under-size the storage: `construct`
      *  static-asserts every pool it places against these bounds, so drift fails the build.  */
     using pool_traits_t = max_size_align< //
@@ -124,11 +125,13 @@ struct pool_variants_t {
         fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
         >;
 
-    /** Raw aligned storage holding the one live pool, reinterpreted per `kind_` and `capabilities_`. */
+    /** Raw aligned storage for the one live pool, reinterpreted per `kind_` and `capabilities_`. */
     alignas(pool_traits_t::alignment_k) std::uint8_t storage_[pool_traits_t::size_k];
-    /** The stored pool's shape, or `unknown_k` when the storage is empty - no pool spawned yet. */
+
+    /** The stored pool's shape, or @c unknown_k when the storage is empty - no pool spawned yet. */
     fu::pool_kind_t kind_ {fu::pool_kind_t::unknown_k};
-    /** The one busy-wait bit the stored pool uses; together with `kind_` it names the concrete type. */
+
+    /** The busy-wait bit the stored pool uses; together with `kind_` it names the concrete type. */
     fu::capabilities_t capabilities_ {fu::capabilities_unknown_k};
 
     pool_variants_t() = default;
@@ -148,7 +151,7 @@ struct pool_variants_t {
         new (storage_) pool_type_(std::forward<args_types_>(args)...);
         kind_ = pool_type_::kind_k;
         // The waiter and the hints declare distinct bits, so their union names the combination
-        // unambiguously, and `select_pool` decodes the exact type back - a deterministic round-trip.
+        // unambiguously, and `select_pool` decodes the exact type back, a deterministic round-trip.
         capabilities_ = static_cast<fu::capabilities_t>(pool_type_::micro_yield_t::capability_k |
                                                         pool_type_::cache_hints_t::capability_k);
     }
@@ -168,12 +171,14 @@ static bool selects(fu::capabilities_t const bits) noexcept {
 }
 
 /**
- *  @brief The one capability→type cascade: walks the silicon-real waiter and cache-hints pairs, most
- *      capable first, and invokes @p action with the tag of the first pair whose every declared
- *      bit is in @p bits; anything unexpected degrades to the nearest pair that only drops
- *      capabilities, down to the portable `(standard_yield_t, standard_cache_hints_t)` fallback.
+ *  @brief The one capability→type cascade: walks the silicon-real waiter and cache-hints pairs,
+ *      most capable first, and invokes @p action with the tag of the first pair whose every
+ *      declared bit is in @p bits.
  *
- *  Serves both directions - `construct_pool` passes the probed machine capabilities, `visit_kind`
+ *  Anything unexpected degrades to the nearest pair that only drops capabilities, down to the
+ *  portable `(standard_yield_t, standard_cache_hints_t)` fallback.
+ *
+ *  Serves both directions - @c construct_pool passes the probed machine capabilities, @c visit_kind
  *  passes the bits stored at construction - so selection and decoding can never disagree.
  */
 template <fu::pool_kind_t kind_, typename action_type_>
@@ -205,8 +210,8 @@ static auto select_pool(FU_MAYBE_UNUSED_ fu::capabilities_t const bits, action_t
         return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::preferred_cache_hints_t>::type> {});
 #endif
     // RVA23 mandates Zawrs and Zicbom together, so the monitored waiter travels with the
-    // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space
-    // `prefetch.w` promotion that can never fault.
+    // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space `prefetch.w`
+    // promotion that can never fault.
 #if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
     if (selects<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
@@ -224,9 +229,9 @@ static auto select_pool(FU_MAYBE_UNUSED_ fu::capabilities_t const bits, action_t
 
 /**
  *  @brief Dispatches to the stored pool of a known @p kind_, decoding the stored capability bits
- *      through the same `select_pool` cascade that chose them at construction.
- *  @sa `visit`, which selects the kind first. There is no bitmask overlap: the shape is the tag,
- *      and the waiter and hints bits together name the concrete type.
+ *      through the same @c select_pool cascade that chose them at construction.
+ *  @sa visit, which selects the kind first. There is no bitmask overlap: the shape is the tag, and
+ *      the waiter and hints bits together name the concrete type.
  */
 template <fu::pool_kind_t kind_, typename visitor_type_>
 auto visit_kind(visitor_type_ &&visitor, pool_variants_t &variants) {
@@ -237,10 +242,10 @@ auto visit_kind(visitor_type_ &&visitor, pool_variants_t &variants) {
 }
 
 /**
- *  @brief What a failed call leaves in a `size_t` output.
+ *  @brief What a failed call leaves in a @c size_t output.
  *
  *  Not part of the contract - the contract is that the output holds nothing meaningful unless the
- *  status is `fu_success_k`. This just makes a caller who ignores the status read something
+ *  status is @c fu_success_k. This just makes a caller who ignores the status read something
  *  obviously wrong instead of a plausible zero.
  */
 static constexpr std::size_t poisoned_size_k = static_cast<std::size_t>(-1);
@@ -282,12 +287,12 @@ void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
 }
 
 /**
- *  @brief Constructs into @p variants the pool of the requested @p kind_k, picking the best
- *      waiter and cache-hints pair the @p effective capabilities allow and forwarding @p args to
- *      that pool's constructor.
+ *  @brief Constructs into @p variants the pool of the requested @p kind_k, picking the best waiter
+ *      and cache-hints pair the @p effective capabilities allow.
+ *      Forwards @p args to that pool's constructor.
  *
- *  One cascade for every pool shape - `select_pool` is the sole place the C ABI turns a capability
- *  mask into a concrete `flat_pool` / `colocated_pool` / `distributed_pool` instantiation.
+ *  One cascade for every pool shape - @c select_pool is the sole place the C ABI turns a capability
+ *  mask into a concrete @c flat_pool, @c colocated_pool or @c distributed_pool instantiation.
  */
 template <fu::pool_kind_t pool_kind_, typename... args_types_>
 static void construct_pool(pool_variants_t &variants, fu::capabilities_t effective, args_types_ &&...args) noexcept {
@@ -298,21 +303,26 @@ static void construct_pool(pool_variants_t &variants, fu::capabilities_t effecti
 }
 
 /**
- *  @brief What a `fu_pool_t` actually points at: a pool, plus the state the C callbacks need.
+ *  @brief What a @c fu_pool_t actually points at: a pool, plus the state the C callbacks need.
  *
  *  The C ABI passes a lambda as a context pointer and a function pointer, and the unsafe dispatch
  *  APIs return before the callback runs - so both must outlive the call and live here rather than
  *  on the caller's stack.
  */
 struct opaque_pool_t {
+
     /** The one live pool - flat, colocated, or distributed - or empty before the first spawn. */
     pool_variants_t variants;
+
     /** The capability envelope `machine_capabilities() & allowed`, fixed at creation. */
     fu::capabilities_t effective {fu::capabilities_unknown_k};
-    /** Context held across a non-blocking `fu_pool_unsafe_for_threads` until its join. */
+
+    /** Context held across a non-blocking @c fu_pool_unsafe_for_threads until its join. */
     fu_lambda_context_t current_context {nullptr};
-    /** Callback held across a non-blocking `fu_pool_unsafe_for_threads` until its join. */
+
+    /** Callback held across a non-blocking @c fu_pool_unsafe_for_threads until its join. */
     fu_for_threads_t current_callback {nullptr};
+
     /** The caller's pool name, kept so a re-spawn can rebuild the variant without losing it. */
     char name[FU_POOL_NAME_CAPACITY] {};
 
@@ -321,7 +331,8 @@ struct opaque_pool_t {
         size_t i = 0;
         for (; i + 1 < sizeof(name) && source[i]; ++i) name[i] = source[i];
         name[i] = '\0';
-        // `variants` starts empty (kind `unknown_k`); the first spawn builds the pool the topology dictates.
+        // `variants` starts empty, kind `unknown_k`;
+        // the first spawn builds the pool the topology dictates.
     }
 
     /** A shim to redirect unsafe callbacks to the current context. */
@@ -342,7 +353,7 @@ static void destroy_variant(pool_variants_t &variants) noexcept {
     variants.kind_ = fu::pool_kind_t::unknown_k;
 }
 
-/** This machine's capabilities - the CPU busy-wait waiters and the memory facilities - probed once. */
+/** This machine's capabilities - CPU busy-wait waiters and memory facilities - probed once. */
 static fu::capabilities_t machine_capabilities(void) {
     static fu::capabilities_t const capabilities =
         static_cast<fu::capabilities_t>(fu::cpu_capabilities() | fu::ram_capabilities());
@@ -351,7 +362,7 @@ static fu::capabilities_t machine_capabilities(void) {
 
 using machine_topology_t = fu::machine_topology_t;
 
-/** Recovers the `machine_topology_t` behind an opaque `fu_topology_t` handle. */
+/** Recovers the @c machine_topology_t behind an opaque @c fu_topology_t handle. */
 static fu::machine_topology_t *upcast_topology(fu_topology_t topology) noexcept {
     return std::launder(reinterpret_cast<fu::machine_topology_t *>(topology));
 }
@@ -366,9 +377,9 @@ static bool any_compute_domain_near(fu::machine_topology_t const &machine,
     return false;
 }
 
-/*  `CXX_VISIBILITY_PRESET hidden` keeps the pool templates out of the dynamic symbol table, but alone
- *  it exports nothing, so this re-opens the C ABI below. Guarded on `__GNUC__`, not `__clang__`:
- *  clang-cl defines the latter yet rejects the pragma, and takes its exports from the `.def` instead.  */
+/*  `CXX_VISIBILITY_PRESET hidden` keeps the pool templates out of the dynamic symbol table, but
+ *  alone it exports nothing, so this re-opens the C ABI below. Guarded on @c __GNUC__, not on
+ *  @c __clang__: clang-cl defines the latter, rejects the pragma, and takes exports from `.def`. */
 #if defined(__GNUC__)
 #pragma GCC visibility push(default)
 #endif
@@ -377,8 +388,8 @@ extern "C" {
 
 #pragma region Metadata
 
-/*  The C enum and the C++ one are spelled out separately - one for callers who have no C++, one for
- *  callers who want it `constexpr`. Nothing but these assertions keeps them from drifting apart.  */
+/** The C enum and the C++ one are spelled out separately - one for callers who have no C++, one for
+ *  callers who want it @c constexpr. Only these assertions keep them from drifting apart.  */
 #define fu_assert_same_bit_(c_name, cpp_name)                                           \
     static_assert(static_cast<unsigned>(c_name) == static_cast<unsigned>(fu::cpp_name), \
                   #c_name " drifted from " #cpp_name)
@@ -441,7 +452,7 @@ fu_status_t fu_name_capabilities(fu_capabilities_t capabilities, char *name_buff
     return fu_success_k;
 }
 
-// Defined below with the pool allocator; declared here for `fu_topology_new`.
+/** Defined below with the pool allocator; declared here for @c fu_topology_new. */
 void *fu_aligned_malloc(std::size_t size, std::size_t alignment) noexcept;
 void fu_aligned_free(void *ptr, std::size_t alignment) noexcept;
 
@@ -451,8 +462,8 @@ fu_status_t fu_topology_new(fu_topology_t *topology_out) {
     void *raw = fu_aligned_malloc(sizeof(fu::machine_topology_t), alignof(fu::machine_topology_t));
     if (!raw) return fu_bad_alloc_k;
     fu::machine_topology_t *topology = new (raw) fu::machine_topology_t();
-    // An allocation failure and a machine that will not describe itself are different problems,
-    // and the caller can now tell them apart.
+    // An allocation failure and a machine that will not describe itself are different problems, and
+    // the caller can now tell them apart.
     if (fu::status_t const harvested = topology->harvest(); fu::failed(harvested)) {
         topology->~machine_topology_t();
         fu_aligned_free(raw, alignof(fu::machine_topology_t));
@@ -554,8 +565,8 @@ fu_status_t fu_local_memory_of(FU_MAYBE_UNUSED_ fu_topology_t topology, FU_MAYBE
     if (!memory_domain_out) return fu_invalid_argument_k;
     *memory_domain_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
-    // Never bounds-checked before, because there was no way to report the refusal - an
-    // out-of-range domain silently answered memory domain 0, which is a real answer elsewhere.
+    // Never bounds-checked before, because there was no way to report the refusal - an out-of-range
+    // domain silently answered memory domain 0, which is a real answer elsewhere.
     if (compute_domain_index >= (*upcast_topology(topology)).compute_domains_count()) return fu_invalid_argument_k;
     *memory_domain_out =
         (*upcast_topology(topology)).local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain_index));
@@ -728,7 +739,7 @@ inline void *fu_aligned_malloc(std::size_t size, std::size_t alignment) noexcept
 
 /**
  *  @brief Cross-platform aligned memory deallocation.
- *  @note Matches `fu_aligned_malloc` - must use the same alignment value.
+ *  @note Matches @c fu_aligned_malloc - must use the same alignment value.
  */
 inline void fu_aligned_free(void *ptr, std::size_t alignment) noexcept {
     ::operator delete(ptr, std::align_val_t {alignment}, std::nothrow);
@@ -789,7 +800,7 @@ static fu_status_t spawn_flat(opaque_pool_t *opaque, size_t threads, fu::caller_
 
 #if FU_WITH_OS_THREADS
 
-/** Rebuilds @p opaque as a distributed pool if it holds another shape, then spawns across the whole machine. */
+/** Rebuilds @p opaque distributed if it holds another shape, then spawns across the machine. */
 static fu_status_t spawn_distributed(opaque_pool_t *opaque, fu::machine_topology_t const &machine, size_t threads,
                                      fu::caller_exclusivity_t exclusivity) {
     if (opaque->variants.kind_ != fu::pool_kind_t::distributed_k) {
@@ -800,7 +811,7 @@ static fu_status_t spawn_distributed(opaque_pool_t *opaque, fu::machine_topology
         [&](auto &variant) { return variant.spawn(machine, threads, exclusivity); }, opaque->variants));
 }
 
-/** Rebuilds @p opaque as a colocated pool if it holds another shape, then spawns on one compute domain. */
+/** Rebuilds @p opaque colocated if it holds another shape, then spawns on one compute domain. */
 static fu_status_t spawn_colocated(opaque_pool_t *opaque, fu::machine_topology_t const &machine,
                                    fu::compute_domain_index_t compute_domain_index, size_t threads,
                                    fu::caller_exclusivity_t exclusivity) {
@@ -815,7 +826,7 @@ static fu_status_t spawn_colocated(opaque_pool_t *opaque, fu::machine_topology_t
         opaque->variants));
 }
 
-/** Rebuilds @p opaque as a distributed pool if it holds another shape, then spawns near one memory domain. */
+/** Rebuilds @p opaque distributed if it holds another shape, then spawns near one memory domain. */
 static fu_status_t spawn_distributed_near(opaque_pool_t *opaque, fu::machine_topology_t const &machine,
                                           fu::memory_domain_id_t memory_domain_id, size_t threads,
                                           fu::caller_exclusivity_t exclusivity) {
@@ -855,7 +866,7 @@ fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads
     opaque_pool_t *opaque = upcast_pool(pool);
     auto exclusivity = c_exclusivity == fu_caller_inclusive_k ? fu::caller_inclusive_k : fu::caller_exclusive_k;
 
-    // A whole-machine pool is distributed when the mask allows placing memory on domains, else flat.
+    // Whole-machine pool is distributed when the mask allows placing memory on domains, else flat.
     if (opaque->effective & fu::capability_place_memory_on_domain_k)
         return spawn_distributed(opaque, *upcast_topology(topology), threads, exclusivity);
     return spawn_flat(opaque, threads, exclusivity);
@@ -899,7 +910,7 @@ fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t p
                                   exclusivity);
 }
 
-/** Safely cast `fu_fabric_t` to `fu::measured_fabric_t*` avoiding alignment violation warnings. */
+/** Safely cast @c fu_fabric_t to `fu::measured_fabric_t*` avoiding alignment violation warnings. */
 inline fu::measured_fabric_t *upcast_fabric(fu_fabric_t fabric) noexcept {
     return std::launder(reinterpret_cast<fu::measured_fabric_t *>(fabric));
 }

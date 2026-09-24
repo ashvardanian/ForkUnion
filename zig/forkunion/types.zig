@@ -1,5 +1,5 @@
-//! Value types mirroring the C++ `types` header, and the `Status`/`Error` vocabulary every
-//! other module reports through.
+//! Value types mirroring the C++ `types` header, and the `Status`/`Error` vocabulary every other
+//! module reports through.
 //!
 //! Holds the `ComputeDomain`/`MemoryDomain`/`MemoryDomainId` machine coordinates, the `TasksRange`
 //! work descriptor and its `ThreadInDomain` locator, and the small parity primitives the parallel
@@ -37,8 +37,8 @@ pub const Status = enum(c_int) {
 
 /// One error per status, so `@errorName` carries as much as the status itself does.
 ///
-/// Zig error values hold no payload, so the symbol name that named which call failed cannot
-/// travel with the error. Reach for `Status` where that detail matters.
+/// Zig error values hold no payload, so the symbol name that named which call failed cannot travel
+/// with the error. Reach for `Status` where that detail matters.
 pub const Error = error{
     Unknown,
     BadAlloc,
@@ -88,8 +88,8 @@ pub const default_alignment: usize = switch (@import("builtin").cpu.arch) {
 
 /// A dense compute-domain index, in `0..Topology.computeDomainsCount()`.
 ///
-/// A distinct type from `MemoryDomain` because the two index different axes of the machine and
-/// the compiler is the only thing that can tell them apart at a call site.
+/// A distinct type from `MemoryDomain` because the two index different axes of the machine and the
+/// compiler is the only thing that can tell them apart at a call site.
 pub const ComputeDomain = enum(usize) {
     _,
 
@@ -151,12 +151,11 @@ pub const ThreadInDomain = struct {
     compute_domain: ComputeDomain,
 };
 
-/// A half-open `[start, start + len)` slice of a task range, as handed out by `IndexedSplit.get`.
 /// A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
 ///
-/// Zig has no first-class range value, so `first` and `count` feed the language's own `for`
-/// syntax: `for (range.first..range.end()) |task|`. An idle thread receives `count == 0`, and
-/// every dispatch still calls it exactly once.
+/// Zig has no first-class range value, so `first` and `count` feed the language's own `for` syntax:
+/// `for (range.first..range.end()) |task|`. An idle thread receives `count == 0`, and every
+/// dispatch still calls it exactly once.
 pub const TasksRange = struct {
     /// The first task index in the run.
     first: usize,
@@ -181,15 +180,15 @@ pub const TasksRange = struct {
 
 /// Splits a range of tasks into fair-sized runs for parallel distribution.
 ///
-/// The first `tasks % threads` runs get `ceil(tasks / threads)` tasks; the rest get
-/// `floor(tasks / threads)`. This minimizes size variance across threads. Mirrors the C++
-/// `indexed_split` and Lemire's fair-run scheme.
+/// The first `tasks % threads` runs get `ceil(tasks / threads)` tasks; the rest get `floor(tasks /
+/// threads)`. This minimizes size variance across threads. Mirrors the C++ `indexed_split` and
+/// Lemire's fair-run scheme.
 /// See: https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/
 pub const IndexedSplit = struct {
     quotient: usize,
     remainder: usize,
 
-    /// Builds a split of `tasks_count` tasks across `threads_count` threads; `threads_count` can't be zero.
+    /// Builds a split of `tasks_count` tasks across `threads_count` nonzero threads.
     pub fn init(tasks_count: usize, threads_count: usize) IndexedSplit {
         std.debug.assert(threads_count > 0);
         return .{
@@ -206,8 +205,8 @@ pub const IndexedSplit = struct {
     }
 };
 
-/// Wraps a value in cache-line-aligned, cache-line-padded storage so per-thread accumulators
-/// never share a cache line and thus never false-share.
+/// Wraps a value in cache-line-aligned, cache-line-padded storage so per-thread accumulators never
+/// share a cache line and thus never false-share.
 ///
 /// Mirrors the C++ `cache_aligned` and the Rust `CacheAligned<T>`: allocate one per thread as
 /// scratch, then combine after the parallel region.
@@ -217,8 +216,8 @@ pub fn CacheAligned(comptime T: type) type {
     };
 }
 
-/// A `Send + Sync`-style read-only raw-pointer view, letting one immutable buffer be read by
-/// every worker across the FFI callback boundary.
+/// A `Send + Sync`-style read-only raw-pointer view, letting one immutable buffer be read by every
+/// worker across the FFI callback boundary.
 ///
 /// The caller guarantees the pointee outlives the parallel region and is not mutated while shared.
 pub fn SyncConstPtr(comptime T: type) type {
@@ -272,7 +271,7 @@ pub fn SyncMutPtr(comptime T: type) type {
 }
 
 test "IndexedSplit fair runs tile the range" {
-    // The runs must cover [0, tasks) exactly once, be contiguous, and differ in size by at most one.
+    // The runs must cover [0, tasks) once, be contiguous, and differ in size by at most one.
     const cases = [_]struct { tasks: usize, threads: usize }{
         .{ .tasks = 0, .threads = 4 },
         .{ .tasks = 1, .threads = 4 },

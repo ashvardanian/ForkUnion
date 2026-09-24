@@ -1,6 +1,9 @@
 //! Rayon-style parallel iterators built on top of the thread pool.
 //!
 //! Pure logic layered over `scheduling`; no FFI of its own.
+//!
+//! File: rust/forkunion/parallel.rs
+//! Author: Ash Vardanian
 
 use crate::allocators::{DomainAllocator, PinnedVec};
 use crate::scheduling::{fold_with_scratch, ThreadPool};
@@ -14,8 +17,8 @@ use core::marker::PhantomData;
 /// # Safety
 ///
 /// This is safe because:
-/// - Only one thread writes (enforced by AtomicBool in caller)
-/// - Write happens-before any subsequent read (synchronized by atomic operations)
+/// - Only one thread writes, enforced by an `AtomicBool` in the caller
+/// - Write happens-before any subsequent read, synchronized by atomic operations
 /// - Final read happens after all threads finish (enforced by drive() completion)
 struct SyncOnceCell<T> {
     inner: UnsafeCell<Option<T>>,
@@ -53,8 +56,8 @@ pub trait ParallelSchedule: Copy {
     where
         F: Fn(usize, ThreadInDomain) + Sync;
 
-    /// Runs `function` over contiguous runs. The count is a real run length under static
-    /// scheduling and always 1 under dynamic, which has no batched entry point.
+    /// Runs `function` over contiguous runs. The count is a real run length under static scheduling
+    /// and always 1 under dynamic, which has no batched entry point.
     fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
         F: Fn(TasksRange, ThreadInDomain) + Sync;
@@ -96,8 +99,8 @@ impl ParallelSchedule for DynamicScheduler {
         pool.for_n_dynamic(tasks, function)
     }
 
-    /// Work-stealing hands out one task at a time, so every run is length 1 - the C core exposes
-    /// no batched dynamic entry point. Use [`StaticScheduler`] when the batching is what you want.
+    /// Work-stealing hands out one task at a time, so every run is length 1 - the C core exposes no
+    /// batched dynamic entry point. Use [`StaticScheduler`] when the batching is what you want.
     fn dispatch_slices<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
         F: Fn(TasksRange, ThreadInDomain) + Sync,
@@ -228,14 +231,14 @@ where
 
     /// Parallel reduction with caller-provided scratch buffer.
     ///
-    /// Reduces items in parallel by folding into per-thread accumulators,
-    /// then combining results on the caller thread. Uses cache-aligned scratch
-    /// to prevent false sharing. Indexes by thread_index (works with dynamic scheduling).
+    /// Reduces items in parallel by folding into per-thread accumulators, then combining results on
+    /// the caller thread. Uses cache-aligned scratch to prevent false sharing. Indexes by
+    /// thread_index, which works with dynamic scheduling.
     ///
     /// # Arguments
-    /// * `scratch` - Per-thread accumulators (must be `>= pool.threads_count()`)
-    /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, usize, ThreadInDomain)`
-    /// * `combine` - Function to merge two accumulators: `fn(T, T) -> T`
+    /// - `scratch` - Per-thread accumulators, at least `pool.threads_count()` long
+    /// - `fold` - Function to accumulate items: `fn(&mut T, I::Item, usize, ThreadInDomain)`
+    /// - `combine` - Function to merge two accumulators: `fn(T, T) -> T`
     ///
     /// # Returns
     /// The final reduced value of type `T`
@@ -287,8 +290,9 @@ where
     ///
     /// # Arguments
     ///
-    /// * `scratch` - Per-thread accumulators (must be `>= pool.threads_count()`)
-    /// * `fold` - Fallible fold function: `fn(&mut T, I::Item, usize, ThreadInDomain) -> core::result::Result<(), E>`
+    /// - `scratch` - Per-thread accumulators, at least `pool.threads_count()` long
+    /// - `fold` - Fallible fold function:
+    ///   `fn(&mut T, I::Item, usize, ThreadInDomain) → core::result::Result<(), E>`
     ///
     /// # Returns
     ///
@@ -432,7 +436,7 @@ where
         })
     }
 
-    /// Searches for the first element that matches a predicate (deterministic, by index).
+    /// Searches for the first element that matches a predicate, deterministically, by index.
     ///
     /// Returns the element with the smallest `task_index` among all matches.
     ///
@@ -466,13 +470,13 @@ where
         // The index has to travel with the item, and the comparison has to be the same step as the
         // store. Deciding from a `fetch_min` and then storing under a separate lock is a
         // check-then-act race: with matches at 100 and 152, the thread at 152 reads `usize::MAX`
-        // and decides to store, the thread at 100 reads 152 and also decides to store, and whichever
-        // takes the lock last wins - which is 152 about half the time.
+        // and decides to store, the thread at 100 reads 152 and also decides to store, and
+        // whichever takes the lock last wins - which is 152 about half the time.
         //
         // So give every worker a slot of its own, keyed by `thread_index`. A slot has exactly one
         // writer, which is why the fold below needs no atomic, no lock, and no compare-exchange.
-        // The caller then reduces the per-thread minima into the global one, sequentially, after the
-        // join has already established happens-before.
+        // The caller then reduces the per-thread minima into the global one, sequentially, after
+        // the join has already established happens-before.
         if self.iterator.is_empty() {
             return Ok(None);
         }
@@ -522,7 +526,7 @@ where
         .map(|best| best.0.map(|(_, item)| item))
     }
 
-    /// Searches for the last element that matches a predicate (deterministic, by index).
+    /// Searches for the last element that matches a predicate, deterministically, by index.
     ///
     /// Returns the element with the largest `task_index` among all matches.
     ///
@@ -553,8 +557,8 @@ where
         I::Item: Send,
         P: Fn(&I::Item) -> bool + Sync,
     {
-        // The mirror of `find_first`, and it was racy for the same reason. A slot starts empty rather
-        // than at a sentinel index, so index zero - a real index - cannot reject itself.
+        // The mirror of `find_first`, and it was racy for the same reason. A slot starts empty
+        // rather than at a sentinel index, so index zero - a real index - cannot reject itself.
         if self.iterator.is_empty() {
             return Ok(None);
         }
@@ -603,7 +607,7 @@ where
         .map(|best| best.0.map(|(_, item)| item))
     }
 
-    /// Searches for any element that matches a predicate (non-deterministic).
+    /// Searches for any element that matches a predicate, non-deterministically.
     ///
     /// Uses cooperative cancellation: once a match is found, no further items are processed.
     /// If multiple items match, any one of them may be returned.
@@ -723,15 +727,15 @@ where
 
     /// Parallel reduction with a cache-aligned per-thread scratch accumulator.
     ///
-    /// Allocates one `CacheAligned<T>` accumulator per thread in a node-local `PinnedVec`, so threads
-    /// fold into local memory before the serial combine.
+    /// Allocates one `CacheAligned<T>` accumulator per thread in a node-local `PinnedVec`, so
+    /// threads fold into local memory before the serial combine.
     ///
     /// Nearly identical to Rayon's reduce API, just requires explicit pool.
     ///
     /// # Arguments
-    /// * `init` - Function to create initial accumulator value
-    /// * `fold` - Function to accumulate items: `fn(&mut T, I::Item, usize, ThreadInDomain)`
-    /// * `combine` - Function to merge two accumulators: `fn(T, T) -> T`
+    /// - `init` - Function to create initial accumulator value
+    /// - `fold` - Function to accumulate items: `fn(&mut T, I::Item, usize, ThreadInDomain)`
+    /// - `combine` - Function to merge two accumulators: `fn(T, T) -> T`
     ///
     /// # Examples
     /// ```
@@ -758,11 +762,13 @@ where
         let threads = self.pool.threads_count();
 
         // Create cache-aligned scratch: one CacheAligned<T> per thread
-        // Note: Using PinnedVec per compute_domain for true NUMA-awareness would be ideal,
-        // but for simplicity we use a contiguous allocation here. The OS will still
-        // tend to place this on the memory domain of the allocating thread.
-        // POLISH: a fresh Topology is probed here only because `ThreadPool` does not carry one;
-        // it must outlive `scratch`. A `&Topology` threaded through the reduce adapters removes this.
+        //
+        // Note: Using PinnedVec per compute_domain for true NUMA-awareness would be ideal, but for
+        // simplicity we use a contiguous allocation here. The OS will still tend to place this on
+        // the memory domain of the allocating thread.
+        //
+        // POLISH: a fresh Topology is probed here only because `ThreadPool` does not carry one; it
+        // must outlive `scratch`. A `&Topology` threaded through the reduce adapters removes this.
         let topology = Topology::new().expect("failed to probe topology");
         let mut scratch = PinnedVec::with_capacity_in(
             DomainAllocator::new(
@@ -793,7 +799,7 @@ where
 
     /// Sum all items in parallel with NUMA-aware local accumulators.
     ///
-    /// Works for owned values (usize, u64, etc.) and references (&u64, etc.).
+    /// Works for owned values, such as usize and u64, and for references, such as &u64.
     ///
     /// # Examples
     /// ```

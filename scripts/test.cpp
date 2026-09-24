@@ -1,13 +1,13 @@
 /**
- *  @brief Unit and stress tests for the pools, the harvested topology, and the parallel algorithms.
- *  @author Ash Vardanian
  *  @file scripts/test.cpp
+ *  @author Ash Vardanian
  *  @date May 2, 2025
+ *  @brief Unit and stress tests for the pools, the harvested topology, and the parallel algorithms.
  *
- *  Every test is a `static void test_*` reached through the `unit_tests` and `stress_tests` tables in
- *  `main`, so a test absent from its table does not run - the tables are the only index that cannot
- *  drift from what executes. Asserts stay live whatever the build type, which is what the `#undef
- *  NDEBUG` below buys: a failure that only reproduces in Release is the one worth catching.
+ *  Every test is a `static void test_*` reached through the `unit_tests` and `stress_tests` tables
+ *  in @c main, so a test absent from its table does not run - the tables are the only index that
+ *  cannot drift from what executes. Asserts stay live whatever the build type, which is what the
+ *  `#undef NDEBUG` below buys: a failure that only reproduces in Release is the one worth catching.
  */
 #include <cstdio>  // `std::printf`, `std::fprintf`
 #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
@@ -24,7 +24,7 @@ namespace fu = ashvardanian::forkunion;
 
 #undef NDEBUG // ? Keep any library asserts live in the test binary
 
-/*  `backtrace` is a glibc/Apple facility; Bionic, FreeBSD, and musl ship `<execinfo.h>` without it. */
+/*  `backtrace` is glibc/Apple-specific; Bionic, FreeBSD and musl ship `<execinfo.h>` without it. */
 #if FU_ON_POSIX
 #include <csignal>  // `std::signal`, `std::raise`
 #include <unistd.h> // `::write`, `STDERR_FILENO`
@@ -34,9 +34,9 @@ namespace fu = ashvardanian::forkunion;
 #endif
 #endif
 
-/*  Correctness only: the throughput/stress suite hammers a race window a slow emulator neither
- *  reproduces nor runs in tolerable time. `FORKUNION_TEST_SKIP_STRESS` in CMake defines this to 1 for
- *  the cross builds; native builds leave it 0 and run the full suite.  */
+/** Correctness only: the throughput/stress suite hammers a race window a slow emulator neither
+ *  reproduces nor runs in tolerable time. @c FORKUNION_TEST_SKIP_STRESS in CMake defines this to 1
+ *  for the cross builds; native builds leave it 0 and run the full suite. */
 #ifndef FU_TEST_SKIP_STRESS_
 #define FU_TEST_SKIP_STRESS_ 0
 #endif
@@ -57,7 +57,7 @@ static void format_value_(char *buffer, std::size_t capacity, value_type_ const 
     else std::snprintf(buffer, capacity, "?");
 }
 
-/** Prints a located `FAIL` and exits; the preceding `Running ...` line already names the test. */
+/** Prints a located @c FAIL and exits; the preceding `Running ...` line already names the test. */
 [[noreturn]] static void report_failure_(char const *file, int line, char const *expr, char const *detail) noexcept {
     fu::logging_colors_t colors;
     char const *slash = std::strrchr(file, '/');
@@ -84,7 +84,7 @@ static void expect_cmp_(bool ok, a_type_ const &a, b_type_ const &b, char const 
     report_failure_(file, line, expr, detail);
 }
 
-/** Notes a skipped test inline; the runner still prints `PASS` after the test returns. */
+/** Notes a skipped test inline; the runner still prints @c PASS after the test returns. */
 static void skip_(char const *reason) noexcept {
     fu::logging_colors_t colors;
     std::printf("%s(skip: %s)%s ", colors.dim(), reason, colors.reset());
@@ -111,6 +111,7 @@ static void expect_ne_(a_type_ const &a, b_type_ const &b, char const *expr, cha
     } while (0)
 
 #if FU_ON_POSIX
+
 /** Adds a backtrace to a fatal signal; the flushed `Running ...` line names the test. */
 extern "C" void on_fatal_signal_(int signal_number) noexcept {
     ssize_t const written = ::write(STDERR_FILENO, "\nCRASH - backtrace:\n", 20);
@@ -136,12 +137,10 @@ using fu16_t =
 using fu8_t =
     fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t, std::uint8_t>;
 
-/*
- *  Explicitly instantiate the thread-pools to cover all of their logic, but avoid the
- *  "duplicate explicit instantiation" error on platforms where `std::size_t` is `uint64_t`.
+/*  Explicitly instantiate the thread-pools to cover all of their logic, but avoid the "duplicate
+ *  explicit instantiation" error on platforms where @c std::size_t is @c uint64_t.
  *
- *  template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::size_t>
- */
+ *  template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::size_t> */
 template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
                              std::uint32_t>;
 template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
@@ -155,10 +154,10 @@ template struct fu::distributed_pool<>;
 #endif
 
 /**
- *  @brief Exhausts every tasks-and-threads pair in the index space, checking the split is a partition.
+ *  @brief Exhausts every tasks-and-threads pair in the index space to verify a clean partition.
  *
- *  Every task index must fall in bounds and be visited exactly once across the per-thread subranges;
- *  a gap or an overlap here would mean lost or double-dispatched work in every static scheduler.
+ *  Every task index must fall in bounds and be visited exactly once across the per-thread
+ *  subranges; a gap or overlap would mean lost or double-dispatched work in any static scheduler.
  */
 template <typename index_type_ = std::uint8_t>
 void test_indexed_split() noexcept {
@@ -188,8 +187,8 @@ void test_indexed_split() noexcept {
 /**
  *  @brief Exhausts every start-end-seed triple in the index space, checking each walk permutes.
  *
- *  Counting alone can't tell a permutation from a walk that revisits some values and skips others,
- *  so each value's first visit is recorded - a revisit makes a stealing thread drain a victim twice.
+ *  Counting alone can't tell a permutation from a walk that revisits values and skips others, so
+ *  each value's first visit is recorded - a revisit drains some victim twice.
  */
 template <typename index_type_ = std::uint8_t>
 void test_coprime_permutation() noexcept {
@@ -208,9 +207,9 @@ void test_coprime_permutation() noexcept {
                 // Reset visits for each test case
                 std::fill_n(visits.begin(), max_tasks, false);
 
-                // Counting alone can't tell a permutation from a walk that revisits some values and
-                // skips others - and a walk that revisits makes a work-stealing thread drain the same
-                // victim twice, overrunning its cursor. Check that each value appears exactly once.
+                // Counting alone can't tell a permutation from a walk that revisits values and
+                // skips others - a revisit makes a work-stealing thread drain the same victim
+                // twice, overrunning its cursor; each value must appear exactly once.
                 std::size_t count_matches = 0;
                 for (auto value : permutation) {
                     expect(value >= start); // In range
@@ -231,10 +230,10 @@ void test_coprime_permutation() noexcept {
 /**
  *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
  *
- *  Deliberately @b not gated on `FU_WITH_PLACE_MEMORY_ON_DOMAIN`: some platforms harvest a topology without
- *  compiling the NUMA pools, so gating this on the pools leaves their harvest wholly untested.
- *  A host with no harvest at all reports `false` and is skipped rather than failed - the absence
- *  of a topology is not a broken topology.
+ *  Deliberately @b not gated on `FU_WITH_PLACE_MEMORY_ON_DOMAIN`: some platforms harvest a topology
+ *  without compiling the NUMA pools, so gating this on the pools leaves their harvest wholly
+ *  untested. A host with no harvest at all reports @c false and is skipped rather than failed - the
+ *  absence of a topology is not a broken topology.
  */
 static void test_topology_invariants() noexcept {
     fu::machine_topology_t topology;
@@ -251,7 +250,7 @@ static void test_topology_invariants() noexcept {
     expect(compute_levels <= compute_domains);
 
     // Levels are a *dense* rank, so each of [0, levels) must be claimed by at least one domain.
-    // Merely staying in range is too weak - it would accept a count inflated past the distinct levels.
+    // Merely staying in range is too weak - it would accept a count inflated past distinct levels.
     std::vector<bool> compute_level_seen(compute_levels, false);
 
     std::size_t cores_across_domains = 0;
@@ -277,7 +276,7 @@ constexpr std::size_t default_parallel_tasks_k = 10000; // 10K
  *  its pool through a maker and spawns it on `maker.scope()`, so the same body runs against the
  *  flat, colocated, and distributed pools without knowing which one it drives.  */
 
-/** Makes `flat_pool_t`s scoped to a thread count - the allowed cores, times oversubscription. */
+/** Makes @c flat_pool_ts scoped to a thread count - the allowed cores, times oversubscription. */
 struct make_pool_t {
     fu::flat_pool_t construct() const noexcept { return fu::flat_pool_t(); }
     std::size_t scope(std::size_t oversubscription = 1) const noexcept {
@@ -288,7 +287,7 @@ struct make_pool_t {
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
 static fu::machine_topology_t machine_topology;
 
-/** Makes `colocated_pool_t`s scoped to the machine's first compute domain. */
+/** Makes @c colocated_pool_ts scoped to the machine's first compute domain. */
 struct make_colocated_pool_t {
     fu::colocated_pool_t construct() const noexcept { return fu::colocated_pool_t("forkunion"); }
     fu::compute_domain_t scope(std::size_t = 0) const noexcept {
@@ -296,7 +295,7 @@ struct make_colocated_pool_t {
     }
 };
 
-/** Makes `distributed_pool_t`s scoped to the whole harvested topology. */
+/** Makes @c distributed_pool_ts scoped to the whole harvested topology. */
 struct make_distributed_pool_t {
     fu::distributed_pool_t construct() const noexcept { return fu::distributed_pool_t("forkunion"); }
     fu::machine_topology_t const &scope(std::size_t = 0) const noexcept { return machine_topology; }
@@ -304,14 +303,14 @@ struct make_distributed_pool_t {
 #endif
 
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+
 /**
  *  @brief The tier derivation must rank a synthetic edge log by bandwidth first, latency second.
  *
  *  A tier is a property of the medium: HBM splits from DDR on bandwidth despite a worse latency,
  *  two DDR sockets within both jitter bands share a tier, a same-bandwidth medium past the 1.5x
  *  latency band splits, CXL trails on either key, an unobserved domain lands one tier past the
- *  slowest, and a worse duplicate recording must not move its domain - the envelope keeps the
- *  best per metric.
+ *  slowest, and a worse duplicate recording must not move its domain - the best per metric wins.
  */
 static void test_fabric_level_derivation() noexcept {
     fu::measured_edge_t const edges[] = {
@@ -336,11 +335,9 @@ static void test_fabric_level_derivation() noexcept {
     expect_eq(levels[4], std::size_t(4)); // Unobserved shares one tier past the slowest
 }
 
-/**
- *  A harvested fabric must cover every reachable edge with sane bounds and leave
- *  unreachable ones unwalked. No local-beats-remote assertion on purpose: emulated-NUMA
- *  guests legitimately measure every edge the same.
- */
+/** A harvested fabric must cover every reachable edge with sane bounds and leave unreachable ones
+ *  unwalked. No local-beats-remote assertion on purpose: emulated-NUMA guests legitimately measure
+ *  every edge the same. */
 static void test_measured_fabric() noexcept {
     fu::machine_topology_t const &topology = machine_topology;
     alignas(fu::default_alignment_k) fu::distributed_pool<> pool;
@@ -362,9 +359,9 @@ static void test_measured_fabric() noexcept {
             fu::memory_domain_index_t const to = static_cast<fu::memory_domain_index_t>(target);
             std::size_t const measured = fabric.memory_latency(initiator, to);
 
-            // The harvest only walks edges some pool worker can first-touch, so a cpuless
-            // domain - a CXL expander, or a node whose cores sit outside the pool - stays at zero
-            // and answers with the unmeasured-remote fallback.
+            // The harvest only walks edges some pool worker can first-touch, so a cpuless domain -
+            // a CXL expander, or a node whose cores sit outside the pool - stays at zero and
+            // answers with the unmeasured-remote fallback.
             bool reachable = false;
             for (std::size_t other = 0; other != pool.compute_domains_count() && !reachable; ++other)
                 reachable =
@@ -432,7 +429,7 @@ static void test_caller_exclusivity_query() noexcept {
     expect_eq(pool.caller_exclusivity(), fu::caller_exclusive_k);
 }
 
-/** Make sure that `for_threads` is called from each thread. */
+/** Make sure that @c for_threads is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_threads() noexcept {
 
@@ -448,7 +445,7 @@ static void test_for_threads() noexcept {
     for (std::size_t i = 0; i < pool.threads_count(); ++i) expect(visited[i]);
 }
 
-/** Make sure that `unsafe_for_threads` is called from each thread. */
+/** Make sure that @c unsafe_for_threads is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_unsafe_for_threads() noexcept {
 
@@ -474,8 +471,8 @@ static void test_generation_polling() noexcept {
     auto pool_a = maker.construct();
     auto pool_b = maker.construct();
 
-    // Polling before join is the caller-exclusive pattern: on inclusive pools the
-    // caller owes a slice that only runs inside `unsafe_join`.
+    // Polling before join is the caller-exclusive pattern: on inclusive pools the caller owes a
+    // slice that only runs inside `unsafe_join`.
     expect(fu::succeeded(pool_a.spawn(maker.scope(), fu::caller_exclusive_k)));
     expect(fu::succeeded(pool_b.spawn(maker.scope(), fu::caller_exclusive_k)));
 
@@ -547,7 +544,7 @@ static void test_guard_lifecycle() noexcept {
     }
 }
 
-/** Dropping the guard without an explicit `join` must still join in the destructor. */
+/** Dropping the guard without an explicit @c join must still join in the destructor. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_guard_destructor_joins() noexcept {
 
@@ -705,7 +702,7 @@ static void test_exclusivity_inline_guards() noexcept {
     for (std::size_t i = 0; i < total_size; ++i) expect(visited[i]);
 }
 
-/** Make sure that `for_n` is called from each thread. */
+/** Make sure that @c for_n is called from each thread. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_uncomfortable_input_size() noexcept {
 
@@ -722,7 +719,7 @@ static void test_uncomfortable_input_size() noexcept {
             executed.fetch_add(1, std::memory_order_relaxed);
         };
 
-        // Both schedulers must cover the awkward sizes exactly - a dropped task is as wrong as a stray one.
+        // Both schedulers must cover the awkward sizes exactly; a drop is as wrong as a duplicate.
         pool.for_n(input_size, probe);
         expect_eq(executed.load(std::memory_order_relaxed), input_size);
 
@@ -734,9 +731,9 @@ static void test_uncomfortable_input_size() noexcept {
 }
 
 /**
- *  @brief One `for_slices` dispatch of @p n tasks must partition [0, n) into non-empty slices.
+ *  @brief One @c for_slices dispatch of @p n tasks must partition [0, n) into non-empty slices.
  *
- *  A slice callback receives a `tasks_range_t`, so a broken split shows up as an index covered
+ *  A slice callback receives a @c tasks_range_t, so a broken split shows up as an index covered
  *  twice, never, or past the range. Every thread is dispatched exactly once, an idle one with an
  *  empty range, and no dispatch may produce more ranges than there are threads.
  */
@@ -762,7 +759,7 @@ static void expect_for_slices_cover_(pool_type_ &pool, std::size_t const n) noex
     for (std::size_t i = 0; i < n; ++i) expect_eq(executions[i].load(std::memory_order_relaxed), 1u);
 }
 
-/** Sweeps `for_slices` through the awkward sizes around the thread count and one large run. */
+/** Sweeps @c for_slices through the awkward sizes around the thread count and one large run. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_slices() noexcept {
     auto maker = make_pool_type_ {};
@@ -799,7 +796,7 @@ static void test_stale_generation_completes() noexcept {
 /**
  *  @brief Hammers the spawn/terminate lifecycle; every re-spawned crew must dispatch exactly-once.
  *
- *  Worker ids are published by the workers themselves and reset on `terminate`, so lifecycle churn
+ *  Worker ids are published by the workers themselves and reset on @c terminate, so lifecycle churn
  *  is where a stale id or an unjoined thread would surface - as a lost task or a crash on re-spawn.
  */
 template <typename make_pool_type_ = make_pool_t>
@@ -873,7 +870,7 @@ bool contains_iota(std::vector<aligned_visit_t> &visited) noexcept {
     return true;
 }
 
-/** Make sure that `for_n` is called the right number of times with the right task indices. */
+/** Make sure that @c for_n is called the right number of times with the right task indices. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_n() noexcept {
 
@@ -887,24 +884,26 @@ static void test_for_n() noexcept {
     using pool_t = decltype(pool);
 
     pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
 
-    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0,
+    // `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
     pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
 
-    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0,
+    // `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 
@@ -919,7 +918,7 @@ static void test_for_n() noexcept {
     expect(contains_iota(visited_threads));
 }
 
-/** Make sure that `for_n_dynamic` is called the right number of times with the right task indices. */
+/** Ensures @c for_n_dynamic runs the right number of times with the right task indices. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_n_dynamic() noexcept {
 
@@ -930,19 +929,20 @@ static void test_for_n_dynamic() noexcept {
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter(0);
     pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
 
-    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0,
+    // `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
     pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
@@ -954,10 +954,10 @@ static void test_for_n_dynamic() noexcept {
 /**
  *  @brief Stalls one thread and checks its neighbours drain the slice it can't reach.
  *
- *  `for_n_dynamic` reserves a contiguous slice per thread and lets idle threads help drain the rest.
- *  Correctness must not depend on any thread keeping up: with one thread crawling, every task still
- *  runs, and runs @b once. The stalled thread must also end up executing fewer tasks than its own
- *  slice held - otherwise nobody stole, and the test is silently proving nothing.
+ *  @c for_n_dynamic reserves a contiguous slice per thread and lets idle threads help drain the
+ *  rest. Correctness must not depend on any thread keeping up: with one thread crawling, every task
+ *  still runs, and runs @b once. The stalled thread must also end up executing fewer tasks than its
+ *  own slice held - otherwise nobody stole, and the test is silently proving nothing.
  */
 template <typename make_pool_type_ = make_pool_t>
 static void test_for_n_dynamic_stealing() noexcept {
@@ -1002,12 +1002,13 @@ static void test_for_n_dynamic_stealing() noexcept {
  *
  *  With domain 0 crawling, the other domains drain their own slices and must reach across the
  *  interconnect for more, so the steal path is exercised rather than silently idle. The owner of a
- *  task index mirrors the invoker's own split: domain `d` owns `split[d]`.
+ *  task index mirrors the invoker's own split: domain @c d owns `split[d]`.
  *
- *  @note The crawl is @b per @b domain, not per thread. Stalling a single thread only forces a steal
- *      where a domain has few of them: with 64 threads to a domain, one crawler is 1/64th of its
- *      capacity, its neighbours absorb the slice, and no steal ever needs to cross - so the
- *      assertion below passed on small CI runners and was a coin-flip on real hardware.
+ *  @note The crawl is @b per @b domain, not per thread - stalling one thread may not force it.
+ *
+ *  With 64 threads to a domain, one crawler is 1/64th of its capacity, its neighbours absorb the
+ *  slice, and no steal ever needs to cross - so the assertion below passed on small CI runners and
+ *  was a coin-flip on real hardware.
  */
 template <typename pool_type_>
 static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n, bool const crawl) noexcept {
@@ -1019,8 +1020,8 @@ static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n,
     for (auto &e : executions) e.store(0, std::memory_order_relaxed);
 
     pool.for_n_dynamic(n, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
-        // ? A spin, not a sleep, so the pool's yields don't mask it. Keyed on the executing thread's
-        // ? domain, so a stealer from elsewhere runs the stolen task at full speed.
+        // ? A spin, not a sleep, so the pool's yields don't mask it. Keyed on the executing
+        // thread's domain, so a stealer from elsewhere runs the stolen task at full speed.
         if (crawl && at.compute_domain == 0) {
             volatile std::size_t sink = 0;
             for (std::size_t i = 0; i < 200000; ++i) sink = sink + i;
@@ -1038,11 +1039,11 @@ static void expect_dynamic_regime_covers_(pool_type_ &pool, std::size_t const n,
 }
 
 /**
- *  @brief Exhausts the distributed `for_n_dynamic` across task-count regimes, on a real multi-domain box.
+ *  @brief Exhausts @c for_n_dynamic across task-count regimes on a real multi-domain box.
  *
- *  Every boundary the two-level slicing exposes gets a regime - fewer tasks than threads, exactly as
- *  many, one more, and a large skewed run with a crawling thread. The index type here is
- *  `std::size_t`; the small-type wrap-around regimes live in the flat pool's `fu8`/`fu16` stress suite.
+ *  Every boundary the two-level slicing exposes gets a regime - fewer tasks than threads, exactly
+ *  as many, one more, and a large skewed run with a crawling thread. The index type here is
+ *  @c std::size_t; small-type wrap-around regimes live in the flat pool's @c fu8 and @c fu16 suite.
  */
 template <typename make_pool_type_ = make_pool_t>
 static void test_distributed_for_n_dynamic_exhaustive() noexcept {
@@ -1079,12 +1080,13 @@ static void test_oversubscribed_threads() noexcept {
         // Perform some weird amount of work, that is not very different between consecutive tasks.
         for (std::size_t i = 0; i != task % oversubscription; ++i) some_local_work = some_local_work + i * i;
 
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
 
-    // Make sure that all task indices are unique and form the full range of [0, `default_parallel_tasks_k`).
+    // Make sure that all task indices are unique and form the full range of [0,
+    // `default_parallel_tasks_k`).
     expect_eq(counter.load(), default_parallel_tasks_k);
     expect(contains_iota(visited));
 }
@@ -1092,9 +1094,9 @@ static void test_oversubscribed_threads() noexcept {
 /**
  *  @brief Naps the workers between batches; every wake must still dispatch exactly-once.
  *
- *  `sleep` flips the pool to `chill_k` and, where the platform allows, demotes workers to the
- *  idle scheduling class; the next dispatch must wake and restore them. Losing a worker to a
- *  missed wake-up shows up here as a hung join, and a double-dispatched task as a broken iota.
+ *  `sleep` flips the pool to `chill_k` and, where the platform allows, demotes workers to the idle
+ *  scheduling class; the next dispatch must wake and restore them. Losing a worker to a missed
+ *  wake-up shows up here as a hung join, and a double-dispatched task as a broken iota.
  */
 template <typename make_pool_type_ = make_pool_t>
 static void test_sleep_wake() noexcept {
@@ -1116,7 +1118,7 @@ static void test_sleep_wake() noexcept {
     }
 }
 
-/** Make sure that that we can combine static & dynamic loads over the same pool with & w/out resetting. */
+/** Combines static and dynamic loads over the same pool, with and without resetting. */
 template <bool should_restart_, typename make_pool_type_ = make_pool_t>
 static void test_mixed_restart() noexcept {
 
@@ -1128,7 +1130,7 @@ static void test_mixed_restart() noexcept {
     std::atomic<std::size_t> counter(0);
 
     pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
@@ -1144,7 +1146,7 @@ static void test_mixed_restart() noexcept {
     // Make sure repeated calls to `for_n` work
     counter = 0;
     pool.for_n_dynamic(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
-        // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+        // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
     });
@@ -1156,8 +1158,8 @@ static void test_mixed_restart() noexcept {
 /**
  *  @brief Alternates static & dynamic dispatch over a small-index pool for many generations.
  *
- *  The epoch is the same width as the pool's index, so a `fu8` pool wraps it every 128
- *  dispatch/join cycles and a `fu16` every 32768. Enough @p cycles drives the counter through
+ *  The epoch is the same width as the pool's index, so a @c fu8 pool wraps it every 128
+ *  dispatch/join cycles and a @c fu16 every 32768. Enough @p cycles drives the counter through
  *  several wraps, proving the token parity and completion comparisons survive the overflow.
  */
 template <typename pool_type_>
@@ -1173,7 +1175,7 @@ static void stress_test_composite(std::size_t const threads_count, std::size_t c
     std::atomic<std::size_t> counter(0);
     std::vector<aligned_visit_t> visited(parallel_tasks_count);
 
-    // ? Relax the memory order, as we don't care about the order of the results, will sort 'em later
+    // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
     auto log_visit = [&](index_t const task, typename pool_t::thread_in_domain_t) noexcept {
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
@@ -1192,7 +1194,8 @@ static void stress_test_composite(std::size_t const threads_count, std::size_t c
     }
 }
 
-/** `replicated_array` is one uninitialized per-domain buffer; the caller fills and reads its slices. */
+/** @c replicated_array is one uninitialized per-domain buffer; the caller fills and reads its
+ *  slices. */
 static void test_replicated_array() noexcept {
     fu::machine_topology_t topology;
     if (fu::failed(topology.harvest())) skip("no topology"); // ? No topology here; nothing to check
@@ -1224,7 +1227,8 @@ static void test_replicated_array() noexcept {
         expect_eq(tiny.at(static_cast<fu::memory_domain_index_t>(domain), 0), domain);
 }
 
-/** `sharded_array` stores each element once; `location_of`/`logical_index_of` round-trip the segment map. */
+/** @c sharded_array stores each element once; @c location_of and @c logical_index_of round-trip the
+ *  segment map. */
 static void test_sharded_array() noexcept {
     fu::machine_topology_t topology;
     if (fu::failed(topology.harvest())) skip("no topology");
@@ -1265,6 +1269,7 @@ static void test_sharded_array() noexcept {
 }
 
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+
 /** One distributed pool of exactly @p threads workers must dispatch every task exactly once. */
 static void expect_spawn_shape_dispatches_(std::size_t const threads) noexcept {
     constexpr std::size_t tasks_k = 4096;
@@ -1320,8 +1325,9 @@ void log_numa_topology() noexcept {
 }
 
 #if FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
+
 /**
- *  @brief A pool must size itself from the cores we were given, and hand the caller back its own mask.
+ *  @brief A pool sizes itself from the cores we were given, and hands the caller back its own mask.
  *
  *  The process is narrowed here the way `taskset` or a cgroup `cpuset` would narrow it. A topology
  *  harvested from the machine rather than from the mask would report every core, the pool would
@@ -1352,7 +1358,7 @@ static void test_caller_affinity_preserved() noexcept {
             pool.terminate();
         }
 
-        // The caller must be back on the two cores it narrowed itself to, not on the machine's cores.
+        // The caller must be back on the two cores it narrowed itself to, not the machine's.
         fu::core_mask_t afterwards;
         succeeded = succeeded && fu::succeeded(fu::capture_thread_cores(afterwards)) && afterwards.count() == 2;
     }
@@ -1395,8 +1401,8 @@ static void check_atomic_ref_words() noexcept {
     expect_eq(flag, false);
 }
 
-/** The operations past the standard - no-return forms, `fetch_max`/`fetch_min`, the conditional
- *  adds - each refusing exactly at its bound, unsigned and signed alike. */
+/** The operations past the standard - no-return forms, @c fetch_max and @c fetch_min, the
+ *  conditional adds - each refusing exactly at its bound, unsigned and signed alike. */
 template <template <typename> class atomic_ref_>
 static void check_atomic_ref_extensions() noexcept {
     std::uint32_t word = 11;
@@ -1460,8 +1466,8 @@ static void check_atomic_verbs() noexcept {
 }
 
 /** The shapes the indexes lean on, under contention - a dispenser by the no-return add, a bounded
- *  claim by the conditional add, a high-water mark by `fetch_max`, a lock by `exchange` - each
- *  with an exact expected total. */
+ *  claim by the conditional add, a high-water mark by `fetch_max`, a lock by `exchange` - each with
+ *  an exact expected total. */
 template <template <typename> class atomic_ref_>
 static void check_atomic_ref_under_contention() noexcept {
     constexpr std::size_t threads_k = 8, rounds_k = 20'000, claim_limit_k = threads_k * rounds_k / 3;
@@ -1492,8 +1498,8 @@ static void check_atomic_ref_under_contention() noexcept {
     expect_eq(guarded, threads_k * rounds_k); // ? The lock serialized every increment
 }
 
-/** Runs one reference through the contract where the machine admits it - the bits it declares are
- *  the same ones a CPU class needs before the runtime dispatch may pick it; a missing one skips by name. */
+/** Runs one reference through the contract where the machine admits it: the bits it declares match
+ *  what a CPU class needs before dispatch may pick it, and a missing one is skipped by name. */
 template <template <typename> class atomic_ref_>
 static void check_atomic_ref() noexcept {
     fu::capabilities_t const needed = atomic_ref_<std::uint32_t>::capabilities_k;
@@ -1537,7 +1543,8 @@ static void test_atomic_refs() noexcept {
 
 #else
 
-/** The references need the library's `std::atomic_ref` and `std::bit_cast`; say so rather than vanish. */
+/** The references need the library's @c std::atomic_ref and @c std::bit_cast; say so rather than
+ *  vanish. */
 static void test_atomic_refs() noexcept { skip("no `std::atomic_ref`"); }
 
 #endif // __cpp_lib_atomic_ref && __cpp_lib_bit_cast
@@ -1667,8 +1674,8 @@ int main(void) {
     std::printf("Starting stress tests...\n");
     std::size_t const max_cores = fu::allowed_cores_count();
 
-    // On 32-bit architectures, limit thread counts to avoid resource exhaustion
-    // Each thread needs ~8MB stack, and 255 threads would consume 2GB+ address space
+    // On 32-bit architectures, limit thread counts to avoid resource exhaustion. Each thread needs
+    // ~8MB stack, and 255 threads would consume 2GB+ address space
     constexpr bool is_32bit = sizeof(void *) == 4;
     constexpr std::size_t max_stress_threads = is_32bit ? 23 : 255;
 

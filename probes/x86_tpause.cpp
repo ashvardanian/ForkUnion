@@ -1,8 +1,9 @@
 /**
- *  @brief ForkUnion probe: the `UMONITOR` & `UMWAIT` encodings behind `TPAUSE`, or their `<immintrin.h>` intrinsics.
- *  @author Ash Vardanian
  *  @file probes/x86_tpause.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the @c UMONITOR & @c UMWAIT encodings behind @c TPAUSE, or their
+ *      `<immintrin.h>` intrinsics.
  */
 #if !(defined(__x86_64__) || defined(_M_X64))
 #error "x86-64 only"

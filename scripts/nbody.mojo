@@ -346,8 +346,8 @@ def main() raises:
     var total = fixed(total_seconds, 2)
     print(t"{backend}: {count} bodies, {passes} iters, {pace} us/iter ({total} s total)")
 
-    # `bodies` holds raw pointers into the ten lists, and Mojo releases a value after its last
-    # named use - which would otherwise be the construction above, long before the last read.
+    # `bodies` holds raw pointers into the ten lists, and Mojo releases a value after its last named
+    # use - which would otherwise be the construction above, long before the last read.
     _ = position_x^
     _ = position_y^
     _ = position_z^

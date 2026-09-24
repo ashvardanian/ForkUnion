@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the A extension - an `amoswap.w` and an `lr.w`/`sc.w` loop.
- *  @author Ash Vardanian
  *  @file probes/risc5_atomic.cpp
+ *  @author Ash Vardanian
  *  @date September 9, 2026
+ *  @brief ForkUnion probe: the A extension - an `amoswap.w` and an `lr.w`/`sc.w` loop.
  */
 #if !(defined(__riscv) && __riscv_xlen == 64)
 #error "64-bit RISC-V only"

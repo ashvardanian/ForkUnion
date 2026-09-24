@@ -1,8 +1,8 @@
 //! Machine topology discovery and library capability introspection.
 //!
-//! Mirrors the C++ `topology` header: an owned `Topology` handle enumerating this machine's
-//! compute and memory domains, the `Capabilities` bitset describing what the library was built
-//! for and what the machine offers, and the library version accessors.
+//! Mirrors the C++ `topology` header: an owned `Topology` handle enumerating this machine's compute
+//! and memory domains, the `Capabilities` bitset describing what the library was built for and what
+//! the machine offers, and the library version accessors.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -42,9 +42,9 @@ extern fn fu_memory_domain_id_at_index(topology: *anyopaque, memory_domain_index
 
 /// Defines whether the calling thread participates in task execution
 pub const CallerExclusivity = enum(c_int) {
-    /// Calling thread participates in workload (spawns N-1 workers)
+    /// Calling thread participates in workload, spawning N-1 workers.
     inclusive = 0,
-    /// Calling thread only coordinates (spawns N workers)
+    /// Calling thread only coordinates, spawning N workers.
     exclusive = 1,
 };
 
@@ -59,9 +59,10 @@ pub fn version() struct { major: u32, minor: u32, patch: u32 } {
 
 /// Everything the library can do, whether decided when it was compiled or found on this machine.
 ///
-/// One bit per facility, and two accessors ask two questions of the same bit. `comptimeCapabilities`
-/// reports whether the code was _built_: a set `place_huge_pages_on_domain` means we compiled the
-/// path that asks for them. `runtimeCapabilities` reports whether the machine _offers_ it now.
+/// One bit per facility, and two accessors ask two questions of the same bit.
+/// `comptimeCapabilities` reports whether the code was _built_: a set `place_huge_pages_on_domain`
+/// means we compiled the path that asks for them. `runtimeCapabilities` reports whether the machine
+/// _offers_ it now.
 ///
 /// Neither implies the other. A binary that built `place_memory_on_domain` runs perfectly well on a
 /// single-node box, where the runtime accessor never sets that bit; and a machine with four NUMA
@@ -105,8 +106,8 @@ pub const Capabilities = packed struct(u32) {
     /// `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
     /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
     arm64_dc_cvac: bool = false,
-    /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` -
-    /// the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+    /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
+    /// hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
     risc5_zicbom: bool = false,
 
     _unused: u14 = 0,
@@ -124,8 +125,8 @@ pub fn comptimeCapabilities() Capabilities {
 
 /// The set `comptimeCapabilities` bits, comma-separated, like `"threads,topology"`.
 ///
-/// POLISH: writes into a caller-provided buffer so the returned slice borrows `buf`; the
-/// buffer must outlive the slice. Callers pass their own stack buffer.
+/// POLISH: writes into a caller-provided buffer so the returned slice borrows `buf`; the buffer
+/// must outlive the slice. Callers pass their own stack buffer.
 pub fn comptimeCapabilitiesString(buf: []u8) Error![]const u8 {
     var written: usize = 0;
     try check(fu_name_capabilities(fu_comptime_capabilities(), buf.ptr, buf.len, &written));
@@ -137,10 +138,10 @@ pub fn runtimeCapabilities() Capabilities {
     return @bitCast(fu_runtime_capabilities());
 }
 
-/// The set `runtimeCapabilities` bits, comma-separated, like `"arm64_yield,place_memory_on_domain"`.
+/// The set `runtimeCapabilities` bits, comma-separated: `"arm64_yield,place_memory_on_domain"`.
 ///
-/// POLISH: writes into a caller-provided buffer so the returned slice borrows `buf`; the
-/// buffer must outlive the slice. Callers pass their own stack buffer.
+/// POLISH: writes into a caller-provided buffer so the returned slice borrows `buf`; the buffer
+/// must outlive the slice. Callers pass their own stack buffer.
 pub fn runtimeCapabilitiesString(buf: []u8) Error![]const u8 {
     var written: usize = 0;
     try check(fu_name_capabilities(fu_runtime_capabilities(), buf.ptr, buf.len, &written));
@@ -149,8 +150,8 @@ pub fn runtimeCapabilitiesString(buf: []u8) Error![]const u8 {
 
 /// An explicit, owned handle to this machine's discovered compute and memory topology.
 ///
-/// Build one with `init`, query it through the methods below, and hand it to pool constructors
-/// and memory-domain allocators so they know which machine they are placing work and pages onto.
+/// Build one with `init`, query it through the methods below, and hand it to pool constructors and
+/// memory-domain allocators so they know which machine they are placing work and pages onto.
 pub const Topology = struct {
     handle: *anyopaque,
 
@@ -181,9 +182,9 @@ pub const Topology = struct {
         return answer;
     }
 
-    /// Resolves a memory domain's dense index to the OS id the allocators take; `.none` if out of range.
-    /// A real domain may itself carry `.none` where the OS names none, so an index this machine
-    /// does not have is a reported refusal rather than that same value.
+    /// Resolves a memory domain's dense index to the allocator's OS id; `.none` if out of range. A
+    /// real domain may itself carry `.none` where the OS names none, so an index this machine does
+    /// not have is a reported refusal rather than that same value.
     pub fn memoryDomainIdAtIndex(self: Topology, memory_domain: MemoryDomain) Error!MemoryDomainId {
         var raw: i32 = -1;
         try check(fu_memory_domain_id_at_index(self.handle, memory_domain.index(), &raw));
@@ -211,7 +212,7 @@ pub const Topology = struct {
         return answer;
     }
 
-    /// Returns the memory domain nearest a given compute domain (its local allocation target).
+    /// Returns the memory domain nearest a given compute domain, its local allocation target.
     ///
     /// Performance - tiers, latencies, bandwidths, distances - is not the topology's to declare:
     /// harvest a `Fabric` to measure it in-process.
@@ -223,8 +224,8 @@ pub const Topology = struct {
 
     /// Returns the number of distinct Quality-of-Service levels.
     ///
-    /// May be smaller than `computeDomainsCount`, as several domains can share one level - equally-fast
-    /// cores may still be split across cache clusters, or across NUMA nodes.
+    /// May be smaller than `computeDomainsCount`, as several domains can share one level -
+    /// equally-fast cores may still be split across cache clusters, or across NUMA nodes.
     pub fn computeLevelsCount(self: Topology) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try check(fu_compute_levels_count(self.handle, &answer));
@@ -233,9 +234,9 @@ pub const Topology = struct {
 
     /// Returns the relative throughput of one core in a compute domain (0 if unknown).
     ///
-    /// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present. Weight
-    /// work by this - `computeLevelIn` is a dense ordinal and must never be divided by. Platforms that
-    /// rank cores without rating them report 0; weigh by core count instead.
+    /// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present.
+    /// Weight work by this - `computeLevelIn` is a dense ordinal and must never be divided by.
+    /// Platforms that rank cores without rating them report 0; weigh by core count instead.
     pub fn computeCapacityIn(self: Topology, compute_domain: ComputeDomain) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try check(fu_compute_capacity_in(self.handle, compute_domain.index(), &answer));
@@ -252,28 +253,28 @@ pub const Topology = struct {
         return answer;
     }
 
-    /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
+    /// Returns the total RAM volume, in bytes, across all memory domains, regardless of page size.
     pub fn volumeRam(self: Topology) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try check(fu_volume_ram(self.handle, &answer));
         return answer;
     }
 
-    /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
+    /// Returns the RAM volume, in bytes, held by a given memory domain (0 if out of range).
     pub fn volumeRamIn(self: Topology, memory_domain: MemoryDomain) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try check(fu_volume_ram_in(self.handle, memory_domain.index(), &answer));
         return answer;
     }
 
-    /// Returns the total huge-page volume (bytes) across all memory domains.
+    /// Returns the total huge-page volume, in bytes, across all memory domains.
     pub fn volumeHugePages(self: Topology) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try check(fu_volume_huge_pages(self.handle, &answer));
         return answer;
     }
 
-    /// Returns the huge-page volume (bytes) available in a given memory domain (0 if out of range).
+    /// Returns the huge-page volume, in bytes, held by a given memory domain (0 if out of range).
     pub fn volumeHugePagesIn(self: Topology, memory_domain: MemoryDomain) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try check(fu_volume_huge_pages_in(self.handle, memory_domain.index(), &answer));

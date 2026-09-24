@@ -1,26 +1,26 @@
 //! N-Body simulation benchmark comparing different parallelism libraries.
 //!
 //! Compares the synchronization overhead of different thread-pool implementations:
-//! - forkunion_static_shared: static work division (N tasks pre-divided into thread slices)
-//! - forkunion_dynamic_shared: dynamic work-stealing (ForkUnion's work-stealing scheduler)
-//! - forkunion_static_replicated: static, with body positions replicated into each domain's local memory
+//! - forkunion_static_shared: static work division, N tasks pre-divided into thread slices.
+//! - forkunion_dynamic_shared: dynamic work-stealing, via ForkUnion's own scheduler.
+//! - forkunion_static_replicated: static, with bodies replicated into each domain's local memory
 //! - forkunion_dynamic_replicated: work-stealing, over the same per-domain replicas
-//! - std_io_group: static work division (one `std.Io.Group` task per slice, awaited per pass)
-//! - libxev: dynamic lock-free queue (Mitchell Hashimoto's lock-free thread pool)
+//! - std_io_group: static work division, one `std.Io.Group` task per slice, awaited per pass.
+//! - libxev: dynamic lock-free queue, via Mitchell Hashimoto's lock-free thread pool.
 //!
-//! On a machine with one memory domain the replicas collapse to one, and the portable allocator backs
-//! them, so the `replicated_*` backends compile and run everywhere.
+//! On a machine with one memory domain the replicas collapse to one, and the portable allocator
+//! backs them, so the `replicated_*` backends compile and run everywhere.
 //!
 //! Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
 //! rate it sustained: contended-atomic paths amplify any background noise, and short dynamic runs
 //! swing ~±30%, so the window sizes the iteration count to the machine instead of guessing it.
 //!
 //! Environment variables:
-//! - NBODY_COUNT: number of bodies (default: number of threads)
-//! - NBODY_SECONDS: wall-clock budget per run, reporting the sustained rate (default: 10)
+//! - NBODY_COUNT: number of bodies, defaulting to the thread count.
+//! - NBODY_SECONDS: wall-clock budget per run, reporting the sustained rate, defaulting to 10.
 //! - NBODY_ITERATIONS: run an exact iteration count instead, when set
-//! - NBODY_BACKEND: one of the backend names above (default: forkunion_static_shared)
-//! - NBODY_THREADS: number of threads (default: CPU count)
+//! - NBODY_BACKEND: one of the backend names above, defaulting to forkunion_static_shared.
+//! - NBODY_THREADS: number of threads, defaulting to the CPU count.
 //!
 //! Build and run from the scripts/ directory:
 //!
@@ -116,7 +116,7 @@ inline fn randomUnit(counter: u64) f32 {
     return @as(f32, @floatFromInt(splitMix(counter) >> 40)) * (1.0 / 16777216.0);
 }
 
-/// Fast reciprocal square root (Quake-style with one Newton iteration)
+/// Fast reciprocal square root, Quake-style with one Newton iteration.
 inline fn fastRsqrt(x: f32) f32 {
     const i = 0x5f3759df -% (@as(u32, @bitCast(x)) >> 1);
     var y = @as(f32, @bitCast(i));
@@ -184,7 +184,7 @@ inline fn applyForce(b: *Body, f: *const Vector3) void {
     b.position.x += b.velocity.x * DT;
     b.position.y += b.velocity.y * DT;
     b.position.z += b.velocity.z * DT;
-    // ? Wrap into the unit box to keep every distance - and so every force - inside the normal
+    // ? Wrap into the unit box to keep every distance - and so every force - well inside the normal
     // ? `f32` range forever: no overflows into NaN, and no denormals for x86 to stall on.
     b.position.x -= @floor(b.position.x);
     b.position.y -= @floor(b.position.y);
@@ -198,7 +198,7 @@ const Placement = enum { shared, replicated };
 
 // ForkUnion kernels
 
-/// Everything either pass of a ForkUnion backend reads or writes; the comptime placement elides the rest.
+/// What either pass of a ForkUnion backend reads or writes; the comptime placement elides the rest.
 const WorkContext = struct {
     bodies_ptr: [*]Body,
     forces_ptr: [*]Vector3,
@@ -208,7 +208,7 @@ const WorkContext = struct {
     n: usize,
 };
 
-/// The all-to-all sweep: every body reads every other, from the shared array or its node-local replica.
+/// The all-to-all sweep: every body reads the rest, from the shared array or a node-local replica.
 fn forceKernel(comptime placement: Placement) fn (*const WorkContext, usize, fu.ThreadInDomain) void {
     return struct {
         fn calc(work: *const WorkContext, task: usize, at: fu.ThreadInDomain) void {
@@ -229,7 +229,7 @@ fn applyKernel(work: *const WorkContext, task: usize, at: fu.ThreadInDomain) voi
     applyForce(&work.bodies_ptr[task], &work.forces_ptr[task]);
 }
 
-/// Dispatches `kernel` over `n` tasks on the chosen schedule: pre-divided static, or work-stolen dynamic.
+/// Dispatches `kernel` over `n` tasks by schedule: pre-divided static, or work-stolen dynamic.
 fn forNScheduled(comptime schedule: Schedule, pool: fu.Pool, n: usize, comptime kernel: anytype, work: *const WorkContext) !void {
     if (schedule == .static) try pool.forN(n, work, kernel) else try pool.forNDynamic(n, work, kernel);
 }
@@ -240,9 +240,9 @@ fn forNScheduled(comptime schedule: Schedule, pool: fu.Pool, n: usize, comptime 
 // quadratic all-to-all reads stay node-local. The all-to-all cannot be sharded - every body reads
 // every other - so the only locality left to win is the read side.
 
-/// Copies canonical `bodies` into every per-domain replica, each written by the cores local to its node
-/// so the pages first-touch there. Every compute domain sharing a memory domain cooperates on that
-/// node's one replica, partitioned across all its threads so no element is copied twice.
+/// Copies canonical `bodies` into every per-domain replica, each written by the cores local to its
+/// node so the pages first-touch there. Every compute domain sharing a memory domain cooperates on
+/// that node's one replica, partitioned across all its threads so no element is copied twice.
 fn refreshReplicas(pool: fu.Pool, local_memory: []const fu.MemoryDomain, bodies: []const Body, replicas: *fu.ReplicatedArray(Body)) !void {
     const RefreshContext = struct {
         pool: fu.Pool,
@@ -256,8 +256,9 @@ fn refreshReplicas(pool: fu.Pool, local_memory: []const fu.MemoryDomain, bodies:
         fn refresh(carried: *const RefreshContext, thread_index: usize, compute_domain: fu.ComputeDomain) void {
             const memory_domain = carried.local_memory[compute_domain.index()];
 
-            // Rank this thread among every thread on its memory domain, and count them, so the node's
-            // whole team splits [0, n) without overlap even when several compute domains share the node.
+            // Rank this thread among every thread on its memory domain, and count them, so the
+            // node's whole team splits [0, n) without overlap even when several compute domains
+            // share the node.
             var threads_on_memory_domain: usize = 0;
             var local_index: usize = 0;
             for (0..carried.pool.computeDomainsCount() catch unreachable) |index| {
@@ -280,9 +281,9 @@ fn refreshReplicas(pool: fu.Pool, local_memory: []const fu.MemoryDomain, bodies:
     }.refresh);
 }
 
-/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion backends
-/// are its instantiations. The all-to-all sweep reads either the shared array or each thread's node-local
-/// replica; the apply pass then integrates the canonical bodies.
+/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion
+/// backends are its instantiations. The all-to-all sweep reads either the shared array or each
+/// thread's node-local replica; the apply pass then integrates the canonical bodies.
 fn iterationForkUnion(
     comptime schedule: Schedule,
     comptime placement: Placement,
@@ -306,7 +307,8 @@ fn iterationForkUnion(
     try pool.forN(n, &work, applyKernel);
 }
 
-// std.Io.Group backend (static work division)
+// std.Io.Group backend, static work division
+//
 // The standard library's fork-join answer since 0.16 removed `std.Thread.Pool`: one `Io.Group` per
 // pass, one task per body slice, awaited before the next pass reads what it wrote.
 
@@ -349,9 +351,10 @@ fn iterationStdIoGroup(io: std.Io, bodies: []Body, forces: []Vector3, n_threads:
     }
 }
 
-// libxev thread-pool backend (lock-free queue - dynamic)
-// Creates one task per body, batches them, and relies on the framework's lock-free queue for dynamic
-// work distribution across workers.
+// libxev thread-pool backend, dynamic lock-free queue
+//
+// Creates one task per body, batches them, and relies on the framework's lock-free queue for
+// dynamic work distribution across workers.
 
 fn iterationLibxev(pool: *xev.ThreadPool, bodies: []Body, forces: []Vector3, allocator: std.mem.Allocator) !void {
     const n = bodies.len;
@@ -427,8 +430,8 @@ fn iterationLibxev(pool: *xev.ThreadPool, bodies: []Body, forces: []Vector3, all
 /// Which execution engine a backend runs on, so `main` builds exactly the resource it needs.
 const Engine = enum { forkunion, forkunion_replicated, std_io_group, libxev };
 
-/// Everything a backend reads or writes for one simulation step; `main` owns the lifetimes and hands
-/// each backend only the execution engine it asked for.
+/// Everything a backend reads or writes for one simulation step; `main` owns the lifetimes and
+/// hands each backend only the execution engine it asked for.
 const Context = struct {
     bodies: []Body,
     forces: []Vector3,
@@ -502,13 +505,13 @@ pub fn main() !void {
     const forces = try allocator.alloc(Vector3, n_bodies);
     defer allocator.free(forces);
 
-    // Seven counter-based draws per body: three position coordinates, three velocity components, and
-    // one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    // Seven counter-based draws per body: three position coordinates, three velocity components,
+    // and one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
     for (bodies, 0..) |*body, i| {
         const counter = @as(u64, i) * 7;
         body.position = .{ .x = randomUnit(counter), .y = randomUnit(counter + 1), .z = randomUnit(counter + 2) };
         body.velocity = .{ .x = randomUnit(counter + 3), .y = randomUnit(counter + 4), .z = randomUnit(counter + 5) };
-        // ? Round each literal to `f32` before subtracting: Zig's comptime floats are exact, and the
+        // ? Round each `f32` literal before subtracting: Zig's comptime floats stay exact, and the
         // ? folded span would otherwise differ from the C++ and Rust builds by an ULP.
         const mass_span: f32 = @as(f32, 1.0e15) - @as(f32, 1.0e10);
         body.mass = @as(f32, 1.0e10) + randomUnit(counter + 6) * mass_span;

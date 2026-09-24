@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the raw `WFET` encoding, `D5031000`.
- *  @author Ash Vardanian
  *  @file probes/arm64_wfet.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the raw @c WFET encoding, @c D5031000.
  */
 #if !(defined(__aarch64__) || defined(_M_ARM64))
 #error "AArch64 only"

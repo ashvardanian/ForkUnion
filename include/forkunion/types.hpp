@@ -1,22 +1,23 @@
 /**
- *  @brief Vocabulary and utilities: task ranges, padded buffers, index splitting, claim cursors.
- *  @author Ash Vardanian
  *  @file include/forkunion/types.hpp
+ *  @author Ash Vardanian
  *  @date July 10, 2026
+ *  @brief Vocabulary and utilities: task ranges, padded buffers, index splitting, claim cursors.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
 #if defined(_MSC_VER)
 #pragma warning(disable : 4505) // unreferenced function with internal linkage has been removed
 #pragma warning(disable : 4324) // structure was padded due to alignment specifier
-#pragma warning(disable : 4996) // `strncpy` etc. flagged "unsafe"; a preceding CRT include may have
-                                // already marked them deprecated, so the define below cannot undo it
+/*  @c strncpy etc. flagged "unsafe"; a preceding CRT include may have already marked them
+ *  deprecated, so the define below cannot undo it. */
+#pragma warning(disable : 4996)
 #pragma warning(disable : 4191) // `GetProcAddress` -> typed function pointer is the documented idiom
 #endif
 
-/*  Must precede the first CRT header below: `strncpy` and friends are only "unsafe" to MSVC, and the
- *  suppression is inert once `<cstring>` has already been parsed. `NOMINMAX` is hoisted for the same
- *  reason - it has to be set before the eventual `<windows.h>`. */
+/*  Must precede the first CRT header below: @c strncpy and friends are only "unsafe" to MSVC, and
+ *  the suppression is inert once `<cstring>` has already been parsed. `NOMINMAX` is hoisted for the
+ *  same reason - it has to be set before the eventual `<windows.h>`. */
 #if defined(_WIN32)
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
@@ -57,20 +58,21 @@
 
 #pragma region Platform Identity
 
-/*  Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to derive
- *  the capabilities below. Nothing else in the library may ask `__linux__` again. Identity is the kernel
- *  ABI - pthreads, `sched_setaffinity`, `gettid`, `/proc`, `/sys` - which Android shares in full, and
- *  which is all the capabilities below now ask for. What Bionic lacks is GLibC, and that is the separate
- *  `FU_ON_GLIBC` axis below; it gates no capability, because none is glibc's to grant.  */
+/** Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to
+ *  derive the capabilities below. Nothing else in the library may ask @c __linux__ again. Identity
+ *  is the kernel ABI - pthreads, @c sched_setaffinity, @c gettid, `/proc`, `/sys` - which Android
+ *  shares in full, and which is all the capabilities below now ask for. What Bionic lacks is GLibC,
+ *  and that is the separate @c FU_ON_GLIBC axis below; it gates no capability, because none is
+ *  glibc's to grant. */
 #if defined(__linux__)
 #define FU_ON_LINUX 1
 #else
 #define FU_ON_LINUX 0
 #endif
 
-/*  A Bionic sub-identity of Linux: Android shares the kernel ABI but not every GLibC extension, so the
- *  handful of capabilities that differ - affinity, whose `pthread_setaffinity_np` Bionic lacks before
- *  NDK 36 - key on this rather than re-asking `__ANDROID__` at the use site.  */
+/** A Bionic sub-identity of Linux: Android shares the kernel ABI but not every GLibC extension, so
+ *  the handful of capabilities that differ - affinity, whose @c pthread_setaffinity_np Bionic lacks
+ *  before NDK 36 - key on this rather than re-asking @c __ANDROID__ at the use site. */
 #if defined(__ANDROID__)
 #define FU_ON_ANDROID 1
 #else
@@ -95,9 +97,13 @@
 #define FU_ON_FREEBSD 0
 #endif
 
-/*  A sandbox rather than a kernel: the module is compiled once and run by whichever runtime loads it,
- *  so there is no affinity, no `/proc`, and no memory domain to place onto. What it does have depends
- *  on how it was built, which is `FU_WITH_SHARED_MEMORY` below rather than anything here.  */
+/**
+ *  @brief A sandbox rather than a kernel: the module is compiled once and run by whichever runtime
+ *      loads it, so there is no affinity, no `/proc`, and no memory domain to place onto.
+ *
+ *  What it does have depends on how it was built, which is @c FU_WITH_SHARED_MEMORY below rather
+ *  than anything here.
+ */
 #if defined(__wasm__) || defined(__EMSCRIPTEN__)
 #define FU_ON_WASM 1
 #else
@@ -110,17 +116,17 @@
 #include <features.h> // `__GLIBC__`
 #endif
 
-/*  Is-glibc, for facilities glibc provides that Bionic and musl do not - `backtrace`, say. Stays 0 on
- *  Apple and FreeBSD, whose libc is not glibc. Gates no capability below: sysfs and the syscall table
- *  are the kernel's, and every libc on Linux shares them.  */
+/** Is-glibc, for facilities glibc provides that Bionic and musl do not - @c backtrace, say. Stays 0
+ *  on Apple and FreeBSD, whose libc is not glibc. Gates no capability below: sysfs and the syscall
+ *  table are the kernel's, and every libc on Linux shares them. */
 #if defined(__GLIBC__)
 #define FU_ON_GLIBC 1
 #else
 #define FU_ON_GLIBC 0
 #endif
 
-/*  The kernel UAPI headers ship separately from libc - `linux-headers` on Alpine and other musl
- *  distributions - so `<linux/mman.h>` must be probed, not assumed from the platform.  */
+/** The kernel UAPI headers ship separately from libc - `linux-headers` on Alpine and other musl
+ *  distributions - so `<linux/mman.h>` must be probed, not assumed from the platform. */
 #if FU_ON_LINUX && __has_include(<linux/mman.h>)
 #define FU_DETECT_LINUX_MMAN_ 1
 #else
@@ -128,25 +134,24 @@
 #endif
 #pragma endregion Platform Identity
 
-#pragma region Platform Capabilities
-
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
- *  facility rather than for the library that happens to provide it - so Windows' `VirtualAllocExNuma`
- *  satisfies `FU_WITH_PLACE_MEMORY_ON_DOMAIN` without inventing a second macro.
+ *  facility rather than for the library that happens to provide it - so Windows'
+ *  @c VirtualAllocExNuma satisfies @c FU_WITH_PLACE_MEMORY_ON_DOMAIN without a second macro.
  *
- *  Every one auto-derives from Layer 1, and from the capabilities it leans on - so switching one off
- *  cascades to everything downstream, and `-DFU_WITH_TOPOLOGY=0` alone yields a coherent build rather
- *  than an `#error` about the four capabilities it silently orphaned. The `#error`s below then only
- *  ever fire on a contradiction the caller wrote out by hand.
+ *  Every one auto-derives from Layer 1, and from the capabilities it leans on - so switching one
+ *  off cascades to everything downstream, and `-DFU_WITH_TOPOLOGY=0` alone yields a coherent build
+ *  rather than an `#error` about the four capabilities it silently orphaned. The `#error`s below
+ *  then only ever fire on a contradiction the caller wrote out by hand.
  *
  *  A build system may @b override, never re-derive: that keeps the default in exactly one place,
- *  instead of duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift.  */
+ *  not duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift. */
+#pragma region Platform Capabilities
 
 /**
  *  @brief Do several threads see one address space, so atomics and parks mean anything?
- *  @note Always true where a kernel schedules the threads. On WebAssembly it is a build-time choice:
- *      @c -pthread puts each worker on its own Web Worker over a shared memory. Without it a module
- *      has one thread, and @c std::atomic degenerates to plain loads because nothing can contend.
+ *  @note Always true where a kernel schedules the threads. On WebAssembly it is a build-time
+ *      choice: @c -pthread gives each worker its own Web Worker over shared memory; without it, one
+ *      thread means @c std::atomic degenerates to plain loads, with nothing to contend.
  */
 #if !defined(FU_WITH_SHARED_MEMORY)
 #if !FU_ON_WASM
@@ -158,29 +163,30 @@
 #endif
 #endif
 
-/** Can we create operating-system threads directly, rather than through `std::thread`? */
+/** Can we create operating-system threads directly, rather than through @c std::thread? */
 #if !defined(FU_WITH_OS_THREADS)
 #define FU_WITH_OS_THREADS (FU_ON_POSIX || FU_ON_WINDOWS || (FU_ON_WASM && FU_WITH_SHARED_MEMORY))
 #endif
 
 /** Can we enumerate this machine's cores, compute domains, and memory domains? */
 #if !defined(FU_WITH_TOPOLOGY)
-/*  Windows needs no separate library for this: `GetLogicalProcessorInformationEx` ships with the
+/*  Windows needs no separate library for this: @c GetLogicalProcessorInformationEx ships with the
  *  kernel since Vista and reports NUMA nodes, cores, processor groups, and caches in one call. */
-/*  FreeBSD needs no separate library either: the in-kernel `cpuset`/NUMA framework enumerates memory
- *  domains through `sysctl vm.ndomains` and `cpuset_getaffinity(CPU_WHICH_DOMAIN)`. */
-/*  Nor Linux: the harvest reads `/sys/devices/system/node`, which the kernel mounts wherever there are
- *  domains to report - so no libc and no `libnuma-dev` on the build host gates it. */
+/*  FreeBSD needs no separate library either: the in-kernel @c cpuset/NUMA framework enumerates
+ *  memory domains through `sysctl vm.ndomains` and `cpuset_getaffinity(CPU_WHICH_DOMAIN)`. */
+
+/** Nor Linux: the harvest reads `/sys/devices/system/node`, which the kernel mounts wherever there
+ *  are domains to report - so no libc and no `libnuma-dev` on the build host gates it. */
 #define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || FU_ON_FREEBSD || FU_ON_LINUX)
 #endif
 
 /**
  *  @brief Can we bind a thread to a set of cores, and have the kernel honour it?
- *  @note Deliberately independent of `FU_WITH_PLACE_MEMORY_ON_DOMAIN`. `pthread_setaffinity_np` needs no
- *      `libnuma`, and a Linux box without it could pin perfectly well - it simply never did,
- *      because a single NUMA macro guarded both.
+ *  @note Deliberately independent of @c FU_WITH_PLACE_MEMORY_ON_DOMAIN. @c pthread_setaffinity_np
+ *      needs no @c libnuma, and a Linux box without it could pin perfectly well - it simply never
+ *      did, because a single NUMA macro guarded both.
  *  @note False on Apple Silicon, where `thread_policy_set(THREAD_AFFINITY_POLICY)` answers
- *      `KERN_NOT_SUPPORTED`. Its only placement lever is `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
+ *      @c KERN_NOT_SUPPORTED. Its only placement lever is @c FU_WITH_PLACE_THREADS_BY_CORE_CLASS.
  */
 #if !defined(FU_WITH_PLACE_THREADS_BY_AFFINITY)
 #define FU_WITH_PLACE_THREADS_BY_AFFINITY (FU_ON_LINUX || FU_ON_FREEBSD || FU_ON_WINDOWS)
@@ -191,29 +197,36 @@
 #define FU_WITH_PLACE_THREADS_BY_CORE_CLASS FU_ON_APPLE
 #endif
 
-/** @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply?
- *  @note Linux spells it `sched_setscheduler(SCHED_IDLE)`; FreeBSD rejects `SCHED_IDLE` but reaches the
- *      same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`. */
+/**
+ *  @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply?
+ *  @note Linux spells it `sched_setscheduler(SCHED_IDLE)`; FreeBSD rejects `SCHED_IDLE` but reaches
+ *      the same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`.
+ */
 #if !defined(FU_WITH_RESCHEDULE_THREADS_BY_CLASS)
 #define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
 #endif
 
 /** Can we place pages on a chosen memory domain? */
 #if !defined(FU_WITH_PLACE_MEMORY_ON_DOMAIN)
-/*  Linux places with `mbind`; Windows with `VirtualAllocExNuma`; FreeBSD sets the calling thread's
- *  `domainset` to a PREFER policy and first-touches. Same capability, named for the facility. */
+
+/** Linux places with `mbind`; Windows with `VirtualAllocExNuma`; FreeBSD sets the calling thread's
+ *  @c domainset to a PREFER policy and first-touches. Same capability, named for the facility. */
 #define FU_WITH_PLACE_MEMORY_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_TOPOLOGY)
 #endif
 
-/** Can we request pages larger than the base page? */
-#if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
-/*  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
- *  gated behind the `SeLockMemoryPrivilege` the caller must already hold; FreeBSD hints the alignment
- *  with `MAP_ALIGNED_SUPER` and lets its transparent superpages promote.
+/**
+ *  @brief Can we request pages larger than the base page?
  *
- *  On Linux the `MAP_HUGE_2MB`-family constants live in `<linux/mman.h>`, and the kernel UAPI headers
- *  ship separately from libc (`linux-headers` on Alpine and other musl distributions) - the platform
- *  alone does not guarantee the header, and assuming it would fail at `#include`, not at a check.  */
+ *  Linux calls them huge pages (`MAP_HUGETLB`); Windows calls them large pages (`MEM_LARGE_PAGES`),
+ *  gated behind the @c SeLockMemoryPrivilege the caller must already hold; FreeBSD hints the
+ *  alignment with @c MAP_ALIGNED_SUPER and lets its transparent superpages promote.
+ *
+ *  On Linux the @c MAP_HUGE_2MB-family constants live in `<linux/mman.h>`, and the kernel UAPI
+ *  headers ship separately from libc - `linux-headers` on Alpine and other musl distributions - so
+ *  the platform alone does not guarantee the header, and assuming it would fail at `#include`, not
+ *  at a check.
+ */
+#if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
 #define FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN \
     (((FU_ON_LINUX && FU_DETECT_LINUX_MMAN_) || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
 #endif
@@ -221,7 +234,7 @@
 /*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
 
 /**
- *  @brief Whether the domain-aware `colocated_pool` and `distributed_pool` are compiled at all.
+ *  @brief Whether the domain-aware @c colocated_pool and @c distributed_pool are compiled at all.
  *
  *  They need threads, and a topology to spawn onto. They do @b not need to be able to pin, or to
  *  place memory: a machine may report a rich compute topology and refuse both. Every Apple Silicon
@@ -230,9 +243,9 @@
  */
 #define FU_WITH_COLOCATE_POOLS_ON_DOMAIN (FU_WITH_OS_THREADS && FU_WITH_TOPOLOGY)
 
-/*  A bad override should fail at the `#include`, not at link time - whether it is a contradiction the
- *  caller wrote by hand, or a retired spelling that would otherwise be silently ignored, handing a
- *  build system or a downstream a default build unlike the one it asked for.  */
+/*  A bad override should fail at the `#include`, not at link time - whether it is a contradiction
+ *  the caller wrote by hand, or a retired spelling that would otherwise be silently ignored,
+ *  handing a build system or a downstream a default build unlike the one it asked for. */
 #if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_APPLE
 #error \
     "FU_WITH_PLACE_THREADS_BY_AFFINITY: Apple answers KERN_NOT_SUPPORTED to thread_policy_set; pinning cannot be forced on"
@@ -252,7 +265,7 @@
     "Retired capability macro. Use FU_WITH_PLACE_MEMORY_ON_DOMAIN, FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN, or FU_WITH_PLACE_THREADS_BY_AFFINITY"
 #endif
 
-/** The `alignas` width that keeps two threads' words off one line: 256-byte lines on s390x, 64 on
+/** The @c alignas width that keeps two threads' words off one line: 256-byte lines on s390x, 64 on
  *  wasm, which has no coherence to protect, and 128 elsewhere - x86 pairs its 64-byte lines in the
  *  adjacent-line prefetcher, and Apple's cores carry 128 outright. Neoverse lands there too:
  *  `aarch64-unknown-linux-gnu` cannot be told from Asahi Linux on Apple silicon, and under-padding
@@ -274,7 +287,7 @@
 #include <exception> // `std::exception_ptr`
 #endif
 
-/*  No `<numa.h>`, no `<numaif.h>`: sysfs needs no header, and `mbind` arrives by syscall number.  */
+/*  No `<numa.h>`, no `<numaif.h>`: sysfs needs no header, and `mbind` arrives by syscall number. */
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 #include <sys/syscall.h> // `SYS_mbind`, the policy syscall no libc wraps
 #include <unistd.h>      // `syscall`
@@ -289,7 +302,8 @@
 #endif
 
 /*  Both the huge-page inventory and the topology harvest walk sysfs directories - a Linux-only
- *  concern. Windows has no `<dirent.h>` under MSVC, and its large pages are probed by size, not path. */
+ *  concern.
+ *  Windows has no `<dirent.h>` under MSVC, and its large pages are probed by size, not path. */
 #if (FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN || FU_WITH_TOPOLOGY) && FU_ON_LINUX
 #include <dirent.h> // `opendir`, `readdir`, `closedir`
 #endif
@@ -321,8 +335,9 @@
 #endif
 
 /*  FreeBSD's placement facilities are all base-system, so - like `<windows.h>` on Windows and
- *  `<sys/sysctl.h>` on Apple - one identity-gated block pulls them once, rather than a per-capability
- *  block re-`#include`-ing `<sys/cpuset.h>` for pinning, topology, and memory placement in turn. */
+ *  `<sys/sysctl.h>` on Apple - one identity-gated block pulls them once, rather than a
+ *  per-capability block re-`#include`-ing `<sys/cpuset.h>` for pinning, topology, and memory
+ *  placement in turn. */
 #if FU_ON_FREEBSD
 #include <sys/param.h>     // ! Must precede `<sys/cpuset.h>`
 #include <sys/cpuset.h>    // `cpuset_t`, `cpuset_getaffinity`, `cpuset_setdomain`, `CPU_WHICH_DOMAIN`
@@ -334,8 +349,8 @@
 #endif
 
 #if FU_ON_WINDOWS
-// `NOMINMAX` and `_CRT_SECURE_NO_WARNINGS` are already defined at the top of this header, before the
-// CRT includes, where they can still take effect.
+/*  @c NOMINMAX and @c _CRT_SECURE_NO_WARNINGS are already defined at the top of this header, before
+ *  the CRT includes, where they can still take effect. */
 #include <windows.h> // `GlobalMemoryStatusEx`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`
 #include <io.h>      // `_isatty`, `_fileno`
 #if defined(_MSC_VER)
@@ -346,12 +361,11 @@
 
 #pragma region Language and Architecture
 
-/**
- *  On C++17 and later we can detect misuse of lambdas that are not properly annotated.
- *  On C++20 and later we can use concepts for cleaner compile-time checks.
- *  MSVC pins `__cplusplus` at `199711L` unless `/Zc:__cplusplus` is passed, and reports the real
- *  standard through `_MSVC_LANG` instead - so read that where it is larger, or every gate below
- *  collapses to pre-C++17 on MSVC even under `/std:c++20`.  */
+/** On C++17 and later we can detect misuse of lambdas that are not properly annotated, and on C++20
+ *  and later we can use concepts for cleaner compile-time checks. MSVC pins @c __cplusplus at
+ *  `199711L` unless given `/Zc:__cplusplus`, and reports the real standard through @c _MSVC_LANG
+ *  instead - so read that where it is larger, or every gate below collapses to pre-C++17 on MSVC
+ *  even under `/std:c++20`. */
 #if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
 #define FU_CPLUSPLUS_ _MSVC_LANG
 #else
@@ -376,14 +390,15 @@
 #define FU_REQUIRES_(condition)
 #endif
 
-/*  C++17 is the floor: `if constexpr`, inline variables, and `std::is_nothrow_invocable_r_v` have no
- *  fallback here. Say so once, rather than let a C++14 build fail deeper in a cascade.  */
+/*  C++17 is the floor: `if constexpr`, inline variables, and @c std::is_nothrow_invocable_r_v have
+ *  no fallback here. Say so once, rather than let a C++14 build fail deeper in a cascade. */
 #if !FU_DETECT_CPP_17_
 #error "ForkUnion requires C++17 or later"
 #endif
 
-/*  The target architecture - each in its 64-bit form: x86-64, AArch64, RV64 - which the inline assembly and
- *  the capability bits key on. A 32-bit RISC-V build lands on none of them and on the portable paths. */
+/** The target architecture - each in its 64-bit form: x86-64, AArch64, RV64 - which the inline
+ *  assembly and the capability bits key on.
+ *  A 32-bit RISC-V build lands on none of them and on the portable paths. */
 #if defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64)
 #define FU_DETECT_ARCH_ARM64_ 1
 #else
@@ -447,51 +462,60 @@
 #define fu_unlikely_(x) (x)
 #endif
 
-/*  Whether GNU-style inline assembly (`__asm__`) is available: GCC and Clang have it, MSVC does not on
- *  x86-64 or AArch64, and reaches the same instructions through intrinsics instead. Gates only the
- *  paths that genuinely need inline asm - the hand-encoded opcodes and the MSR/register reads. */
+/**
+ *  @brief GNU-style @c __asm__ inline assembly is available: GCC and Clang have it, MSVC does not
+ *      on x86-64 or AArch64, and reaches the same instructions through intrinsics instead.
+ *
+ *  Gates only the paths that need inline asm: hand-encoded opcodes and MSR/register reads.
+ */
 #if defined(__GNUC__) || defined(__clang__)
 #define FU_DETECT_INLINE_ASM_SUPPORT_ 1
 #else
 #define FU_DETECT_INLINE_ASM_SUPPORT_ 0
 #endif
 
-/*  Whether MSVC's cache-hint intrinsics are available: `_mm_cldemote` and `_m_prefetchw` on x64,
- *  `__prefetch2` on AArch64 - all encoded unconditionally, no `/arch` flag needed. 1922 == VS 2019
- *  16.2, the release that introduced `_mm_cldemote`. clang-cl takes the inline-asm path above. */
+/** Whether MSVC's cache-hint intrinsics are available: @c _mm_cldemote and @c _m_prefetchw on x64,
+ *  @c __prefetch2 on AArch64 - all encoded unconditionally, no `/arch` flag needed. 1922 == VS 2019
+ *  16.2, the release that introduced @c _mm_cldemote. clang-cl takes the inline-asm path above. */
 #if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER >= 1922
 #define FU_DETECT_HINT_INTRINSICS_ 1
 #else
 #define FU_DETECT_HINT_INTRINSICS_ 0
 #endif
 
-/*  Whether MSVC's AArch64 atomic intrinsics are available and lower to LSE: `__ldar`/`__stlr`/`__ldapr`,
- *  `__swp*` and `__cas*` are encoded unconditionally, while the arithmetic tail rides `_Interlocked*`,
- *  which tail-calls the CRT unless `/arch:armv8.1` is given - reported as `__ARM_FEATURE_ATOMICS`, the
- *  macro GCC and Clang publish for `+lse`. clang-cl takes the inline-asm path above. */
+/** Whether MSVC's AArch64 atomic intrinsics are available and lower to LSE:
+ *  @c __ldar, @c __stlr, @c __ldapr, `__swp*` and `__cas*` are encoded unconditionally, while the
+ *  arithmetic tail rides `_Interlocked*`, which tail-calls the CRT unless `/arch:armv8.1` is given
+ *  - reported as @c __ARM_FEATURE_ATOMICS, the macro GCC and Clang publish for `+lse`. clang-cl
+ *  takes the inline-asm path above. */
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64) && defined(__ARM_FEATURE_ATOMICS)
 #define FU_DETECT_ARM64_ATOMIC_INTRINSICS_ 1
 #else
 #define FU_DETECT_ARM64_ATOMIC_INTRINSICS_ 0
 #endif
 
-/*  Set by a translation unit that admits rungs at runtime - the C library, a consumer's own dispatch
- *  unit built without the probes - so every path the toolchain builds is defined below. */
+/** Set by a translation unit that admits rungs at runtime - the C library, a consumer's own
+ *  dispatch unit built without the probes - so every path the toolchain builds is defined below. */
 #if !defined(FU_RUNTIME_DISPATCH)
 #define FU_RUNTIME_DISPATCH 0
 #endif
 
-/*  Whether this translation unit may use the bit's path - `FU_TARGET_<BIT>`. A unit with the build's
- *  probe lists or `FU_RUNTIME_DISPATCH` takes the toolchain's verdict, can it build the path: the
- *  architecture, plus inline assembly for a raw encoding or a mnemonic, or nothing more where MSVC
- *  reaches the instruction through an intrinsic. A unit without them derives the bits a compile-time
- *  default can pick from what the compilation target promises through the compiler's macro for the
- *  extension, since `preferred_yield_t` runs its pick unchecked. The trap-free hints - PAUSE, YIELD,
- *  Zihintpause, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and Zicbom,
- *  which no default ever picks and a caller admits at runtime, stay on the toolchain's verdict, WFET
- *  having no compiler macro at all. The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches
- *  the two through intrinsics whose arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A
- *  extension's mnemonics need the `-march` the compiler reports. */
+/**
+ *  @brief Whether this translation unit may use the bit's path - `FU_TARGET_<BIT>`.
+ *
+ *  A unit with the build's probe lists or @c FU_RUNTIME_DISPATCH takes the toolchain's verdict, can
+ *  it build the path: the architecture, plus inline assembly for a raw encoding or a mnemonic, or
+ *  nothing more where MSVC reaches the instruction through an intrinsic. A unit without them
+ *  derives the bits a compile-time default can pick from what the compilation target promises
+ *  through the compiler's macro for the extension, since @c preferred_yield_t runs its pick
+ *  unchecked. The trap-free hints - PAUSE, YIELD, Zihintpause, CLDEMOTE in reserved-NOP space, DC
+ *  CVAC - stay on the architecture; WFET and Zicbom, which no default ever picks and a caller
+ *  admits at runtime, stay on the toolchain's verdict, WFET having no compiler macro at all.
+ *
+ *  The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches the two through intrinsics whose
+ *  arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A extension's mnemonics need the
+ *  `-march` the compiler reports.
+ */
 #if !defined(FU_TARGET_X86_PAUSE)
 #define FU_TARGET_X86_PAUSE FU_DETECT_ARCH_X86_64_
 #endif
@@ -588,21 +612,25 @@
 #define FU_TARGET_RISC5_ZACAS 0
 #endif
 
-/** @brief Can we deterministically push a freshly-written cache line away from this core?
+/**
+ *  @brief Can we deterministically push a freshly-written cache line away from this core?
  *
- *  x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the
- *  `DC CVAC` clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does,
- *  and Windows traps it. RISC-V `cbo.clean` traps unless the kernel set `senvcfg.CBCFE`,
- *  which no compile-time macro can prove, so it is reached only through the runtime
- *  capability, never this gate. Derived from the two demote bits the toolchain can build. */
+ *  x86 `CLDEMOTE` moves it toward the LLC and retains it; AArch64 has no demote, only the `DC CVAC`
+ *  clean, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does, and Windows traps
+ *  it. RISC-V `cbo.clean` traps unless the kernel set `senvcfg.CBCFE`, which no compile-time macro
+ *  can prove, so it is reached only through the runtime capability, never this gate. Derived from
+ *  the two demote bits the toolchain can build.
+ */
 #if !defined(FU_WITH_DEMOTE_CACHE_LINES)
 #define FU_WITH_DEMOTE_CACHE_LINES (FU_TARGET_X86_CLDEMOTE || (FU_TARGET_ARM64_DC_CVAC && FU_ON_LINUX))
 #endif
 
-/** @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
+/**
+ *  @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
  *
- *  Every ISA here places its write-prefetch in hint space - x86 `PREFETCHW`, AArch64
- *  `PRFM PSTL1KEEP`, RISC-V `prefetch.w` - so emission can never fault, on any part. */
+ *  Every ISA here places its write-prefetch in hint space, so emission can never fault on any of
+ *  them: x86 @c PREFETCHW, AArch64 `PRFM PSTL1KEEP`, RISC-V `prefetch.w`.
+ */
 #if !defined(FU_WITH_PROMOTE_CACHE_LINES)
 #define FU_WITH_PROMOTE_CACHE_LINES                                   \
     ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
@@ -619,20 +647,26 @@ namespace forkunion {
 
 #pragma region Domain Identifiers
 
-/** The OS's NUMA node number - on Linux, an `N` for which `/sys/devices/system/node/nodeN` exists. */
+/** The OS's NUMA node id - on Linux, an `N` for which `/sys/devices/system/node/nodeN` exists. */
 using memory_domain_id_t = int;
+
 /** Opaque logical-processor id; on Windows it packs a group and a bit. */
 using core_id_t = int;
+
 /** Physical CPU socket, or -1 where the OS will not say. */
 using socket_id_t = int;
-/** A core's performance tier, ranked from fastest to lowest-power, like "performance" or "efficiency". */
+
+/** A core's performance tier, ranked from fastest to lowest-power, like "performance" or
+ *  "efficiency". */
 using core_quality_t = int;
 
 #if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 /*  The two `mbind` inputs `<numaif.h>` supplied. Syscall ABI, so naming them needs no header - and
- *  where `<linux/mempolicy.h>` is installed, the `static_assert`s hold us to the kernel's spelling.  */
+ *  where `<linux/mempolicy.h>` is installed, the `static_assert`s match the kernel's spelling. */
+
 /** `MPOL_BIND` - allocate strictly from the mask. */
 static constexpr int mpol_bind_k = 2;
+
 /** `MPOL_F_STATIC_NODES` - literal ids, not cpuset-relative. */
 static constexpr int mpol_static_nodes_k = 1 << 15;
 
@@ -648,27 +682,29 @@ static_assert(mpol_static_nodes_k == MPOL_F_STATIC_NODES, "MPOL_F_STATIC_NODES i
  *      Bounds @b domains, never cores - those are a `core_mask`, which grows.
  */
 static constexpr std::size_t max_memory_domains_k = 1024;
+
 /** The node mask's width in `unsigned long` words, as the `mbind` syscall counts it. */
 static constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
 #endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
 
 /**
- *  @brief A position in `machine_topology`'s array of @b compute domains, in [0, compute_domains_count).
+ *  @brief A position in `machine_topology`'s array of @b compute domains, in [0,
+ *      compute_domains_count).
  *  @sa `memory_domain_index_t`, which indexes a different array and must not be confused with this.
  *
  *  These are plain enums with a fixed underlying type, not `enum class`, deliberately. The implicit
  *  widening to `std::size_t` survives, so comparisons and array subscripts read exactly as before;
- *  what does @b not survive is passing one where the other is expected, because no conversion exists
- *  between two enumeration types. Minting one costs a `static_cast`, which is the point: it marks the
- *  spot where an untyped integer becomes a claim about @b which axis it indexes.
+ *  what does @b not survive is passing one where the other is expected, because no conversion
+ *  exists between two enumeration types. Minting one costs a `static_cast`, which is the point: it
+ *  marks the spot where an untyped integer becomes a claim about @b which axis it indexes.
  *
- *  This is not hypothetical. `RoundRobinVec` handed a compute-domain index to an allocator expecting a
- *  memory-domain index, and `nbody.cpp` did the same to an array of per-node replicas. Both compiled,
- *  both ran on every machine where the two counts happened to match, and both broke on the first chip
- *  with three compute domains over one memory domain.
+ *  This is not hypothetical. `RoundRobinVec` handed a compute-domain index to an allocator
+ *  expecting a memory-domain index, and `nbody.cpp` did the same to an array of per-node replicas.
+ *  Both compiled, both ran on every machine where the two counts happened to match, and both broke
+ *  on the first chip with three compute domains over one memory domain.
  *
- *  @note The implicit widening also means a raw `array[compute_domain]` still compiles. The enums stop
- *      the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
+ *  @note The implicit widening also means a raw `array[compute_domain]` still compiles. The enums
+ *      stop the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
  */
 enum compute_domain_index_t : std::size_t {};
 
@@ -682,46 +718,59 @@ enum memory_domain_index_t : std::size_t {};
 /**
  *  @brief Why a call failed. Success is `0`; every failure is negative.
  *
- *  Every enumerator takes its value from `fu_status_t` in `forkunion.h`, so the C++ mirror and
- *  the ABI cannot drift - there is nothing to keep in step and nothing to assert.
+ *  Every enumerator takes its value from `fu_status_t` in `forkunion.h`, so the C++ mirror and the
+ *  ABI cannot drift - there is nothing to keep in step and nothing to assert.
  *
- *  Two causes are collapsed on purpose and two are split on purpose. Every argument fault -
- *  a zero count, an out-of-range index, a byte count that would wrap - is one
- *  `invalid_argument_k`, because the remedy is the same. `capacity_exhausted_k` is @b not
- *  `bad_alloc_k`, because retrying smaller cannot help against a fixed ceiling, and
- *  `already_spawned_k` is not `not_spawned_k`, because one says terminate first and the
- *  other says spawn first.
+ *  Two causes are collapsed on purpose and two are split on purpose. Every argument fault - a zero
+ *  count, an out-of-range index, a byte count that would wrap - is one `invalid_argument_k`,
+ *  because the remedy is the same. `capacity_exhausted_k` is @b not `bad_alloc_k`, because retrying
+ *  smaller cannot help against a fixed ceiling, and `already_spawned_k` is not `not_spawned_k`,
+ *  because one says terminate first and the other says spawn first.
  *
- *  @note A refused affinity is not here. The pool still partitions work by domain when the
- *      kernel declines to pin; `all_threads_pinned()` is where that is reported.
+ *  @note A refused affinity is not here. The pool still partitions work by domain when the kernel
+ *      declines to pin; `all_threads_pinned()` is where that is reported.
  */
 enum class status_t : int {
+
     /** The call completed and any output holds a meaningful value. */
     success_k = fu_success_k,
+
     /** No reason was reported, or one this build does not name. */
     unknown_k = fu_unknown_k,
+
     /** An allocation or mapping failed; a smaller request may succeed. */
     bad_alloc_k = fu_bad_alloc_k,
+
     /** A fixed ceiling was reached, so a smaller request will not help either. */
     capacity_exhausted_k = fu_capacity_exhausted_k,
+
     /** An argument was malformed, out of range, or would overflow a byte count. */
     invalid_argument_k = fu_invalid_argument_k,
+
     /** The handles or the pool kind cannot serve this call together. */
     config_mismatch_k = fu_config_mismatch_k,
+
     /** The pool is already spawned; terminate it first. */
     already_spawned_k = fu_already_spawned_k,
+
     /** The pool was never spawned. */
     not_spawned_k = fu_not_spawned_k,
+
     /** The OS declined to create a thread - a resource limit, or permissions. */
     thread_refused_k = fu_thread_refused_k,
+
     /** The machine could not be described; transient if its CPU set changed mid-probe. */
     topology_unavailable_k = fu_topology_unavailable_k,
+
     /** A privileged operation was declined. */
     permission_denied_k = fu_permission_denied_k,
+
     /** This build or this machine has no such facility. */
     unsupported_k = fu_unsupported_k,
+
     /** Binding-only: nothing to load, or a different major version. Never returned here. */
     library_missing_k = fu_library_missing_k,
+
     /** Binding-only: the loaded core is missing a symbol. Never returned here. */
     symbol_missing_k = fu_symbol_missing_k,
 };
@@ -734,8 +783,8 @@ constexpr bool failed(status_t status) noexcept { return status != status_t::suc
 
 /**
  *  @brief Static, English description of @p status. Never returns `nullptr`.
- *  @note The fall-through sits after the `switch` rather than in a `default:` label, so adding
- *      an enumerator without a text here is a `-Wswitch` warning instead of silent prose.
+ *  @note The fall-through sits after the `switch` rather than in a `default:` label, so adding an
+ *      enumerator without a text here is a `-Wswitch` warning instead of silent prose.
  */
 constexpr char const *status_to_string(status_t status) noexcept {
     switch (status) {
@@ -765,9 +814,9 @@ constexpr char const *status_to_string(status_t status) noexcept {
  *  @brief Defines the in- and exclusivity of the calling thread in for the executing task.
  *  @sa `caller_inclusive_k` and `caller_exclusive_k`
  *
- *  This enum affects how the join is performed. If the caller is inclusive, 1/Nth of the call
- *  will be executed by the calling thread, as opposed to workers, and the join will happen
- *  inside of the calling scope.
+ *  This enum affects how the join is performed.
+ *  If the caller is inclusive, 1/Nth of the call will be executed by the calling thread, as opposed
+ *  to workers, and the join will happen inside of the calling scope.
  */
 enum caller_exclusivity_t : unsigned int {
     caller_inclusive_k = 0,
@@ -779,10 +828,13 @@ enum caller_exclusivity_t : unsigned int {
  *  @sa `mood_t::grind_k`, `mood_t::chill_k`, `mood_t::die_k`
  */
 enum class mood_t : unsigned int {
+
     /** That's our default ;) */
     grind_k = 0,
+
     /** Sleepy and tired, but just a wake-up call away. */
     chill_k,
+
     /** The thread is about to die, we must exit the loop peacefully. */
     die_k,
 };
@@ -791,15 +843,18 @@ enum class mood_t : unsigned int {
  *  @brief Describes all the special library features, both those compiled in and those found here.
  *  @sa `comptime_capabilities` and `runtime_capabilities`
  *
- *  One bit per facility, and two accessors ask two questions of the same bit. `comptime_capabilities()`
- *  reports whether the code for a facility was @b built: `capability_place_huge_pages_on_domain_k` there
- *  means we compiled the path that asks the kernel for them. `runtime_capabilities()` reports whether the
- *  facility is @b present on this machine: the same bit means the kernel is offering them now.
+ *  One bit per facility, and two accessors ask two questions of the same bit.
+ *  `comptime_capabilities()` reports whether the code for a facility was @b built:
+ *  `capability_place_huge_pages_on_domain_k` there means we compiled the path that asks the kernel
+ *  for them. `runtime_capabilities()` reports whether the facility is @b present on this machine:
+ *  the same bit means the kernel is offering them now.
  *
- *  Neither implies the other. A binary that built `capability_place_memory_on_domain_k` runs well on a
- *  single-node box, where the runtime accessor never sets that bit; and a machine with four NUMA nodes
- *  reports none of them to a build that left the topology out. A facility is usable here only when
- *  both accessors agree, so `comptime_capabilities() & runtime_capabilities()` is the honest set.
+ *  Neither implies the other.
+ *  A binary that built `capability_place_memory_on_domain_k` runs well on a single-node box, where
+ *  the runtime accessor never sets that bit; and a machine with four NUMA nodes reports none of
+ *  them to a build that left the topology out.
+ *  A facility is usable here only when both accessors agree:
+ *  the honest set is `comptime_capabilities() & runtime_capabilities()`.
  */
 enum capabilities_t : unsigned int {
     capabilities_unknown_k = 0,
@@ -810,30 +865,36 @@ enum capabilities_t : unsigned int {
      *  @sa `x86_pause_t` - the waiter emitting it.
      */
     capability_x86_pause_k = 1 << 0,
+
     /**
      *  @brief `TPAUSE` sleeps the core until a deadline rather than spinning - the `WAITPKG`
      *      feature, `CPUID.(7,0):ECX[5]`, on Sapphire Rapids, Alder Lake and their successors.
      *  @sa `x86_tpause_t` - the waiter arming it; `capability_x86_pause_k` - the spin it replaces.
      */
     capability_x86_tpause_k = 1 << 1,
+
     /**
      *  @brief The `YIELD` hint, on every AArch64: releases the pipeline to a sibling hardware
      *      thread and costs nothing where there is none.
      *  @sa `arm64_yield_t` - the waiter emitting it.
      */
     capability_arm64_yield_k = 1 << 2,
+
     /**
-     *  @brief `WFET` sleeps the core until a deadline or an event on the monitored line - `FEAT_WFxT`,
-     *      Armv8.7, read from `ID_AA64ISAR2_EL1` on Linux and `hw.optional.arm.FEAT_WFxT` on Apple.
-     *  @sa `arm64_wfet_t` - the waiter arming it; `capability_arm64_yield_k` - the spin it replaces.
+     *  @brief `WFET` sleeps the core until a deadline or an event on the monitored line -
+     *      `FEAT_WFxT`, Armv8.7, read from `ID_AA64ISAR2_EL1` on Linux and
+     *      `hw.optional.arm.FEAT_WFxT` on Apple.
+     *  @sa arm64_wfet_t - the waiter arming it; `capability_arm64_yield_k` - the spin it replaces.
      */
     capability_arm64_wfet_k = 1 << 3,
+
     /**
-     *  @brief The `PAUSE` spin hint of the `Zihintpause` extension - encoded as a `FENCE` every hart
-     *      accepts, so it is reported on every RISC-V.
+     *  @brief The `PAUSE` spin hint of the `Zihintpause` extension - encoded as a `FENCE` every
+     *      hart accepts, so it is reported on every RISC-V.
      *  @sa `risc5_pause_t` - the waiter emitting it.
      */
     capability_risc5_pause_k = 1 << 4,
+
     /**
      *  @brief `WRS.STO` sleeps the hart until a reservation breaks or a short timeout - the `Zawrs`
      *      extension, attested by the kernel's `hwprobe`.
@@ -848,6 +909,7 @@ enum capabilities_t : unsigned int {
      *      `capability_reschedule_threads_by_class_k` - the levers needing the handle.
      */
     capability_os_threads_k = 1 << 6,
+
     /**
      *  @brief Enumerate this machine's cores, compute domains, and memory domains - the root every
      *      placement needs. Built: `FU_WITH_TOPOLOGY`.
@@ -855,18 +917,21 @@ enum capabilities_t : unsigned int {
      *      `capability_colocate_pools_on_domain_k` - the placements standing on it.
      */
     capability_topology_k = 1 << 7,
+
     /**
      *  @brief Bind a thread to a set of cores, choosing where it runs.
      *      Built: `FU_WITH_PLACE_THREADS_BY_AFFINITY`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_place_threads_by_affinity_k = 1 << 8,
+
     /**
      *  @brief Steer a thread onto a class of core at creation, choosing where it runs.
      *      Built: `FU_WITH_PLACE_THREADS_BY_CORE_CLASS`.
      *  @sa `capability_os_threads_k` - the owned handle this needs.
      */
     capability_place_threads_by_core_class_k = 1 << 9,
+
     /**
      *  @brief Reclass a thread's scheduler to sleep or wake it, choosing when it runs.
      *      Built: `FU_WITH_RESCHEDULE_THREADS_BY_CLASS`.
@@ -875,88 +940,109 @@ enum capabilities_t : unsigned int {
     capability_reschedule_threads_by_class_k = 1 << 10,
 
     /**
-     *  @brief Place a buffer's pages on a chosen memory domain. Built: `FU_WITH_PLACE_MEMORY_ON_DOMAIN`.
+     *  @brief Place a buffer's pages on a chosen memory domain. Built:
+     *      `FU_WITH_PLACE_MEMORY_ON_DOMAIN`.
      *  @sa `capability_topology_k` - the enumerated domains this places onto.
      */
     capability_place_memory_on_domain_k = 1 << 11,
+
     /**
-     *  @brief Place larger-than-base pages on a chosen memory domain. A narrower case of memory placement.
-     *      Built: `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`.
+     *  @brief Place larger-than-base pages on a chosen memory domain. A narrower case of memory
+     *      placement. Built: `FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN`.
      *  @sa `capability_place_memory_on_domain_k` - the placement this specializes.
      */
     capability_place_huge_pages_on_domain_k = 1 << 12,
+
     /**
-     *  @brief The kernel promotes base pages to huge pages on its own. A passive, runtime-only observation.
-     *  @sa `capability_place_huge_pages_on_domain_k` - the explicit request this is the automatic counterpart to.
+     *  @brief The kernel promotes base pages to huge pages on its own.
+     *      A passive, runtime-only observation.
+     *  @sa capability_place_huge_pages_on_domain_k - the explicit request this automates.
      */
     capability_huge_transparent_pages_k = 1 << 13,
 
     /**
      *  @brief Compile the domain-aware `colocated_pool` and `distributed_pool`.
      *      Built: `FU_WITH_COLOCATE_POOLS_ON_DOMAIN`.
-     *  @sa `capability_os_threads_k` and `capability_topology_k` - both are needed; memory placement is not.
+     *  @sa capability_os_threads_k and `capability_topology_k` - both needed, not memory placement.
      */
     capability_colocate_pools_on_domain_k = 1 << 14,
 
     /**
-     *  @brief `CLDEMOTE` moves a just-written line from this core's private caches toward the shared
-     *      LLC and retains it there. Runtime-detected on Sapphire-Rapids-class parts; the emitting
-     *      functor is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, so this bit reports,
-     *      it never dispatches.
+     *  @brief `CLDEMOTE` moves a just-written line from this core's private caches toward the
+     *      shared LLC and retains it there.
+     *
+     *  Runtime-detected on Sapphire-Rapids-class parts; the emitting functor is chosen at compile
+     *  time by `FU_WITH_DEMOTE_CACHE_LINES`, so this bit reports, it never dispatches.
      *  @sa `x86_cache_hints_t` - the functor emitting it.
      */
     capability_x86_cldemote_k = 1 << 15,
+
     /**
-     *  @brief `DC CVAC` cleans a dirty line to the coherency point - the nearest thing AArch64 has to a
-     *      demote: the next claimer's snoop finds a clean line instead of forcing a dirty intervention.
-     *      Set where EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+     *  @brief `DC CVAC` cleans a dirty line to the coherency point - the nearest thing AArch64 has
+     *      to a demote:
+     *      the next claimer's snoop finds a clean line instead of forcing a dirty intervention.
+     *
+     *  Set where EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
      *  @sa `arm64_cache_hints_t` - the functor emitting it.
      */
     capability_arm64_dc_cvac_k = 1 << 16,
+
     /**
-     *  @brief The kernel enabled user-mode Zicbom cache-block management - `senvcfg.CBCFE` - attested
-     *      through `hwprobe`, the only sound signal, since a compile-time `+zicbom` proves nothing about
-     *      the kernel. No compile-time policy emits `cbo.clean` yet; the bit is the hook for runtime dispatch.
+     *  @brief The kernel enabled user-mode Zicbom cache-block management - `senvcfg.CBCFE` -
+     *      attested through `hwprobe`, the only sound signal, since a compile-time `+zicbom` proves
+     *      nothing about the kernel.
+     *
+     *  No compile-time policy emits `cbo.clean` yet; the bit is the hook for runtime dispatch.
      *  @sa `risc5_cbo_cache_hints_t` - the functor that would emit it.
      */
     capability_risc5_zicbom_k = 1 << 17,
 
     /**
-     *  @brief `CMPCCXADD`, the conditional atomic add - `CPUID.(7,1):EAX[7]`, on Sierra Forest, Diamond
-     *      Rapids and their successors: a bounded claim as one instruction instead of a compare-exchange loop.
+     *  @brief `CMPCCXADD`, the conditional atomic add - `CPUID.(7,1):EAX[7]`, on Sierra Forest,
+     *      Diamond Rapids and their successors: a bounded claim as one instruction instead of a
+     *      compare-exchange loop.
      *  @sa `x86_cmpccxadd_atomic_ref` - the reference this admits.
      */
     capability_x86_cmpccxadd_k = 1 << 18,
+
     /**
-     *  @brief RAO-INT `aadd`, `aand`, `aor` and `axor` - `CPUID.(7,1):EAX[3]`, on Grand Ridge: no-return
-     *      atomics executed at the shared cache rather than pulling the line; weakly ordered, so relaxed only.
-     *  @sa `x86_raoint_atomic_ref` - the reference this admits; `capability_x86_cmpccxadd_k` - which it extends.
+     *  @brief RAO-INT `aadd`, `aand`, `aor` and `axor` - `CPUID.(7,1):EAX[3]`, on Grand Ridge:
+     *  @verbatim
+     *  no-return atomics executed at the shared cache rather than pulling the line; weakly
+     *  ordered, so relaxed only.
+     *  @endverbatim
+     *
+     *  @sa x86_raoint_atomic_ref, the admitted reference; extends `capability_x86_cmpccxadd_k`.
      */
     capability_x86_raoint_k = 1 << 19,
+
     /**
-     *  @brief Armv8.1 `FEAT_LSE`: `swp`, `cas`, `ldadd` and the no-return `st*` forms - one instruction
-     *      per read-modify-write instead of a load-exclusive loop. Read from `ID_AA64ISAR0_EL1.Atomic`
-     *      on Linux and `hw.optional.arm.FEAT_LSE` on Apple.
+     *  @brief Armv8.1 `FEAT_LSE`: `swp`, `cas`, `ldadd` and the no-return `st*` forms - one
+     *      instruction per read-modify-write instead of a load-exclusive loop. Read from
+     *      `ID_AA64ISAR0_EL1.Atomic` on Linux and `hw.optional.arm.FEAT_LSE` on Apple.
      *  @sa `arm64_lse_atomic_ref` - the reference this admits.
      */
     capability_arm64_lse_k = 1 << 20,
+
     /**
-     *  @brief Armv8.3 `FEAT_LRCPC`: `ldapr`, the RCpc acquiring load that needn't wait for the core's
-     *      earlier release stores the way RCsc `ldar` may. Read from `ID_AA64ISAR1_EL1.LRCPC` on Linux
-     *      and `hw.optional.arm.FEAT_LRCPC` on Apple.
-     *  @sa `arm64_rcpc_atomic_ref` - the reference this admits; `capability_arm64_lse_k` - which it extends.
+     *  @brief Armv8.3 `FEAT_LRCPC`: `ldapr`, the RCpc acquiring load that needn't wait for the
+     *      core's earlier release stores the way RCsc `ldar` may. Read from
+     *      `ID_AA64ISAR1_EL1.LRCPC` on Linux and `hw.optional.arm.FEAT_LRCPC` on Apple.
+     *  @sa arm64_rcpc_atomic_ref, the admitted reference; extends `capability_arm64_lse_k`.
      */
     capability_arm64_rcpc_k = 1 << 21,
+
     /**
      *  @brief `Zacas`: `amocas`, compare-and-swap as one instruction instead of an `lr`/`sc` loop,
      *      attested by the kernel's `hwprobe`.
      *  @sa `risc5_zacas_atomic_ref` - the reference this admits.
      */
     capability_risc5_zacas_k = 1 << 22,
+
     /**
-     *  @brief The A extension: `lr`/`sc` and the `amo*` read-modify-writes, the RISC-V baseline every
-     *      Linux ABI guarantees, so the detector sets it unconditionally.
-     *  @sa `risc5_atomic_ref` - the reference this admits; `capability_risc5_zacas_k` - which extends it.
+     *  @brief The A extension: `lr`/`sc` and the `amo*` read-modify-writes, the RISC-V baseline
+     *      every Linux ABI guarantees, so the detector sets it unconditionally.
+     *  @sa risc5_atomic_ref, the admitted reference; extended by `capability_risc5_zacas_k`.
      */
     capability_risc5_atomic_k = 1 << 23,
 
@@ -974,18 +1060,22 @@ enum capabilities_t : unsigned int {
  *  @brief Which of the three pool shapes an instance is, independent of the waiter it uses.
  *  @sa `flat_k`, `colocated_k`, and `distributed_k`
  *
- *  This is the shape discriminator, not a capability: `capability_colocate_pools_on_domain_k` says the
- *  colocated and distributed shapes were @b compiled, while this says which shape a given pool @b is. A
- *  `flat_k` pool ignores the machine's domains; a `colocated_k` pool pins to one compute domain; a
- *  `distributed_k` pool spans every domain and replicates per memory domain.
+ *  This is the shape discriminator, not a capability: `capability_colocate_pools_on_domain_k` says
+ *  the colocated and distributed shapes were @b compiled, while this says which shape a given pool
+ *  @b is. A `flat_k` pool ignores the machine's domains; a `colocated_k` pool pins to one compute
+ *  domain; a `distributed_k` pool spans every domain and replicates per memory domain.
  */
 enum class pool_kind_t : unsigned int {
+
     /** No pool constructed - the shape is undecided until a spawn builds one. */
     unknown_k = 0,
+
     /** No domain awareness - one worker set over all cores, as if the machine were uniform. */
     flat_k,
+
     /** Pinned to a single compute domain, so its workers share a cache and a memory domain. */
     colocated_k,
+
     /** Spans every compute domain, replicating hot state per memory domain. */
     distributed_k,
 };
@@ -997,8 +1087,9 @@ constexpr capabilities_t operator|(capabilities_t a, capabilities_t b) {
 inline capabilities_t &operator|=(capabilities_t &a, capabilities_t b) noexcept { return a = a | b; }
 
 /**
- *  @brief The lower-case name of a single capability bit, or `nullptr` for a composite or unknown one.
- *  @note The one source of truth for capability names - the string builders and the C ABI both defer here.
+ *  @brief Lower-case name of one capability bit, or `nullptr` for composite and unknown ones.
+ *  @note The one source of truth for capability names:
+ *      the string builders and the C ABI both defer here.
  *  @sa `capability_named`, its inverse.
  */
 constexpr char const *capability_name(capabilities_t const capability) noexcept {
@@ -1088,9 +1179,10 @@ constexpr std::size_t bytes_for_elements(std::size_t count, std::size_t element_
 /**
  *  @brief Byte-wise `memcpy` of @p from into @p to, written as an explicit loop.
  *
- *  Not `std::memcpy`: the wait monitors that call this - `arm64_wfet_t` and `risc5_wrs_t` - are pinned to a
- *  narrower `target(...)` than `-march=native`, where the fortified `always_inline` `memcpy` cannot inline -
- *  "target specific option mismatch". Reading and writing through `unsigned char` keeps it well-defined.
+ *  Not `std::memcpy`: the wait monitors that call this - `arm64_wfet_t` and `risc5_wrs_t` - are
+ *  pinned to a narrower `target(...)` than `-march=native`, where the fortified `always_inline`
+ *  `memcpy` cannot inline - "target specific option mismatch". Reading and writing through
+ *  `unsigned char` keeps it well-defined.
  */
 template <typename value_type_>
 inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
@@ -1168,11 +1260,11 @@ void bubble_sort(value_type_ *array, std::size_t size, comparator_type_ comp = {
 }
 
 /**
- *  @brief Dense-ranks `count` items by an ascending integer key, writing each item's 0-based rank.
+ *  @brief Dense-ranks @p count items by an ascending integer key, writing each item's 0-based rank.
  *  @return The number of distinct keys, at least 1 when `count > 0`.
  *
- *  `key(index)` must read a @b stable source and `assign(index, rank)` write a @b different field, so
- *  ranking in place never corrupts a not-yet-ranked item whose key repeats. Used to turn raw CPU
+ *  `key(index)` must read a @b stable source and `assign(index, rank)` write a @b different field,
+ *  so ranking in place never corrupts a not-yet-ranked item whose key repeats. Used to turn raw CPU
  *  capacities into compute levels and raw memory tiers into memory levels.
  */
 template <typename key_type_, typename assign_type_>
@@ -1205,21 +1297,25 @@ std::size_t dense_rank(std::size_t count, key_type_ const &key, assign_type_ con
 /**
  *  @brief One thread, situated in one compute domain - the "where I am" every callback receives.
  *
- *  Every dispatch hands its callback two things: the work, and this. A callback that only needs
- *  the thread can take the implicit conversion to a bare index; one placing memory reads
+ *  Every dispatch hands its callback two things: the work, and this. A callback that only needs the
+ *  thread can take the implicit conversion to a bare index; one placing memory reads
  *  `compute_domain` to find the node it runs on.
  */
 template <typename index_type_ = std::size_t>
 struct thread_in_domain {
+
     /** The integer type both indices are counted in. */
     using index_t = index_type_;
+
     /** Core index, or thread ID, in [0, threads_count). */
     using thread_index_t = index_t;
+
     /** NUMA-specific, QoS-specific compute domain ID. */
     using compute_domain_index_t = index_t;
 
     /** The thread or core index, in [0, threads_count). */
     thread_index_t thread {0};
+
     /** The compute domain the thread is pinned to, in [0, compute_domains_count). */
     compute_domain_index_t compute_domain {0};
 
@@ -1249,10 +1345,13 @@ struct allocation_result {
 
     /** Pointer to the allocated memory, or nullptr if allocation failed. */
     pointer_type ptr {nullptr};
+
     /** Number of elements allocated, or 0 if allocation failed. */
     size_type count {0};
+
     /** Total volume of memory allocated, in bytes. */
     size_type bytes {0};
+
     /** Number of memory pages allocated. */
     size_type pages {0};
 
@@ -1267,10 +1366,12 @@ struct allocation_result {
 
     /**
      *  @brief The standard says, that `std::allocation_result` must have 2 template arguments:
+     *  @verbatim
      *  pointer type and size type. Clang until version 19 disagrees and results in a
      *  compilation error, so we use some ugly SFINAE to detect which form is available.
+     *  @endverbatim
      *
-     *  `_LIBCPP_VERSION` is encoded  as MAJOR * 10000 + MINOR * 100 + PATCH.
+     *  `_LIBCPP_VERSION` is encoded as MAJOR * 10000 + MINOR * 100 + PATCH.
      *  @see https://github.com/llvm/llvm-project/blob/main/libcxx/include/__config
      */
 #if defined(__cpp_lib_allocate_at_least)
@@ -1287,13 +1388,13 @@ struct allocation_result {
 };
 
 /**
- *  @brief Result of a @b symmetric allocation - one mapping whose equal-stride slices sit on each domain.
+ *  @brief Result of a @b symmetric allocation, one mapping with equal-stride slices per domain.
  *  @tparam value_type_ The element type; the base pointer is `value_type_ *`.
  *
  *  Slice @b d begins at the byte address `ptr + d * stride_bytes` - see `slice` - and holds `count`
- *  elements. Every slice is a uniform distance `stride_bytes` apart - the CPU analog of a GPU symmetric
- *  heap. The stride is in bytes, not elements, because it is page-aligned and a page rarely divides
- *  `sizeof(value_type)`.
+ *  elements. Every slice is a uniform distance `stride_bytes` apart - the CPU analog of a GPU
+ *  symmetric heap. The stride is in bytes, not elements, because it is page-aligned and a page
+ *  rarely divides `sizeof(value_type)`.
  */
 template <typename value_type_, typename size_type_ = std::size_t>
 struct symmetric_allocation_result {
@@ -1303,32 +1404,39 @@ struct symmetric_allocation_result {
 
     /** Base of the mapping, or nullptr on failure. */
     pointer_type ptr {nullptr};
+
     /** Usable elements per domain slice - what was requested. */
     size_type count {0};
-    /** Page-aligned @b byte distance between consecutive slice bases; `>= count * sizeof(value_type)`. */
+
+    /** Page-aligned @b byte distance between consecutive slice bases;
+     *  `>= count * sizeof(value_type)`. */
     size_type stride_bytes {0};
+
     /** Number of domain slices. */
     size_type domains {0};
+
     /** Total mapped volume in bytes - `domains * stride_bytes`. */
     size_type bytes {0};
+
     /** Number of memory pages mapped across all slices. */
     size_type pages {0};
 
     explicit constexpr operator bool() const noexcept { return ptr != nullptr && count > 0; }
     size_type bytes_per_page() const noexcept { return pages ? bytes / pages : 0; }
 
-    /** Base of the slice on memory domain @p domain_index, at `ptr + domain_index * stride_bytes`. */
+    /** Base of slice on memory domain @p domain_index, at `ptr + domain_index * stride_bytes`. */
     pointer_type slice(size_type domain_index) const noexcept {
         return reinterpret_cast<pointer_type>(reinterpret_cast<char *>(ptr) + domain_index * stride_bytes);
     }
 };
 
 /**
- *  @brief Detects allocators exposing our @b sized `allocate_at_least`, reporting `bytes` and `pages`.
+ *  @brief Detects allocators with our @b sized `allocate_at_least`, reporting `bytes` and `pages`.
  *
- *  Deliberately keys on the `bytes` member rather than on the function name. C++ 23 gave
- *  `std::allocator` an `allocate_at_least` of its own, but its `std::allocation_result` carries only
- *  `ptr` and `count`, so probing the name alone would match it and then fail to compile on `bytes`.
+ *  Deliberately keys on the `bytes` member rather than on the function name.
+ *  C++ 23 gave `std::allocator` an `allocate_at_least` of its own, but its `std::allocation_result`
+ *  carries only `ptr` and `count`, so probing the name alone would match it and then fail to
+ *  compile on `bytes`.
  */
 template <typename allocator_type_, typename = void>
 struct has_sized_allocate_at_least : std::false_type {};
@@ -1356,8 +1464,10 @@ class limited_array {
                   "limited_array requires noexcept-default-constructible values");
 
     using value_t = value_type_;
+
     /** Inline storage for up to `capacity_` values. */
     std::array<value_t, capacity_> values_ {};
+
     /** Number of values currently stored, in [0, capacity_]. */
     std::size_t size_ {0};
 
@@ -1390,7 +1500,7 @@ class limited_array {
 
 /**
  *  @brief An owning, allocator-aware array whose size is fixed once, at `resize`.
- *  @sa `limited_array` for bounded counts, `dynamic_padded_array` when each element wants its own line.
+ *  @sa limited_array for bounded counts, `dynamic_padded_array` when elements want their own line.
  */
 template <typename value_type_, typename allocator_type_ = std::allocator<value_type_>>
 class dynamic_array {
@@ -1403,10 +1513,13 @@ class dynamic_array {
 
     /** Allocator used to acquire and release the heap block. */
     allocator_t allocator_ {};
+
     /** Pointer to the heap block, or nullptr when empty. */
     value_t *data_ {nullptr};
+
     /** Number of live elements. */
     std::size_t size_ {0};
+
     /** Allocated element slots; `>= size_`, doubled by `push_back` when full. */
     std::size_t capacity_ {0};
 
@@ -1450,8 +1563,10 @@ class dynamic_array {
         capacity_ = 0;
     }
 
-    /** @brief Reallocates to exactly @p new_size value-initialized elements, discarding any prior contents.
-     *  @return false on allocation failure, leaving the array empty rather than half-built. */
+    /**
+     *  @brief Reallocates to @p new_size value-initialized elements, discarding any prior contents.
+     *  @return false on allocation failure, leaving the array empty rather than half-built.
+     */
     [[nodiscard]] status_t resize(std::size_t const new_size) noexcept {
         reset();
         if (new_size == 0) return status_t::success_k;
@@ -1469,9 +1584,12 @@ class dynamic_array {
         return status_t::success_k;
     }
 
-    /** @brief Like `resize`, but skips the zero-fill so the caller controls the first touch.
+    /**
+     *  @brief Like `resize`, but skips the zero-fill so the caller controls the first touch.
      *  @note Trivial value types only - nothing is constructed, so every element must be written
-     *      before it is read. @sa `sharded_array::resize_uninitialized`, the same contract. */
+     *      before it is read.
+     *  @sa sharded_array::resize_uninitialized, the same contract.
+     */
     [[nodiscard]] status_t resize_uninitialized(std::size_t const new_size) noexcept {
         static_assert(std::is_trivially_default_constructible_v<value_t> && std::is_trivially_destructible_v<value_t>,
                       "Uninitialized storage is only safe for trivial value types");
@@ -1535,13 +1653,13 @@ class dynamic_array {
 };
 
 /**
- *  @brief A `dynamic_array` whose elements sit at a caller-chosen stride, each on its own cache line.
+ *  @brief A `dynamic_array` with elements at a caller-chosen stride, each on its own cache line.
  *  @sa `dynamic_array` for the packed counterpart at natural alignment.
  *
- *  Move-only and owning like `std::unique_ptr<T[]>`, but it spaces objects by `stride()` bytes rather
- *  than `sizeof(T)` and honours over-alignment, so an `alignas(128)` pool cell never false-shares and
- *  never lands in under-aligned storage. It also accepts an `allocate_at_least` allocator, the way the
- *  NUMA backends hand back more bytes than asked.
+ *  Move-only and owning like `std::unique_ptr<T[]>`, but it spaces objects by `stride()` bytes
+ *  rather than `sizeof(T)` and honours over-alignment, so an `alignas(128)` pool cell never
+ *  false-shares and never lands in under-aligned storage. It also accepts an `allocate_at_least`
+ *  allocator, the way the NUMA backends hand back more bytes than asked.
  */
 template <typename object_type_, typename allocator_type_>
 class dynamic_padded_array {
@@ -1556,14 +1674,19 @@ class dynamic_padded_array {
 
     /** Aligned base the objects live at. */
     char *raw_ {nullptr};
+
     /** What the allocator actually handed us, and what we must give back. */
     char *raw_owned_ {nullptr};
+
     /** Number of objects currently held. */
     std::size_t objects_count_ {0};
-    /** Stride between consecutive objects, in bytes; at least `sizeof(object_t)`. */
+
+    /** Stride between consecutive objects, in bytes; at least the size of @p object_t. */
     std::size_t bytes_per_object_ {sizeof(object_t)};
+
     /** Total bytes owned, and what we must free. */
     std::size_t bytes_total_ {0};
+
     /** Raw byte allocator that backs the buffer. */
     raw_allocator_t allocator_ {};
 
@@ -1625,9 +1748,10 @@ class dynamic_padded_array {
 
         if (new_objects_count == 0) return status_t::success_k;
 
-        // An `alignas(128)` object placement-newed into 16-byte-aligned storage is undefined, and it
-        // is exactly what happens when the object is a sub-pool and the allocator is `std::allocator`.
-        // `linux_numa_allocator` hands back page-aligned memory and hides the bug; Apple's does not.
+        // An `alignas(128)` object placement-newed into 16-byte-aligned storage is undefined, and
+        // it is exactly what happens when the object is a sub-pool and the allocator is
+        // `std::allocator`. `linux_numa_allocator` hands back page-aligned memory and hides the
+        // bug; Apple's does not.
         constexpr std::size_t object_alignment_k = alignof(object_t);
         constexpr bool over_aligned_k = object_alignment_k > alignof(std::max_align_t);
         std::size_t const slack = over_aligned_k ? object_alignment_k - 1 : 0;
@@ -1686,9 +1810,9 @@ struct dummy_lambda_t {};
  *  @brief Compile-time tag: a monitored wait bounded by a timeout, so it re-checks on its own.
  *  @sa `wait_uncapped_t`
  *
- *  For a loop guarding more than one word: the monitor arms a single line, so a store to another word
- *  goes unseen and the cap bounds how late it is noticed. Selects the timed instruction - `WFET`,
- *  `WRS.STO`. A spin waiter ignores the tag.
+ *  For a loop guarding more than one word: the monitor arms a single line, so a store to another
+ *  word goes unseen and the cap bounds how late it is noticed. Selects the timed instruction -
+ *  `WFET`, `WRS.STO`. A spin waiter ignores the tag.
  */
 struct wait_capped_t {};
 
@@ -1697,24 +1821,28 @@ struct wait_capped_t {};
  *  @sa `wait_capped_t`
  *
  *  For a loop guarding a single word: the monitor covers every wake source, so a timeout would only
- *  wake the core to learn nothing and waste power. Selects the untimed instruction - `WFE`, `WRS.NTO`.
+ *  wake the core to learn nothing and waste power.
+ *  Selects the untimed instruction - `WFE`, `WRS.NTO`.
  */
 struct wait_uncapped_t {};
 
 /** The canonical `wait_capped_t` value to pass as a wait tag. */
 inline constexpr wait_capped_t wait_capped_k {};
+
 /** The canonical `wait_uncapped_t` value to pass as a wait tag. */
 inline constexpr wait_uncapped_t wait_uncapped_k {};
 
 /**
- *  @brief The portable busy-wait: hands the core back to the scheduler. Works everywhere, cheap nowhere.
+ *  @brief The portable busy-wait: hands the core back to the scheduler.
+ *      Works everywhere, cheap nowhere.
  *
- *  A spin waiter ignores the watched word - the caller's loop already re-checks its own condition, so
- *  this only needs to emit one backoff hint per turn. The monitored waiters - `arm64_wfet_t`,
+ *  A spin waiter ignores the watched word - the caller's loop already re-checks its own condition,
+ *  so this only needs to emit one backoff hint per turn. The monitored waiters - `arm64_wfet_t`,
  *  `x86_tpause_t`, and `risc5_wrs_t` - use the word to sleep the core until that line changes.
  */
 struct standard_yield_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
+
     /** Any waited word - a `std::atomic` object or a bare address - the yield watches nothing. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
               typename bound_type_ = wait_capped_t>
@@ -1724,12 +1852,13 @@ struct standard_yield_t {
 };
 
 /**
- *  @brief Whether @p yield_type_ is a valid waiter: callable as `yield(watched, observed, thread_index)`.
+ *  @brief Whether @p yield_type_ is a valid waiter, callable as:
+ *      `yield(watched, observed, thread_index)`.
  *
- *  Every waiter takes the atomic being watched, the value last seen, and the calling thread's index.
- *  A spin functor ignores the first two; a monitored functor arms a hardware address monitor on the
- *  watched line and sleeps the core until it changes. The thread index is carried for a future
- *  adaptive backoff, and dropped by every waiter today.
+ *  Every waiter takes the atomic being watched, the value last seen, and the calling thread's
+ *  index. A spin functor ignores the first two; a monitored functor arms a hardware address monitor
+ *  on the watched line and sleeps the core until it changes. The thread index is carried for a
+ *  future adaptive backoff, and dropped by every waiter today.
  */
 template <typename yield_type_, typename value_type_, typename thread_index_type_>
 struct is_wait_functor {
@@ -1739,10 +1868,13 @@ struct is_wait_functor {
 
 /** Tag for pushing a just-written line away, toward the LLC or the coherency point. */
 struct demote_line_t {};
+
 /** Tag for pulling a line toward this core with write intent, ahead of an atomic claim. */
 struct promote_line_t {};
+
 /** Canonical `demote_line_t` value, mirroring the `wait_capped_k` tag convention. */
 inline constexpr demote_line_t demote_line_k {};
+
 /** Canonical `promote_line_t` value, mirroring the `wait_uncapped_k` tag convention. */
 inline constexpr promote_line_t promote_line_k {};
 
@@ -1771,18 +1903,20 @@ struct is_cache_hints_functor {
 };
 
 /**
- *  @brief A trivial minimalistic lock-free "mutex" implementation over a single `std::atomic<bool>`.
+ *  @brief A trivial minimalistic lock-free "mutex" implementation over a single
+ *      `std::atomic<bool>`.
  *  @tparam micro_yield_type_ The type of the waiter to be used for busy-waiting.
  *  @tparam alignment_ The alignment of the mutex. Defaults to `default_alignment_k`.
  *
- *  The C++ standard would recommend using `std::hardware_destructive_interference_size`
- *  alignment, as well as `std::atomic_flag::notify_one` and `std::this_thread::yield` APIs,
- *  but our solution is better despite being more primitive.
+ *  The C++ standard would recommend using `std::hardware_destructive_interference_size` alignment,
+ *  as well as `std::atomic_flag::notify_one` and `std::this_thread::yield` APIs, but our solution
+ *  is better despite being more primitive.
  *
  *  A `std::atomic<bool>` is used rather than `std::atomic_flag` so the flag has an @b address a
  *  monitored waiter can arm: the lock loop is test-and-test-and-set, spinning on a plain load, so a
  *  monitored `micro_yield` sleeps the core until `unlock`'s store to that line wakes it. On every
- *  platform we target `std::atomic<bool>` is lock-free, so the `atomic_flag` guarantee buys nothing.
+ *  platform we target `std::atomic<bool>` is lock-free, so the `atomic_flag` guarantee buys
+ *  nothing. Compatible with STL unique locks.
  *
  *  @see Compatible with STL unique locks: https://en.cppreference.com/w/cpp/thread/unique_lock.html
  */
@@ -1796,13 +1930,14 @@ class spin_mutex {
     void lock() noexcept {
         micro_yield_t micro_yield;
         while (true) {
-            // Claim the lock with the only store in the loop, so a monitored waiter is woken once per
-            // `unlock` rather than by every contender's attempt.
+            // Claim the lock with the only store in the loop, so a monitored waiter is woken once
+            // per `unlock` rather than by every contender's attempt.
             if (!flag_.exchange(true, std::memory_order_acquire)) return;
-            // Contended: spin on a non-writing load until the line looks free, sleeping the core meanwhile.
+            // Contended: spin on a non-writing load until the line looks free, sleeping meanwhile.
             while (flag_.load(std::memory_order_relaxed)) micro_yield(flag_, true, static_cast<std::size_t>(0));
         }
     }
+
     /** @return true when the lock was free and is now held; contention, never an error. */
     bool lock_if_free() noexcept { return !flag_.exchange(true, std::memory_order_acquire); }
     void unlock() noexcept { flag_.store(false, std::memory_order_release); }
@@ -1815,7 +1950,7 @@ using spin_mutex_t = spin_mutex<>;
 #pragma region Task Ranges
 
 /**
- *  @brief A half-open `[first, first + count)` run of task indices - the "what work" of a slice dispatch.
+ *  @brief A half-open `[first, first + count)` run of task indices, the "what work" of a dispatch.
  *
  *  Iterable, so a callback reads `for (auto task : range)` rather than rebuilding the bounds. The
  *  exclusive end is `first + count`; an idle thread receives a range with `count == 0`.
@@ -1826,6 +1961,7 @@ struct tasks_range {
 
     /** The first task index in the run. */
     index_t first {0};
+
     /** How many tasks the run covers; zero means an idle thread. */
     index_t count {0};
 
@@ -1853,9 +1989,9 @@ using tasks_range_t = tasks_range<>;
  *  @see https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/
  *
  *  The first `(tasks % threads)` runs have size `ceil(tasks / threads)`.
- *  The remaining `tasks - (tasks % threads)` runs have size `floor(tasks / threads)`
- *  Has the convenient added property that the difference between the largest and smallest
- *  run size is at most 1, which can be used in some ordering algorithms.
+ *  The remaining `tasks - (tasks % threads)` runs have size `floor(tasks / threads)`. Has the
+ *  convenient added property that the difference between the largest and smallest run size is at
+ *  most 1, which can be used in some ordering algorithms.
  */
 template <typename index_type_ = std::size_t>
 struct indexed_split {
@@ -1865,6 +2001,7 @@ struct indexed_split {
   private:
     /** Floor of tasks divided by threads; the smaller run size. */
     index_t quotient_ {0};
+
     /** Tasks left over; the first `remainder_` runs get one extra task. */
     index_t remainder_ {0};
 
@@ -1929,10 +2066,13 @@ struct coprime_permutation_range {
   private:
     /** First value of the domain. */
     index_t start_ {0};
+
     /** Size of the domain being permuted. */
     index_t length_ {1};
+
     /** Co-prime step between consecutive values. */
     index_t stride_ {1};
+
     /** Where this seed's walk begins, in [0, length_). */
     index_t first_offset_ {0};
 
@@ -1949,10 +2089,11 @@ struct coprime_permutation_range {
         inline iterator &operator++() noexcept {
             assert(elements_left_ != 0 && "Attempting to increment an iterator beyond bounds");
 
-            // Avoid modulo division by using wrap-around logic. Both `offset_` and `stride_` are below
-            // `length_`, but their @b sum need not fit `index_t` - on `std::uint8_t` with a length of
-            // 253, `200 + 100` truncates to 44 rather than wrapping to 47, and the walk stops being a
-            // permutation. Subtracting first keeps every intermediate value inside the domain.
+            // Avoid modulo division by using wrap-around logic.
+            // Both `offset_` and `stride_` are below `length_`, but their @b sum need not fit
+            // `index_t` - on `std::uint8_t` with a length of 253, `200 + 100` truncates to 44
+            // rather than wrapping to 47, and the walk stops being a permutation.
+            // Subtracting first keeps every intermediate value inside the domain.
             index_t const room_left = static_cast<index_t>(length_ - offset_); // ? Always positive
             offset_ = stride_ < room_left ? static_cast<index_t>(offset_ + stride_)
                                           : static_cast<index_t>(stride_ - room_left);
@@ -1978,12 +2119,16 @@ struct coprime_permutation_range {
 
         /** First value of the domain. */
         index_t start_ {0};
+
         /** Size of the domain being permuted. */
         index_t length_ {1};
+
         /** Co-prime step between consecutive values. */
         index_t stride_ {1};
+
         /** Current offset into the domain, in [0, length_). */
         index_t offset_ {0};
+
         /** Countdown of values remaining until `end()`. */
         index_t elements_left_ {0};
     };
@@ -2075,19 +2220,23 @@ class invoke_for_n {
  *  @brief One thread's private cursor into its own slice of a `for_n_dynamic` dispatch.
  *  @sa `invoke_for_n_dynamic` hands each thread a slice; idle threads drain their neighbours'.
  *
- *  A single shared counter serializes an entire dispatch: only one core may own its cache line at
- *  a time, so no dispatch retires tasks faster than that line circulates. Handing every thread its
+ *  A single shared counter serializes an entire dispatch: only one core may own its cache line at a
+ *  time, so no dispatch retires tasks faster than that line circulates. Handing every thread its
  *  own cursor turns the common claim into an @b uncontended read-modify-write on a line nobody else
- *  touches, which is roughly fifty times cheaper. The line is only shared once a thread runs dry and
- *  starts helping a neighbour, which is exactly when the extra cost is worth paying.
+ *  touches, which is roughly fifty times cheaper. The line is only shared once a thread runs dry
+ *  and starts helping a neighbour, which is exactly when the extra cost is worth paying.
  *
  *  Pad these to a full cache line - two cursors sharing a line would reintroduce the very traffic
- *  the split exists to avoid. @sa `dynamic_padded_array`, which spaces them by the pool's alignment.
+ *  the split exists to avoid.
+ *
+ *  @sa dynamic_padded_array, which spaces them by the pool's alignment.
  */
 template <typename index_type_ = std::size_t>
 struct dynamic_claim {
+
     /** Next task in this slice; only ever grows, and may overshoot `end` by `threads`. */
     std::atomic<index_type_> next {0};
+
     /** One past this slice's last task; written once before the dispatch, then read-only. */
     index_type_ end {0};
 };
@@ -2118,7 +2267,7 @@ inline void drain_claim(dynamic_claim<index_type_> &claim, locator_type_ const &
 }
 
 /**
- *  @brief Drains whatever is left of the @p slice thread's claim in @p pool, whether or not we own it.
+ *  @brief Drains what is left of the @p slice thread's claim in @p pool, whether or not we own it.
  *  @sa The `dynamic_claim` overload above, where the probe and the overshoot invariants live.
  */
 template <typename pool_type_, typename index_type_, typename locator_type_, typename fork_type_>
@@ -2140,40 +2289,44 @@ inline void drain_claim(pool_type_ &pool, index_type_ const slice, locator_type_
  *  Probing the neighbours in a coprime order rather than linearly keeps two drained threads from
  *  descending on the same victim, which would serialize them on one line for no reason.
  *  @sa `invoke_distributed_for_n_dynamic`, which applies the same trick one level up, across
- *  compute domains, so a thread exhausts local work before touching a remote node's memory.
+ *      compute domains, so a thread exhausts local work before touching a remote node's memory.
  *
  *  @section tasks_range_overflow Overflow Considerations
  *
- *  If we run a default for-loop at 1 Billion times per second on a 64-bit machine, then every 585 years
- *  of computational time we will wrap around the `std::size_t` capacity for the task index.
+ *  If we run a default for-loop at 1 Billion times per second on a 64-bit machine, then every 585
+ *  years of computational time we will wrap around the `std::size_t` capacity for the task index.
  *  In case we `n + thread >= std::size_t(-1)`, a simple condition won't be enough.
  *  Alternatively, we can make sure, that each thread can do at least one increment of a cursor
- *  without worrying about the overflow. The way to achieve that is to preprocess the trailing `threads`
- *  of elements externally, before entering this loop!
+ *  without worrying about the overflow. The way to achieve that is to preprocess the trailing
+ *  `threads` of elements externally, before entering this loop!
  *
- *  That trailing reservation also bounds the cursors. Every thread visits a given slice exactly once -
- *  each thread's coprime walk is a permutation of all the slices, beginning with its own - and a visit
- *  overshoots by at most one increment, since `drain_claim` leaves the moment it reads `>= end` and its
- *  read-only probe skips already-drained slices without any increment at all. A cursor therefore never
- *  passes `end + threads`.
+ *  That trailing reservation also bounds the cursors. Every thread visits a given slice exactly
+ *  once - each thread's coprime walk is a permutation of all the slices, beginning with its own -
+ *  and a visit overshoots by at most one increment, since `drain_claim` leaves the moment it reads
+ *  `>= end` and its read-only probe skips already-drained slices without any increment at all. A
+ *  cursor therefore never passes `end + threads`.
  *
- *  Two regimes bound that. When `n > threads` the last slice ends at `n - threads`, so no cursor passes
- *  `n`. When `n <= threads` every slice is empty and `end == 0`, so no cursor passes `threads` - which
- *  may exceed `n`, but is still an index the type must represent to have spawned the pool at all.
- *  Either way `max(cursor) == max(n, threads)`, and no index type can wrap.
+ *  Two regimes bound that. When `n > threads` the last slice ends at `n - threads`, so no cursor
+ *  passes `n`. When `n <= threads` every slice is empty and `end == 0`, so no cursor passes
+ *  `threads` - which may exceed `n`, but is still an index the type must represent to have spawned
+ *  the pool at all. Either way `max(cursor) == max(n, threads)`, and no index type can wrap.
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_for_n_dynamic {
+
     /** The pool, owning one padded `dynamic_claim` per thread; we never allocate. */
     pool_type_ &pool_;
+
     /** The per-task callback to invoke. */
     fork_type_ fork_;
+
     /** Total number of tasks to dispatch. */
     index_type_ n_;
+
     /** Number of worker threads sharing the dispatch. */
     index_type_ threads_;
 
-    /** Number of tasks handed out dynamically; the trailing `threads_` are static prongs. */
+    /** Number of tasks handed out dynamically; the trailing @p threads_ are static prongs. */
     index_type_ dynamic_count() const noexcept { return n_ > threads_ ? static_cast<index_type_>(n_ - threads_) : 0; }
 
   public:
@@ -2190,9 +2343,10 @@ class invoke_for_n_dynamic {
         thread_in_domain<index_type_> const at {thread};
         if (one_static_task < n_) fork_(one_static_task, at);
 
-        // Help everyone, in a coprime order so drained threads don't collide on one victim. The walk
-        // starts at our own slice - `first_offset_ = seed % length` with `seed = thread < threads_` -
-        // so the uncontended line is drained first and no self-guard is needed.
+        // Help everyone, in a coprime order so drained threads don't collide on one victim.
+        // The walk starts at our own slice:
+        // `first_offset_ = seed % length` with `seed = thread < threads_` - so the uncontended line
+        // drains first, needing no self-guard.
         coprime_permutation_range<index_type_> victims(0, threads_, thread);
         for (auto victim = victims.begin(); victim != default_sentinel_t {}; ++victim)
             drain_claim(pool_, *victim, at, fork_);
@@ -2219,18 +2373,18 @@ class invoke_for_n_dynamic {
  *  @note You don't have to explicitly call any of the APIs, it's like `std::jthread` ;)
  *
  *  The lifecycle is keyed on the pool's exclusivity:
- *  - On `caller_exclusive_k` pools the fork is dispatched at @b construction: the workers
- *    start immediately, the caller may overlap its own work, poll `is_complete`, and the
- *    `join` call, or the destructor, waits for completion.
- *  - On `caller_inclusive_k` pools the dispatch is deferred to @b join, or the destructor,
- *    where the calling thread contributes its own slice - a deferred blocking call.
+ *  - On `caller_exclusive_k` pools the fork is dispatched at @b construction: the workers start
+ *    immediately, the caller may overlap its own work, poll `is_complete`, and the `join` call, or
+ *    the destructor, waits for completion.
+ *  - On `caller_inclusive_k` pools the dispatch is deferred to @b join, or the destructor, where
+ *    the calling thread contributes its own slice - a deferred blocking call.
  *
  *  You don't have to explicitly handle the return value and wait on it.
- *  According to the C++ standard, the destructor of the `broadcast_join` will
- *  be called in the end of the `for_threads`-calling expression.
+ *  According to the C++ standard, the destructor of the `broadcast_join` will be called in the end
+ *  of the `for_threads`-calling expression.
  *
- *  The object is immovable: on caller-exclusive pools the pool holds a pointer to the
- *  `fork_` member for the lifetime of the broadcast, so the object must never relocate.
+ *  The object is immovable: on caller-exclusive pools the pool holds a pointer to the `fork_`
+ *  member for the lifetime of the broadcast, so the object must never relocate.
  *  Guaranteed C++17 copy elision still allows returning it by value from `for_threads`.
  */
 template <typename pool_type_, typename fork_type_>
@@ -2243,8 +2397,10 @@ struct broadcast_join {
   private:
     /** The pool this broadcast dispatches onto and joins. */
     pool_t &pool_ref_;
+
     /** The wrapped fork; held to extend the lifetime of the lambda object. */
     fork_t fork_;
+
     /** Generation token of this broadcast; real tokens are odd, zero means "not yet dispatched". */
     generation_t generation_ {0};
 
@@ -2319,10 +2475,11 @@ constexpr bool can_be_for_slice_callback() noexcept {
  *  @brief A zero-setup thread-pool that runs every task on the calling thread.
  *
  *  A drop-in @b serial executor - it satisfies `is_pool` and `is_unsafe_pool` and offers the same
- *  scheduling surface as `flat_pool` - `for_threads`, `for_n`, `for_n_dynamic`, `for_slices` - but with
- *  one thread on one compute domain, no `spawn`, and no allocation. `unsafe_for_threads` runs the
- *  fork synchronously as thread 0; everything else composes through `broadcast_join` exactly as the real
- *  pools do. Useful as a serial baseline and as the default executor for the domain-aware containers.
+ *  scheduling surface as `flat_pool` - `for_threads`, `for_n`, `for_n_dynamic`, `for_slices` - but
+ *  with one thread on one compute domain, no `spawn`, and no allocation.
+ *  `unsafe_for_threads` runs the fork synchronously as thread 0; everything else composes through
+ *  `broadcast_join` exactly as the real pools do.
+ *  Useful as a serial baseline and as the default executor for the domain-aware containers.
  */
 struct dummy_pool_t {
     using index_t = std::size_t;

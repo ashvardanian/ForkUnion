@@ -1,9 +1,33 @@
 /**
- *  @brief CPU/RAM capability probing and the hardware-friendly busy-wait yields.
- *  @author Ash Vardanian
  *  @file include/forkunion/capabilities.hpp
+ *  @author Ash Vardanian
  *  @date July 10, 2026
+ *  @brief CPU/RAM capability probing and the hardware-friendly busy-wait yields.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
+ *
+ *  @section spin_and_atomic_costs Measured Cost of the Spin and Atomic Primitives
+ *
+ *  Reciprocal throughput in cycles, from uops.info. For @c PAUSE that is the whole cost of one spin
+ *  iteration, and for the locked forms it is an uncontended line already owned by the issuing core.
+ *
+ *  @verbatim
+ *      Instruction          Skylake-X   Ice Lake   Golden Cove   Raptor Cove   Zen 4   Zen 5
+ *      PAUSE                  140.0       138.2       160.2          34.2       65.0    65.0
+ *      XADD m64, r64           18.0        18.0        18.0          18.0        7.8    19.8
+ *      CMPXCHG m64, r64        17.0        19.0        19.0          19.0        7.9    19.7
+ *      XCHG m64, r64           18.0        18.0        17.0          17.0        7.9    20.0
+ *      LFENCE                   4.0         5.2        12.0          12.0       10.0    11.0
+ *      MFENCE                  33.0        36.2        38.0          38.0       58.7    82.2
+ *      CLDEMOTE m8               -           -           -          128.1         -       -
+ *  @endverbatim
+ *
+ *  @c PAUSE fell fourfold between the client and server cores above, which moves the crossover
+ *  between @c x86_pause_t and @c x86_tpause_t by the same factor; Sapphire and Granite Rapids are
+ *  unmeasured. @c CLDEMOTE is no cheaper than a store, so @c FU_WITH_DEMOTE_CACHE_LINES pays off at
+ *  a phase boundary rather than per produced line. A locked @c XADD and a locked @c CMPXCHG cost
+ *  the same everywhere, so a @c fetch_add cursor wins by never retrying, not by being a cheaper
+ *  instruction; @c CMPccXADD on Lion Cove measures 33 cycles against 32 for the @c CMPXCHG it would
+ *  replace, and removes only the retry.
  */
 #pragma once
 #include "types.hpp"

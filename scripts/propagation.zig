@@ -1,6 +1,6 @@
 //! Demo app: Connected Components by label propagation, with ForkUnion and `std.Io.Group`.
 //!
-//! The N-body simulation gives every task an identical cost, so it can only measure dispatch latency.
+//! The N-body simulation gives every task identical cost, so it can only measure dispatch latency.
 //! Label propagation is the opposite end of fork-join usage: one parallel sweep per round, repeated
 //! until no label changes - so a single pass pays the dispatch-and-join tax once per round, and the
 //! graph's topology decides how many rounds there are.
@@ -10,27 +10,29 @@
 //! while each round stays a bandwidth-bound sweep - the fork-join frequency is the controlled axis.
 //!
 //! The labels are double-buffered: every round reads the immutable previous array and each vertex
-//! writes only its own slot in the next - no atomics, no races, and every round is a pure function of
-//! the last. Rounds-to-convergence, every intermediate label, and the final fixed point are therefore
-//! identical across schedules, backends, thread counts, and languages - the C++, Rust, and this Zig
-//! port all print the same component count, round count, and checksum.
+//! writes only its own slot in the next - no atomics, no races, and every round is a pure function
+//! of the last. Rounds-to-convergence, every intermediate label, and the final fixed point are
+//! therefore identical across schedules, backends, thread counts, and languages - the C++, Rust,
+//! and this Zig port all print the same component count, round count, and checksum.
 //!
 //! Environment variables:
-//! - PROPAGATION_SCALE: each community has 2^scale vertices (default: 14)
-//! - PROPAGATION_COMMUNITIES: communities strung on the ring (default: 64)
-//! - PROPAGATION_EDGE_FACTOR: edges generated per vertex, before deduplication (default: 16)
-//! - PROPAGATION_BACKEND: one of the backend names below (default: forkunion_static_shared)
-//! - PROPAGATION_THREADS: number of threads (default: CPU count)
-//! - PROPAGATION_SECONDS: wall-clock budget per run, reporting the sustained rate (default: 10)
+//! - PROPAGATION_SCALE: each community has 2^scale vertices, defaulting to 14.
+//! - PROPAGATION_COMMUNITIES: communities strung on the ring, defaulting to 64.
+//! - PROPAGATION_EDGE_FACTOR: edges generated per vertex, before deduplication, defaulting to 16.
+//! - PROPAGATION_BACKEND: one of the backend names below, defaulting to forkunion_static_shared.
+//! - PROPAGATION_THREADS: number of threads, defaulting to the CPU count.
+//! - PROPAGATION_SECONDS: wall-clock budget per run, reporting sustained rate, defaulting to 10.
 //! - PROPAGATION_ITERATIONS: run an exact pass count instead, when set
 //! - PROPAGATION_CHECK: also converge serially, and fail unless labels and rounds agree exactly
 //!
-//! The ForkUnion backends are the four cells of forkunion_{static,dynamic}_{shared,replicated};
-//! the baseline is std_io_group, the standard library's own fork-join answer. Cells run bare, with no pinning
-//! environment; the residual spread on SMT machines is preemption - one delayed hyperthread stalls
-//! every barrier of a pass - which the fixed window amortizes. The _replicated backends are a
-//! deliberate non-win on this workload: the hot traffic is the shared label array every round must
-//! see fresh, so replicating the read-only CSR pays nothing here, unlike N-body's replicated bodies.
+//! The ForkUnion backends are the four cells of forkunion_{static,dynamic}_{shared,replicated}; the
+//! baseline is std_io_group, the standard library's own fork-join answer. Cells run bare, with no
+//! pinning environment; the residual spread on SMT machines is preemption - one delayed hyperthread
+//! stalls every barrier of a pass - which the fixed window amortizes. The _replicated backends are
+//! a deliberate non-win on this workload: the hot traffic is the shared label array every round
+//! must see fresh, so replicating the read-only CSR, unlike N-body's replicated bodies, buys
+//! nothing here at all.
+//!
 //! Build and run from the scripts/ directory:
 //!
 //! ```sh
@@ -84,8 +86,8 @@ fn writeStdout(text: []const u8) void {
 // Graph generation
 //
 // A counter-based SplitMix64 instead of a stateful generator: each draw is a pure function of its
-// counter, so iterations are order-free, the fill parallelizes without sharding generator state, and
-// the graph is bit-identical at any thread count - and across the C++, Rust, and Zig ports.
+// counter, so iterations are order-free, the fill parallelizes without sharding generator state,
+// and the graph is bit-identical at any thread count - and across the C++, Rust, and Zig ports.
 
 /// A component name: the smallest vertex index reachable so far.
 const Label = u32;
@@ -135,7 +137,7 @@ const CsrView = struct {
     }
 };
 
-/// The two CSR arrays built once on the host; `page_allocator` backs them so `retouch` sees virgin pages.
+/// The two CSR arrays built on the host; `page_allocator` backs them; `retouch` sees virgin pages.
 const CsrHost = struct {
     row_offsets: []u64,
     column_indices: []u32,
@@ -180,12 +182,12 @@ fn fillEdge(context: *const FillContext, task: usize, at: fu.ThreadInDomain) voi
     }
 }
 
-/// Generates the necklace: `communities` independent R-MAT graphs of `2^scale` vertices, joined in a
-/// ring by one bridge per neighbouring pair, and scatters it all into a CSR.
+/// Generates the necklace: `communities` independent R-MAT graphs of `2^scale` vertices, joined in
+/// a ring by one bridge per neighbouring pair, and scatters it all into a CSR.
 ///
-/// Community `c` owns global edge indices `[c * raw_local, (c+1) * raw_local)` and the vertex range
-/// `[c << scale, (c+1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters as the
-/// single-graph generators. Bridge draws live in their own counter range above all edge draws.
+/// Community `c` owns global edge indices `[c * raw_local, (c + 1) * raw_local)` and the vertex
+/// range `[c << scale, (c + 1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters
+/// as the single-graph generators, and bridge draws take a counter range above all edge draws.
 fn generateNecklace(pool: fu.Pool, scale: usize, communities: usize, edge_factor: usize) !CsrHost {
     const allocator = std.heap.page_allocator;
     const community_vertices = @as(usize, 1) << @intCast(scale);
@@ -215,7 +217,7 @@ fn generateNecklace(pool: fu.Pool, scale: usize, communities: usize, edge_factor
 
     std.mem.sort(Edge, edges, {}, Edge.lessThan);
 
-    // Dedup in place; every sentinel sorts to the tail and at most one survives, trimmed with the rest.
+    // Dedup in place: sentinels sort to the tail and at most one survives, trimmed with the rest.
     var unique_count: usize = 0;
     for (edges, 0..) |edge, i| {
         if (i > 0 and Edge.equals(edge, edges[unique_count - 1])) continue;
@@ -243,10 +245,10 @@ fn generateNecklace(pool: fu.Pool, scale: usize, communities: usize, edge_factor
 
 // Deterministic first touch
 //
-// Generation first-touches pages on whichever cores ran the fill, so every process rolls a different
-// page placement and throughput swings run to run. Copying into virgin pages from the static split of
-// PINNED threads makes placement a pure function of the topology - identical for every backend,
-// process, and language.
+// Generation first-touches pages on whichever cores ran the fill, so every process rolls a
+// different page placement and throughput swings run to run. Copying into virgin pages from the
+// static split of PINNED threads makes placement a pure function of the topology - identical for
+// every backend, process, and language.
 
 /// Everything one retouch copy reads or writes; `forSlices` hands each thread one contiguous range.
 fn RetouchContext(comptime T: type) type {
@@ -292,7 +294,7 @@ inline fn minLabelOf(row_offsets: [*]const u64, column_indices: [*]const u32, ol
 const Schedule = enum { static, dynamic };
 const Placement = enum { shared, replicated };
 
-/// Everything one round of any ForkUnion backend reads or writes; the comptime placement elides the rest.
+/// What one round of any ForkUnion backend reads or writes; the comptime placement elides the rest.
 const WorkContext = struct {
     row_offsets: [*]const u64,
     column_indices: [*]const u32,
@@ -370,7 +372,8 @@ fn runForkUnion(
     return rounds;
 }
 
-// std.Io.Group backend (static work division)
+// std.Io.Group backend, static work division
+//
 // The standard library's fork-join answer since 0.16 removed `std.Thread.Pool`: one `Io.Group` per
 // round, one task per vertex slice, awaited before the labels swap.
 
@@ -414,7 +417,7 @@ fn runStdIoGroup(allocator: std.mem.Allocator, io: std.Io, graph: CsrView, label
     return rounds;
 }
 
-/// Converges serially from `labels[v] = v`, returning the rounds taken - the reference for the CHECK.
+/// Converges serially from `labels[v] = v`, returning rounds taken - the reference for the CHECK.
 fn convergeSerially(graph: CsrView, labels_a: []Label, labels_b: []Label) usize {
     const vertices: usize = graph.vertices();
     for (labels_a, 0..) |*label, v| label.* = @intCast(v);
@@ -466,7 +469,7 @@ pub fn main() !void {
     var n_threads = envUsize("PROPAGATION_THREADS", 0);
     if (n_threads == 0) n_threads = try topology.logicalCoresCount();
 
-    // One pinned pool spawns for EVERY backend - first to give the graph and label pages their
+    // One pinned pool spawns for every backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; std_io_group ignores it.
     const pool = try fu.Pool.init(topology, .{ .threads = n_threads, .name = "fu-propagate" });
     defer pool.deinit();

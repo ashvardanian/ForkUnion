@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the `YIELD` hint, or `__yield`.
- *  @author Ash Vardanian
  *  @file probes/arm64_yield.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the @c YIELD hint, or @c __yield.
  */
 #if !(defined(__aarch64__) || defined(_M_ARM64))
 #error "AArch64 only"

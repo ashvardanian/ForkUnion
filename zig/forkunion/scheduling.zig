@@ -136,8 +136,8 @@ pub const PoolOptions = struct {
     pub const Placement = union(enum) {
         /// Spread across every compute domain the topology reports.
         everywhere,
-        /// Pin threads and domain-local allocations to one compute domain. On builds without
-        /// NUMA only compute domain 0 is valid.
+        /// Pin threads and domain-local allocations to one compute domain. On builds without NUMA
+        /// only compute domain 0 is valid.
         on_compute_domain: ComputeDomain,
     };
 };
@@ -152,7 +152,7 @@ pub const Pool = struct {
     /// coordinate them from a single thread with the generation-token API.
     pub fn init(topo: Topology, options: PoolOptions) Error!Pool {
         // SAFETY: the C library copies the name into an internal buffer immediately, then clips it
-        // to whatever the platform's thread naming accepts - this only has to null-terminate a copy.
+        // to whatever the platform's thread naming accepts - it only has to null-terminate a copy.
         // `FU_POOL_NAME_CAPACITY`; the C side clips anything longer.
         var name_buf: [16]u8 = undefined;
         const name_z: ?[*:0]const u8 = if (options.name) |given|
@@ -190,8 +190,8 @@ pub const Pool = struct {
 
     /// Returns whether the calling thread participates in the workload.
     ///
-    /// Queries the pool directly rather than caching, so it stays correct across
-    /// `terminate` and re-spawning with a different exclusivity.
+    /// Queries the pool directly rather than caching, so it stays correct across `terminate` and
+    /// re-spawning with a different exclusivity.
     pub fn callerExclusivity(self: Pool) Error!CallerExclusivity {
         var raw: c_int = 0;
         try types.check(fu_pool_caller_exclusivity(self.handle, &raw));
@@ -227,7 +227,7 @@ pub const Pool = struct {
         return answer;
     }
 
-    /// Terminates all worker threads (pool can be respawned).
+    /// Terminates all worker threads; the pool can be respawned.
     /// Not thread-safe; call only when no dispatch is in flight, never as a sync point.
     pub fn terminate(self: Pool) void {
         fu_pool_terminate(self.handle);
@@ -239,10 +239,10 @@ pub const Pool = struct {
         fu_pool_sleep(self.handle, microseconds);
     }
 
-    /// Executes a callback on all threads (blocking)
+    /// Executes a callback on all threads, blocking.
     ///
-    /// The context is a single-item pointer the caller owns, forwarded to the callback verbatim,
-    /// so its `const`-ness carries through:
+    /// The context is a single-item pointer the caller owns, forwarded to the callback verbatim, so
+    /// its `const`-ness carries through:
     /// - If context is `void`: `fn (usize, ComputeDomain) void`
     /// - Otherwise: `fn (@TypeOf(context), usize, ComputeDomain) void`
     pub fn forThreads(
@@ -266,7 +266,7 @@ pub const Pool = struct {
         try types.check(fu_pool_for_threads(self.handle, Wrapper.callback, contextPointer(Context, context)));
     }
 
-    /// Distributes N tasks across threads with static scheduling (blocking)
+    /// Distributes N tasks across threads with static scheduling, blocking.
     ///
     /// - If context is `void`: `fn (usize, ThreadInDomain) void`
     /// - Otherwise: `fn (@TypeOf(context), usize, ThreadInDomain) void`
@@ -300,7 +300,7 @@ pub const Pool = struct {
         try types.check(fu_pool_for_n(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
     }
 
-    /// Distributes N tasks with dynamic work-stealing (blocking)
+    /// Distributes N tasks with dynamic work-stealing, blocking.
     ///
     /// - If context is `void`: `fn (usize, ThreadInDomain) void`
     /// - Otherwise: `fn (@TypeOf(context), usize, ThreadInDomain) void`
@@ -334,7 +334,7 @@ pub const Pool = struct {
         try types.check(fu_pool_for_n_dynamic(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
     }
 
-    /// Distributes N tasks as slices (blocking)
+    /// Distributes N tasks as slices, blocking.
     ///
     /// The `TasksRange` names the half-open run of task indices this worker drew.
     /// - If context is `void`: `fn (TasksRange, ThreadInDomain) void`
@@ -371,10 +371,10 @@ pub const Pool = struct {
         try types.check(fu_pool_for_slices(self.handle, n, Wrapper.callback, contextPointer(Context, context)));
     }
 
-    /// Splits `data` into one contiguous chunk per thread and runs `func` on each (blocking).
+    /// Splits `data` into one contiguous chunk per thread and runs `func` on each, blocking.
     ///
-    /// The chunks partition `data`, so no two threads observe overlapping elements and the
-    /// callback can write its own slice with no atomics and no index arithmetic.
+    /// The chunks partition `data`, so no two threads observe overlapping elements and the callback
+    /// can write its own slice with no atomics and no index arithmetic.
     /// - If context is `void`: `fn ([]T, ThreadInDomain) void`
     /// - Otherwise: `fn (@TypeOf(context), []T, ThreadInDomain) void`
     pub fn forSlicesMut(
@@ -400,7 +400,7 @@ pub const Pool = struct {
         }.spread);
     }
 
-    /// Executes callback on all threads without blocking (unsafe).
+    /// Executes callback on all threads without blocking; unsafe.
     /// Returns an always-odd generation token to pass to `isComplete` or `unsafeJoin`.
     ///
     /// - If context is `void`: `fn (usize, ComputeDomain) void`
@@ -434,15 +434,15 @@ pub const Pool = struct {
     /// Returns true if the given generation has completed.
     ///
     /// A `true` result also guarantees visibility of every contributor's writes. On
-    /// caller-inclusive pools this can only turn `true` once `unsafeJoin` contributes
-    /// the calling thread's slice, so poll-then-join is reserved for exclusive pools.
+    /// caller-inclusive pools this can only turn `true` once `unsafeJoin` contributes the calling
+    /// thread's slice, so poll-then-join is reserved for exclusive pools.
     pub fn isComplete(self: Pool, generation: usize) Error!bool {
         var complete: c_int = 0;
         try types.check(fu_pool_is_complete(self.handle, generation, &complete));
         return complete != 0;
     }
 
-    /// Blocks until the given generation completes (unsafe).
+    /// Blocks until the given generation completes; unsafe.
     /// On caller-inclusive pools this also executes the calling thread's slice.
     /// Idempotent: joining an already-joined generation returns immediately.
     pub fn unsafeJoin(self: Pool, generation: usize) void {
@@ -452,13 +452,12 @@ pub const Pool = struct {
 
 /// The measured memory fabric - what this process observed, as opposed to the structure a
 /// `Topology` declares. Two query families: edge queries `(initiator, target)` describe one
-/// interconnect link; medium queries `(target)` describe the memory pool itself, independent of
-/// any initiator.
+/// interconnect link; medium queries `(target)` describe the memory pool itself, with no initiator.
 ///
-/// Completes the `harvest` pipeline: a `Topology` is harvested first and stays immutable, a
-/// `Pool` spawns on it, and the fabric then harvests through that pool's pinned workers,
-/// snapshotting what it needs so the topology may be freed after. Before a harvest every query
-/// answers 0, and `memoryLevelsCount` answers 1.
+/// Completes the `harvest` pipeline: a `Topology` is harvested first and stays immutable, a `Pool`
+/// spawns on it, and the fabric then harvests through that pool's pinned workers, snapshotting what
+/// it needs so the topology may be freed after. Before a harvest every query answers 0, and
+/// `memoryLevelsCount` answers 1.
 pub const Fabric = struct {
     handle: *anyopaque,
 
@@ -478,7 +477,7 @@ pub const Fabric = struct {
     /// harvest; the `topo` is only read.
     ///
     /// Returns `false` on allocation failure, or for a pool whose workers are not pinned per
-    /// domain - flat pools and those pinned to one compute domain have no fabric to walk; it is left
+    /// domain: flat pools and those pinned to one compute domain have no fabric to walk; it is left
     /// empty, never half-written. Not thread-safe: it dispatches on the pool and rebuilds the
     /// fabric, so call it between task batches. Expect seconds of runtime on large fabrics.
     pub fn harvest(self: Fabric, topo: Topology, pool: Pool) Error!void {
@@ -486,8 +485,8 @@ pub const Fabric = struct {
         return types.check(fu_fabric_harvest(topo.handle, pool.handle, self.handle));
     }
 
-    /// Returns the measured dependent-load latency (nanoseconds) on an edge - the best recording;
-    /// 0 before a harvest, for an edge no worker could reach, or an out-of-range index.
+    /// Returns the measured dependent-load latency, in nanoseconds, on an edge - the best
+    /// recording; 0 before a harvest, for an edge no worker could reach, or an out-of-range index.
     pub fn memoryLatency(self: Fabric, compute_domain: ComputeDomain, memory_domain: MemoryDomain) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try types.check(fu_fabric_memory_latency(self.handle, compute_domain.index(), memory_domain.index(), &answer));
@@ -511,8 +510,8 @@ pub const Fabric = struct {
         return answer;
     }
 
-    /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL),
-    /// keyed by the best bandwidth any initiator sustains to it, ties split by the best latency.
+    /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL), keyed
+    /// by the best bandwidth any initiator sustains to it, ties split by the best latency.
     pub fn memoryLevelIn(self: Fabric, memory_domain: MemoryDomain) Error!usize {
         var answer: usize = std.math.maxInt(usize);
         try types.check(fu_fabric_memory_level_in(self.handle, memory_domain.index(), &answer));
@@ -538,7 +537,7 @@ test "pool creation and destruction" {
 }
 
 test "caller exclusivity query" {
-    // The pool is the single source of truth, queried live (not cached).
+    // The pool is the single source of truth, queried live, never cached.
     const topo = try Topology.init();
     defer topo.deinit();
     const inclusive = try Pool.init(topo, .{ .threads = 2, .exclusivity = .inclusive });
@@ -557,8 +556,8 @@ test "pool capabilities reflect the build" {
     defer pool.deinit();
     const full: u32 = @bitCast(try pool.capabilities());
 
-    // Clearing a bit in the allow-mask must clear it in the effective set - the mask can
-    // only subtract: forcing off `place_memory_on_domain` demotes a NUMA pool to the flat pool.
+    // Clearing a bit in the allow-mask must clear it in the effective set - the mask can only
+    // subtract: forcing off `place_memory_on_domain` demotes a NUMA pool to the flat pool.
     var flat_mask = Capabilities.all();
     flat_mask.place_memory_on_domain = false;
     const flat_pool = try Pool.init(topo, .{ .threads = 2, .allowed = flat_mask });
@@ -613,8 +612,8 @@ test "fabric harvest fills edges" {
     // return counts as a pass, so the summary would claim coverage this run never had.
     fabric.harvest(topo, pool) catch return error.SkipZigTest;
 
-    // Every reachable edge must carry sane observations; emulated-NUMA guests may measure
-    // equal local and remote costs, so nothing stronger is asserted.
+    // Every reachable edge must carry sane observations; emulated-NUMA guests may measure equal
+    // local and remote costs, so nothing stronger is asserted.
     const first = ComputeDomain.at(0);
     const local = try topo.localMemoryOf(first);
     try std.testing.expect(try fabric.memoryLatency(first, local) > 0);
@@ -745,8 +744,8 @@ test "for_n void context" {
     defer pool.deinit();
 
     // A stateless kernel needs no context at all; anything it must reach travels in one. With no
-    // context there is nothing to write to, so the callback can only check its own arguments -
-    // that every task actually runs is covered by the pointer-context tests above.
+    // context there is nothing to write to, so the callback can only check its own arguments - that
+    // every task actually runs is covered by the pointer-context tests above.
     try pool.forN(50, {}, struct {
         fn worker(task: usize, at: ThreadInDomain) void {
             std.debug.assert(task < 50);

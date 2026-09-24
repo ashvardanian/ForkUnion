@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the LSE read-modify-writes, as a mnemonic or as an intrinsic.
- *  @author Ash Vardanian
  *  @file probes/arm64_lse.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the LSE read-modify-writes, as a mnemonic or as an intrinsic.
  */
 #if !(defined(__aarch64__) || defined(_M_ARM64))
 #error "AArch64 only"

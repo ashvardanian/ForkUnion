@@ -355,8 +355,8 @@ def converge_on_pool[
     while True:
         for index in range(len(counters)):
             counters[index].value = 0
-        # Build it whole: mutating a copy of a register-passable scratch and then dispatching
-        # loses the writes, because the pointer the workers get need not see them.
+        # Build it whole: mutating a copy of a register-passable scratch and then dispatching loses
+        # the writes, because the pointer the workers get need not see them.
         var round = Round(
             template.graph,
             old_labels,
@@ -555,8 +555,8 @@ def main() raises:
                 raise Error(t"MISMATCH: serial labels differ at vertex {vertex}")
         print("check: matches the serial labels and rounds")
 
-    # `graph` holds raw pointers into these two, and Mojo releases a value after its last named
-    # use - which would otherwise be the `Graph` construction above, long before the last read.
+    # `graph` holds raw pointers into these two, and Mojo releases a value after its last named use
+    # - which would otherwise be the `Graph` construction above, long before the last read.
     _ = row_offsets^
     _ = column_indices^
     _ = local_memory^

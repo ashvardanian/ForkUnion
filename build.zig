@@ -2,8 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    // Matches `minimum_zig_version` in `build.zig.zon`; 0.15 still builds this script, but it cannot
-    // link against the macOS 26 SDK, so CI validates 0.16 only and the floor follows it.
+    // Matches `minimum_zig_version` in `build.zig.zon`; 0.15 still builds this script, but it
+    // cannot link against the macOS 26 SDK, so CI validates 0.16 only and the floor follows it.
     if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
         @panic("ForkUnion requires Zig 0.16.0 or later. Please upgrade your Zig toolchain.");
     }
@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     const with_place_threads_by_affinity = b.option(bool, "place-threads-by-affinity", "Bind worker threads to cores");
     const portable = b.option(bool, "portable", "Force every optional capability off") orelse false;
 
-    // Compile the C++ library from c/forkunion.cpp (like Rust's build.rs does)
+    // Compile the C++ library from c/forkunion.cpp, the way Rust's build.rs does.
     const lib = b.addLibrary(.{
         .name = "forkunion",
         .linkage = .static,
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     // Create forkunion module for use as a dependency. It binds the C ABI with `extern fn`, so it
-    // carries the artifact itself - a dependent that imports it should not have to relink it by hand.
+    // carries the artifact itself - a dependent that imports it need not relink it by hand.
     const module = b.addModule("forkunion", .{
         .root_source_file = b.path("zig/forkunion.zig"),
         .target = target,

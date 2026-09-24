@@ -1,6 +1,9 @@
-//! Portable building blocks - cache-line padding, spin mutexes, task ranges, sync pointers, and splits.
+//! Portable building blocks: cache-line padding, spin mutexes, task ranges, sync pointers, splits.
 //!
 //! Pure logic with no FFI; mirrors the C++ `types` header.
+//!
+//! File: rust/forkunion/types.rs
+//! Author: Ash Vardanian
 
 use core::cell::UnsafeCell;
 use core::ffi::c_int;
@@ -139,8 +142,8 @@ pub fn bytes_for_elements(count: usize, element_bytes: usize) -> Result<usize> {
 
 /// Default alignment for preventing false sharing between threads.
 ///
-/// Picked from the target the way `FU_DEFAULT_ALIGNMENT` is in `types.hpp`: 256 bytes on s390x, 64 on
-/// wasm, 128 elsewhere.
+/// Picked from the target the way `FU_DEFAULT_ALIGNMENT` is in `types.hpp`: 256 bytes on s390x, 64
+/// on wasm, 128 elsewhere.
 ///
 /// On x86, most CPUs fetch 2 cache lines (128 bytes) at once with spatial prefetching enabled.
 /// This conservative padding prevents false sharing even with aggressive prefetch settings.
@@ -156,9 +159,9 @@ pub const DEFAULT_ALIGNMENT: usize = if cfg!(target_arch = "s390x") {
 
 /// Cache-line aligned wrapper to prevent false sharing between threads.
 ///
-/// When multiple threads access separate data that resides on the same cache line,
-/// modifications by one thread invalidate the cache line for all others, causing
-/// performance degradation known as "false sharing".
+/// When multiple threads access separate data that resides on the same cache line, modifications by
+/// one thread invalidate the cache line for all others, causing performance degradation known as
+/// "false sharing".
 ///
 /// This wrapper ensures each wrapped value occupies its own [`DEFAULT_ALIGNMENT`] bytes,
 /// eliminating false sharing at the cost of increased memory usage.
@@ -194,7 +197,8 @@ pub const DEFAULT_ALIGNMENT: usize = if cfg!(target_arch = "s390x") {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CacheAligned<T>(pub T);
 
-// `repr(align(..))` takes only a literal, so the arms above restate `DEFAULT_ALIGNMENT`; this holds them to it.
+// `repr(align(..))` takes only a literal, so the arms above restate `DEFAULT_ALIGNMENT`; this holds
+// them to it.
 const _: () = assert!(
     core::mem::align_of::<CacheAligned<u8>>() == DEFAULT_ALIGNMENT,
     "CacheAligned alignment must match DEFAULT_ALIGNMENT"
@@ -202,13 +206,13 @@ const _: () = assert!(
 
 /// A generic spin mutex that uses CPU-specific pause instructions for efficient busy-waiting.
 ///
-/// This is a low-level synchronization primitive that spins on a busy loop rather than
-/// blocking the thread. It's most appropriate for very short critical sections where
-/// the cost of context switching would be higher than busy-waiting.
+/// This is a low-level synchronization primitive that spins on a busy loop rather than blocking the
+/// thread. It's most appropriate for very short critical sections where the cost of context
+/// switching would be higher than busy-waiting.
 ///
 /// The generic parameter `P` allows customization of the pause behavior:
-/// - `true` enables CPU-specific pause instructions (recommended for most use cases)
-/// - `false` disables pause instructions (may be useful in some specialized scenarios)
+/// - `true` enables CPU-specific pause instructions, recommended for most use cases
+/// - `false` disables pause instructions, which may be useful in specialized scenarios
 ///
 /// # Examples
 ///
@@ -228,8 +232,8 @@ const _: () = assert!(
 /// assert_eq!(*mutex.lock(), 100);
 /// ```
 ///
-/// Fast for short critical sections but spins continuously. Use when latency matters
-/// more than CPU usage. Avoid for long critical sections or high contention scenarios.
+/// Fast for short critical sections but spins continuously. Use when latency matters more than CPU
+/// usage. Avoid for long critical sections or high contention scenarios.
 #[cfg_attr(target_arch = "s390x", repr(align(256)))]
 #[cfg_attr(any(target_arch = "wasm32", target_arch = "wasm64"), repr(align(64)))]
 #[cfg_attr(
@@ -251,7 +255,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     ///
     /// # Arguments
     ///
-    /// * `data` - The value to be protected by the mutex
+    /// - `data` - The value to be protected by the mutex
     ///
     /// # Examples
     ///
@@ -270,8 +274,8 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
 
     /// Acquires the lock, returning a guard that provides access to the protected data.
     ///
-    /// This method will spin until the lock is acquired. If the lock is already held,
-    /// it will busy-wait using CPU-specific pause instructions (if `PAUSE = true`).
+    /// This method will spin until the lock is acquired. If the lock is already held, it will
+    /// busy-wait using CPU-specific pause instructions when `PAUSE` is true.
     ///
     /// # Examples
     ///
@@ -285,8 +289,8 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
     #[must_use]
     pub fn lock(&self) -> BasicSpinMutexGuard<'_, T, PAUSE> {
         loop {
-            // The only store in the loop, so contenders spin on a shared line rather than
-            // taking it exclusive on every attempt.
+            // The only store in the loop, so contenders spin on a shared line rather than taking it
+            // exclusive on every attempt.
             if !self.locked.swap(true, Ordering::Acquire) {
                 return BasicSpinMutexGuard { mutex: self };
             }
@@ -300,8 +304,8 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
 
     /// Attempts to acquire the lock without blocking.
     ///
-    /// Returns `Some(guard)` if the lock was successfully acquired, or `None` if
-    /// the lock is currently held by another thread.
+    /// Returns `Some(guard)` if the lock was successfully acquired, or `None` if the lock is
+    /// currently held by another thread.
     ///
     /// # Examples
     ///
@@ -327,8 +331,8 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
 
     /// Checks if the mutex is currently locked.
     ///
-    /// This method provides a non-blocking way to check the lock state, but should
-    /// be used carefully as the state can change immediately after this call returns.
+    /// This method provides a non-blocking way to check the lock state, but should be used
+    /// carefully as the state can change immediately after this call returns.
     ///
     /// # Examples
     ///
@@ -352,8 +356,7 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
 
     /// Consumes the mutex and returns the protected data.
     ///
-    /// This method bypasses the locking mechanism entirely since we have exclusive
-    /// ownership of the mutex.
+    /// This method bypasses the locking mechanism entirely, since we already own it exclusively.
     ///
     /// # Examples
     ///
@@ -371,8 +374,8 @@ impl<T, const PAUSE: bool> BasicSpinMutex<T, PAUSE> {
 
     /// Gets a mutable reference to the protected data.
     ///
-    /// Since this requires a mutable reference to the mutex, no locking is needed
-    /// as we have exclusive access.
+    /// Since this requires a mutable reference to the mutex, no locking is needed as we have
+    /// exclusive access.
     ///
     /// # Examples
     ///
@@ -442,8 +445,8 @@ impl<'a, T, const PAUSE: bool> Drop for BasicSpinMutexGuard<'a, T, PAUSE> {
 
 /// A type alias for the most commonly used spin mutex configuration.
 ///
-/// This is equivalent to `BasicSpinMutex<T, true>`, which enables CPU-specific
-/// pause instructions for efficient busy-waiting.
+/// This is equivalent to `BasicSpinMutex<T, true>`, which enables CPU-specific pause instructions
+/// for efficient busy-waiting.
 ///
 /// # Examples
 ///
@@ -512,9 +515,9 @@ pub struct ThreadInDomain {
 
 /// A thread-safe wrapper around raw pointers for sharing read-only data across threads.
 ///
-/// This type is designed for scenarios where you need to share immutable data
-/// across async tasks or threads, particularly when the standard borrowing rules
-/// would prevent such sharing. The caller is responsible for ensuring that:
+/// This type is designed for scenarios where you need to share immutable data across async tasks or
+/// threads, particularly when the standard borrowing rules would prevent such sharing. The caller
+/// is responsible for ensuring that:
 /// - The pointed-to data remains valid for the lifetime of use
 /// - The data is not modified while being accessed through `SyncConstPtr`
 ///
@@ -560,7 +563,7 @@ impl<T> SyncConstPtr<T> {
     ///
     /// # Arguments
     ///
-    /// * `index` - The index of the element to access
+    /// - `index` - The index of the element to access
     ///
     /// # Returns
     ///
@@ -640,8 +643,8 @@ impl IndexedSplit {
     ///
     /// # Arguments
     ///
-    /// * `tasks_count` - Total number of tasks to distribute
-    /// * `threads_count` - Number of threads to distribute across (must be > 0)
+    /// - `tasks_count` - Total number of tasks to distribute
+    /// - `threads_count` - Number of threads to distribute across (must be > 0)
     ///
     /// # Panics
     ///
@@ -710,8 +713,8 @@ mod tests {
     #[test]
     fn guard_lifecycle_inclusive() {
         let topology = Topology::new().unwrap();
-        // On inclusive pools the dispatch is deferred to `join`, where the
-        // calling thread contributes its own slice.
+        // On inclusive pools the dispatch is deferred to `join`, where the calling thread
+        // contributes its own slice.
         let mut pool = spawn(&topology, 4);
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);

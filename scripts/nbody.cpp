@@ -1,19 +1,19 @@
 /**
- *  @brief Demo app: N-Body simulation with ForkUnion and OpenMP.
- *  @author Ash Vardanian
  *  @file scripts/nbody.cpp
+ *  @author Ash Vardanian
  *  @date May 23, 2025
+ *  @brief Demo app: N-Body simulation with ForkUnion and OpenMP.
  *
  *  To control the script, several environment variables are used:
  *
- *  - `NBODY_COUNT` - number of bodies in the simulation, defaulting to the number of threads.
- *  - `NBODY_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
- *  - `NBODY_ITERATIONS` - run an exact iteration count instead, when set.
+ *  - @c NBODY_COUNT - number of bodies in the simulation, defaulting to the number of threads.
+ *  - @c NBODY_SECONDS - wall-clock budget per run, reporting the sustained rate - default 10.
+ *  - @c NBODY_ITERATIONS - run an exact iteration count instead, when set.
  *  - `NBODY_BACKEND` - backend to use for the simulation, defaulting to `forkunion_static_shared`.
- *  - `NBODY_THREADS` - number of threads to use for the simulation, defaulting to the number of hardware threads.
+ *  - @c NBODY_THREADS - number of threads to use, defaulting to the hardware thread count.
  *
- *  The backends include: `forkunion_{static,dynamic}_{shared,replicated}`, `openmp_{static,dynamic}`,
- *  and `taskflow_{static,dynamic}`.
+ *  The backends include: `forkunion_{static,dynamic}_{shared,replicated}`,
+ *  `openmp_{static,dynamic}`, and `taskflow_{static,dynamic}`.
  *  To compile and run on all cores in Linux:
  *
  *  @code{.sh}
@@ -25,9 +25,10 @@
  *  Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
  *  rate it sustained. Contended-atomic paths amplify any background noise, and short dynamic runs
  *  swing ~±30%, so the window sizes the iteration count to the machine instead of guessing it per
- *  backend. Published comparisons run under `numactl --interleave=all` with
+ *  backend. Published comparisons run under `numactl --interleave=all` together with
  *  `OMP_PROC_BIND=spread OMP_PLACES=cores`; this C++ build also adds `-ffast-math`, which Rust
- *  cannot express globally. To benchmark each backend:
+ *  cannot express globally.
+ *  To benchmark each backend:
  *
  *  @code{.sh}
  *  NBODY_COUNT=512 NBODY_BACKEND=openmp_static build_release/forkunion_nbody
@@ -56,8 +57,8 @@
 #include <chrono>   // `std::chrono::steady_clock`
 #include <optional> // `std::optional` - the executor, spawned only when chosen
 
-// Clang generally defines `_OPENMP` when OpenMP, but compiling it is
-// tricky and the header may not be available.
+/*  Clang generally defines `_OPENMP` when OpenMP, but compiling it is tricky and the header may not
+ *  be available. */
 #if defined(_OPENMP)
 #if __has_include(<omp.h>)
 #include <omp.h>
@@ -162,7 +163,7 @@ inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
     bi.position.z -= std::floor(bi.position.z);
 }
 
-/** One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`. */
+/** One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in @c f32. */
 static inline float random_unit(std::uint64_t const counter) noexcept {
     return static_cast<float>(fu::split_mix(counter) >> 40) * (1.0f / 16777216.0f);
 }
@@ -175,7 +176,7 @@ static inline float random_unit(std::uint64_t const counter) noexcept {
  *  @brief The one pool type behind every ForkUnion backend.
  *
  *  The distributed pool exists wherever we can harvest a topology and spawn POSIX threads onto it -
- *  Linux and Apple both. Only the @b memory placement is NUMA-specific, and `replicated_array`
+ *  Linux and Apple both. Only the @b memory placement is NUMA-specific, and @c replicated_array
  *  already falls back to a heap-backed replica where no NUMA API exists, so a machine with one
  *  memory domain sees the per-node replicas collapse to one.
  */
@@ -185,8 +186,8 @@ using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t, fu::prefe
  *  @brief Copies canonical @p bodies into every per-domain replica.
  *
  *  Each replica is written by the cores local to its node so the pages first-touch there. Every
- *  compute domain sharing a memory domain cooperates on that node's one replica, partitioned
- *  across all its threads so no element is copied twice.
+ *  compute domain sharing a memory domain cooperates on that node's one replica, partitioned across
+ *  all its threads so no element is copied twice.
  */
 void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t &pool,
                       fu::replicated_array<body_t> &replicas, fu::span<body_t const> bodies) noexcept {
@@ -196,8 +197,8 @@ void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t
         fu::memory_domain_index_t const memory_domain =
             topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain));
 
-        // Locate this thread among every thread on its memory domain, and count them, so the node's whole
-        // team splits [0, n) without overlap even when several compute domains share the node.
+        // Locate this thread among every thread on its memory domain, and count them, so the
+        // domain's whole team splits [0, n) without overlap even when several share one node.
         std::size_t threads_on_memory_domain = 0, local_index_on_memory_domain = 0;
         for (std::size_t other = 0; other < pool.compute_domains_count(); ++other) {
             if (topology.local_memory_of(static_cast<fu::compute_domain_index_t>(other)) != memory_domain) continue;
@@ -214,36 +215,45 @@ void refresh_replicas(fu::machine_topology_t const &topology, distributed_pool_t
 }
 
 /**
- *  @brief Everything a backend reads or writes for one simulation step; the harness owns the lifetimes.
+ *  @brief State a backend reads or writes for one simulation step; the harness owns its lifetime.
  *
- *  The Taskflow graphs are built once and re-run every step, the way Taskflow is meant to be used - never
- *  rebuilt on the hot path.
+ *  The Taskflow graphs are built once and re-run every step, the way Taskflow is meant to be used -
+ *  never rebuilt on the hot path.
  */
 struct nbody_context_t {
+
     /** Canonical positions, updated in place each step. */
     fu::span<body_t> bodies;
+
     /** Scratch for the accumulated force per body. */
     fu::span<vector3_t> forces;
+
     /** Per-node position replicas, filled only for `replicated_*`. */
     fu::replicated_array<body_t> &replicas;
+
     /** The compute-to-memory bridge for the replicated read. */
     fu::machine_topology_t const &topology;
-    /** Spawned by `main` only for the ForkUnion backends. */
+
+    /** Spawned by @c main only for the ForkUnion backends. */
     distributed_pool_t *pool = nullptr;
-    /** Spawned by `main` only for the `taskflow_*` backends. */
+
+    /** Spawned by @c main only for the `taskflow_*` backends. */
     tf::Executor *taskflow = nullptr;
+
     /** Force-accumulation graph, built once and re-run every step. */
     std::optional<tf::Taskflow> force_pass;
+
     /** Position-update graph, built once and re-run every step. */
     std::optional<tf::Taskflow> apply_pass;
 };
 
 /** Pre-split across threads vs work-stolen. */
 enum class schedule_k : unsigned int { static_k, dynamic_k };
+
 /** One shared body array vs one position replica per memory domain. */
 enum class placement_k : unsigned int { shared_k, replicated_k };
 
-/** Runs @p body over `[0, n)`, statically pre-split or work-stolen per the compile-time schedule. */
+/** Runs @p body over `[0, n)`, statically pre-split or work-stolen per compile-time schedule. */
 template <schedule_k schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
     if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
@@ -253,9 +263,9 @@ static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_
 /**
  *  @brief One simulation step, specialized over the schedule and placement axes at compile time.
  *
- *  The all-to-all sweep cannot be sharded - every body reads every other - so the only locality to win
- *  is the read side: replicate the positions once per step, then keep the quadratic loop node-local.
- *  The four ForkUnion backends are the four instantiations of this one body.
+ *  The all-to-all sweep cannot be sharded - every body reads every other - so the only locality to
+ *  win is the read side: replicate the positions once per step, then keep the quadratic loop
+ *  node-local. The four ForkUnion backends are the four instantiations of this one body.
  */
 template <schedule_k schedule_, placement_k placement_>
 static void run(nbody_context_t &c) noexcept {
@@ -288,6 +298,7 @@ static void run(nbody_context_t &c) noexcept {
 }
 
 #if defined(_OPENMP)
+
 /** The OpenMP baselines - the same all-to-all sweep under an `omp parallel for`. */
 static void run_openmp_static(nbody_context_t &c) noexcept {
     std::size_t const n = c.bodies.size();
@@ -310,11 +321,11 @@ static void run_openmp_dynamic(nbody_context_t &c) noexcept {
 #endif
 
 /**
- *  @brief The Taskflow baselines - the same all-to-all sweep under `tf::for_each_index`.
+ *  @brief The Taskflow baselines - the same all-to-all sweep under @c tf::for_each_index.
  *
  *  The executor is spawned once by `main`, and the two task graphs are built once on the first step
- *  and re-run thereafter - exactly how Taskflow is meant to be used. Rebuilding a `tf::Taskflow`
- *  every step, or spawning a fresh `tf::Executor` per dispatch, would measure graph construction,
+ *  and re-run thereafter - exactly how Taskflow is meant to be used. Rebuilding a @c tf::Taskflow
+ *  every step, or spawning a fresh @c tf::Executor per dispatch, would measure graph construction,
  *  not the dispatch this benchmark isolates. The graphs capture the `bodies`/`forces` spans, whose
  *  pointers never move, so one build stays valid.
  */
@@ -340,15 +351,19 @@ static void run_taskflow(nbody_context_t &c, partitioner_ partitioner) noexcept 
 static void run_taskflow_static(nbody_context_t &c) noexcept { run_taskflow(c, tf::StaticPartitioner()); }
 static void run_taskflow_dynamic(nbody_context_t &c) noexcept { run_taskflow(c, tf::DynamicPartitioner(1)); }
 
-/** Which execution engine a backend runs on, so `main` builds exactly the resource it needs. */
+/** Which execution engine a backend runs on, so @c main builds exactly the resource it needs. */
 enum class engine_t : unsigned int {
+
     /** Spawns the shared ForkUnion pool. */
     forkunion_k,
+
     /** Also allocates the per-node position replicas. */
     forkunion_replicated_k,
+
     /** Runs under `omp parallel for`, needing no pool object. */
     openmp_k,
-    /** Runs on a reused `tf::Executor`, needing no pool object. */
+
+    /** Runs on a reused @c tf::Executor, needing no pool object. */
     taskflow_k,
 };
 
@@ -376,7 +391,7 @@ static constexpr backend_t backends_k[] = {
 
 #pragma endregion Backends
 
-/** Reads an environment variable, or @p fallback when unset - `getenv_s` on MSVC. */
+/** Reads an environment variable, or @p fallback when unset - @c getenv_s on MSVC. */
 static char const *env_string(char const *name, char const *fallback) noexcept {
 #if defined(_MSC_VER)
     static thread_local char buffer[256];
@@ -417,8 +432,8 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // Seven counter-based draws per body: three position coordinates, three velocity components, and
-    // one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    // Seven counter-based draws per body: three position coordinates, three velocity components,
+    // and one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
     for (std::size_t i = 0; i < n; ++i) {
         std::uint64_t const counter = static_cast<std::uint64_t>(i) * 7;
         bodies[i].position.x = random_unit(counter + 0);
@@ -488,8 +503,8 @@ int main() {
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
     double const total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     double const microseconds_per_iteration = total_seconds / static_cast<double>(passes) * 1e6;
-    // Per-iteration latency is the comparable unit - one `for_each` dispatch over `n` bodies. The total
-    // wall time follows for reference, since a fast dispatch rounds to zero when printed in seconds.
+    // Per-iteration latency is the comparable unit - one `for_each` dispatch over `n` bodies. The
+    // total wall time follows for reference, since a fast dispatch rounds to zero in seconds.
     std::printf("%.*s: %zu bodies, %zu iters, %.2f us/iter (%.2f s total)\n", static_cast<int>(backend.size()),
                 backend.data(), n, passes, microseconds_per_iteration, total_seconds);
     return EXIT_SUCCESS;

@@ -2,7 +2,7 @@
 //!
 //! The derivation rules live in `include/forkunion/types.hpp`, not here. By default this script
 //! defines no `FU_WITH_*` macro at all and lets the header work it out from the platform. Cargo
-//! features only ever *override* that.
+//! features only ever _override_ that.
 //!
 //! Nothing here probes the build host. The core reads its topology from sysfs and places memory by
 //! syscall, so there is no `libnuma` to find and no artifact that differs by where it was built.
@@ -10,12 +10,15 @@
 //! Features are additive, which is an awkward fit for a switch that wants three positions, so:
 //!
 //! - default: AUTO. The header decides, and this script says nothing.
-//! - `topology`, `place-memory-on-domain`, `place-huge-pages-on-domain`, `place-threads-by-affinity`:
-//!   force the capability on. A build that cannot honour it - or a prerequisite it needs, like huge
-//!   pages needing on-domain placement - stops at the `#error` in `types.hpp`, with a sentence,
-//!   rather than at link time with missing symbols.
+//! - `topology`, `place-memory-on-domain`, `place-huge-pages-on-domain`,
+//!   `place-threads-by-affinity`: force the capability on. A build that cannot honour it - or a
+//!   prerequisite it needs, like huge pages needing on-domain placement - stops at the `#error` in
+//!   `types.hpp`, with a sentence, rather than at link time with missing symbols.
 //! - `portable`: force every optional capability off, leaving the STL thread pool. Useful under
 //!   musl, inside containers, and for seeing what a caller on an unsupported platform will see.
+//!
+//! File: build.rs
+//! Author: Ash Vardanian
 
 use std::path::Path;
 
@@ -78,9 +81,9 @@ fn main() -> Result<(), cc::Error> {
         }
     }
 
-    // Mirror Rust's `debug_assertions` onto the C++ `assert`s. Cargo only exports this as a
-    // `cfg`, and it tracks the profile's `debug-assertions` key - unlike `DEBUG`, which is
-    // debug-info and stays `true` under `[profile.release] debug = true`.
+    // Mirror Rust's `debug_assertions` onto the C++ `assert`s. Cargo only exports this as a `cfg`,
+    // and it tracks the profile's `debug-assertions` key - unlike `DEBUG`, which is debug-info and
+    // stays `true` under `[profile.release] debug = true`.
     if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
         build.define("NDEBUG", None);
     }

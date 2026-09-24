@@ -1,8 +1,8 @@
 /**
- *  @brief The hardware description: memory domains, compute domains, and the topology that holds them.
- *  @author Ash Vardanian
  *  @file include/forkunion/topology.hpp
+ *  @author Ash Vardanian
  *  @date July 10, 2026
+ *  @brief The hardware description: memory domains, compute domains, and the topology holding them.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
 #pragma once
@@ -19,11 +19,11 @@ namespace forkunion {
 
 /**
  *  @brief The kernel's own identifier for the calling thread, or 0 where there is none.
- *  @sa `pinned_thread_t::id`, which caches it so other threads can read it.
+ *  @sa pinned_thread_t::id, which caches it so other threads can read it.
  *
  *  Linux calls it a `pid_t` and hands it out through `gettid`. Darwin has no `gettid` at all, and
- *  spells the same idea `pthread_threadid_np`, returning 64 bits. Both are the number a scheduler
- *  or a profiler will show you; neither is a `pthread_t`.
+ *  spells the same idea @c pthread_threadid_np, returning 64 bits. Both are the number a scheduler
+ *  or a profiler will show you; neither is a @c pthread_t.
  */
 FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
 #if FU_ON_LINUX && FU_WITH_OS_THREADS
@@ -47,9 +47,9 @@ FU_MAYBE_UNUSED_ static inline std::uint64_t current_thread_id() noexcept {
 /**
  *  @brief Names the @b calling thread, which is the only thread every platform lets us name.
  *
- *  Linux's `pthread_setname_np` takes a thread and a name, so a spawner can name its workers. Apple's
- *  takes only a name and always renames the caller. Rather than branch on that at every call, the
- *  worker names itself once it is running - the one shape both kernels agree on.
+ *  Linux's @c pthread_setname_np takes a thread and a name, so a spawner can name its workers.
+ *  Apple's takes only a name and always renames the caller. Rather than branch on that at every
+ *  call, the worker names itself once it is running - the one shape both kernels agree on.
  */
 FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ char const *thread_name) noexcept {
 #if FU_ON_LINUX && FU_WITH_OS_THREADS
@@ -57,14 +57,15 @@ FU_MAYBE_UNUSED_ static inline void set_current_thread_name(FU_MAYBE_UNUSED_ cha
 #elif FU_ON_APPLE
     (void)::pthread_setname_np(thread_name);
 #elif FU_ON_WINDOWS && FU_WITH_OS_THREADS
-    // `SetThreadDescription` wants UTF-16 and only exists on Windows 10 1607+. Resolve it at runtime
-    // so a binary keeps loading on older Windows, where the name is simply not applied - the same
-    // "best effort, never fatal" contract the POSIX paths keep.
+    // `SetThreadDescription` wants UTF-16 and only exists on Windows 10 1607+. Resolve it at
+    // runtime so a binary keeps loading on older Windows, where the name is simply not applied -
+    // the same "best effort, never fatal" contract the POSIX paths keep.
     using set_thread_description_t = HRESULT(WINAPI *)(HANDLE, PCWSTR);
     HMODULE const kernel32 = ::GetModuleHandleW(L"kernel32.dll");
     if (!kernel32) return;
-    // The `FARPROC`-to-typed-pointer cast is the documented `GetProcAddress` idiom; MSVC's C4191 for it
-    // is suppressed with the other Windows pragmas up top, and it is clean under `-Wextra`/clang-tidy.
+    // The `FARPROC`-to-typed-pointer cast is the documented `GetProcAddress` idiom; MSVC's C4191
+    // for it is suppressed with the other Windows pragmas up top, and it is clean under
+    // `-Wextra`/clang-tidy.
     auto const set_thread_description =
         reinterpret_cast<set_thread_description_t>(::GetProcAddress(kernel32, "SetThreadDescription"));
     if (!set_thread_description) return;
@@ -103,15 +104,16 @@ FU_MAYBE_UNUSED_ static inline std::size_t possible_cores() noexcept {
 #pragma region Core Masks
 #if FU_ON_WINDOWS
 /*  Windows addresses a logical processor by (processor group, bit within the group's 64-bit
- *  `KAFFINITY` mask), not by a flat global id. A `core_id_t` therefore packs both, so the free
- *  function `try_pin_thread_to_cores` can rebuild a `GROUP_AFFINITY` from an id alone - no side table
- *  threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits, so the
- *  index is 0..63); the remaining bits hold the group number. Everywhere else a `core_id_t` is
- *  still just an opaque, comparable id - only the pinning path decodes it. */
+ *  @c KAFFINITY mask), not by a flat global id. A @c core_id_t therefore packs both, so the free
+ *  function @c try_pin_thread_to_cores can rebuild a @c GROUP_AFFINITY from an id alone - no side
+ *  table threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits,
+ *  so the index is 0..63); the remaining bits hold the group number. Everywhere else a @c core_id_t
+ *  is still just an opaque, comparable id - only the pinning path decodes it. */
 static constexpr int win_core_group_shift_k = 6;
 static constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
-/** Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap
- *  of 64 @b per @b group, never a cap on total cores - a machine with more uses several groups. */
+
+/** Logical processors per Windows processor group - the `KAFFINITY` bit-width, a hard ABI cap of 64
+ *  @b per @b group, never a cap on total cores - a machine with more uses several groups. */
 static constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
 
 FU_MAYBE_UNUSED_ static inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
@@ -126,9 +128,9 @@ FU_MAYBE_UNUSED_ static inline unsigned win_core_index(core_id_t id) noexcept {
 }
 #endif // FU_ON_WINDOWS
 
-/*  The unit each kernel writes its affinity mask in. Deliberately not `std::uint64_t` everywhere:
+/*  The unit each kernel writes its affinity mask in. Deliberately not @c std::uint64_t everywhere:
  *  a glibc `cpu_set_t` is an array of `__cpu_mask`, a FreeBSD `cpuset_t` an array of `long`, and a
- *  Windows `GROUP_AFFINITY` carries one 64-bit `KAFFINITY`. Matching the word keeps the aliasing
+ *  Windows @c GROUP_AFFINITY carries one 64-bit @c KAFFINITY. Matching the word keeps the aliasing
  *  below honest on 32-bit and big-endian targets alike. */
 #if FU_ON_WINDOWS
 using core_mask_word_t = KAFFINITY;
@@ -141,26 +143,26 @@ using core_mask_word_t = std::uint64_t;
 #endif
 
 /**
- *  @brief A dense bitset over `core_id_t` - the cores a thread may run on, or should be confined to.
+ *  @brief A dense bitset over @c core_id_t: the cores a thread may run on, or is confined to.
  *
  *  A machine is not the same thing as the slice of it we were handed. `taskset`, a cgroup `cpuset`,
- *  and a batch scheduler all narrow this set, and `hardware_concurrency` sees none of them. Sizing a
- *  pool from the machine and pinning to cores outside the set either escapes the restriction, or -
- *  where the kernel enforces it - crowds every spinning worker onto the few cores that remain.
+ *  and a batch scheduler all narrow this set, and @c hardware_concurrency sees none of them. Sizing
+ *  a pool from the machine and pinning to cores outside the set either escapes the restriction, or,
+ *  where the kernel enforces it, crowds every spinning worker onto the few cores that remain.
  *
- *  Every platform hands out a dense core id, so one bitset covers them all: Linux and FreeBSD number
- *  logical processors from zero, and Windows packs `(group << 6) | bit` into the same integer.
+ *  Every platform hands out a dense core id, so one bitset covers them all: Linux and FreeBSD
+ *  number logical processors from zero, and Windows packs `(group << 6) | bit` into one integer.
  *
  *  @note Not `CPU_ALLOC`. That macro is `malloc` behind a name - glibc's `__sched_cpualloc` rounds
  *      the count up and tail-calls it - which would both bypass this allocator and contradict what
- *      the library promises. A `dynamic_array` sized from `possible_cores()` costs one cold-path
- *      allocation and, unlike a fixed `cpu_set_t`, does not stop at glibc's 1024-core `CPU_SETSIZE`.
+ *      the library promises. A @c dynamic_array sized from `possible_cores()` costs one cold-path
+ *      allocation and, unlike a fixed `cpu_set_t`, never stops at glibc's 1024-core `CPU_SETSIZE`.
  */
 template <typename allocator_type_ = std::allocator<core_mask_word_t>>
 class core_mask {
     static constexpr std::size_t bits_per_word_k = sizeof(core_mask_word_t) * 8;
 
-    /** Backing words of the bitset, one bit per `core_id_t`. */
+    /** Backing words of the bitset, one bit per @c core_id_t. */
     dynamic_array<core_mask_word_t, allocator_type_> words_;
 
   public:
@@ -168,9 +170,9 @@ class core_mask {
     explicit core_mask(allocator_type_ const &allocator) noexcept : words_(allocator) {}
 
     /**
-     *  @brief Upper bound on the `core_id_t` values this machine can produce - the width a mask covers.
-     *  @note Not `possible_cores()`. Windows ids are `(group << 6) | bit`, so a two-group machine with
-     *      80 logical processors still emits ids up to 103. Sizing by the core count would drop them.
+     *  @brief Upper bound on `core_id_t` values this machine can produce - the width a mask covers.
+     *  @note Not `possible_cores()`; Windows ids are `(group << 6) | bit`, so a two-group machine
+     *      with 80 processors still emits ids up to 103, and sizing by core count would drop them.
      */
     static std::size_t id_space() noexcept {
 #if FU_ON_WINDOWS
@@ -181,12 +183,12 @@ class core_mask {
 #endif
     }
 
-    /** @return bad_alloc_k on allocation failure, leaving the mask unusable rather than half-sized. */
+    /** @return bad_alloc_k on failure, leaving the mask unusable rather than half-sized. */
     [[nodiscard]] status_t resize_for(std::size_t const cores) noexcept {
         return words_.resize(div_ceil(cores, bits_per_word_k));
     }
 
-    /** @brief Sizes the mask to hold every id this machine can produce. @sa `id_space`. */
+    /** Sizes the mask to hold every id this machine can produce. @sa id_space. */
     [[nodiscard]] status_t resize() noexcept { return resize_for(id_space()); }
 
     void reset() noexcept { words_.reset(); }
@@ -231,8 +233,8 @@ using core_mask_t = core_mask<>;
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t capture_thread_cores(
     FU_MAYBE_UNUSED_ core_mask_t &cores) noexcept {
 #if FU_ON_LINUX
-    // A `cpu_set_t` is an array of `__cpu_mask`, which is exactly `core_mask_word_t` here. The kernel
-    // rejects a buffer narrower than its own cpumask, so grow once rather than guess at `nr_cpu_ids`.
+    // A `cpu_set_t` is an array of `__cpu_mask`, exactly `core_mask_word_t` here. The kernel
+    // rejects a buffer smaller than its cpumask; grow once instead of guessing `nr_cpu_ids`.
     std::size_t cores_to_fit = core_mask_t::id_space();
     for (int attempt = 0; attempt < 4; ++attempt, cores_to_fit *= 2) {
         if (status_t const grew = cores.resize_for(cores_to_fit); failed(grew)) return grew;
@@ -244,7 +246,7 @@ using core_mask_t = core_mask<>;
     return status_t::unsupported_k;
 
 #elif FU_ON_WINDOWS
-    // A thread lives in exactly one processor group at a time, so that group's mask is its allowed set.
+    // A thread lives in one processor group at a time, so that group's mask is its allowed set.
     if (status_t const grew = cores.resize(); failed(grew)) return grew;
     GROUP_AFFINITY affinity = {};
     if (!::GetThreadGroupAffinity(::GetCurrentThread(), &affinity)) return status_t::unknown_k;
@@ -253,7 +255,7 @@ using core_mask_t = core_mask<>;
     return status_t::success_k;
 
 #elif FU_ON_FREEBSD
-    // ! Not `sched_getaffinity`: FreeBSD spells it `cpuset_getaffinity`, and `-1` means "this thread".
+    // ! FreeBSD spells `sched_getaffinity` as `cpuset_getaffinity`; `-1` means "this thread".
     if (status_t const grew = cores.resize(); failed(grew)) return grew;
     if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, cores.bytes(),
                              static_cast<cpuset_t *>(cores.data())) == 0)
@@ -262,16 +264,17 @@ using core_mask_t = core_mask<>;
     return status_t::unknown_k;
 
 #else
-    // Darwin exposes no CPU mask at all. `thread_policy_set(THREAD_AFFINITY_POLICY)` sets an affinity
-    // @b tag - a hint that threads want to share an L2 - not a set of cores, and Apple Silicon answers
-    // `KERN_NOT_SUPPORTED`. A pool there partitions the work by domain and lets the scheduler place it.
+    // Darwin exposes no CPU mask at all. `thread_policy_set(THREAD_AFFINITY_POLICY)` sets an
+    // affinity @b tag - a hint that threads want to share an L2 - not a set of cores, and Apple
+    // Silicon answers `KERN_NOT_SUPPORTED`. A pool there partitions the work by domain and lets the
+    // scheduler place it.
     return status_t::unsupported_k;
 #endif
 }
 
 /**
  *  @brief Number of cores the calling thread may run on, or `possible_cores()` where unknowable.
- *  @note Prefer this to `std::thread::hardware_concurrency` when sizing a pool: the latter counts
+ *  @note Prefer this to @c std::thread::hardware_concurrency when sizing a pool: the latter counts
  *      the machine's cores, not the ones this process was given.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
@@ -287,25 +290,29 @@ FU_MAYBE_UNUSED_ static inline std::size_t allowed_cores_count() noexcept {
 
 #pragma region Thread Placement
 
-/** The OS thread handle a `colocated_pool` stores, joins, and pins - one per worker. */
+/** The OS thread handle a @c colocated_pool stores, joins, and pins - one per worker. */
 #if FU_ON_WINDOWS
-/** From `CreateThread`; identity is tracked by thread id, not this. */
+
+/** From @c CreateThread; identity is tracked by thread id, not this. */
 using native_thread_t = HANDLE;
 #else
-/** From `pthread_create`; doubles as the thread's identity, via `pthread_equal`. */
+
+/** From @c pthread_create; doubles as the thread's identity, via @c pthread_equal. */
 using native_thread_t = pthread_t;
 #endif
 
 /**
- *  @brief Confines @p thread to the cores held by @p cores. The one place placement actually happens.
+ *  @brief Confines @p thread to the cores held by @p cores. The one place placement happens.
  *  @return false when the platform exposes no thread placement, which is @b not an error.
  *
- *  Linux hands out a `cpu_set_t` and honours it. FreeBSD spells the same idea `cpuset_t`. Windows
- *  addresses a core by processor group and bit, packed into each `core_id_t`; a thread lives in exactly
- *  one group, so a mask spanning two is a caller error. Apple Silicon answers `KERN_NOT_SUPPORTED` to
- *  `thread_policy_set` - measured, not assumed - and offers only a Quality-of-Service class, chosen at
- *  creation. So a pool there partitions the @b work by domain and lets the scheduler place the @b threads.
- *  @sa `try_pin_thread_to_cores`, the adaptor that builds a mask from a core list.
+ *  Linux hands out a @c cpu_set_t and honours it. FreeBSD spells the same idea @c cpuset_t. Windows
+ *  addresses a core by processor group and bit, packed into each @c core_id_t; a thread lives in
+ *  exactly one group, so a mask spanning two is a caller error. Apple Silicon answers
+ *  @c KERN_NOT_SUPPORTED to @c thread_policy_set - measured, not assumed - and offers only a
+ *  Quality-of-Service class, chosen at creation. So a pool there partitions the @b work by domain
+ *  and lets the scheduler place the @b threads.
+ *
+ *  @sa try_pin_thread_to_cores, the adaptor that builds a mask from a core list.
  */
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t apply_thread_cores(
     FU_MAYBE_UNUSED_ native_thread_t thread, FU_MAYBE_UNUSED_ core_mask_t const &cores) noexcept {
@@ -333,9 +340,9 @@ using native_thread_t = pthread_t;
                : status_t::permission_denied_k;
 
 #elif FU_ON_ANDROID
-    // Bionic gained `pthread_setaffinity_np` only at NDK API 36, so pin through `sched_setaffinity` on
-    // the thread's tid instead - it works at every level, with `pthread_gettid_np` from API 21 mapping
-    // the handle to that tid.
+    // Bionic gained `pthread_setaffinity_np` only at NDK API 36, so pin through `sched_setaffinity`
+    // on the thread's tid instead - it works at every level, with `pthread_gettid_np` from API 21
+    // mapping the handle to that tid.
     if (!cores.valid()) return status_t::invalid_argument_k;
     return ::sched_setaffinity(::pthread_gettid_np(thread), cores.bytes(),
                                static_cast<cpu_set_t const *>(cores.data())) == 0
@@ -356,7 +363,7 @@ using native_thread_t = pthread_t;
 /**
  *  @brief Confines @p thread to the @p count cores listed in @p cores.
  *  @return false when the platform exposes no thread placement, which is @b not an error.
- *  @note A thin adaptor: it builds a `core_mask` and defers to `try_apply_thread_cores`, which is
+ *  @note A thin adaptor: it builds a @c core_mask and defers to @c try_apply_thread_cores, which is
  *      where the per-platform placement lives. It owns no platform logic of its own.
  */
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t pin_thread_to_cores(
@@ -381,12 +388,12 @@ using native_thread_t = pthread_t;
  *  @note A no-op where nothing was ever narrowed, or where @p saved was never captured.
  *
  *  A pool that narrows the caller owes it the mask it had, not the mask of the whole machine. The
- *  two differ under `taskset`, a cgroup `cpuset`, or any batch scheduler, and widening to the
+ *  two differ under @c taskset, a cgroup @c cpuset, or any batch scheduler, and widening to the
  *  machine would hand the caller cores this process was never granted.
  *
  *  Note that no NUMA run-node policy is reset here: the pool never sets one. Memory placement goes
- *  through `mbind` on the allocation, not through the calling thread's policy, and `numa_run_on_node`
- *  would rewrite the very CPU mask we just restored.
+ *  through @c mbind on the allocation, not through the calling thread's policy, and
+ *  @c numa_run_on_node would rewrite the very CPU mask we just restored.
  */
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t restore_thread_cores(
     FU_MAYBE_UNUSED_ core_mask_t const &saved) noexcept {
@@ -406,6 +413,7 @@ using native_thread_t = pthread_t;
 
 #pragma region Sysfs Readers
 #if FU_ON_LINUX
+
 /**
  *  @brief Reads one unsigned integer out of a `/sys` or `/proc` file.
  *  @return false where the file is absent or holds no number - @p value is then untouched.
@@ -448,15 +456,19 @@ using native_thread_t = pthread_t;
  *  @brief One page size the kernel offers, and how many pages of it exist.
  *
  *  A machine reports several: the base page every allocation uses by default, and whichever huge
- *  page sizes the hardware and kernel agree on. `available_pages` counts what was reserved, and
+ *  page sizes the hardware and kernel agree on. @c available_pages counts what was reserved, and
  *  `free_pages` what nobody has taken yet, so an allocator can tell "unsupported" from "exhausted".
- *  @sa `ram_capabilities`
+ *
+ *  @sa ram_capabilities
  */
 struct ram_page_setting_t {
+
     /** Huge page size in bytes, e.g. 4 KB, 2 MB, or 1 GB. */
     std::size_t bytes_per_page {0};
+
     /** Number of pages available for this size, 0 if not available. */
     std::size_t available_pages {0};
+
     /** Number of pages available and unused, 0 if not available. */
     std::size_t free_pages {0};
 };
@@ -549,23 +561,24 @@ FU_MAYBE_UNUSED_ static inline std::size_t volume_ram() noexcept {
  *  aren't free, so most chips have a "Translation Lookaside Buffer" @b TLB cache
  *  as part of the "Memory Management Unit" @b MMU to speed up the process.
  *
- *  To keep it fast, in Big Data applications, one would like to use larger pages,
- *  to reduce the number of distinct entries in the TLB cache. Going from 4 KB to
- *  2 MB or 1 GB "Huge Pages" @b HPs, reduces the table size by 512 or 262K times,
- *  respectively.
+ *  To keep it fast, in Big Data applications, one would like to use larger pages, to reduce the
+ *  number of distinct entries in the TLB cache. Going from 4 KB to 2 MB or 1 GB "Huge Pages" @b
+ *  HPs, reduces the table size by 512 or 262K times, respectively.
  *
- *  To benefit from those, some applications rely on "Transparent Huge Pages" @b THP,
- *  which are automatically allocated by the kernel. Such implicit behaviour isn't
- *  great for performance-oriented applications, so this inventory exposes @b largest_free, which
- *  the `linux_numa_allocator` consults before falling back to the base page size.
+ *  To benefit from those, some applications rely on "Transparent Huge Pages" @b THP, which are
+ *  automatically allocated by the kernel. Such implicit behaviour isn't great for
+ *  performance-oriented applications, so this inventory exposes @b largest_free, which the
+ *  @c linux_numa_allocator consults before falling back to the base page size.
  *
  *  @see https://docs.kernel.org/admin-guide/mm/hugetlbpage.html
  */
 template <std::size_t max_page_sizes_ = 4>
 class ram_page_settings {
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
+
     /** Huge page sizes in bytes; a machine offers a handful, so the storage is inline. */
     limited_array<ram_page_setting_t, max_page_sizes_k> sizes_ {};
+
     /** Total memory available on this memory domain. */
     std::size_t total_memory_bytes_ {0};
 
@@ -773,7 +786,7 @@ using ram_page_settings_t = ram_page_settings<>;
 
 /**
  *  @brief Describes a NUMA node, containing its ID, memory size, and core IDs.
- *  @sa Views different slices of the `machine_topology` structure.
+ *  @sa Views different slices of the @c machine_topology structure.
  */
 template <std::size_t max_page_sizes_ = 4>
 struct memory_domain {
@@ -781,14 +794,19 @@ struct memory_domain {
 
     /** The OS's id for this memory domain: a NUMA node number, in [0, numa_max_node()]. */
     memory_domain_id_t memory_domain_id {-1};
+
     /** Physical CPU socket ID. */
     socket_id_t socket_id {-1};
+
     /** RAM volume in bytes. */
     std::size_t volume_ram {0};
-    /** Pointer to the first core ID in the `core_ids` array. */
+
+    /** Pointer to the first core ID in the @c core_ids array. */
     core_id_t const *first_core_id {nullptr};
-    /** Number of items in the `core_ids` array. */
+
+    /** Number of items in the @c core_ids array. */
     std::size_t logical_cores_count {0};
+
     /** Huge page sizes available on this memory domain. */
     ram_page_settings<max_page_sizes_k> page_sizes {};
 };
@@ -797,7 +815,7 @@ using memory_domain_t = memory_domain<>;
 
 /**
  *  @brief One bindable cluster of cores sharing a QoS class and locality - the compute axis.
- *  @sa `memory_domain` is the memory axis; a `machine_topology` exposes both plus their affinity.
+ *  @sa memory_domain is the memory axis; a @c machine_topology exposes both plus their affinity.
  *
  *  A compute domain is a contiguous run of same-capacity cores within a single NUMA node. It is
  *  what a pool binds to and the index a worker callback receives. Several compute domains may map
@@ -805,32 +823,38 @@ using memory_domain_t = memory_domain<>;
  *  why compute and memory are separate axes rather than a single "colocation" cell.
  */
 struct compute_domain_t {
+
     /** The OS's id for the memory domain these cores live on. */
     memory_domain_id_t memory_domain_id {-1};
+
     /** Our dense index for that same memory domain, into `machine topology`'s array. */
     memory_domain_index_t memory_domain_index {};
+
     /** QoS ordinal, sorted least-to-most performant. */
     std::size_t compute_level {0};
 #if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+
     /**
      *  @brief Apple's absolute class for these cores, from `hw.perflevelN.name`; -1 when unnamed.
-     *  @sa `colocated_pool`'s `_qos_for_domain`, for why the relative rank above cannot replace it.
+     *  @sa colocated_pool's @c _qos_for_domain, for why the relative rank above cannot replace it.
      *
-     *  Spawn-path plumbing, not a second caller-facing rank: like `first_core_id`, it is the raw
+     *  Spawn-path plumbing, not a second caller-facing rank: like @c first_core_id, it is the raw
      *  material the platform's placement call consumes - an affinity mask there, a QoS class here.
      */
     core_quality_t apple_core_quality {-1};
 #endif
+
     /**
      *  @brief Relative throughput of @b one core here; 0 when the platform exposes no rating.
-     *  @sa `compute_level` is a dense ordinal for grouping - never divide by it.
+     *  @sa compute_level is a dense ordinal for grouping - never divide by it.
      *
-     *  Unlike `compute_level`, this is a magnitude, so it may be summed and divided. Where the
+     *  Unlike @c compute_level, this is a magnitude, so it may be summed and divided. Where the
      *  kernel publishes a per-core rating - such as the Linux scheduler's `cpu_capacity`, scaled so
      *  the fastest core present reads 1024 - it lands here. Platforms that rank cores without
-     *  quantifying them leave this unknown, and callers weigh domains by `logical_cores_count` instead.
+     *  quantifying them leave it unknown; callers instead weigh domains by @c logical_cores_count.
      */
     std::size_t capacity {0};
+
     /**
      *  @brief Bytes of the deepest cache private to this domain's cores; 0 when unknown.
      *
@@ -839,8 +863,10 @@ struct compute_domain_t {
      *  neither number can be derived from the other. Shared by every core in the domain.
      */
     std::size_t cache_bytes {0};
+
     /** Pointer to the first core ID in this domain. */
     core_id_t const *first_core_id {nullptr};
+
     /** Number of cores in this domain. */
     std::size_t logical_cores_count {0};
 };
@@ -879,10 +905,10 @@ FU_MAYBE_UNUSED_ static inline socket_id_t socket_id_of_core(FU_MAYBE_UNUSED_ co
  *  @brief Fetches the scheduler capacity of a CPU core, used to separate QoS classes.
  *  @return A capacity value where larger means more performant, or 0 if unavailable.
  *
- *  Reads `/sys/devices/system/cpu/cpuN/cpu_capacity`, which the kernel populates from the
- *  Energy Model on ARM @b big.LITTLE/DynamIQ and from ITMT/Thread-Director on Intel @b hybrid
- *  chips - performance cores report ~1024, efficiency cores less. A return of 0 means the core
- *  is homogeneous or the kernel does not expose capacities - the whole node is then one class.
+ *  Reads `/sys/devices/system/cpu/cpuN/cpu_capacity`, which the kernel populates from the Energy
+ *  Model on ARM @b big.LITTLE/DynamIQ and from ITMT/Thread-Director on Intel @b hybrid chips -
+ *  performance cores report ~1024, efficiency cores less. A return of 0 means the core is
+ *  homogeneous or the kernel does not expose capacities - the whole node is then one class.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t capacity_of_core(FU_MAYBE_UNUSED_ core_id_t core_id) noexcept {
 
@@ -907,9 +933,9 @@ FU_MAYBE_UNUSED_ static inline std::size_t capacity_of_core(FU_MAYBE_UNUSED_ cor
 }
 
 /**
- *  @brief Hands every `[low, high]` range of a Linux id list - "0", "0-3", or "0,2-4" - to @p visit.
- *  @note One parser for every list the kernel publishes: `shared_cpu_list`, a domain's `cpulist`, and
- *      `node/online`. Ranges arrive inclusive on both ends, as written.
+ *  @brief Hands every `[low, high]` range in a Linux id list - "0", "0-3", "0,2-4" - to @p visit.
+ *  @note One parser for every list the kernel publishes: @c shared_cpu_list, a domain's @c cpulist,
+ *      and `node/online`. Ranges arrive inclusive on both ends, as written.
  */
 template <typename visitor_type_>
 FU_MAYBE_UNUSED_ static inline void for_each_id_list_range(char const *line, visitor_type_ &&visit) noexcept {
@@ -926,7 +952,7 @@ FU_MAYBE_UNUSED_ static inline void for_each_id_list_range(char const *line, vis
 }
 
 /**
- *  @brief Whether every core in a Linux cpulist line - "0", "0-3", or "0,2-4" - belongs to @p cores.
+ *  @brief Whether every core in a Linux cpulist line - "0", "0-3", "0,2-4" - belongs to @p cores.
  *  @note Pass only complete lines: a truncated tail could name cores the verdict never saw.
  */
 FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t const *cores,
@@ -947,14 +973,15 @@ FU_MAYBE_UNUSED_ static inline bool cpu_list_within(char const *line, core_id_t 
 #pragma region Cache Hierarchy
 
 /**
- *  @brief Bytes of the deepest data or unified cache serving @p core_id, confined to @p domain_cores.
+ *  @brief Bytes of the deepest data or unified cache serving @p core_id, confined to
+ *      @p domain_cores.
  *  @return The cache size in bytes, or 0 when no platform source can name it.
  *
  *  Two exact sources, no measurement: Linux's per-core cacheinfo sysfs, counting a level only if
- *  its `shared_cpu_list` stays within the domain - a socket-wide L3 is not one QoS class's to
+ *  its @c shared_cpu_list stays within the domain - a socket-wide L3 is not one QoS class's to
  *  claim; elsewhere x86 CPUID leaf 0x4 / 0x8000001D, with the sharing width standing in for that
- *  containment. Arm has no userspace cache-geometry registers - `CCSIDR_EL1` is EL1-only - so
- *  sysfs is the only Arm source and other Arm hosts honestly report 0.
+ *  containment. Arm has no userspace cache-geometry registers - `CCSIDR_EL1` is EL1-only - so sysfs
+ *  is the only Arm source and other Arm hosts honestly report 0.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
     FU_MAYBE_UNUSED_ core_id_t core_id, FU_MAYBE_UNUSED_ core_id_t const *domain_cores,
@@ -1047,11 +1074,11 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_bytes_of_core(
  *  @brief Bytes in one cache line - what a single access transfers.
  *  @return The line size, or 0 when no platform source names it.
  *
- *  Exact sources only, no measurement: Linux's `coherency_line_size` - the only source on Arm,
- *  where `CCSIDR_EL1` is EL1-only - Apple's `hw.cachelinesize`, Windows' `CACHE_RELATIONSHIP`,
- *  and x86 CPUID leaf 0x4, whose line field `cache_bytes_of_core` above already decodes for its
- *  size arithmetic. Every source is gated to a power of two in [16, 1024], so a bogus reading
- *  falls through to the caller's compiled default rather than sizing an arena.
+ *  Exact sources only, no measurement: Linux's @c coherency_line_size - the only source on Arm,
+ *  where `CCSIDR_EL1` is EL1-only - Apple's `hw.cachelinesize`, Windows' `CACHE_RELATIONSHIP`, and
+ *  x86 CPUID leaf 0x4, whose line field @c cache_bytes_of_core above already decodes for its size
+ *  arithmetic. Every source is gated to a power of two in [16, 1024], so a bogus reading falls
+ *  through to the caller's compiled default rather than sizing an arena.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
 #if FU_ON_LINUX
@@ -1065,8 +1092,8 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
 #endif
 #if FU_ON_APPLE
     // The widest line across both core tiers, so a P-core's 128 is never rounded down to an
-    // E-core's 64. Spelled out rather than routed through `apple_sysctl_uint`, which the
-    // Platform Probes region below defines only after this one.
+    // E-core's 64. Spelled out rather than routed through `apple_sysctl_uint`, which the Platform
+    // Probes region below defines only after this one.
     unsigned long long apple_line = 0;
     std::size_t apple_length = sizeof(apple_line);
     if (::sysctlbyname("hw.cachelinesize", &apple_line, &apple_length, nullptr, 0) == 0 && //
@@ -1114,7 +1141,7 @@ FU_MAYBE_UNUSED_ static inline std::size_t cache_line_bytes() noexcept {
  *
  *  Not the same question as @ref cache_line_bytes: x86's adjacent-line prefetcher pulls lines in
  *  pairs, so two 64-byte lines behave as one 128-byte unit of coherence traffic and padding must
- *  cover both. Everywhere else the line is the unit. This is the quantity `default_alignment_k`
+ *  cover both. Everywhere else the line is the unit. This is the quantity @c default_alignment_k
  *  guesses from the target when no probe can run.
  */
 FU_MAYBE_UNUSED_ static inline std::size_t destructive_interference_bytes() noexcept {
@@ -1130,13 +1157,13 @@ FU_MAYBE_UNUSED_ static inline std::size_t destructive_interference_bytes() noex
 #pragma region Linux Memory Domains
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
 /*  Everything `libnuma` was asked for, asked of `/sys/devices/system/node` instead - which is where
- *  `libnuma` read it from too.  */
+ *  @c libnuma read it from too.  */
 
 static constexpr char const *sysfs_node_root_k = "/sys/devices/system/node";
 
 /**
- *  @brief Whether this kernel enumerates memory domains at all - what `numa_available` answered.
- *  @note A kernel built without `CONFIG_NUMA` mounts no such directory.
+ *  @brief Whether this kernel enumerates memory domains at all - what @c numa_available answered.
+ *  @note A kernel built without @c CONFIG_NUMA mounts no such directory.
  */
 FU_MAYBE_UNUSED_ static inline bool linux_has_memory_domains() noexcept {
     DIR *node_dir = ::opendir(sysfs_node_root_k);
@@ -1146,8 +1173,8 @@ FU_MAYBE_UNUSED_ static inline bool linux_has_memory_domains() noexcept {
 }
 
 /**
- *  @brief Highest online memory-domain id, or -1 where none can be read - what `numa_max_node` gave.
- *  @note `node/online` is an id list, and hot-unplug makes it gappy - "0,2" - so this is a ceiling only.
+ *  @brief Highest online memory-domain id, or -1 if none can be read - what @c numa_max_node gives.
+ *  @note `node/online` is a gappy id list after hot-unplug, e.g. "0,2", so this is a ceiling only.
  */
 FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcept {
     char path[256], line[256];
@@ -1163,11 +1190,11 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
 }
 
 /**
- *  @brief Reads one memory domain's total RAM into @p bytes - what `numa_node_size64` returned.
- *  @return topology_unavailable_k where the domain publishes no `meminfo` - offline, or absent.
+ *  @brief Reads one memory domain's total RAM into @p bytes - what @c numa_node_size64 returned.
+ *  @return topology_unavailable_k where the domain publishes no @c meminfo - offline, or absent.
  *  @note Fallible rather than 0-sentinel because the distinction is load-bearing: a failure is that
  *      function's negative, while success with zero @p bytes is a memoryless domain, still real.
- *      Its `free` out-parameter is not mirrored - the only caller wrote it and never read it.
+ *      Its @c free out-parameter is not mirrored - the only caller wrote it and never read it.
  */
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t read_ram_bytes_of_memory_domain(memory_domain_id_t const id,
                                                                                       std::size_t &bytes) noexcept {
@@ -1193,11 +1220,11 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
 }
 
 /**
- *  @brief Reads the cores of one memory domain into @p cores - what `numa_node_to_cpus` filled.
+ *  @brief Reads the cores of one memory domain into @p cores - what @c numa_node_to_cpus filled.
  *  @return topology_unavailable_k where the domain names no cpulist, bad_alloc_k where the mask
  *      could not be sized to hold it.
- *  @note A `core_mask`, so the harvest's own allocator owns it - `numa_allocate_cpumask` malloc'd
- *      behind its back, the very thing `core_mask` refuses `CPU_ALLOC` over.
+ *  @note A @c core_mask, so the harvest's own allocator owns it - @c numa_allocate_cpumask malloc'd
+ *      behind its back, the very thing @c core_mask refuses @c CPU_ALLOC over.
  */
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t capture_memory_domain_cores(memory_domain_id_t const id,
                                                                                   core_mask_t &cores) noexcept {
@@ -1219,23 +1246,26 @@ FU_MAYBE_UNUSED_ static inline memory_domain_id_t max_memory_domain_id() noexcep
 
 #pragma region Windows Processor Groups
 #if FU_ON_WINDOWS
+
 /**
- *  @brief One accumulator per processor group and efficiency class: the union of that class's core masks
- *      within the group, and the largest private cache seen for it.
- *  @sa `try_harvest_windows` builds these from the processor-core and cache relationships, then reads
+ *  @brief One accumulator per processor group and efficiency class: the union of that class's core
+ *      masks within the group, and the largest private cache seen for it.
+ *  @sa try_harvest_windows builds these from the processor-core and cache relationships, then reads
  *      them back per NUMA node - so it never keeps a per-processor scratch table.
  */
 struct win_group_class_cell_t {
+
     /** OR of every core of this class in this group. */
     KAFFINITY mask {0};
+
     /** Largest private L1/L2 cache seen for those cores. */
     std::size_t cache_bytes {0};
 };
 
 /**
- *  @brief Detects whether this SDK's `NUMA_NODE_RELATIONSHIP` exposes the multi-group `GroupMasks[]`.
- *  @note Version macros are unreliable here - MinGW reports Windows 7 yet defines the member - so we
- *      probe the member itself. Older SDKs model a node as a single group, read by the fallback.
+ *  @brief Detects whether the SDK's @c NUMA_NODE_RELATIONSHIP exposes multi-group `GroupMasks[]`.
+ *  @note Version macros are unreliable here - MinGW reports Windows 7 yet defines the member - so
+ *      we probe the member itself. Older SDKs model a node as a single group, read by the fallback.
  */
 template <typename numa_relationship_type_, typename = void>
 struct win_numa_has_group_masks : std::false_type {};
@@ -1246,9 +1276,9 @@ struct win_numa_has_group_masks<numa_relationship_type_,
 
 /**
  *  @brief Invokes @p visitor(group, mask) for every processor group a NUMA @p node owns.
- *  @note Templated on the node type so the discarded `if constexpr` branch is dependent and only the
- *      supported member is ever compiled. A node spanning several groups - the largest servers - is
- *      thus enumerated in full on new SDKs, and read through its single group on old ones.
+ *  @note Templated on the node type so the discarded `if constexpr` branch is dependent and only
+ *      the supported member is ever compiled. A node spanning several groups, the largest servers,
+ *      is thus enumerated in full on new SDKs, and read through its single group on old ones.
  */
 template <typename numa_relationship_type_, typename visitor_type_>
 static inline void win_numa_for_each_group(numa_relationship_type_ const &node, visitor_type_ &&visitor) noexcept {
@@ -1292,6 +1322,7 @@ FU_MAYBE_UNUSED_ static inline socket_id_t win_socket_for_node( //
 
 #pragma region Apple Performance Levels
 #if FU_ON_APPLE
+
 /**
  *  @brief Reads an unsigned integer `sysctl` by name - e.g. "hw.nperflevels" - or 0 if unavailable.
  *  @sa Used to harvest the Apple Silicon performance-level topology.
@@ -1304,10 +1335,11 @@ FU_MAYBE_UNUSED_ static inline std::size_t apple_sysctl_uint(char const *name) n
 }
 #endif // FU_ON_APPLE
 
-/*  The core-quality kit exists for one consumer - the QoS class a `colocated_pool` assigns at spawn -
- *  so it is gated on that capability: turning it off erases producer, field, and consumer together. */
+/*  The core-quality kit exists for one consumer, the QoS class a `colocated_pool` assigns at spawn,
+ *  so it is gated on that capability: turning it off drops producer, field, and consumer alike. */
 #if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
-/** Reads a string `sysctl` by name into @p out - always NUL-terminated - returning success. */
+
+/** Reads a string @c sysctl by name into @p out - always NUL-terminated - returning success. */
 [[nodiscard]] FU_MAYBE_UNUSED_ static inline status_t apple_sysctl_string(char const *name, char *out,
                                                                           std::size_t cap) noexcept {
     if (cap == 0) return status_t::invalid_argument_k;
@@ -1322,8 +1354,8 @@ FU_MAYBE_UNUSED_ static inline std::size_t apple_sysctl_uint(char const *name) n
 }
 
 /**
- *  @brief Apple's `hw.perflevelN.name` vocabulary as an @b absolute ladder; higher is more performant.
- *  @note Absolute, unlike `compute_level`: "Performance" is the same class on an M1, its top tier,
+ *  @brief Apple's `hw.perflevelN.name` as an @b absolute ladder; higher is more performant.
+ *  @note Absolute, unlike @c compute_level: "Performance" is the same class on an M1, its top tier,
  *      and an M5 Pro, its bottom. Apple has shipped exactly these three names.
  */
 enum apple_core_quality_t : core_quality_t {
@@ -1333,8 +1365,8 @@ enum apple_core_quality_t : core_quality_t {
 };
 
 /**
- *  @brief The name Apple gives an absolute core class, or `nullptr` for an unknown one.
- *  @note The one source of truth for the names; `apple_core_quality_from_name` inverts it.
+ *  @brief The name Apple gives an absolute core class, or @c nullptr for an unknown one.
+ *  @note The one source of truth for the names; @c apple_core_quality_from_name inverts it.
  */
 FU_MAYBE_UNUSED_ static inline char const *apple_core_quality_name(core_quality_t const quality) noexcept {
     switch (quality) {
@@ -1346,8 +1378,8 @@ FU_MAYBE_UNUSED_ static inline char const *apple_core_quality_name(core_quality_
 }
 
 /**
- *  @brief Maps a `hw.perflevelN.name` to its absolute class; inverts `apple_core_quality_name`.
- *  @return apple_performance_k for a null or unrecognised name, so `UTILITY` is never guessed.
+ *  @brief Maps a `hw.perflevelN.name` to its absolute class; inverts @c apple_core_quality_name.
+ *  @return apple_performance_k for a null or unrecognised name, so @c UTILITY is never guessed.
  */
 FU_MAYBE_UNUSED_ static inline core_quality_t apple_core_quality_from_name(char const *name) noexcept {
     if (name == nullptr) return apple_performance_k;
@@ -1367,9 +1399,9 @@ FU_MAYBE_UNUSED_ static inline core_quality_t apple_core_quality_from_name(char 
 /**
  *  @brief NUMA topology descriptor: describing memory pools and core counts next to them.
  *
- *  Uses dynamic memory to store the NUMA nodes and their cores. Assuming we may soon have
- *  Intel "Sierra Forest"-like CPUs with 288 cores with up to 8 sockets per node, this structure
- *  can easily grow to 10 KB.
+ *  Uses dynamic memory to store the NUMA nodes and their cores. Assuming we may soon have Intel
+ *  "Sierra Forest"-like CPUs with 288 cores with up to 8 sockets per node, this structure can
+ *  easily grow to 10 KB.
  */
 template <std::size_t max_page_sizes_ = 4, typename allocator_type_ = std::allocator<char>>
 struct machine_topology {
@@ -1385,18 +1417,25 @@ struct machine_topology {
   private:
     /** Allocator that backs every heap array below. */
     allocator_t allocator_ {};
+
     /** Memory domains, one per NUMA node. */
     dynamic_array<memory_domain_t, memory_domains_allocator_t> memory_domains_;
+
     /** Core IDs grouped by node then QoS; the nodes and domains below slice into this. */
     dynamic_array<core_id_t, cores_allocator_t> domain_core_ids_;
+
     /** Compute domains, one per same-QoS core run within a node; sized for the worst case. */
     dynamic_array<compute_domain_t, domains_allocator_t> compute_domains_;
+
     /** Number of memory domains, one per NUMA node. */
     std::size_t memory_domains_count_ {0};
+
     /** Total number of cores in all nodes. */
     std::size_t logical_cores_count_ {0};
+
     /** Number of compute domains actually written, never more than `compute_domains_.size()`. */
     std::size_t compute_domains_count_ {0};
+
     /** Number of distinct QoS classes, at least 1. */
     std::size_t compute_levels_count_ {1};
 
@@ -1445,12 +1484,12 @@ struct machine_topology {
     /**
      *  @brief Copy-assigns the topology from @p other.
      *
-     *  Instead of a copy-constructor we expose an explicit operation that can
-     *  FAIL - returning `false` if *any* intermediate allocation fails.
+     *  Instead of a copy-constructor we expose an explicit operation that can FAIL - returning
+     *  @c false if *any* intermediate allocation fails.
      *
      *  @param[in] other The topology to deep-copy from, left unchanged.
-     *  @return true on success, with the current instance owning a deep copy, or bad_alloc_k when an
-     *      allocation failed and the current instance is unchanged.
+     *  @return true on success, with the current instance owning a deep copy, or bad_alloc_k when
+     *      an allocation failed and the current instance is unchanged.
      */
     [[nodiscard]] status_t assign(machine_topology const &other) noexcept {
         if (this == &other) return status_t::success_k; // ? Self-assignment is a no-op
@@ -1495,7 +1534,7 @@ struct machine_topology {
 
 #pragma region Core API
 
-    /** @brief Number of memory domains, one per NUMA node. @sa `compute_domains_count`. */
+    /** Number of memory domains, one per NUMA node. @sa compute_domains_count. */
     std::size_t memory_domains_count() const noexcept { return memory_domains_count_; }
     std::size_t logical_cores_count() const noexcept { return logical_cores_count_; }
 
@@ -1507,6 +1546,7 @@ struct machine_topology {
 
     /** Number of compute domains - one per same-QoS core run within a node. */
     std::size_t compute_domains_count() const noexcept { return compute_domains_count_; }
+
     /** Number of distinct QoS classes across all compute domains, at least 1. */
     std::size_t compute_levels_count() const noexcept { return compute_levels_count_; }
 
@@ -1530,16 +1570,17 @@ struct machine_topology {
      *  @brief Fills a single memory domain and compute domain covering every allowed core.
      *  @return false only if the core count is zero or an allocation fails.
      *
-     *  The uniform view used when no richer topology source exists - a build without `FU_WITH_TOPOLOGY`,
-     *  or a machine the kernel reports no NUMA for. Every query then returns a sensible whole-machine
-     *  answer and a `distributed_pool` degenerates to one domain, so `fu_topology_t` is usable anywhere.
+     *  The uniform view used when no richer topology source exists - a build without
+     *  @c FU_WITH_TOPOLOGY, or a machine the kernel reports no NUMA for. Every query then returns a
+     *  sensible whole-machine answer and a @c distributed_pool degenerates to one domain, so
+     *  @c fu_topology_t is usable anywhere.
      */
     [[nodiscard]] status_t harvest_portable() noexcept {
         reset();
 
         // Name the allowed cores, never just count them: a dense `0..n-1` iota over the count would
-        // report ids 0-7 under `taskset -c 8-15` - eight cores we may not run on. Where no mask exists
-        // the platform numbers them densely anyway, and the iota is then the honest answer.
+        // report ids 0-7 under `taskset -c 8-15` - eight cores we may not run on. Where no mask
+        // exists the platform numbers them densely anyway, and the iota is then the honest answer.
         core_mask_t allowed;
         bool const allowed_known = succeeded(capture_thread_cores(allowed)) && allowed.count() != 0;
         std::size_t const cores = allowed_known ? allowed.count() : possible_cores();
@@ -1595,16 +1636,17 @@ struct machine_topology {
 
 #pragma region FreeBSD Harvest
 #if FU_ON_FREEBSD
+
     /**
-     *  @brief Harvests memory domains and their cores through the in-kernel `cpuset`/NUMA framework.
-     *  @sa `harvest` dispatches here; `try_harvest_portable` is the fallback when NUMA is absent.
+     *  @brief Harvests memory domains and cores through the in-kernel @c cpuset/NUMA framework.
+     *  @sa harvest dispatches here; @c try_harvest_portable is the fallback when NUMA is absent.
      *
-     *  FreeBSD ships no `libnuma`. `sysctl vm.ndomains` counts the NUMA memory domains, and
-     *  `cpuset_getaffinity(CPU_WHICH_DOMAIN)` reports the cores each one owns. Every domain's cores are
-     *  intersected with the set this process may actually run on, exactly as the Linux harvest does, so
-     *  a jailed or `cpuset`-narrowed process never sizes a pool from cores it will never be scheduled
-     *  on. Cores are not ranked by class here - FreeBSD publishes no per-core capacity - so each memory
-     *  domain yields exactly one compute domain.
+     *  FreeBSD ships no @c libnuma. `sysctl vm.ndomains` counts the NUMA memory domains, and
+     *  `cpuset_getaffinity(CPU_WHICH_DOMAIN)` reports the cores each one owns. Every domain's cores
+     *  are intersected with the set this process may actually run on, exactly as the Linux harvest
+     *  does, so a jailed or @c cpuset-narrowed process never sizes a pool from cores it will never
+     *  be scheduled on. Cores are not ranked by class here - FreeBSD publishes no per-core capacity
+     *  - so each memory domain yields exactly one compute domain.
      */
     [[nodiscard]] status_t harvest_freebsd() noexcept {
         reset();
@@ -1617,8 +1659,9 @@ struct machine_topology {
         if (::sysctlbyname("vm.ndomains", &domain_count, &domain_count_size, nullptr, 0) != 0 || domain_count < 1)
             return harvest_portable(); // ? No NUMA report - one uniform domain
 
-        // A scratch mask reused for each domain's core set. `try_capture_thread_cores` already proved a
-        // `cpuset_t`-sized buffer round-trips through the kernel; the domain query fills the same shape.
+        // A scratch mask reused for each domain's core set. `try_capture_thread_cores` already
+        // proved a `cpuset_t`-sized buffer round-trips through the kernel; the domain query fills
+        // the same shape.
         core_mask_t domain_mask;
         if (status_t const grew = domain_mask.resize(); failed(grew)) return grew;
 
@@ -1644,7 +1687,7 @@ struct machine_topology {
         }
         if (fetched_memory_domains == 0) return harvest_portable(); // ? Every domain masked away
 
-        // Second pass - allocate. One compute domain per memory domain, since cores are unranked here.
+        // Second pass: allocate one compute domain per memory domain; cores are unranked here.
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
@@ -1717,8 +1760,8 @@ struct machine_topology {
      *  @return true if the harvest was successful and the topology is ready to use, or false if the
      *      platform lacks topology support or the harvest failed.
      *
-     *  Falls back to `try_harvest_portable` whenever no richer source is available, so a spawned pool
-     *  always sees at least one compute and one memory domain.
+     *  Falls back to @c try_harvest_portable whenever no richer source is available, so a spawned
+     *  pool always sees at least one compute and one memory domain.
      */
     [[nodiscard]] status_t harvest() noexcept {
 #if FU_WITH_TOPOLOGY && FU_ON_LINUX
@@ -1733,7 +1776,8 @@ struct machine_topology {
         if (!linux_has_memory_domains()) return harvest_portable(); // ? No NUMA - one uniform domain
 
         // A scratch mask reused for each domain's core set - sized once, refilled per domain, and
-        // owned by this harvest's allocator rather than by a `malloc` behind `numa_allocate_cpumask`.
+        // owned by this harvest's allocator rather than by a `malloc` behind
+        // `numa_allocate_cpumask`.
         core_mask_t domain_mask;
         if (status_t const grew = domain_mask.resize(); failed(grew)) return grew; // ! Allocation failed
 
@@ -1744,8 +1788,8 @@ struct machine_topology {
             std::size_t node_ram = 0;
             if (failed(read_ram_bytes_of_memory_domain(memory_domain_id, node_ram))) continue; // ! Offline
             if (failed(capture_memory_domain_cores(memory_domain_id, domain_mask))) continue;  // ! No CPU map
-            // A cpuless memory domain (HBM-flat, CXL expander, GPU HBM) reports zero cores, yet is a
-            // valid memory domain - and so is one whose every core was masked away from us.
+            // A cpuless memory domain (HBM-flat, CXL expander, GPU HBM) reports zero cores, yet is
+            // a valid memory domain - and so is one whose every core was masked away from us.
             std::size_t node_cores = 0;
             std::size_t const id_space = domain_mask.capacity();
             for (std::size_t bit = 0; bit < id_space; ++bit) {
@@ -1772,7 +1816,7 @@ struct machine_topology {
         compute_domain_t *const domains_ptr = domains.data();
 
         // A scratch table of every configured CPU's capacity, filled once below and read by the
-        // per-node QoS split (which is O(n^2) in comparisons) instead of re-opening sysfs each time.
+        // per-node QoS split - an O(n^2) comparison - instead of re-opening sysfs each time.
         std::size_t const configured_cores = possible_cores();
         if (configured_cores == 0) return status_t::topology_unavailable_k; // ! Not a valid state
         dynamic_array<std::size_t, capacities_allocator_t> capacities {capacities_allocator_t {allocator_}};
@@ -1803,8 +1847,9 @@ struct machine_topology {
             }
             node.logical_cores_count = core_index - core_index_before;
 
-            // ? Cpuless memory domains have no core to query - default the socket and skip the lookup.
-            // ! Only valid once `first_core_id` points to initialized entries, hence after the loop above
+            // ? Cpuless memory domains have no core to query - default the socket and skip the
+            // ? lookup.
+            // ! Valid only after the loop above initializes every `first_core_id` entry.
             node.socket_id = node.logical_cores_count > 0 ? socket_id_of_core(node.first_core_id[0]) : -1;
 
             // Fetch Huge Page sizes for this NUMA node
@@ -1820,7 +1865,7 @@ struct machine_topology {
         memory_domains_count_ = fetched_memory_domains;
         logical_cores_count_ = fetched_cores;
 
-        // Let's sort all the nodes by their socket ID, then by number of cores, then by first core ID
+        // Sort the nodes by socket ID, then by number of cores, then by first core ID.
         bubble_sort(memory_domains_.data(), memory_domains_count_,
                     [](memory_domain_t const &a, memory_domain_t const &b) noexcept {
                         if (a.socket_id != b.socket_id) return a.socket_id < b.socket_id;
@@ -1870,12 +1915,13 @@ struct machine_topology {
                     domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
                     domain.compute_level = core_capacities[static_cast<std::size_t>(
                         node_cores[run_begin])]; // ? Raw capacity, ranked below
-                    // ! Keep the raw magnitude too - `compute_level` is about to collapse into an ordinal.
+                    // ! Keep the raw magnitude too - `compute_level` is about to collapse into an
+                    // ! ordinal.
                     // TODO: measure `capacity` in-house too, like the memory edges. The scheduler's
                     // `cpu_capacity` is the platform's opinion, and most kernels report none; the
-                    // measured-distances infrastructure could rate cores by observed throughput, but
-                    // needs the same bucketing as the fabric's tier derivation, or every
-                    // domain becomes its own `compute_level` and the QoS split explodes.
+                    // measured-distances infrastructure could rate cores by observed throughput,
+                    // but needs the same bucketing as the fabric's tier derivation, or every domain
+                    // becomes its own `compute_level` and the QoS split explodes.
                     domain.capacity = core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
                     domain.cache_bytes =
                         cache_bytes_of_core(node_cores[run_begin], node_cores + run_begin, core - run_begin);
@@ -1919,24 +1965,25 @@ struct machine_topology {
 
 #pragma region Apple Harvest
 #if FU_ON_APPLE
+
     /**
-     *  @brief Harvests the Apple Silicon topology from `sysctl` performance levels.
+     *  @brief Harvests the Apple Silicon topology from @c sysctl performance levels.
      *  @return false if the machine reports no logical CPUs or an allocation failed.
      *
      *  Apple Silicon is one UMA memory domain shared by every core, so we build a single memory
-     *  domain. The compute axis is cut twice: first by `hw.perflevelN`, then by `cpusperl2` within
+     *  domain. The compute axis is cut twice: first by `hw.perflevelN`, then by @c cpusperl2 within
      *  each level, because a performance level may span several L2 clusters that share no cache.
      *  A compute domain is cores sharing a QoS class @b and locality, so the cluster is the unit.
-     *  Domains from one level all carry that level's `compute_level`; `hw.perflevel0` ranks highest.
+     *  Domains from one level carry that level's @c compute_level; `hw.perflevel0` ranks highest.
      *
      *  Performance levels rank cores without rating them, and the parts they distinguish need not
-     *  differ in clock - some pair equal scalar throughput with unequal cache. So `capacity` stays
-     *  0 and only `cache_bytes` is populated; weighting work by the level ordinal
-     *  would hand a wide-cache cluster more tasks than it can necessarily retire any faster.
+     *  differ in clock - some pair equal scalar throughput with unequal cache. So @c capacity stays
+     *  0 and only @c cache_bytes is populated; weighting work by the level ordinal would hand a
+     *  wide-cache cluster more tasks than it can necessarily retire any faster.
      *
      *  @note macOS exposes no hard pinning - `thread_policy_set(THREAD_AFFINITY_POLICY)` returns
-     *      `KERN_NOT_SUPPORTED` on arm64, and QoS classes are the only placement lever. These
-     *      domains are therefore descriptive: `spawn_on` reports them, the kernel still migrates.
+     *      @c KERN_NOT_SUPPORTED on arm64, and QoS classes are the only placement lever. These
+     *      domains are therefore descriptive: @c spawn_on reports them, the kernel still migrates.
      */
     [[nodiscard]] status_t harvest_apple() noexcept {
         std::size_t const total_cores = apple_sysctl_uint("hw.logicalcpu");
@@ -1953,7 +2000,8 @@ struct machine_topology {
         }
         if (nonempty_levels == 0) nonempty_levels = 1; // ? One level covering every core
 
-        // `compute_domains_` is sized to `logical_cores_count_` across the class (at most one domain per core).
+        // `compute_domains_` is sized to `logical_cores_count_` across the class (at most one
+        // domain per core).
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
@@ -1972,8 +2020,9 @@ struct machine_topology {
         node.first_core_id = core_ids_ptr;
         node.logical_cores_count = total_cores;
 
-        // One compute domain per L2 cluster. Apple lists cores fastest-level first, so `hw.perflevel0`
-        // takes the highest compute level; every cluster carved out of it repeats that same level.
+        // One compute domain per L2 cluster. Apple lists cores fastest-level first, so
+        // `hw.perflevel0` takes the highest compute level; every cluster carved out of it repeats
+        // that same level.
         std::size_t core_offset = 0, domains_written = 0, levels_written = 0;
         for (std::size_t level = 0; level < levels && core_offset < total_cores; ++level) {
             char name[64];
@@ -2050,30 +2099,32 @@ struct machine_topology {
 
 #pragma region Windows Harvest
 #if FU_ON_WINDOWS
+
     /**
-     *  @brief Harvests the Windows topology from `GetLogicalProcessorInformationEx`.
+     *  @brief Harvests the Windows topology from @c GetLogicalProcessorInformationEx.
      *  @return false if the machine reports no NUMA node or an allocation failed.
      *
      *  Windows describes a machine in the same two axes this library already uses. A @b processor
-     *  @b group holds at most 64 logical processors sharing one `KAFFINITY` mask; groups are cut along
-     *  NUMA boundaries, so a NUMA node maps to one memory domain. Within a node the compute axis is cut
-     *  by @b efficiency @b class - the kernel's rank of a core's performance, where a higher class is
-     *  more performant - so a hybrid P/E chip yields one compute domain per class, exactly as Apple's
-     *  performance levels do. Non-hybrid chips report class 0 for every core and collapse to a single
-     *  compute domain per node.
+     *  @b group holds at most 64 logical processors sharing one @c KAFFINITY mask; groups are cut
+     *  along NUMA boundaries, so a NUMA node maps to one memory domain. Within a node the compute
+     *  axis is cut by @b efficiency @b class - the kernel's rank of a core's performance, where a
+     *  higher class is more performant - so a hybrid P/E chip yields one compute domain per class,
+     *  exactly as Apple's performance levels do. Non-hybrid chips report class 0 for every core and
+     *  collapse to a single compute domain per node.
      *
      *  Rather than a per-processor scratch table, the harvest accumulates one mask per processor
-     *  group and efficiency class - a @ref win_group_class_cell_t - so its working set is tiny and it
-     *  reads the compute domains straight out of masks, the unit Windows itself speaks in.
+     *  group and efficiency class - a @ref win_group_class_cell_t - so its working set is tiny and
+     *  it reads the compute domains straight out of masks, the unit Windows itself speaks in.
      *
      *  Efficiency class is an ordinal, not a magnitude - it ranks cores without rating them - so
-     *  `capacity` stays 0 and callers weigh domains by `logical_cores_count`, mirroring the
-     *  Apple path. `cache_bytes` is the largest private L1/L2 cache the kernel reports for the class.
+     *  @c capacity stays 0 and callers weigh domains by @c logical_cores_count, mirroring the Apple
+     *  path. @c cache_bytes is the largest private L1/L2 cache the kernel reports for the class.
      *
-     *  @note A `core_id_t` here is not a flat index: it packs the group and in-group bit pair via
-     *      `win_encode_core_id`, which `try_pin_thread_to_cores` decodes back into a `GROUP_AFFINITY`.
-     *  @note A NUMA node spanning several processor groups - the largest servers - is enumerated in full
-     *      where the SDK exposes `GroupMasks[]`; @sa `win_numa_for_each_group`.
+     *  @note A @c core_id_t here is not a flat index: it packs the group and in-group bit pair via
+     *      `win_encode_core_id`, which `try_pin_thread_to_cores` decodes into a `GROUP_AFFINITY`.
+     *  @note A NUMA node spanning several processor groups - the largest servers - is enumerated in
+     *      full where the SDK exposes `GroupMasks[]`.
+     *  @sa win_numa_for_each_group
      */
     [[nodiscard]] status_t harvest_windows() noexcept {
         // Pull one relationship class into a heap buffer the caller frees. The record layout is
@@ -2096,14 +2147,14 @@ struct machine_topology {
             typename std::allocator_traits<allocator_t>::template rebind_alloc<win_group_class_cell_t>;
 
         // Everything the `failed_harvest:` label frees must be declared and initialized before the
-        // first `goto`, so a jump there never skips an initializer. Only the Win32 buffers still need
-        // the label; the arrays below own themselves.
+        // first `goto`, so a jump there never skips an initializer. Only the Win32 buffers still
+        // need the label; the arrays below own themselves.
         cell_allocator_t cell_alloc {allocator_};
         BYTE *numa_buf = nullptr, *package_buf = nullptr;
         win_group_class_cell_t *cells = nullptr; // ? [group * class_count + class]: core mask + private cache
 
         // ! Declared before the first `goto`: jumping over a non-trivial destructor is ill-formed.
-        // ! They free themselves at every exit, so the label below need only mind the Win32 buffers.
+        // ! They free themselves at every exit, so only the Win32 buffers below need minding.
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
@@ -2118,8 +2169,8 @@ struct machine_topology {
         // A processor group holds at most 64 logical processors; `group_span` bounds the cell grid.
         WORD const group_span = ::GetActiveProcessorGroupCount() ? ::GetActiveProcessorGroupCount() : 1;
 
-        // Pass 1: from the physical-core relationships, learn how many efficiency classes exist, then
-        // OR each core into its (group, class) cell. Two sweeps of one buffer - measure, then fill.
+        // Pass 1: from the physical-core relationships, learn how many efficiency classes exist,
+        // then OR each core into its group-class cell; two sweeps of one buffer measure, then fill.
         {
             BYTE *cores_buf = query(RelationProcessorCore, cores_len);
             if (!cores_buf) goto failed_harvest; // ! No processor information at all
@@ -2154,8 +2205,8 @@ struct machine_topology {
             std::free(cores_buf);
         }
 
-        // Pass 2: attribute each private (L1/L2) cache to the (group, class) cells its cores belong to.
-        // L3 is shared across domains, so it would misreport a domain's private cache and is skipped.
+        // Pass 2: attribute each private L1/L2 cache to the group-class cells its cores belong to.
+        // L3 is shared across domains and misreports a domain's private cache, so it's skipped.
         if (BYTE *cache_buf = query(RelationCache, cache_len)) {
             for (DWORD offset = 0; offset < cache_len;) {
                 auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(cache_buf + offset);
@@ -2176,7 +2227,7 @@ struct machine_topology {
             std::free(cache_buf);
         }
 
-        // Packages are kept until the fill so each node can be tagged with its socket; null is fine.
+        // Packages are kept until the fill so each node is tagged with its socket; null is fine.
         package_buf = query(RelationProcessorPackage, package_len);
 
         // Pass 3: count nodes and total cores - counting the exact bits pass 4 will emit (each node
@@ -2200,9 +2251,9 @@ struct machine_topology {
         }
         if (counted_nodes == 0 || counted_cores == 0) goto failed_harvest; // ! Nothing to spawn onto
 
-        // Allocate the committed arrays. `compute_domains_` is sized to the core count - at most one
-        // domain per core. `resize` value-initializes, so the members the fill below does not touch
-        // - the `page_sizes` inventory - hold their zeroed defaults rather than garbage.
+        // Allocate the committed arrays. `compute_domains_` is sized to the core count - at most
+        // one domain per core. `resize` value-initializes, so the members the fill below does not
+        // touch - the `page_sizes` inventory - hold their zeroed defaults rather than garbage.
         if (failed(nodes.resize(counted_nodes))) goto failed_harvest;    // ! Out of memory
         if (failed(core_ids.resize(counted_cores))) goto failed_harvest; // ! Out of memory
         if (failed(domains.resize(counted_cores))) goto failed_harvest;  // ! Out of memory
@@ -2210,9 +2261,9 @@ struct machine_topology {
         core_ids_ptr = core_ids.data();
         domains_ptr = domains.data();
 
-        // Pass 4: fill each node, emitting its cores one efficiency class at a time (most performant
-        // first) so a class's cores land contiguously and become one compute domain - reading the
-        // (group, class) cells rather than any per-core table.
+        // Pass 4: fill each node, emitting its cores one efficiency class at a time (most
+        // performant first) so a class's cores land contiguously and become one compute domain -
+        // reading the (group, class) cells rather than any per-core table.
         for (DWORD offset = 0; offset < numa_len;) {
             auto *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(numa_buf + offset);
             if (record->Relationship != RelationNumaNode) {
@@ -2273,8 +2324,8 @@ struct machine_topology {
         cell_alloc.deallocate(cells, cell_count);
         cells = nullptr;
 
-        // Collapse the raw efficiency classes into a dense 0..K-1 rank, least-performant first - the
-        // ordinal `compute_level` promises. A non-hybrid machine ranks every domain 0: one level.
+        // Collapse the raw efficiency classes into a dense 0..K-1 rank, least-performant first -
+        // the ordinal `compute_level` promises. A non-hybrid machine ranks every domain at level 0.
         if (domain_cursor != 0)
             levels = dense_rank(
                 domain_cursor,

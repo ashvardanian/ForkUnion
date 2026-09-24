@@ -1,46 +1,48 @@
 /**
+ *  @file include/forkunion/atomics.hpp
+ *  @author Ash Vardanian
+ *  @date September 5, 2026
  *  @brief `std::atomic_ref` replacements that spell every access as the one instruction a CPU
  *      generation has for it, independent of the translation unit's target flags.
  *
- *  @author Ash Vardanian
- *  @file include/forkunion/atomics.hpp
- *  @date September 5, 2026
+ *  @c standard_atomic_ref is the in-house @c std::atomic_ref: the standard operations verbatim plus
+ *  the ones the standard lacks - @c fetch_max and @c fetch_min ahead of C++26, no-return @c add,
+ *  @c sub, @c set_bits, @c clear_bits and @c flip_bits, and the conditional @c fetch_add_if_at_most
+ *  and @c fetch_sub_if_at_least - spelled portably via compare-exchange. Instruction-set references
+ *  share that interface and replace both the portable loops and the compiler's flag-dependent
+ *  lowering with instructions:
  *
- *  `standard_atomic_ref` is the in-house `std::atomic_ref`: the standard operations verbatim plus
- *  the ones the standard lacks - `fetch_max`/`fetch_min` ahead of C++26, the no-return `add`/`sub`/
- *  `set_bits`/`clear_bits`/`flip_bits`, and the conditional `fetch_add_if_at_most`/`fetch_sub_if_at_least` - spelled
- *  portably over compare-exchange. The instruction-set references share that interface and replace
- *  the loops and the compiler's flag-dependent lowering with instructions:
- *
- *  - `x86_cmpccxadd_atomic_ref`: the conditional adds as one `cmpccxadd`; every other operation
- *    is the `lock`-prefixed instruction the compiler emits anyway.
+ *  - `x86_cmpccxadd_atomic_ref`: the conditional adds as one `cmpccxadd`; every other operation is
+ *    the @c lock-prefixed instruction the compiler emits anyway.
  *  - `x86_raoint_atomic_ref`: the relaxed no-return forms as RAO-INT `aadd`/`aand`/`aor`, executed
  *    at the shared cache rather than pulling the line.
- *  - `arm64_lse_atomic_ref`: Armv8.1 `swp`, `cas`, `ldadd`, `ldclr`, `ldset`, `ldeor`, `ldsmax`
- *    & kin - one instruction per read-modify-write, the no-return `st*` forms posted without a
- *    round trip; `ldar`/`stlr` for the ordered loads & stores. Measured on an M5 Pro against the
- *    exclusive loops a baseline build gets: 5x uncontended, 3-4x with 18 threads on one word.
- *  - `arm64_rcpc_atomic_ref`: the above with Armv8.3 `ldapr` for acquiring loads - RCpc, which
- *    needn't wait for the core's earlier release stores the way RCsc `ldar` may.
+ *
+ *  @c arm64_lse_atomic_ref swaps in Armv8.1 @c swp, @c cas, @c ldadd, @c ldclr, @c ldset, @c ldeor,
+ *  `ldsmax` & kin - one instruction per read-modify-write, the no-return `st*` forms posted without
+ *  a round trip; @c ldar and @c stlr for ordered loads & stores. Measured on an M5 Pro against the
+ *  exclusive loops a baseline build gets: 5x uncontended, 3-4x with 18 threads on one word.
+ *
+ *  - @c arm64_rcpc_atomic_ref: the above with Armv8.3 @c ldapr for acquiring loads - RCpc, which
+ *    needn't wait for the core's earlier release stores the way RCsc @c ldar may.
  *  - `risc5_atomic_ref`: the base A extension - `amoswap`, `amoadd`, `amoand`, `amoor`, `amomax`,
- *    `amomin` & the unsigned twins, with `x0` as the destination for the no-return forms - and
- *    `lr`/`sc` loops for compare-exchange and byte exchanges; fences around loads & stores.
- *  - `risc5_zacas_atomic_ref`: compare-exchange as one `amocas`.
+ *    @c amomin & the unsigned twins, with @c x0 as the destination for the no-return forms - and
+ *    @c lr and @c sc loops for compare-exchange and byte exchanges; fences around loads & stores.
+ *  - @c risc5_zacas_atomic_ref: compare-exchange as one @c amocas.
  *
- *  Only the widths & operations the indexes use are spelled: byte exchanges & compare-exchanges
- *  for flags, 32-bit forms for node ids, 64-bit forms for counters & packed words. Every reference
- *  assembles in a baseline translation unit: on Arm the extension is named in the assembly text
- *  - `.arch_extension` - the RISC-V base atomics are the A-extension mnemonics every `rv64gc`
+ *  Only the widths & operations the indexes use are spelled: byte exchanges & compare-exchanges for
+ *  flags, 32-bit forms for node ids, 64-bit forms for counters & packed words. Every reference
+ *  assembles in a baseline translation unit: on Arm the extension is named in the assembly text -
+ *  `.arch_extension` - the RISC-V base atomics are the A-extension mnemonics every @c rv64gc
  *  toolchain assembles, and the x86 and RISC-V extension instructions are raw bytes; the runtime
- *  capability bit decides whether it may run. Where inline assembly is unavailable - MSVC - the Arm64
- *  references are spelled over `__ldar`/`__stlr`/`__ldapr`, `__swp*`, `__cas*` and the `_Interlocked*`
- *  arithmetic, which stays inline only under `/arch:armv8.1`; the x86 and RISC-V references have no
- *  intrinsic for their instructions, so those targets keep `standard_atomic_ref`.
- *  `preferred_atomic_ref`, at the bottom, is the newest reference this unit may run with no runtime
- *  probe, reading `FU_TARGET_<BIT>` alone - the compilation target's promise in a unit that dispatches
- *  nothing - for callers picking at compile time rather than per CPU class.
+ *  capability bit decides whether it may run. Where inline assembly is unavailable - MSVC - the
+ *  Arm64 references are spelled over @c __ldar, @c __stlr, @c __ldapr, `__swp*`, `__cas*` and the
+ *  `_Interlocked*` arithmetic, which stays inline only under `/arch:armv8.1`; the x86 and RISC-V
+ *  references lack intrinsics for their instructions, so those targets keep @c standard_atomic_ref.
+ *  The @c preferred_atomic_ref at the bottom is the newest reference this unit may run with no
+ *  runtime probe, reading `FU_TARGET_<BIT>` alone - the compilation target's promise in a unit that
+ *  dispatches nothing - for compile-time callers, not per CPU class.
  *
- *  The header needs the library's `std::atomic_ref` and `std::bit_cast`, so it is empty without
+ *  The header needs the library's @c std::atomic_ref and @c std::bit_cast, so it is empty without
  *  them - a C++17 translation unit including the umbrella sees nothing here.
  */
 #pragma once
@@ -63,8 +65,8 @@ namespace forkunion {
 
 #if defined(__cpp_lib_atomic_ref) && defined(__cpp_lib_bit_cast)
 
-/** The words arithmetic read-modify-writes apply to: integers other than `bool`, as the
- *  standard's integral `atomic_ref` specialization draws the line - the instructions add bits. */
+/** The words arithmetic read-modify-writes apply to: integers other than @c bool, as the standard's
+ *  integral @c atomic_ref specialization draws the line - the instructions add bits. */
 template <typename value_type_>
 concept atomic_integer = std::integral<value_type_> && !std::same_as<value_type_, bool>;
 
@@ -73,7 +75,8 @@ template <typename value_type_>
 using atomic_word = std::conditional_t<sizeof(value_type_) == 1, std::uint8_t,
                                        std::conditional_t<sizeof(value_type_) == 4, std::uint32_t, std::uint64_t>>;
 
-/** Whether an order carries acquire or release semantics - the two bits every ISA's mnemonics encode. */
+/** Whether an order carries acquire or release semantics - the two bits every ISA's mnemonics
+ *  encode. */
 constexpr bool acquires(std::memory_order order) noexcept {
     return order == std::memory_order_acquire || order == std::memory_order_consume ||
            order == std::memory_order_acq_rel || order == std::memory_order_seq_cst;
@@ -82,6 +85,7 @@ constexpr bool releases(std::memory_order order) noexcept {
     return order == std::memory_order_release || order == std::memory_order_acq_rel ||
            order == std::memory_order_seq_cst;
 }
+
 /** The failure order the standard derives from a single compare-exchange order. */
 constexpr std::memory_order failure_order(std::memory_order success) noexcept {
     if (success == std::memory_order_acq_rel) return std::memory_order_acquire;
@@ -90,7 +94,7 @@ constexpr std::memory_order failure_order(std::memory_order success) noexcept {
 }
 
 /** A reference spelling the verbs past the standard's - every reference in this header does,
- *  `std::atomic_ref` does not - so code holding either posts through the functions below. */
+ *  @c std::atomic_ref does not - so code holding either posts through the functions below. */
 template <typename reference_type_, typename value_type_>
 concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
     reference.add(value, std::memory_order_relaxed);
@@ -130,10 +134,10 @@ void atomic_flip_bits(reference_type_ reference, value_type_ bits, std::memory_o
     else reference.fetch_xor(bits, order);
 }
 
-/** The bounded read-modify-writes for any reference: adds @p operand only if the sum stays at
- *  most @p limit, or subtracts it only if the difference stays at least @p floor, returning the
- *  value held before. One `cmpccxadd` on Intel; elsewhere a read-first compare-exchange loop, so a
- *  word that already refuses returns without writing and losers never take the line. */
+/** The bounded read-modify-writes for any reference: adds @p operand only if the sum stays at most
+ *  @p limit, or subtracts it only if the difference stays at least @p floor, returning the value
+ *  held before. One @c cmpccxadd on Intel; elsewhere a read-first compare-exchange loop, so a word
+ *  that already refuses returns without writing and losers never take the line. */
 template <typename reference_type_, typename value_type_>
 value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
                                         std::memory_order order) noexcept {
@@ -160,11 +164,13 @@ value_type_ atomic_fetch_sub_if_at_least(reference_type_ reference, value_type_ 
 }
 
 /**
- *  @brief `std::atomic_ref` with the operations the standard lacks, spelled the portable way:
- *      compare-exchange loops for the conditional and extremal read-modify-writes, discarded
- *      results for the no-return ones - which the compiler lowers to the store-only instruction
- *      where the target has it. The instruction-set references below share this interface and
- *      replace the loops with `ldsmax`, `stadd`, `cmpccxadd` and kin.
+ *  @brief `std::atomic_ref` with the operations the standard lacks, spelled portably over
+ *      compare-exchange loops.
+ *
+ *  Compare-exchange loops handle the conditional and extremal read-modify-writes; the no-return
+ *  ones discard the result, which the compiler lowers to the store-only instruction where the
+ *  target has it. The instruction-set references below share this interface and replace the loops
+ *  with @c ldsmax, @c stadd, @c cmpccxadd and kin.
  *
  *  Fences can't stand in for any of these: a fence orders accesses, it doesn't make a
  *  read-compare-write atomic. What makes the loops cheap is reading first - a word that already
@@ -173,6 +179,7 @@ value_type_ atomic_fetch_sub_if_at_least(reference_type_ reference, value_type_ 
 template <typename value_type_>
 struct standard_atomic_ref {
     using value_t = value_type_;
+
     /** The runtime bits a reference needs admitted before it may run - none here. */
     static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
 
@@ -221,7 +228,7 @@ struct standard_atomic_ref {
         return reference_().fetch_xor(bits, order);
     }
 
-    /** C++26's `fetch_max`: the value held before, whether or not the operand replaced it. */
+    /** C++26's @c fetch_max: the value held before, whether or not the operand replaced it. */
     value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
@@ -241,11 +248,11 @@ struct standard_atomic_ref {
         return observed;
     }
 
-    /** Adds @p operand only if the sum stays at most @p limit - one `cmpccxadd` on Intel, a
-     *  read-first compare-exchange loop elsewhere. Returns the value held before; the caller
-     *  learns the outcome from `observed + operand <= limit`. An operand past the limit, or a
-     *  floor the operand cannot be taken from, merely observes the word - nothing is required of
-     *  either, beyond a signed sum or difference that stays representable. */
+    /** Adds @p operand only if the sum stays at most @p limit - one @c cmpccxadd on Intel, a
+     *  read-first compare-exchange loop elsewhere. Returns the value held before; the caller learns
+     *  the outcome from `observed + operand <= limit`. An operand past the limit, or a floor the
+     *  operand cannot be taken from, merely observes the word - nothing is required of either,
+     *  beyond a signed sum or difference that stays representable. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -253,8 +260,9 @@ struct standard_atomic_ref {
         // A plain `std::atomic_ref`, or the free verb would post straight back through this one.
         return atomic_fetch_add_if_at_most(reference_(), operand, limit, order);
     }
-    /** Subtracts @p operand only if the difference stays at least @p floor - the semaphore
-     *  acquire. Returns the value held before; the outcome is `observed >= floor + operand`. */
+
+    /** Subtracts @p operand only if the difference stays at least @p floor - the semaphore acquire.
+     *  Returns the value held before; the outcome is `observed >= floor + operand`. */
     value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
                                       std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -263,9 +271,9 @@ struct standard_atomic_ref {
         return atomic_fetch_sub_if_at_least(reference_(), operand, floor, order);
     }
 
-    /** No-return read-modify-writes: the op is posted, nothing is waited for - `stadd`, `stclr`,
-     *  `stset` on Arm, `lock add` on x86, the remote `aadd` family with RAO-INT. Only relaxed
-     *  and release orders exist for them: with no value returned there is nothing to acquire. */
+    /** No-return read-modify-writes: the op is posted, nothing is waited for - @c stadd, @c stclr,
+     *  @c stset on Arm, `lock add` on x86, the remote @c aadd family with RAO-INT. Only relaxed and
+     *  release orders exist for them: with no value returned there is nothing to acquire. */
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
@@ -303,11 +311,11 @@ struct standard_atomic_ref {
  *  @brief Read-only access to a word other threads may be writing: the loads of @ref
  *      standard_atomic_ref, reached down a path that may not write.
  *
- *  `const` is a permission on the path, never a promise that the word holds still - a reader
- *  holding a const handle still shares the storage a writer mutates. This is the one reference
- *  that cannot reach its word without a cast: `std::atomic_ref` binds no const word before
- *  P3323, and no other standard spelling loads atomically from a plain word. Every ISA reference
- *  below binds its own const pointer and needs none.
+ *  @c const is a permission on the path, never a promise that the word holds still - a reader
+ *  holding a const handle still shares the storage a writer mutates. This is the one reference that
+ *  cannot reach its word without a cast: `std::atomic_ref` binds no const word before P3323, and no
+ *  other standard spelling loads atomically from a plain word. Every ISA reference below binds its
+ *  own const pointer and needs none.
  */
 template <typename value_type_>
 struct standard_atomic_ref<value_type_ const> {
@@ -315,6 +323,7 @@ struct standard_atomic_ref<value_type_ const> {
     static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
 
     explicit standard_atomic_ref(value_type_ const &word) noexcept : word_(&word) {}
+
     /** A temporary would die before the reference does. */
     standard_atomic_ref(value_type_ const &&) = delete;
 
@@ -328,13 +337,13 @@ struct standard_atomic_ref<value_type_ const> {
 
 #if FU_TARGET_X86_CMPCCXADD
 
-#pragma region x86 CMPCCXADD
-
 /*  `cmpccxadd`: compares the word against `bound` - flags from `word - bound` - and adds `addend`
- *  only when the condition holds; the register handed as `bound` receives what the word held.
+ *  only when the condition holds; the register handed as @c bound receives what the word held.
  *  Spelled as bytes, since binutils before 2.40 and LLVM before 16 have no mnemonic: the VEX form
  *  in map 0F38, opcode E0 plus the condition, `W` set for the 64-bit forms; the word in `rax`, the
- *  compare-and-return register in `rcx`, the addend in `rdx`. */
+ *  compare-and-return register in @c rcx, the addend in @c rdx. */
+
+#pragma region x86 CMPCCXADD
 
 inline std::uint32_t x86_cmpbexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
     __asm__ __volatile__(".byte 0xc4, 0xe2, 0x69, 0xe6, 0x08" // ? `cmpbexadd %edx, %ecx, (%rax)`
@@ -394,11 +403,12 @@ inline std::int64_t x86_cmpgexadd_i64(std::int64_t *word, std::int64_t bound, st
 }
 
 /**
- *  @brief The standard reference with the conditional adds as one `cmpccxadd` - every other
- *      operation is already the `lock`-prefixed instruction the compiler emits. Intel cores from
- *      the 2024 E-core Xeons on; `CPUID.(7,1):EAX[7]` says so at runtime. The standard reference
- *      hides its pointer, so the word's address is kept alongside.
- *  @sa `capability_x86_cmpccxadd_k` - the bit admitting it; `x86_raoint_atomic_ref` - the same with RAO-INT.
+ *  @brief The standard reference with the conditional adds as one @c cmpccxadd - every other
+ *      operation is already the @c lock-prefixed instruction the compiler emits.
+ *  @sa capability_x86_cmpccxadd_k, the admitting bit; x86_raoint_atomic_ref, the same for RAO-INT.
+ *
+ *  Intel cores from the 2024 E-core Xeons on; `CPUID.(7,1):EAX[7]` says so at runtime. The standard
+ *  reference hides its pointer, so the word's address is kept alongside.
  */
 template <typename value_type_>
 struct x86_cmpccxadd_atomic_ref {
@@ -506,7 +516,7 @@ struct x86_cmpccxadd_atomic_ref {
                                       std::memory_order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        // Subtracts while `word >= floor + operand`: above-or-equal unsigned, greater-or-equal signed.
+        // Subtracts while `word >= floor + operand`: above-or-equal unsigned, at-least signed.
         value_type_ const bound = static_cast<value_type_>(floor + operand);
         if (bound < floor)
             return portable_().load(std::memory_order_acquire); // ? The bound wrapped: nothing could be taken
@@ -527,14 +537,17 @@ struct x86_cmpccxadd_atomic_ref {
     value_type_ *word_;
 };
 
-/** @brief Read-only access through @ref x86_cmpccxadd_atomic_ref, which specializes no load.
- *  @sa `standard_atomic_ref<value_type_ const>` */
+/**
+ *  @brief Read-only access through @ref x86_cmpccxadd_atomic_ref, which specializes no load.
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
 template <typename value_type_>
 struct x86_cmpccxadd_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
     static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k;
 
     explicit x86_cmpccxadd_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+
     /** A temporary would die before the reference does. */
     x86_cmpccxadd_atomic_ref(value_type_ const &&) = delete;
 
@@ -552,14 +565,13 @@ struct x86_cmpccxadd_atomic_ref<value_type_ const> {
 
 #if FU_TARGET_X86_RAOINT
 
-#pragma region x86 RAOINT
-
 /*  RAO-INT: the remote, no-return forms - weakly ordered like write-combining stores, which only
  *  SFENCE or MFENCE order and a C++ release fence never emits on x86, so only the relaxed callers
- *  take them; a release order stays on the `lock`-prefixed base.
- *  Bytes for the same reason: map 0F38 opcode FC, the operation picked by the legacy prefix - none
- *  for add, 66 for and, F2 for or, F3 for xor - `REX.W` for the 64-bit forms; the word in `rax`, the operand
- *  in `rcx`. */
+ *  take them; a release order stays on the @c lock-prefixed base. Bytes for the same reason: map
+ *  0F38 opcode FC, the operation picked by the legacy prefix - none for add, 66 for and, F2 for or,
+ *  F3 for xor - `REX.W` for the 64-bit forms; the word in @c rax, the operand in @c rcx. */
+
+#pragma region x86 RAOINT
 
 inline void x86_aadd_u32(std::uint32_t *word, std::uint32_t operand) noexcept {
     __asm__ __volatile__(".byte 0x0f, 0x38, 0xfc, 0x08"
@@ -611,10 +623,10 @@ inline void x86_axor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
 }
 
 /**
- *  @brief The above plus RAO-INT for the relaxed no-return forms: `aadd`, `aand`, `aor`, `axor` execute
- *      at the shared cache. Anything ordered keeps the `lock`-prefixed instruction, already a full
- *      fence. `CPUID.(7,1):EAX[3]` says so at runtime.
- *  @sa `capability_x86_raoint_k` - the bit admitting it, on top of `capability_x86_cmpccxadd_k`.
+ *  @brief The above plus RAO-INT for the relaxed no-return forms: @c aadd, @c aand, @c aor, @c axor
+ *      execute at the shared cache. Anything ordered keeps the `lock`-prefixed instruction, already
+ *      a full fence. `CPUID.(7,1):EAX[3]` says so at runtime.
+ *  @sa capability_x86_raoint_k - the bit admitting it, on top of @c capability_x86_cmpccxadd_k.
  */
 template <typename value_type_>
 struct x86_raoint_atomic_ref {
@@ -677,7 +689,7 @@ struct x86_raoint_atomic_ref {
         return weaker_().fetch_min(operand, order);
     }
 
-    /** The conditional adds stay one `cmpccxadd`: RAO-INT spells no comparing form. */
+    /** The conditional adds stay one @c cmpccxadd: RAO-INT spells no comparing form. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
@@ -739,14 +751,17 @@ struct x86_raoint_atomic_ref {
     value_type_ *word_;
 };
 
-/** @brief Read-only access through @ref x86_raoint_atomic_ref, which specializes no load.
- *  @sa `standard_atomic_ref<value_type_ const>` */
+/**
+ *  @brief Read-only access through @ref x86_raoint_atomic_ref, which specializes no load.
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
 template <typename value_type_>
 struct x86_raoint_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
     static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k | capability_x86_raoint_k;
 
     explicit x86_raoint_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+
     /** A temporary would die before the reference does. */
     x86_raoint_atomic_ref(value_type_ const &&) = delete;
 
@@ -824,7 +839,7 @@ inline void arm64_stlr_u64(std::uint64_t *word, std::uint64_t value) noexcept {
     __asm__ __volatile__("stlr %x0, [%1]" : : "r"(value), "r"(word) : "memory");
 }
 
-/*  LSE read-modify-writes: `ws` is the operand, `wt` receives what the word held; the order picks
+/*  LSE read-modify-writes: @c ws is the operand, @c wt receives what the word held; the order picks
  *  the acquire/release flavor, and the switches fold away at every constant call site. */
 
 inline std::uint8_t arm64_swp_u8(std::uint8_t *word, std::uint8_t desired, std::memory_order order) noexcept {
@@ -987,7 +1002,7 @@ inline std::uint64_t arm64_ldadd_u64(std::uint64_t *word, std::uint64_t operand,
     return observed;
 }
 
-/** `ldclr` clears the operand's bits: a word's `fetch_and(mask)` is `ldclr ~mask`. */
+/** @c ldclr clears the operand's bits: a word's `fetch_and(mask)` is `ldclr ~mask`. */
 inline std::uint64_t arm64_ldclr_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     std::uint64_t observed;
     switch (order) {
@@ -1224,7 +1239,7 @@ inline void arm64_steor_u64(std::uint64_t *word, std::uint64_t bits, std::memory
     else __asm__ __volatile__(".arch_extension lse\n\tsteorl %x0, [%1]" : : "r"(bits), "r"(word) : "memory");
 }
 
-/*  LSE maxima & minima - signed and unsigned are different instructions, the width is the register. */
+/*  LSE maxima & minima - signed & unsigned differ by instruction, the width by register. */
 
 inline std::uint32_t arm64_ldumax_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
@@ -1482,7 +1497,7 @@ inline std::int64_t arm64_ldsmin_i64(std::int64_t *word, std::int64_t operand, s
     return observed;
 }
 
-/** `cas` compares against `expected` and returns what the word held; equality means it swapped. */
+/** `cas` compares against @p expected and returns what the word held; equality means it swapped. */
 inline std::uint8_t arm64_cas_u8(std::uint8_t *word, std::uint8_t expected, std::uint8_t desired,
                                  std::memory_order order) noexcept {
     switch (order) {
@@ -1647,7 +1662,7 @@ inline std::uint64_t arm64_swp_u64(std::uint64_t *word, std::uint64_t desired, s
     }
 }
 
-/** `cas` compares against `expected` and returns what the word held; equality means it swapped. */
+/** `cas` compares against @p expected and returns what the word held; equality means it swapped. */
 inline std::uint8_t arm64_cas_u8(std::uint8_t *word, std::uint8_t expected, std::uint8_t desired,
                                  std::memory_order order) noexcept {
     switch (order) {
@@ -1679,9 +1694,9 @@ inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, 
     }
 }
 
-/*  LSE arithmetic: `ldadd`, `ldclr`, `ldset` and `ldeor` have no intrinsic of their own, so the
+/*  LSE arithmetic: @c ldadd, @c ldclr, @c ldset and @c ldeor have no intrinsic of their own, so the
  *  `_Interlocked*` family carries them - one instruction under `/arch:armv8.1`, and a call into the
- *  CRT without it, which `FU_DETECT_ARM64_ATOMIC_INTRINSICS_` has already refused. */
+ *  CRT without it, which @c FU_DETECT_ARM64_ATOMIC_INTRINSICS_ has already refused. */
 
 inline std::uint32_t arm64_ldadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     long volatile *target = reinterpret_cast<long volatile *>(word);
@@ -1706,7 +1721,7 @@ inline std::uint64_t arm64_ldadd_u64(std::uint64_t *word, std::uint64_t operand,
     }
 }
 
-/** `ldclr` clears the operand's bits, `_InterlockedAnd` keeps the complement's, so the mask flips. */
+/** @c ldclr clears bits; @c _InterlockedAnd keeps the complement, so the mask flips. */
 inline std::uint32_t arm64_ldclr_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     long volatile *target = reinterpret_cast<long volatile *>(word);
     long const kept = static_cast<long>(~bits);
@@ -1776,8 +1791,8 @@ inline std::uint64_t arm64_ldeor_u64(std::uint64_t *word, std::uint64_t operand,
     }
 }
 
-/*  No-return forms: nothing spells `stadd`, `stclr`, `stset` or `steor`, so the returning instruction runs
- *  and its answer is dropped - one round trip the posted form would not have made. */
+/*  No-return forms: nothing spells @c stadd, @c stclr, @c stset or @c steor, so the returning
+ *  instruction runs and its answer is dropped, a round trip the posted form skips. */
 
 inline void arm64_stadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint32_t const observed = arm64_ldadd_u32(word, operand, order);
@@ -1805,7 +1820,7 @@ inline void arm64_steor_u64(std::uint64_t *word, std::uint64_t bits, std::memory
 }
 
 /*  LSE maxima & minima: nothing spells `ldsmax` & kin either, and no `_Interlocked*` computes them,
- *  so a `cas` loop stands in. It swaps on every pass, an unchanged word included, so the ordered
+ *  so a @c cas loop stands in. It swaps on every pass, an unchanged word included, so the ordered
  *  flavors stay the read-modify-write their callers were promised. */
 
 inline std::uint32_t arm64_ldumax_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
@@ -1893,12 +1908,13 @@ inline std::int64_t arm64_ldsmin_i64(std::int64_t *word, std::int64_t operand, s
 #endif // FU_DETECT_ARM64_ATOMIC_INTRINSICS_
 
 /**
- *  @brief `std::atomic_ref` over Armv8.1 LSE: `ldar`/`stlr` for the ordered loads & stores, one
- *      instruction per read-modify-write in the acquire/release flavor the order asks for. Same
- *      discipline as the standard reference: the word is naturally aligned and never touched
- *      non-atomically while references exist. Widths & operations not spelled above fail to
- *      compile rather than fall back.
- *  @sa `capability_arm64_lse_k` - the bit admitting it; `arm64_rcpc_atomic_ref` - the same with RCpc loads.
+ *  @brief `std::atomic_ref` over Armv8.1 LSE: @c ldar and @c stlr for ordered loads & stores, one
+ *      instruction per read-modify-write in the acquire/release flavor the order asks for.
+ *  @sa capability_arm64_lse_k, the admitting bit; arm64_rcpc_atomic_ref, the same with RCpc loads.
+ *
+ *  Same discipline as the standard reference: the word is naturally aligned and never touched
+ *  non-atomically while references exist. Widths & operations not spelled above fail to compile
+ *  rather than fall back.
  */
 template <typename value_type_>
 struct arm64_lse_atomic_ref {
@@ -1944,8 +1960,8 @@ struct arm64_lse_atomic_ref {
         else return std::bit_cast<value_type_>(arm64_swp_u64(word_, word, order));
     }
 
-    /** One `cas` runs in the stronger of the two orders whatever the outcome; a failed compare
-     *  is then an acquiring load of the observed word, which the standard permits. */
+    /** One @c cas runs in the stronger of the two orders whatever the outcome; a failed compare is
+     *  then an acquiring load of the observed word, which the standard permits. */
     bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
                                  std::memory_order failure) const noexcept {
         word_t const wanted = std::bit_cast<word_t>(expected);
@@ -2011,7 +2027,7 @@ struct arm64_lse_atomic_ref {
         else return std::bit_cast<value_type_>(arm64_ldeor_u64(word_, word, order));
     }
 
-    /** Ahead of C++26: one `ldsmax`/`ldumax`, the signedness picking the instruction. */
+    /** Ahead of C++26: one @c ldsmax and @c ldumax, the signedness picking the instruction. */
     value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
@@ -2037,7 +2053,7 @@ struct arm64_lse_atomic_ref {
         else return static_cast<value_type_>(arm64_ldumin_u64(word_, operand, order));
     }
 
-    /** No-return forms: `stadd`, `stclr`, `stset` - posted, nothing waited for. */
+    /** No-return forms: @c stadd, @c stclr, @c stset - posted, nothing waited for. */
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
@@ -2076,8 +2092,8 @@ struct arm64_lse_atomic_ref {
         else arm64_steor_u64(word_, word, order);
     }
 
-    /** The conditional forms: Arm has no `cmpccxadd`, so a read-first `cas` loop - one
-     *  acquiring load, then one instruction per attempt. */
+    /** The conditional forms: Arm has no @c cmpccxadd, so a read-first @c cas loop - one acquiring
+     *  load, then one instruction per attempt. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -2110,9 +2126,11 @@ struct arm64_lse_atomic_ref {
     }
 };
 
-/** @brief Read-only access through @ref arm64_lse_atomic_ref: the same `LDR` and `LDAR` over a
+/**
+ *  @brief Read-only access through @ref arm64_lse_atomic_ref: the same @c LDR and @c LDAR over a
  *      const pointer, so no cast exists.
- *  @sa `standard_atomic_ref<value_type_ const>` */
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
 template <typename value_type_>
 struct arm64_lse_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
@@ -2120,6 +2138,7 @@ struct arm64_lse_atomic_ref<value_type_ const> {
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k;
 
     explicit arm64_lse_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {}
+
     /** A temporary would die before the reference does. */
     arm64_lse_atomic_ref(value_type_ const &&) = delete;
 
@@ -2144,9 +2163,9 @@ struct arm64_lse_atomic_ref<value_type_ const> {
 
 #if FU_TARGET_ARM64_RCPC
 
-#pragma region Arm64 RCpc
-
 /*  RCpc acquire loads: ordered against later loads and stores, not against earlier stores. */
+
+#pragma region Arm64 RCpc
 
 #if FU_DETECT_INLINE_ASM_SUPPORT_
 
@@ -2177,9 +2196,9 @@ inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept { retur
 #endif // FU_DETECT_ARM64_ATOMIC_INTRINSICS_
 
 /**
- *  @brief Armv8.3 RCpc on top of LSE: acquiring loads are `ldapr`. Sequentially-consistent
- *      loads keep `ldar` - the only form that composes with `stlr` into a total order.
- *  @sa `capability_arm64_rcpc_k` - the bit admitting it, on top of `capability_arm64_lse_k`.
+ *  @brief Armv8.3 RCpc on top of LSE: acquiring loads are @c ldapr. Sequentially-consistent loads
+ *      keep @c ldar - the only form that composes with @c stlr into a total order.
+ *  @sa capability_arm64_rcpc_k - the bit admitting it, on top of @c capability_arm64_lse_k.
  */
 template <typename value_type_>
 struct arm64_rcpc_atomic_ref {
@@ -2303,9 +2322,11 @@ struct arm64_rcpc_atomic_ref {
     word_t *word_;
 };
 
-/** @brief Read-only access through @ref arm64_rcpc_atomic_ref: `LDAPR` for the acquiring
- *      orders, the LSE loads for the rest.
- *  @sa `standard_atomic_ref<value_type_ const>` */
+/**
+ *  @brief Read-only access through @ref arm64_rcpc_atomic_ref: @c LDAPR for the acquiring orders,
+ *      the LSE loads for the rest.
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
 template <typename value_type_>
 struct arm64_rcpc_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
@@ -2313,6 +2334,7 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k | capability_arm64_rcpc_k;
 
     explicit arm64_rcpc_atomic_ref(value_type_ const &word) noexcept : word_(&word) {}
+
     /** A temporary would die before the reference does. */
     arm64_rcpc_atomic_ref(value_type_ const &&) = delete;
 
@@ -2339,10 +2361,10 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
 
 #if FU_TARGET_RISC5_ATOMIC
 
-#pragma region RISC5 A
-
 /*  Loads & stores carry their order as fences, per the RISC-V mapping: acquire is `fence r,rw`
  *  after the load, release `fence rw,w` before the store, sequential consistency both. */
+
+#pragma region RISC5 A
 
 inline std::uint8_t risc5_lbu(std::uint8_t const *word) noexcept {
     std::uint8_t value;
@@ -2372,7 +2394,7 @@ inline void risc5_fence_r_rw() noexcept { __asm__ __volatile__("fence r, rw" : :
 inline void risc5_fence_rw_w() noexcept { __asm__ __volatile__("fence rw, w" : : : "memory"); }
 inline void risc5_fence_rw_rw() noexcept { __asm__ __volatile__("fence rw, rw" : : : "memory"); }
 
-/*  Atomic memory operations of the base A extension: `rd` receives what the word held; `.aqrl`
+/*  Atomic memory operations of the base A extension: @c rd receives what the word held; `.aqrl`
  *  serves every order but relaxed - a strengthening the ISA prices at nothing on the fast path. */
 
 inline std::uint32_t risc5_amoswap_w(std::uint32_t *word, std::uint32_t desired, std::memory_order order) noexcept {
@@ -2502,8 +2524,8 @@ inline std::int64_t risc5_amomin_d(std::int64_t *word, std::int64_t operand, std
     return observed;
 }
 
-/*  No-return forms are the same operations with `x0` as the destination - the ISA's own hint
- *  that nothing waits for the value; release is `.rl`, nothing to acquire. */
+/*  No-return forms are the same operations with @c x0 as the destination - the ISA's own hint that
+ *  nothing waits for the value; release is `.rl`, nothing to acquire. */
 
 inline void risc5_amoadd_w_x0(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
@@ -2552,11 +2574,11 @@ inline void risc5_amoxor_d_x0(std::uint64_t *word, std::uint64_t bits, std::memo
 inline std::uint32_t risc5_lr_sc_cas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
     std::int64_t const wanted = static_cast<std::int32_t>(expected);
     std::int64_t observed, failed;
-    __asm__ __volatile__("1:\n\t"
-                         "lr.w.aqrl %[observed], (%[word])\n\t"
-                         "bne %[observed], %[wanted], 2f\n\t"
-                         "sc.w.rl %[failed], %[desired], (%[word])\n\t"
-                         "bnez %[failed], 1b\n"
+    __asm__ __volatile__("1:\n\t"                                       //
+                         "lr.w.aqrl %[observed], (%[word])\n\t"         //
+                         "bne %[observed], %[wanted], 2f\n\t"           //
+                         "sc.w.rl %[failed], %[desired], (%[word])\n\t" //
+                         "bnez %[failed], 1b\n"                         //
                          "2:"
                          : [observed] "=&r"(observed), [failed] "=&r"(failed)
                          : [word] "r"(word), [wanted] "r"(wanted), [desired] "r"(desired)
@@ -2565,11 +2587,11 @@ inline std::uint32_t risc5_lr_sc_cas_w(std::uint32_t *word, std::uint32_t expect
 }
 inline std::uint64_t risc5_lr_sc_cas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
     std::uint64_t observed, failed;
-    __asm__ __volatile__("1:\n\t"
-                         "lr.d.aqrl %[observed], (%[word])\n\t"
-                         "bne %[observed], %[expected], 2f\n\t"
-                         "sc.d.rl %[failed], %[desired], (%[word])\n\t"
-                         "bnez %[failed], 1b\n"
+    __asm__ __volatile__("1:\n\t"                                       //
+                         "lr.d.aqrl %[observed], (%[word])\n\t"         //
+                         "bne %[observed], %[expected], 2f\n\t"         //
+                         "sc.d.rl %[failed], %[desired], (%[word])\n\t" //
+                         "bnez %[failed], 1b\n"                         //
                          "2:"
                          : [observed] "=&r"(observed), [failed] "=&r"(failed)
                          : [word] "r"(word), [expected] "r"(expected), [desired] "r"(desired)
@@ -2577,7 +2599,7 @@ inline std::uint64_t risc5_lr_sc_cas_d(std::uint64_t *word, std::uint64_t expect
     return observed;
 }
 
-/** A byte exchange without `Zabha`: the reservation covers the aligned word, the byte is masked in. */
+/** A byte exchange without @c Zabha: the aligned word is reserved, the byte masked in. */
 inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired) noexcept {
     std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(byte);
     std::uint32_t *word = reinterpret_cast<std::uint32_t *>(address & ~std::uintptr_t {3});
@@ -2585,11 +2607,11 @@ inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired)
     std::uint32_t const keep = ~(std::uint32_t {0xFF} << shift);
     std::uint32_t const placed = std::uint32_t {desired} << shift;
     std::uint32_t observed, merged, failed;
-    __asm__ __volatile__("1:\n\t"
-                         "lr.w.aqrl %[observed], (%[word])\n\t"
-                         "and %[merged], %[observed], %[keep]\n\t"
-                         "or %[merged], %[merged], %[placed]\n\t"
-                         "sc.w.rl %[failed], %[merged], (%[word])\n\t"
+    __asm__ __volatile__("1:\n\t"                                      //
+                         "lr.w.aqrl %[observed], (%[word])\n\t"        //
+                         "and %[merged], %[observed], %[keep]\n\t"     //
+                         "or %[merged], %[merged], %[placed]\n\t"      //
+                         "sc.w.rl %[failed], %[merged], (%[word])\n\t" //
                          "bnez %[failed], 1b"
                          : [observed] "=&r"(observed), [merged] "=&r"(merged), [failed] "=&r"(failed)
                          : [word] "r"(word), [keep] "r"(keep), [placed] "r"(placed)
@@ -2599,9 +2621,9 @@ inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired)
 
 /**
  *  @brief `std::atomic_ref` over the RISC-V base A extension: one `amo*` per read-modify-write,
- *      `x0` as the destination for the no-return forms, `lr`/`sc` loops for compare-exchange and
- *      byte exchanges, fences around the ordered loads & stores.
- *  @sa `capability_risc5_atomic_k` - the bit admitting it; `risc5_zacas_atomic_ref` - the same with `amocas`.
+ *      @c x0 as the destination for the no-return forms, @c lr and @c sc loops for compare-exchange
+ *      and byte exchanges, fences around the ordered loads & stores.
+ *  @sa capability_risc5_atomic_k, the admitting bit; risc5_zacas_atomic_ref, using @c amocas.
  */
 template <typename value_type_>
 struct risc5_atomic_ref {
@@ -2703,7 +2725,7 @@ struct risc5_atomic_ref {
         else return std::bit_cast<value_type_>(risc5_amoxor_d(word_, word, order));
     }
 
-    /** Native in the base A extension: `amomax`/`amomaxu`, `amomin`/`amominu`. */
+    /** Native in the base A extension: @c amomax and @c amomaxu, @c amomin and @c amominu. */
     value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
@@ -2729,7 +2751,7 @@ struct risc5_atomic_ref {
         else return static_cast<value_type_>(risc5_amominu_d(word_, operand, order));
     }
 
-    /** No-return forms: the same operations into `x0`. */
+    /** No-return forms: the same operations into @c x0. */
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
@@ -2768,7 +2790,7 @@ struct risc5_atomic_ref {
         else risc5_amoxor_d_x0(word_, word, order);
     }
 
-    /** The conditional forms: a read-first compare-exchange loop, `amocas` where the extension is. */
+    /** The conditional forms: a read-first compare-exchange loop, or @c amocas where available. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -2792,9 +2814,11 @@ struct risc5_atomic_ref {
     word_t *word_;
 };
 
-/** @brief Read-only access through @ref risc5_atomic_ref: the same loads over a const pointer,
- *      so no cast exists.
- *  @sa `standard_atomic_ref<value_type_ const>` */
+/**
+ *  @brief Read-only access through @ref risc5_atomic_ref: the same loads over a const pointer, so
+ *      no cast exists.
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
 template <typename value_type_>
 struct risc5_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
@@ -2802,6 +2826,7 @@ struct risc5_atomic_ref<value_type_ const> {
     static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k;
 
     explicit risc5_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {}
+
     /** A temporary would die before the reference does. */
     risc5_atomic_ref(value_type_ const &&) = delete;
 
@@ -2825,14 +2850,15 @@ struct risc5_atomic_ref<value_type_ const> {
 
 #if FU_TARGET_RISC5_ZACAS
 
-#pragma region RISC5 Zacas
-
-/*  `Zacas`: compare-and-swap as one instruction; the comparand register receives what the word
- *  held. Assemblers disagree on how to name the extension inline - `zacas`, `zacas1p0`, or not at
+/*  @c Zacas: compare-and-swap as one instruction; the comparand register receives what the word
+ *  held. Assemblers disagree on how to name the extension inline - @c zacas, @c zacas1p0, or not at
  *  all - and `.insn` is a directive older LLVM lacks, so the two are whole words with the registers
  *  pinned: the AMO opcode, funct5 `00101`, both `aq` and `rl` set, `a0` as the comparand, `a1` as
- *  the address, `a2` as the desired value. A baseline `rv64gc` build then assembles them and the
+ *  the address, @c a2 as the desired value. A baseline @c rv64gc build then assembles them and the
  *  runtime bit decides. */
+
+#pragma region RISC5 Zacas
+
 inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
     register std::int64_t observed __asm__("a0") = static_cast<std::int32_t>(expected);
     register std::uint32_t *address __asm__("a1") = word;
@@ -2855,8 +2881,8 @@ inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected,
 }
 
 /**
- *  @brief `Zacas` on top of the base: compare-exchange as one `amocas` instead of an `lr`/`sc` loop.
- *  @sa `capability_risc5_zacas_k` - the bit admitting it; `risc5_atomic_ref` - the reference it composes.
+ *  @brief `Zacas` atop the base: one @c amocas compare-exchange instead of an @c lr and @c sc loop.
+ *  @sa capability_risc5_zacas_k, the admitting bit; risc5_atomic_ref, the reference it composes.
  */
 template <typename value_type_>
 struct risc5_zacas_atomic_ref {
@@ -2984,14 +3010,17 @@ struct risc5_zacas_atomic_ref {
     word_t *word_;
 };
 
-/** @brief Read-only access through @ref risc5_zacas_atomic_ref, which specializes no load.
- *  @sa `standard_atomic_ref<value_type_ const>` */
+/**
+ *  @brief Read-only access through @ref risc5_zacas_atomic_ref, which specializes no load.
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
 template <typename value_type_>
 struct risc5_zacas_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
     static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k | capability_risc5_zacas_k;
 
     explicit risc5_zacas_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+
     /** A temporary would die before the reference does. */
     risc5_zacas_atomic_ref(value_type_ const &&) = delete;
 
@@ -3007,13 +3036,11 @@ struct risc5_zacas_atomic_ref<value_type_ const> {
 
 #endif // FU_TARGET_RISC5_ZACAS
 
-/**
- *  The newest reference this translation unit may run with no runtime probe, reading each rung's
+/** The newest reference this translation unit may run with no runtime probe, reading each rung's
  *  `FU_TARGET_<BIT>` alone - in a unit that dispatches nothing the compilation target's promise, so
  *  the pick can never be illegal there. In a unit that dispatches at runtime - one with the probe
- *  lists or `FU_RUNTIME_DISPATCH` - the bit is what the toolchain builds and the alias resolves to
- *  the newest buildable rung, so such a unit names its reference per CPU class instead.
- */
+ *  lists or @c FU_RUNTIME_DISPATCH - the bit is what the toolchain builds and the alias resolves to
+ *  the newest buildable rung, so such a unit names its reference per CPU class instead. */
 #if FU_TARGET_ARM64_RCPC
 template <typename value_type_>
 using preferred_atomic_ref = arm64_rcpc_atomic_ref<value_type_>;

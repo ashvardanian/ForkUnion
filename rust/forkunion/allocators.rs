@@ -1,6 +1,9 @@
 //! NUMA-aware allocation - domain allocators, pinned vectors, replicated and sharded arrays.
 //!
 //! Owns the `fu_allocate_*`/`fu_free_*` FFI; mirrors the C++ `allocators` header.
+//!
+//! File: rust/forkunion/allocators.rs
+//! Author: Ash Vardanian
 
 use crate::parallel::{ParallelSlice, ParallelSliceMut};
 use crate::topology::{MemoryDomain, MemoryDomainId, Topology};
@@ -38,8 +41,8 @@ pub struct AllocationResult {
     ptr: NonNull<u8>,
     allocated_bytes: usize,
     bytes_per_page: usize,
-    // The OS memory-domain id is all `fu_free_on_domain_id` needs, so the allocation carries no topology handle
-    // and can outlive the `Topology` it came from.
+    // The OS memory-domain id is all `fu_free_on_domain_id` needs, so the allocation carries no
+    // topology handle and can outlive the `Topology` it came from.
     memory_domain_id: MemoryDomainId,
 }
 
@@ -62,7 +65,7 @@ impl AllocationResult {
         self.ptr.as_ptr()
     }
 
-    /// Returns the number of bytes actually allocated (may be larger than requested).
+    /// Returns the number of bytes actually allocated, which may be larger than requested.
     #[must_use]
     pub fn allocated_bytes(&self) -> usize {
         self.allocated_bytes
@@ -95,7 +98,7 @@ impl AllocationResult {
         slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut T, element_count)
     }
 
-    /// Converts a typed slice into the allocation's memory space (immutable).
+    /// Converts a typed slice into the allocation's memory space, immutably.
     ///
     /// # Safety
     ///
@@ -158,7 +161,7 @@ impl DomainAllocator {
     ///
     /// # Arguments
     ///
-    /// * `memory_domain_id` - The OS memory-domain id from [`Topology::memory_domain_id_at_index`]
+    /// - `memory_domain_id` - The OS memory-domain id from [`Topology::memory_domain_id_at_index`]
     ///
     /// # Errors
     ///
@@ -201,12 +204,12 @@ impl DomainAllocator {
 
     /// Allocates memory with at least the requested size on this allocator's memory domain.
     ///
-    /// Returns both the actual allocated size and page size information, which can be
-    /// useful for optimizing memory access patterns.
+    /// Returns both the actual allocated size and page size information, which can be useful for
+    /// optimizing memory access patterns.
     ///
     /// # Arguments
     ///
-    /// * `minimum_bytes` - The minimum number of bytes to allocate
+    /// - `minimum_bytes` - The minimum number of bytes to allocate
     ///
     /// # Errors
     ///
@@ -265,7 +268,7 @@ impl DomainAllocator {
     ///
     /// # Arguments
     ///
-    /// * `bytes` - The exact number of bytes to allocate
+    /// - `bytes` - The exact number of bytes to allocate
     ///
     /// # Errors
     ///
@@ -317,7 +320,7 @@ impl DomainAllocator {
     ///
     /// # Arguments
     ///
-    /// * `count` - The number of elements to allocate space for
+    /// - `count` - The number of elements to allocate space for
     ///
     /// # Examples
     ///
@@ -358,7 +361,7 @@ impl DomainAllocator {
     ///
     /// # Arguments
     ///
-    /// * `min_count` - The minimum number of elements to allocate space for
+    /// - `min_count` - The minimum number of elements to allocate space for
     ///
     /// # Examples
     ///
@@ -389,7 +392,7 @@ impl DomainAllocator {
     }
 }
 
-/// Creates an allocator for the first memory domain, index 0, when the specific domain does not matter.
+/// Creates an allocator for memory domain 0, used when the specific domain does not matter.
 ///
 /// # Examples
 ///
@@ -419,9 +422,9 @@ pub fn default_pinned_allocator(topology: &Topology) -> Result<DomainAllocator> 
 
 /// A Vec-like container that uses NUMA-aware pinned memory allocation.
 ///
-/// `PinnedVec<T>` provides a dynamic array that allocates memory on a specific
-/// memory domain, which should correspond to a `compute_domain_index` for optimal
-/// performance with `ThreadPool`. It automatically manages growth and shrinkage.
+/// `PinnedVec<T>` provides a dynamic array that allocates memory on a specific memory domain, which
+/// should correspond to a `compute_domain_index` for optimal performance with `ThreadPool`. It
+/// automatically manages growth and shrinkage.
 ///
 /// # Examples
 ///
@@ -461,7 +464,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `allocator` - The `DomainAllocator` to use for memory allocation
+    /// - `allocator` - The `DomainAllocator` to use for memory allocation
     ///
     /// # Examples
     ///
@@ -489,8 +492,8 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `allocator` - The `DomainAllocator` to use for memory allocation
-    /// * `capacity` - The initial capacity to allocate
+    /// - `allocator` - The `DomainAllocator` to use for memory allocation
+    /// - `capacity` - The initial capacity to allocate
     ///
     /// # Errors
     ///
@@ -551,7 +554,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `additional` - The number of additional elements to reserve space for
+    /// - `additional` - The number of additional elements to reserve space for
     ///
     /// # Errors
     ///
@@ -607,7 +610,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `value` - The element to append
+    /// - `value` - The element to append
     ///
     /// # Errors
     ///
@@ -712,8 +715,7 @@ impl<T> PinnedVec<T> {
 
     /// Returns a synchronization-friendly mutable pointer wrapper.
     ///
-    /// The returned pointer can be shared between threads as long as each
-    /// thread accesses disjoint indices.
+    /// The pointer may be shared between threads as long as each accesses disjoint indices.
     #[must_use]
     pub fn sync_ptr(&self) -> SyncMutPtr<T> {
         let ptr = match &self.allocation {
@@ -764,8 +766,8 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `index` - The position to insert at
-    /// * `element` - The element to insert
+    /// - `index` - The position to insert at
+    /// - `element` - The element to insert
     ///
     /// # Panics
     ///
@@ -792,11 +794,11 @@ impl<T> PinnedVec<T> {
         Ok(())
     }
 
-    /// Removes and returns the element at position `index`, shifting all elements after it to the left.
+    /// Removes and returns the element at position `index`, shifting later elements left.
     ///
     /// # Arguments
     ///
-    /// * `index` - The position to remove from
+    /// - `index` - The position to remove from
     ///
     /// # Panics
     ///
@@ -820,7 +822,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `other` - The slice to copy elements from
+    /// - `other` - The slice to copy elements from
     ///
     /// # Errors
     ///
@@ -941,7 +943,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `value` - The value to fill the vector with
+    /// - `value` - The value to fill the vector with
     ///
     /// # Examples
     ///
@@ -966,7 +968,7 @@ impl<T> PinnedVec<T> {
     ///
     /// # Arguments
     ///
-    /// * `f` - A closure that generates values to fill the vector with
+    /// - `f` - A closure that generates values to fill the vector with
     ///
     /// # Examples
     ///
@@ -1013,8 +1015,8 @@ unsafe impl<T: Sync> Sync for PinnedVec<T> {}
 
 /// One symmetric mapping the C allocator stripes across every memory domain and frees as a whole.
 ///
-/// Slice `d` starts at `base + d * stride_bytes` and is bound to its own memory domain. The mapping owns
-/// its storage and unmaps it on drop; like [`AllocationResult`] it carries no topology handle.
+/// Slice `d` starts at `base + d * stride_bytes` and is bound to its own memory domain. The mapping
+/// owns its storage and unmaps it on drop; like [`AllocationResult`] it carries no topology handle.
 struct SymmetricAllocation {
     base: NonNull<u8>,
     stride_bytes: usize,
@@ -1068,12 +1070,12 @@ impl Drop for SymmetricAllocation {
 unsafe impl Send for SymmetricAllocation {}
 unsafe impl Sync for SymmetricAllocation {}
 
-/// One full length-`n` copy of a sequence per memory domain, so every thread reads a node-local replica.
+/// One length-`n` copy of a sequence per memory domain, so every thread reads a node-local replica.
 ///
-/// A thin owner of one symmetric mapping - replica `d` lives at `base + d * stride_bytes()` and holds `n`
-/// elements. Raw uninitialized storage: the caller fills every replica and keeps them coherent, mirroring
-/// the C++ `replicated_array`. `T` must be plain-old-data - any bit pattern is a valid value - since the
-/// container runs no constructors or destructors.
+/// A thin owner of one symmetric mapping - replica `d` lives at `base + d * stride_bytes()` and
+/// holds `n` elements. Raw uninitialized storage: the caller fills every replica and keeps them
+/// coherent, mirroring the C++ `replicated_array`. `T` must be plain-old-data - any bit pattern is
+/// a valid value - since the container runs no constructors or destructors.
 pub struct ReplicatedArray<T> {
     allocation: Option<SymmetricAllocation>,
     len: usize,
@@ -1091,7 +1093,7 @@ impl<T: Copy> ReplicatedArray<T> {
         }
     }
 
-    /// Allocates one uninitialized length-`n` replica per memory domain; the caller first-touches them.
+    /// Allocates one uninitialized length-`n` replica per domain; the caller first-touches them.
     pub fn new_in(topology: &Topology, n: usize) -> Result<Self> {
         if n == 0 {
             return Ok(Self::new());
@@ -1128,7 +1130,7 @@ impl<T: Copy> ReplicatedArray<T> {
         self.allocation.as_ref().map_or(0, |allocation| allocation.stride_bytes)
     }
 
-    /// Raw start of the replica on `memory_domain`, for concurrent first-touch fills through a raw pointer.
+    /// Raw pointer to the replica start on `memory_domain`, for concurrent first-touch fills.
     #[must_use]
     pub fn replica_ptr(&self, memory_domain: MemoryDomain) -> *mut T {
         let allocation = self.allocation.as_ref().expect("empty ReplicatedArray");
@@ -1173,9 +1175,9 @@ pub struct ShardLocation {
 /// A sequence partitioned across memory domains as contiguous segments, each element stored once.
 ///
 /// Each domain owns a contiguous logical segment of `segment()` elements, so element `i` lives at
-/// `{i / segment(), i % segment()}` - see [`location_of`](Self::location_of) - and a scan of a domain's
-/// shard is sequential in memory. Backed by one symmetric mapping; the trailing shard may be short. `T`
-/// must be plain-old-data, mirroring [`ReplicatedArray`].
+/// `{i / segment(), i % segment()}` - see [`location_of`](Self::location_of) - and a scan of a
+/// domain's shard is sequential in memory. Backed by one symmetric mapping; the trailing shard may
+/// be short. `T` must be plain-old-data, mirroring [`ReplicatedArray`].
 pub struct ShardedArray<T> {
     allocation: Option<SymmetricAllocation>,
     len: usize,
@@ -1269,7 +1271,7 @@ impl<T: Copy> ShardedArray<T> {
         }
     }
 
-    /// The logical index of the element at `local_index` on `memory_domain` - inverse of `location_of`.
+    /// Logical index of the element at `local_index` on `memory_domain` - inverse of `location_of`.
     #[must_use]
     pub fn logical_index_of(&self, memory_domain: MemoryDomain, local_index: usize) -> usize {
         memory_domain.get() * self.segment + local_index
@@ -1400,8 +1402,8 @@ mod tests {
             .expect("memory domain 0 should be available");
         assert_eq!(allocator.memory_domain_id().get(), 0);
 
-        // An index this machine does not have is now a reported refusal rather than a `-1` that
-        // a real domain could also carry.
+        // An index this machine does not have is now a reported refusal rather than a `-1` that a
+        // real domain could also carry.
         assert!(
             topology
                 .memory_domain_id_at_index(MemoryDomain(memory_domains + 10))

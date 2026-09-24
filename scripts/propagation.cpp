@@ -1,8 +1,8 @@
 /**
- *  @brief Demo app: Connected Components by label propagation, with ForkUnion, OpenMP, and Taskflow.
- *  @author Ash Vardanian
  *  @file scripts/propagation.cpp
+ *  @author Ash Vardanian
  *  @date July 14, 2026
+ *  @brief Demo: Connected Components by label propagation, with ForkUnion, OpenMP, and Taskflow.
  *
  *  The N-body simulation gives every task an identical cost, so it can only measure dispatch
  *  latency. Label propagation is the opposite end of fork-join usage: one parallel sweep per round,
@@ -19,8 +19,8 @@
  *  fork-join frequency as the controlled axis.
  *
  *  Bridge endpoints are drawn from each community's first 64 vertices: R-MAT's quadrant bias piles
- *  the hubs at low indices, so a low endpoint is essentially guaranteed well-connected, and the ring
- *  cannot be severed by an isolated endpoint.
+ *  the hubs at low indices, so a low endpoint is essentially guaranteed well-connected, and the
+ *  ring cannot be severed by an isolated endpoint.
  *
  *  @section propagation_determinism Determinism
  *
@@ -28,17 +28,17 @@
  *  writes only its own slot in the next - no atomics, no races, and every round is a pure function
  *  of the last. Rounds-to-convergence, every intermediate label, and the final fixed point are
  *  therefore identical across schedules, backends, thread counts, and languages - so the MTEPS
- *  denominator `rounds * edges` is the same number in every cell of a comparison table.
+ *  denominator rounds × edges is the same number in every cell of a comparison table.
  *
  *  To control the script, several environment variables are used:
  *
- *  - `PROPAGATION_SCALE` - each community has `2^scale` vertices - default 14.
- *  - `PROPAGATION_COMMUNITIES` - communities strung on the ring - default 64.
- *  - `PROPAGATION_EDGE_FACTOR` - edges generated per vertex, before deduplication - default 16.
- *  - `PROPAGATION_BACKEND` - backend to use - default `forkunion_static_shared`.
- *  - `PROPAGATION_THREADS` - number of threads to use - default all hardware threads.
- *  - `PROPAGATION_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
- *  - `PROPAGATION_ITERATIONS` - run an exact pass count instead, when set.
+ *  - @c PROPAGATION_SCALE - each community has `2^scale` vertices - default 14.
+ *  - @c PROPAGATION_COMMUNITIES - communities strung on the ring - default 64.
+ *  - @c PROPAGATION_EDGE_FACTOR - edges generated per vertex, before deduplication - default 16.
+ *  - @c PROPAGATION_BACKEND - backend to use - default @c forkunion_static_shared.
+ *  - @c PROPAGATION_THREADS - number of threads to use - default all hardware threads.
+ *  - @c PROPAGATION_SECONDS - wall-clock budget per run, reporting the sustained rate - default 10.
+ *  - @c PROPAGATION_ITERATIONS - run an exact pass count instead, when set.
  *  - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
  *
  *  The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
@@ -47,13 +47,13 @@
  *  @section propagation_protocol Benchmarking Protocol
  *
  *  Every runtime schedules the same one-vertex dynamic tasks: `schedule(dynamic, 1)` in OpenMP,
- *  `tf::DynamicPartitioner(1)` in Taskflow, and `for_n_dynamic` here. Cells run bare - core-granular
- *  pinning like `OMP_PROC_BIND=spread OMP_PLACES=cores` collapses a bandwidth-bound sweep ~16x for
- *  OpenMP and for any pool inheriting the caller's mask. The residual spread on SMT machines is
- *  preemption - one delayed hyperthread stalls every barrier of a pass - which the fixed window
- *  amortizes. The `_replicated` backends are a deliberate non-win on this workload: the hot traffic
- *  is the shared label array every round must see fresh, so replicating the read-only CSR pays
- *  nothing here, unlike N-body's replicated bodies. To compile and run:
+ *  `tf::DynamicPartitioner(1)` in Taskflow, and @c for_n_dynamic here. Cells run bare -
+ *  core-granular pinning like `OMP_PROC_BIND=spread OMP_PLACES=cores` collapses a bandwidth-bound
+ *  sweep ~16x for OpenMP and for any pool inheriting the caller's mask. The residual spread on SMT
+ *  machines is preemption - one delayed hyperthread stalls every barrier of a pass - which the
+ *  fixed window amortizes. The @c _replicated backends are a deliberate non-win on this workload:
+ *  the hot traffic is the shared label array every round must see fresh, so replicating the
+ *  read-only CSR pays nothing here, unlike N-body's replicated bodies. To compile and run:
  *
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release
@@ -92,8 +92,10 @@ namespace fu = ashvardanian::forkunion;
 
 /** A vertex index, dense in [0, vertices). */
 using vertex_t = std::uint32_t;
+
 /** An index into the edge array, wide enough for a graph past 4 billion edges. */
 using edge_offset_t = std::uint64_t;
+
 /** A component name: the smallest vertex index reachable so far. */
 using label_t = std::uint32_t;
 
@@ -108,7 +110,7 @@ struct csr_view_t {
     edge_offset_t edges() const noexcept { return column_indices.size(); }
 };
 
-/** The two CSR arrays built once on the host, in growable `dynamic_array`s. */
+/** The two CSR arrays built once on the host, in growable @c dynamic_arrays. */
 struct csr_host_t {
     fu::dynamic_array<edge_offset_t> row_offsets;
     fu::dynamic_array<vertex_t> column_indices;
@@ -142,10 +144,10 @@ static inline vertex_t random_index(std::uint64_t const counter, vertex_t const 
  *      joined in a ring by one bridge per neighbouring pair, and scatters it all into a CSR.
  *  @return false on any allocation failure, leaving @p graph half-built but valid to destroy.
  *
- *  Community `c` owns global edge indices `[c * raw_local, (c+1) * raw_local)` and the vertex range
- *  `[c << scale, (c+1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters as the
- *  single-graph generators, so community 0 with `communities == 1` reproduces those graphs exactly.
- *  Bridge draws live in their own counter range above all edge draws, so nothing collides.
+ *  Community @c c owns global edge indices `[c * raw_local, (c + 1) * raw_local)` and the vertex
+ *  range `[c << scale, (c + 1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters
+ *  as the single-graph generators, so community 0 with `communities == 1` reproduces those graphs
+ *  exactly. Bridge draws live in their own counter range above all edge draws, so nothing collides.
  */
 static bool generate_necklace(std::size_t const scale, std::size_t const communities, std::size_t const edge_factor,
                               csr_host_t &graph) noexcept {
@@ -161,8 +163,8 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
         fu::dynamic_array<edge_t> edges;
         if (failed(edges.resize(raw_edges * 2 + bridges * 2))) return false; // ? Slots `2e, 2e+1` belong to edge `e`
 
-        // Generation is the most expensive setup step - `scale` draws per edge, millions of edges - and
-        // the counter-based draws make it embarrassingly parallel with no generator objects at all.
+        // Generation is the priciest setup step - `scale` draws per edge over millions of edges -
+        // and counter-based draws make it embarrassingly parallel with no generator objects.
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
@@ -234,7 +236,8 @@ static inline label_t min_label_of(csr_view_t const &graph, label_t const *old_l
     return best;
 }
 
-/** Converges serially from `labels[v] = v`, returning the rounds taken - the reference for `PROPAGATION_CHECK`. */
+/** Converges serially from `labels[v] = v`, returning the rounds taken - the reference for
+ *  @c PROPAGATION_CHECK. */
 static std::size_t converge_serially(csr_view_t const &graph, label_t *labels_a, label_t *labels_b) noexcept {
     vertex_t const vertices = graph.vertices();
     for (vertex_t v = 0; v < vertices; ++v) labels_a[v] = v;
@@ -317,39 +320,50 @@ static bool retouch_deterministically(distributed_pool_t &pool, fu::dynamic_arra
 }
 
 /**
- *  @brief Everything a backend reads or writes for one convergence pass; the harness owns the lifetimes.
+ *  @brief Everything a backend reads or writes for one convergence pass; harness owns lifetimes.
  *
  *  The two label buffers ping-pong from round to round, so the fixed point ends in both.
  */
 struct run_context_t {
+
     /** The shared host view - what every non-replicated backend reads. */
     csr_view_t graph;
-    /** Per-node replicas, populated only for the `_replicated` cells. */
+
+    /** Per-node replicas, populated only for the @c _replicated cells. */
     replicated_csr_t const &replicas;
+
     /** The compute-to-memory bridge for the replicated read. */
     fu::machine_topology_t const &topology;
+
     /** Per-thread change tallies, zeroed each round. */
     fu::span<counter_t> counters;
+
     /** The labels a round reads, seeded with each vertex's own index. */
     fu::span<label_t> labels_a;
+
     /** The labels a round writes. */
     fu::span<label_t> labels_b;
-    /** Worker count the `counters` span is sized to. */
+
+    /** Worker count the @c counters span is sized to. */
     std::size_t threads;
+
     /** Rounds to convergence, written back by every backend. */
     std::size_t rounds = 0;
-    /** Spawned by `main` only for the ForkUnion backends. */
+
+    /** Spawned by @c main only for the ForkUnion backends. */
     distributed_pool_t *pool = nullptr;
-    /** Spawned by `main` only for the `taskflow_*` backends. */
+
+    /** Spawned by @c main only for the `taskflow_*` backends. */
     tf::Executor *taskflow = nullptr;
 };
 
 /** Pre-split across threads vs work-stolen. */
 enum class schedule_k : unsigned int { static_k, dynamic_k };
+
 /** One shared CSR vs one read-only CSR replica per memory domain. */
 enum class placement_k : unsigned int { shared_k, replicated_k };
 
-/** Runs @p body over `[0, n)`, statically pre-split or work-stolen per the compile-time schedule. */
+/** Runs @p body over `[0, n)`, statically pre-split or work-stolen per compile-time schedule. */
 template <schedule_k schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
     if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
@@ -371,7 +385,7 @@ static std::uint64_t sum_counters(fu::span<counter_t> counters) noexcept {
  *
  *  Four ForkUnion backends are the four instantiations of this one body - `if constexpr` picks the
  *  schedule and where each thread reads its CSR from. Every round is one fork-join dispatch, so the
- *  pool's dispatch-and-join cost is paid `rounds` times per pass - the axis this benchmark controls.
+ *  pool's dispatch-and-join cost is paid @c rounds times per pass, the axis under test.
  */
 template <schedule_k schedule_, placement_k placement_>
 static void run(run_context_t &c) noexcept {
@@ -401,6 +415,7 @@ static void run(run_context_t &c) noexcept {
 }
 
 #if defined(_OPENMP)
+
 /** The OpenMP baselines - one `parallel for` with a change reduction per round. */
 template <bool dynamic_>
 static void run_openmp(run_context_t &c) noexcept {
@@ -437,7 +452,7 @@ static void run_openmp_dynamic(run_context_t &c) noexcept { run_openmp<true>(c);
 #endif
 
 /**
- *  @brief The Taskflow baselines - a fresh `tf::Taskflow` per round on the long-lived executor.
+ *  @brief The Taskflow baselines - a fresh @c tf::Taskflow per round on the long-lived executor.
  *  @note The per-round flow construction is charged to Taskflow by design: this benchmark measures
  *      exactly the cost of standing up one fork-join round, and a persisted flow would hide it.
  */
@@ -470,15 +485,19 @@ static void run_taskflow(run_context_t &c, partitioner_ partitioner) noexcept {
 static void run_taskflow_static(run_context_t &c) noexcept { run_taskflow(c, tf::StaticPartitioner()); }
 static void run_taskflow_dynamic(run_context_t &c) noexcept { run_taskflow(c, tf::DynamicPartitioner(1)); }
 
-/** Which execution engine a backend runs on, so `main` builds exactly the resource it needs. */
+/** Which execution engine a backend runs on, so @c main builds exactly the resource it needs. */
 enum class engine_t : unsigned int {
+
     /** Spawns the shared ForkUnion pool. */
     forkunion_k,
+
     /** Also builds the per-node CSR replicas. */
     forkunion_replicated_k,
+
     /** Runs under `omp parallel for`, needing no pool object. */
     openmp_k,
-    /** Runs on a reused `tf::Executor`, needing no pool object. */
+
+    /** Runs on a reused @c tf::Executor, needing no pool object. */
     taskflow_k,
 };
 
@@ -506,7 +525,7 @@ static constexpr backend_t backends_k[] = {
 
 #pragma endregion Backends
 
-/** Reads an environment variable, or @p fallback when unset - `getenv_s` on MSVC. */
+/** Reads an environment variable, or @p fallback when unset - @c getenv_s on MSVC. */
 static char const *env_string(char const *name, char const *fallback) noexcept {
 #if defined(_MSC_VER)
     static char buffer[256];

@@ -1,14 +1,14 @@
 /**
- *  @brief What a GenMC client takes from the verifier: threads, and the assertion it reports
- *      with the execution graph that broke it.
- *  @author Ash Vardanian
  *  @file verification/genmc.hpp
+ *  @author Ash Vardanian
  *  @date September 9, 2026
+ *  @brief What a GenMC client takes from the verifier: threads, and the assertion it reports with
+ *      the execution graph that broke it.
  *
- *  GenMC intercepts these by name. The platform's `pthread_create` it does not, and
- *  `std::thread` rides on that, so every client spawns through here. The clients compile
- *  against the platform's standard library rather than GenMC's freestanding replacement, which
- *  `check.sh` arranges by forwarding the header names GenMC shadows.
+ *  GenMC intercepts these by name. The platform's @c pthread_create it does not, and @c std::thread
+ *  rides on that, so every client spawns through here. The clients compile against the platform's
+ *  standard library rather than GenMC's freestanding replacement, which `check.sh` arranges by
+ *  forwarding the header names GenMC shadows.
  */
 #pragma once
 #include <cstddef> // `size_t` - what `genmc_internal.h` uses without declaring

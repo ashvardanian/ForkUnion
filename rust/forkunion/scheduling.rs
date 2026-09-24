@@ -1,7 +1,10 @@
 //! The thread pool and its dispatch primitives - spawn, scoped joins, parallel loops - and the
 //! measured memory fabric those pools can harvest.
 //!
-//! Owns the `fu_pool_*` and `fu_fabric_*` FFI; mirrors the C++ `flat`/`distributed` scheduling layer.
+//! Owns the `fu_pool_*`/`fu_fabric_*` FFI; mirrors the C++ `flat`/`distributed` scheduling layer.
+//!
+//! File: rust/forkunion/scheduling.rs
+//! Author: Ash Vardanian
 
 use crate::parallel::{ParallelIterator, ParallelSchedule};
 use crate::topology::{CallerExclusivity, Capabilities, ComputeDomain, MemoryDomain, Topology};
@@ -96,14 +99,13 @@ extern "C" {
 /// Minimalistic, fixed-size thread-pool for blocking scoped parallelism.
 ///
 /// This is a safe Rust wrapper around the precompiled C thread pool implementation.
-/// The current thread **participates** in the work, so for `N`-way parallelism the
-/// implementation actually spawns **N − 1** background workers and runs the last
-/// slice on the caller thread.
+/// The current thread __participates__ in the work, so for `N`-way parallelism the implementation
+/// actually spawns __N − 1__ background workers and runs the last slice on the caller thread.
 ///
 /// # Thread Safety
 ///
-/// `ThreadPool` is `Send + Sync` and can be safely shared between threads, though
-/// operations require a mutable reference to ensure exclusive access during execution.
+/// `ThreadPool` is `Send + Sync` and can be safely shared between threads, though operations
+/// require a mutable reference to ensure exclusive access during execution.
 ///
 /// # Performance Characteristics
 ///
@@ -140,11 +142,11 @@ extern "C" {
 ///
 /// # Generation Tokens
 ///
-/// Every dispatch is identified by an always-odd `usize` generation token. The safe
-/// `for_threads` API wraps it inside a [`BroadcastJoin`] guard: on `Exclusive` pools the
-/// work starts at construction and can be polled with `is_complete`; on `Inclusive` pools
-/// it runs at `join`/`Drop`, where the calling thread contributes its own slice. Raw
-/// token-level access is available through the `unsafe_for_threads`/`unsafe_join` pair.
+/// Every dispatch is identified by an always-odd `usize` generation token. The safe `for_threads`
+/// API wraps it inside a [`BroadcastJoin`] guard: on `Exclusive` pools the work starts at
+/// construction and can be polled with `is_complete`; on `Inclusive` pools it runs at
+/// `join`/`Drop`, where the calling thread contributes its own slice. Raw token-level access is
+/// available through the `unsafe_for_threads`/`unsafe_join` pair.
 pub struct ThreadPool {
     inner: *mut c_void,
 }
@@ -166,9 +168,9 @@ impl ThreadPool {
         Self::named_spawn_with_capabilities(topology, name, threads, exclusivity, Capabilities::ALL)
     }
 
-    /// As [`named_spawn_with_exclusivity`](Self::named_spawn_with_exclusivity), but constrains
-    /// the pool to `allowed`: clear a waiter bit to force a lower-priority busy-wait, or clear
-    /// [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] to force the flat (non-NUMA) pool.
+    /// As [`named_spawn_with_exclusivity`](Self::named_spawn_with_exclusivity), but constrains the
+    /// pool to `allowed`: clear a waiter bit to force a lower-priority busy-wait, or clear
+    /// [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] to force the flat pool, which is not NUMA-aware.
     pub fn named_spawn_with_capabilities(
         topology: &Topology,
         name: Option<&str>,
@@ -180,8 +182,8 @@ impl ThreadPool {
             return Err(Error::new(Status::InvalidArgument, "a pool needs at least one thread"));
         }
 
-        // The buffer must outlive the `fu_pool_new` call, so it is declared
-        // before taking the pointer that crosses the FFI boundary.
+        // The buffer must outlive the `fu_pool_new` call, so it is declared before taking the
+        // pointer that crosses the FFI boundary.
         let mut name_buffer = [0u8; 16];
         let name_ptr = if let Some(name_str) = name {
             let name_bytes = name_str.as_bytes();
@@ -208,13 +210,13 @@ impl ThreadPool {
         }
     }
 
-    /// Spawns a pool pinned to a single compute domain (a same-QoS core cluster).
+    /// Spawns a pool pinned to a single compute domain, a same-QoS core cluster.
     ///
     /// The pool's threads and NUMA-local allocations stay on `compute_domain_index`, in
     /// `0..compute_domains_count()`. Spawn one such pool per compute domain and coordinate them
-    /// from a single thread with the generation-token API (`for_threads` guards or the
-    /// raw `unsafe_for_threads`/`is_complete`/`unsafe_join`). On builds without NUMA,
-    /// only compute domain 0 is valid.
+    /// from a single thread with the generation-token API (`for_threads` guards or the raw
+    /// `unsafe_for_threads`/`is_complete`/`unsafe_join`). On builds without NUMA, only compute
+    /// domain 0 is valid.
     ///
     /// # Examples
     ///
@@ -267,13 +269,12 @@ impl ThreadPool {
 
     /// Creates a new thread pool with the specified number of threads.
     ///
-    /// By default, uses `CallerExclusivity::Inclusive`, meaning the calling thread
-    /// participates in work execution. For `N` threads, this spawns `N-1` background
-    /// workers plus uses the caller thread.
+    /// By default, uses `CallerExclusivity::Inclusive`, meaning the calling thread participates in
+    /// work execution. For `N` threads, this uses the caller thread plus `N-1` background workers.
     ///
     /// # Arguments
     ///
-    /// * `threads` - Total number of threads including the caller thread
+    /// - `threads` - Total number of threads including the caller thread
     ///
     /// # Examples
     ///
@@ -293,12 +294,12 @@ impl ThreadPool {
     ///
     /// The thread pool name can be useful for debugging, profiling, and system monitoring.
     /// On supported platforms, the name may be visible in system tools and thread listings.
-    /// Names are truncated to 15 characters (plus null terminator) to fit platform limits.
+    /// Names are truncated to 15 characters, plus a null terminator, to fit platform limits.
     ///
     /// # Arguments
     ///
-    /// * `name` - Name for the thread pool (up to 15 characters)
-    /// * `threads` - Total number of threads including the caller thread
+    /// - `name` - Name for the thread pool, up to 15 characters
+    /// - `threads` - Total number of threads including the caller thread
     ///
     /// # Examples
     ///
@@ -315,8 +316,8 @@ impl ThreadPool {
 
     /// Returns whether the calling thread participates in the workload.
     ///
-    /// Queries the pool directly rather than caching, so it stays correct across
-    /// `terminate` and re-spawning with a different exclusivity.
+    /// Queries the pool directly rather than caching, so it stays correct across `terminate` and
+    /// re-spawning with a different exclusivity.
     pub fn caller_exclusivity(&self) -> Result<CallerExclusivity> {
         let mut raw: c_int = 0;
         Error::check(
@@ -332,8 +333,8 @@ impl ThreadPool {
 
     /// Returns the capabilities this pool was spawned with.
     ///
-    /// Queries the pool directly rather than caching, so it reflects the allow-mask the
-    /// pool actually honors - the intersection of the requested mask and what the machine offers.
+    /// Queries the pool directly rather than caching, so it reflects the allow-mask the pool
+    /// actually honors - the intersection of the requested mask and what the machine offers.
     pub fn capabilities(&self) -> Result<Capabilities> {
         let mut answer = 0u32;
         Error::check(
@@ -360,12 +361,12 @@ impl ThreadPool {
 
     /// Returns the number of threads in a specific compute_domain.
     ///
-    /// This method is useful for NUMA-aware load balancing, allowing you to understand
-    /// how many threads are available in each compute_domain group.
+    /// This method is useful for NUMA-aware load balancing, allowing you to understand how many
+    /// threads are available in each compute_domain group.
     ///
     /// # Arguments
     ///
-    /// * `compute_domain_index` - The compute_domain to query (0-based)
+    /// - `compute_domain_index` - The compute_domain to query (0-based)
     ///
     /// # Examples
     ///
@@ -406,14 +407,14 @@ impl ThreadPool {
 
     /// Converts a global thread index to a local thread index within a compute_domain.
     ///
-    /// This is useful for distributed thread pools where threads are grouped into
-    /// compute domains (same-QoS core clusters). The local index can be used for
-    /// per-compute_domain data structures or algorithms.
+    /// This is useful for distributed thread pools where threads are grouped into compute domains,
+    /// same-QoS core clusters. The local index can be used for per-compute_domain data structures
+    /// or algorithms.
     ///
     /// # Arguments
     ///
-    /// * `global_thread_index` - The global thread index to convert
-    /// * `compute_domain_index` - The compute_domain to get the local index for
+    /// - `global_thread_index` - The global thread index to convert
+    /// - `compute_domain_index` - The compute_domain to get the local index for
     ///
     /// # Returns
     ///
@@ -431,18 +432,17 @@ impl ThreadPool {
 
     /// Transitions worker threads to a power-saving sleep state.
     ///
-    /// This function places worker threads into a low-power sleep state when no work
-    /// is available for extended periods. Threads will periodically check for new work
-    /// at the specified interval.
+    /// This function places worker threads into a low-power sleep state when no work is available
+    /// for extended periods, checking periodically at the specified interval.
     ///
     /// # Arguments
     ///
-    /// * `micros` - Wake-up check interval in microseconds, must be > 0
+    /// - `micros` - Wake-up check interval in microseconds, must be > 0
     ///
     /// # Safety
     ///
-    /// This function is **not thread-safe** and should only be called between task batches
-    /// when no parallel operations are in progress.
+    /// This function is __not thread-safe__ and should only be called between task batches when no
+    /// parallel operations are in progress.
     ///
     /// # Examples
     ///
@@ -476,14 +476,14 @@ impl ThreadPool {
     /// Executes a function on each thread of the pool, returning a [`BroadcastJoin`] guard.
     ///
     /// The guard's lifecycle is keyed on the pool's exclusivity:
-    /// - `CallerExclusivity::Exclusive`: the work is dispatched immediately at construction;
-    ///   the caller can overlap its own work, poll `is_complete`, and `join` (or drop) waits.
-    /// - `CallerExclusivity::Inclusive`: the dispatch is deferred to `join` (or drop), where
-    ///   the calling thread contributes its own slice - a deferred blocking call.
+    /// - `CallerExclusivity::Exclusive`: the work is dispatched immediately at construction; the
+    ///   caller can overlap its own work, poll `is_complete`, then `join` or drop to wait.
+    /// - `CallerExclusivity::Inclusive`: the dispatch is deferred to `join` or to dropping the
+    ///   guard, where the calling thread contributes its own slice - a deferred blocking call.
     ///
     /// # Arguments
     ///
-    /// * `function` - Closure reference executed on each thread, receiving
+    /// - `function` - Closure reference executed on each thread, receiving
     ///   `(thread_index, compute_domain_index)`; borrowed for the guard's lifetime.
     ///
     /// # Examples
@@ -507,10 +507,10 @@ impl ThreadPool {
 
     /// Runs `function` on every thread and blocks until all of them finish.
     ///
-    /// The ergonomic common case: unlike [`for_threads`](Self::for_threads), this takes
-    /// the closure **by value** and joins internally, so there is no `&` binding or guard
-    /// to manage. Reach for `for_threads` only when you want to overlap the caller's own
-    /// work with the pool and poll [`BroadcastJoin::is_complete`] before joining.
+    /// The ergonomic common case: unlike [`for_threads`](Self::for_threads), this takes the closure
+    /// __by value__ and joins internally, so there is no `&` binding or guard to manage. Reach for
+    /// `for_threads` only when you want to overlap the caller's own work with the pool and poll
+    /// [`BroadcastJoin::is_complete`] before joining.
     ///
     /// # Examples
     ///
@@ -528,15 +528,15 @@ impl ThreadPool {
     where
         F: Fn(usize, usize) + Sync,
     {
-        // `function` lives on this frame for the whole dispatch-and-join, so the borrow
-        // handed to the pool cannot dangle - and `join` runs before it drops.
+        // `function` lives on this frame for the whole dispatch-and-join, so the borrow handed to
+        // the pool cannot dangle - and `join` runs before it drops.
         BroadcastJoin::new(self, &function).join();
     }
 
     /// Runs `body` with a [`Scope`] that can broadcast work borrowing local data and answer
     /// read-only topology queries, joining every dispatch before returning.
     ///
-    /// The scope holds the pool by shared reference, so a worker closure can query it *and* borrow
+    /// The scope holds the pool by shared reference, so a worker closure can query it _and_ borrow
     /// the same stack values the caller owns - the borrow conflict that otherwise forces a
     /// raw-pointer smuggle. Because each [`Scope::broadcast`] blocks until it joins, those borrows
     /// can never outlive the work.
@@ -573,14 +573,13 @@ impl ThreadPool {
 
     /// Distributes `n` similar duration calls between threads in slices.
     ///
-    /// Instead of individual task assignment, this method groups tasks into
-    /// contiguous slices and assigns each slice to a thread. This reduces
-    /// per-task overhead and improves cache locality.
+    /// Instead of individual task assignment, this method groups tasks into contiguous slices and
+    /// assigns each slice to a thread. This reduces per-task overhead and improves cache locality.
     ///
     /// # Arguments
     ///
-    /// * `n` - Total number of tasks to distribute
-    /// * `function` - Closure executed for each run, receiving a `TasksRange` and its `ThreadInDomain`
+    /// - `n` - Total number of tasks to distribute
+    /// - `function` - Closure executed for each run, given its `ThreadInDomain` and a `TasksRange`
     ///
     /// # Examples
     ///
@@ -606,13 +605,13 @@ impl ThreadPool {
         StaticSlices::dispatch(self, n, &function)
     }
 
-    /// Splits `data` into one contiguous chunk per thread and runs `function` on each in
-    /// parallel, blocking until all threads finish.
+    /// Splits `data` into one contiguous chunk per thread and runs `function` on each in parallel,
+    /// blocking until all threads finish.
     ///
-    /// Each thread receives an **exclusive** `&mut` sub-slice, so no interior mutability,
-    /// `Mutex`, or raw pointers are needed at the call site: the chunks partition `data`
-    /// and therefore never alias, and the synchronous join keeps every borrow inside
-    /// `data`'s lifetime. This is the safe replacement for a hand-rolled raw-pointer scatter.
+    /// Each thread receives an __exclusive__ `&mut` sub-slice, so no interior mutability, `Mutex`,
+    /// or raw pointers are needed at the call site: the chunks partition `data` and therefore never
+    /// alias, and the synchronous join keeps every borrow inside `data`'s lifetime. This is the
+    /// safe replacement for a hand-rolled raw-pointer scatter.
     ///
     /// Built on [`for_threads`](Self::for_threads), so `function` runs once per thread even when
     /// its chunk is empty - unlike [`for_slices`](Self::for_slices), which skips an empty range.
@@ -654,8 +653,8 @@ impl ThreadPool {
     ///
     /// # Arguments
     ///
-    /// * `n` - Total number of tasks to distribute
-    /// * `function` - Closure executed for each task, receiving the task index and its `ThreadInDomain`
+    /// - `n` - Total number of tasks to distribute
+    /// - `function` - Closure executed for each task, given the task index and its `ThreadInDomain`
     ///
     /// # Examples
     ///
@@ -680,14 +679,14 @@ impl ThreadPool {
 
     /// Executes `n` uneven tasks on all threads, greedily stealing work.
     ///
-    /// Uses dynamic load balancing with work-stealing. Threads that finish their
-    /// assigned tasks early will steal work from busy threads. This is optimal
-    /// when task execution times vary significantly.
+    /// Uses dynamic load balancing with work-stealing. Threads that finish their assigned tasks
+    /// early will steal work from busy threads. This is optimal when task execution times vary
+    /// significantly.
     ///
     /// # Arguments
     ///
-    /// * `n` - Total number of tasks to distribute
-    /// * `function` - Closure executed for each task, receiving the task index and its `ThreadInDomain`
+    /// - `n` - Total number of tasks to distribute
+    /// - `function` - Closure executed for each task, given the task index and its `ThreadInDomain`
     ///
     /// # Examples
     ///
@@ -737,10 +736,9 @@ impl ThreadPool {
 
     /// Returns true if the given generation has completed on all threads.
     ///
-    /// A `true` result also guarantees visibility of every contributor's writes. On
-    /// `Inclusive` pools this can only turn `true` once `unsafe_join` contributes the
-    /// calling thread's slice, so the poll-then-join pattern is reserved for
-    /// `Exclusive` pools.
+    /// A `true` result also guarantees visibility of every contributor's writes. On `Inclusive`
+    /// pools this can only turn `true` once `unsafe_join` contributes the calling thread's slice,
+    /// so the poll-then-join pattern is reserved for `Exclusive` pools.
     pub fn is_complete(&self, generation: usize) -> Result<bool> {
         let mut complete: c_int = 0;
         Error::check(
@@ -756,8 +754,8 @@ impl ThreadPool {
     ///
     /// # Safety
     ///
-    /// Must be called on the thread operating the pool, with the dispatched callback
-    /// and context still valid.
+    /// Must be called on the thread operating the pool; the dispatched callback and context must
+    /// still be valid.
     pub unsafe fn unsafe_join(&self, generation: usize) {
         fu_pool_unsafe_join(self.inner, generation)
     }
@@ -774,14 +772,13 @@ impl Drop for ThreadPool {
 
 /// The measured memory fabric - what this process observed, as opposed to the structure a
 /// [`Topology`] declares. Two query families: edge queries `(initiator, target)` describe one
-/// interconnect link; medium queries `(target)` describe the memory pool itself, independent of
-/// any initiator.
+/// interconnect link; medium queries `(target)` describe the memory pool itself, with no initiator.
 ///
-/// Completes the `harvest` pipeline: a [`Topology`] is harvested first and stays immutable
-/// (and shareable), a [`ThreadPool`] spawns on it, and the fabric then harvests through that
-/// pool's pinned workers, snapshotting what it needs so the topology may be dropped after.
-/// Before a harvest every query answers 0, and
-/// [`memory_levels_count`](Self::memory_levels_count) answers 1.
+/// Completes the `harvest` pipeline: a [`Topology`] is harvested first and stays immutable and
+/// shareable, a [`ThreadPool`] spawns on it, and the fabric then harvests through that pool's
+/// pinned workers, snapshotting what it needs so the topology may be dropped after.
+/// Before a harvest every query answers 0, and [`memory_levels_count`](Self::memory_levels_count)
+/// answers 1.
 ///
 /// # Examples
 ///
@@ -813,11 +810,11 @@ impl Fabric {
     /// Measures the memory fabric through the pool's pinned workers, replacing any previous
     /// harvest; the `topology` is only read.
     ///
-    /// Returns `false` on allocation failure, or for a pool whose workers are not pinned per
-    /// domain - one restricted below [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] or pinned via
+    /// Returns `false` on allocation failure, or for a pool with workers not pinned per domain -
+    /// one restricted below [`Capabilities::PLACE_MEMORY_ON_DOMAIN`] or pinned via
     /// [`ThreadPool::spawn_on`]; the fabric is then left empty, never half-written. Not
-    /// thread-safe: it dispatches on the pool and rebuilds `self`, so call it between task
-    /// batches. Expect seconds of runtime on large fabrics.
+    /// thread-safe: it dispatches on the pool and rebuilds `self`, so call it between task batches.
+    /// Expect seconds of runtime on large fabrics.
     pub fn harvest(&mut self, topology: &Topology, pool: &mut ThreadPool) -> Result<()> {
         // ? A flat pool now reports `ConfigMismatch`, not the same failure as an exhausted heap.
         Error::check(
@@ -826,8 +823,8 @@ impl Fabric {
         )
     }
 
-    /// Returns the measured dependent-load latency (nanoseconds) on an edge - the best recording;
-    /// 0 before a harvest, for an edge no worker could reach, or an out-of-range index.
+    /// Returns the measured dependent-load latency, in nanoseconds, on an edge - the best
+    /// recording; 0 before a harvest, for an edge no worker could reach, or an out-of-range index.
     pub fn memory_latency(&self, compute_domain: ComputeDomain, memory_domain: MemoryDomain) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
@@ -860,8 +857,8 @@ impl Fabric {
         Ok(answer)
     }
 
-    /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL),
-    /// keyed by the best bandwidth any initiator sustains to it, ties split by the best latency.
+    /// Returns the derived speed class of a memory domain (lower = faster: HBM < DDR < CXL), keyed
+    /// by the best bandwidth any initiator sustains to it, ties split by the best latency.
     pub fn memory_level_in(&self, memory_domain: MemoryDomain) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
@@ -894,14 +891,14 @@ impl Drop for Fabric {
 /// A synchronization guard that waits for all threads to finish the broadcasted closure.
 ///
 /// The lifecycle is keyed on the pool's exclusivity:
-/// - On `CallerExclusivity::Exclusive` pools the closure is dispatched at **construction**:
+/// - On `CallerExclusivity::Exclusive` pools the closure is dispatched at __construction__:
 ///   the workers start immediately, the caller can overlap its own work, poll
-///   `is_complete`, and `join` (or `Drop`) waits for completion.
-/// - On `CallerExclusivity::Inclusive` pools the dispatch is deferred to **join** (or
+///   `is_complete`, and `join`, or `Drop`, waits for completion.
+/// - On `CallerExclusivity::Inclusive` pools the dispatch is deferred to __join__ (or
 ///   `Drop`), where the calling thread contributes its own slice of the work.
 ///
-/// The closure is borrowed rather than owned, so its address stays stable while worker
-/// threads hold a pointer to it, and the guard itself remains freely movable.
+/// The closure is borrowed rather than owned, so its address stays stable while worker threads hold
+/// a pointer to it, and the guard itself remains freely movable.
 pub struct BroadcastJoin<'pool, 'fork, F>
 where
     F: Fn(usize, usize) + Sync,
@@ -931,7 +928,7 @@ impl<'pool, 'fork, F> BroadcastJoin<'pool, 'fork, F>
 where
     F: Fn(usize, usize) + Sync,
 {
-    /// Create a new BroadcastJoin (internal use by ThreadPool)
+    /// Create a new BroadcastJoin, for internal use by ThreadPool
     pub(crate) fn new(pool: &'pool mut ThreadPool, function: &'fork F) -> Self {
         let mut operation = Self {
             pool,
@@ -976,9 +973,9 @@ where
 
     /// True once the dispatched generation has fully completed on all threads.
     ///
-    /// A `true` result also guarantees visibility of every contributor's writes. On
-    /// `Inclusive` pools this can only turn `true` once `join` contributes the calling
-    /// thread's slice, so the poll-then-join pattern is reserved for `Exclusive` pools.
+    /// A `true` result also guarantees visibility of every contributor's writes. On `Inclusive`
+    /// pools this can only turn `true` once `join` contributes the calling thread's slice, so the
+    /// poll-then-join pattern is reserved for `Exclusive` pools.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         match self.state {
@@ -1122,8 +1119,8 @@ impl<'pool> Scope<'pool> {
             function(thread_index, compute_domain_index);
         }
 
-        // SAFETY: `function` outlives the dispatch because we join before returning, and `Scope`
-        // is not `Sync`, so no worker can hold one and start an overlapping dispatch.
+        // SAFETY: `function` outlives the dispatch because we join before returning, and `Scope` is
+        // not `Sync`, so no worker can hold one and start an overlapping dispatch.
         unsafe {
             let context = &function as *const F as *mut c_void;
             if let Ok(generation) = self.pool.unsafe_for_threads(trampoline::<F>, context) {
@@ -1360,7 +1357,7 @@ mod tests {
     #[test]
     fn caller_exclusivity_query() {
         let topology = Topology::new().unwrap();
-        // The pool is the single source of truth, queried live (not cached).
+        // The pool is the single source of truth, queried live, not cached.
         let inclusive = ThreadPool::spawn_with_exclusivity(&topology, 2, CallerExclusivity::Inclusive).unwrap();
         assert_eq!(inclusive.caller_exclusivity().unwrap(), CallerExclusivity::Inclusive);
 
@@ -1667,8 +1664,8 @@ mod tests {
         if fabric.harvest(&topology, &mut pool).is_err() {
             return; // ? A flat pool without domain placement has no fabric to walk
         }
-        // Every reachable edge must carry sane observations; emulated-NUMA guests may
-        // measure equal local and remote costs, so nothing stronger is asserted.
+        // Every reachable edge must carry sane observations; emulated-NUMA guests may measure equal
+        // local and remote costs, so nothing stronger is asserted.
         let local = topology.local_memory_of(ComputeDomain(0)).expect("domain 0 exists");
         assert!(fabric.memory_latency(ComputeDomain(0), local).unwrap() > 0);
         assert!(fabric.memory_bandwidth(ComputeDomain(0), local).unwrap() > 0);
@@ -1680,8 +1677,8 @@ mod tests {
     #[test]
     fn generation_raw_unsafe_api() {
         let topology = Topology::new().unwrap();
-        // The raw C-ABI mirror: an `unsafe_for_threads` dispatch returning an odd token,
-        // polled with the safe `is_complete`, and joined with `unsafe_join`.
+        // The raw C-ABI mirror: an `unsafe_for_threads` dispatch returning an odd token, polled
+        // with the safe `is_complete`, and joined with `unsafe_join`.
         let count_threads = hw_threads();
         let pool = ThreadPool::spawn_with_exclusivity(&topology, count_threads, CallerExclusivity::Exclusive)
             .expect("Failed to create exclusive thread pool");

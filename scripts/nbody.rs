@@ -2,17 +2,17 @@
 //!
 //! To control the script, several environment variables are used:
 //!
-//! - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
+//! - `NBODY_COUNT` - number of bodies in the simulation - default the thread count.
 //! - `NBODY_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
 //! - `NBODY_ITERATIONS` - run an exact iteration count instead, when set.
-//! - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static_shared`).
-//! - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
+//! - `NBODY_BACKEND` - backend to use for the simulation - default `forkunion_static_shared`.
+//! - `NBODY_THREADS` - threads to use for the simulation - default the hardware thread count.
 //!
-//! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`, plus
-//! Rust-only `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the
+//! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`,
+//! plus Rust-only `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the
 //! parallel-iterator adapters; the baselines are `rayon_static`, `rayon_dynamic`, and `tokio`. The
-//! `_replicated` backends replicate the body positions into each memory domain's local storage - on a
-//! machine with one domain the replicas collapse to one, so they run everywhere. To compile and run:
+//! `_replicated` backends replicate the body positions into each memory domain's local storage - on
+//! a machine with one domain the replicas collapse to one, so they run everywhere. Build and run:
 //!
 //! ```sh
 //! cargo run --release --features benchmarks --bin forkunion_nbody
@@ -35,6 +35,9 @@
 //! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
 //! NBODY_COUNT=512 NBODY_BACKEND=tokio target/release/forkunion_nbody
 //! ```
+//!
+//! File: scripts/nbody.rs
+//! Author: Ash Vardanian
 use std::env;
 use std::error::Error;
 use std::time::Instant;
@@ -94,7 +97,7 @@ fn random_unit(counter: u64) -> f32 {
     (split_mix(counter) >> 40) as f32 * (1.0 / 16777216.0)
 }
 
-/// Fast reciprocal square-root (one Newton step of the classic Quake hack).
+/// Fast reciprocal square-root, one Newton step of the classic Quake hack.
 #[inline]
 fn fast_rsqrt(x: f32) -> f32 {
     let i = 0x5f37_59dfu32.wrapping_sub(x.to_bits() >> 1);
@@ -165,8 +168,8 @@ fn apply_force(b: &mut Body, f: &Vector3) {
     b.position.x += b.velocity.x * DT_CONST;
     b.position.y += b.velocity.y * DT_CONST;
     b.position.z += b.velocity.z * DT_CONST;
-    // ? Wrap into the unit box to keep every distance - and so every force - inside the normal
-    // ? `f32` range forever: no overflows into NaN, and no denormals for x86 to stall on.
+    // ? Wraps into the unit box to keep every distance - and every force - inside the normal `f32`
+    // ? range forever: no overflows into NaN, and no denormals for x86 to stall on.
     b.position.x -= b.position.x.floor();
     b.position.y -= b.position.y.floor();
     b.position.z -= b.position.z.floor();
@@ -212,7 +215,7 @@ struct Ctx<'a> {
     tokio: Option<&'a TokioRuntime>,
 }
 
-// Compile-time axes as marker types - stable Rust cannot take a custom enum as a const-generic param.
+// Compile-time axes as marker types - stable Rust forbids a custom enum as a const-generic param.
 // nbody is all-to-all, so there is no decomposition axis - only schedule and placement.
 trait Schedule {
     const STATIC_SCHEDULE: bool;
@@ -303,8 +306,9 @@ fn refresh_replicas(
                 .local_memory_of(fu::ComputeDomain(compute_domain_index))
                 .expect("in-range domain");
 
-            // Rank this thread among every thread on its memory domain, and count them, so the node's
-            // whole team splits [0, n) without overlap even when several compute domains share the node.
+            // Rank this thread among every thread on its memory domain, and count them, so the
+            // node's whole team splits [0, n) without overlap even when several compute domains
+            // share the node.
             let mut threads_on_memory_domain = 0usize;
             let mut local_index_on_memory_domain = 0usize;
             for other in 0..view.compute_domains_count() {
@@ -326,9 +330,9 @@ fn refresh_replicas(
             if range.is_empty() {
                 return;
             }
-            // SAFETY: within a memory domain the split hands each thread a disjoint, in-bounds range,
-            // and each node writes only its own replica, so no two threads alias. `bodies` is read
-            // only, and both it and `replicas` outlive the join.
+            // SAFETY: within a memory domain the split hands each thread a disjoint, in-bounds
+            // range, and each node writes only its own replica, so no two threads alias. `bodies`
+            // is read only, and both it and `replicas` outlive the join.
             let replica = replicas.replica_ptr(memory_domain);
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -341,9 +345,10 @@ fn refresh_replicas(
     });
 }
 
-/// The read-only inputs one simulation step hands to every task, small and `Copy` so it moves into a
-/// task closure for free. The pointers stand in for the `bodies` and `forces` slices, and - only when the
-/// placement is replicated - `topology` and `replicas` bridge a compute domain to its node-local copy.
+/// The read-only inputs one simulation step hands to every task, small and `Copy` so it moves into
+/// a task closure for free. The pointers stand in for the `bodies` and `forces` slices, and - only
+/// when the placement is replicated - `topology` and `replicas` bridge a compute domain to its
+/// node-local copy.
 #[derive(Copy, Clone)]
 struct WorkCtx<'a> {
     bodies_ptr: fu::SyncConstPtr<Body>,
@@ -367,8 +372,9 @@ fn bodies_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> &'a 
     } else {
         work.bodies_ptr.as_ptr()
     };
-    // SAFETY: both the canonical array and every replica hold `n` initialized bodies, read-only for the
-    // duration of the force pass, which joins before the apply pass or the next refresh mutates them.
+    // SAFETY: both the canonical array and every replica hold `n` initialized bodies, read-only for
+    // the duration of the force pass, which joins before the apply pass or the next refresh mutates
+    // them once more.
     unsafe { core::slice::from_raw_parts(base, work.n) }
 }
 
@@ -383,7 +389,8 @@ fn force_kernel<P: Placement>(work: WorkCtx, task: usize, at: fu::ThreadInDomain
 /// Integrates one canonical body by the force computed for it - identical for both placements.
 #[inline]
 fn apply_kernel(work: WorkCtx, body: &mut Body, task: usize, _at: fu::ThreadInDomain) {
-    // SAFETY: `forces` holds `n` initialized elements, read-only while the apply pass mutates `bodies`.
+    // SAFETY: `forces` holds `n` initialized elements, read-only while the apply pass mutates
+    // `bodies`.
     let force = unsafe { work.forces_ptr.get(task) };
     apply_force(body, force);
 }
@@ -402,10 +409,10 @@ fn for_each<S: Schedule, T: Send + Sync, F: Fn(&mut T, usize, fu::ThreadInDomain
     }
 }
 
-/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion backends
-/// are its instantiations. The all-to-all sweep cannot be sharded - every body reads every other - so the
-/// only locality to win is the read side: replicate the positions once per step, then keep the quadratic
-/// loop node-local.
+/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion
+/// backends are its instantiations. The all-to-all sweep cannot be sharded - every body reads every
+/// other - so the only locality to win is the read side: replicate the positions once per step,
+/// then keep the quadratic loop node-local.
 fn iteration_forkunion<S: Schedule, P: Placement>(
     topology: &fu::Topology,
     pool: &mut fu::ThreadPool,
@@ -642,8 +649,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     ];
     let mut forces = vec![Vector3::default(); bodies_n];
 
-    // Seven counter-based draws per body: three position coordinates, three velocity components, and
-    // one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    // Seven counter-based draws per body: three position coordinates, three velocity components,
+    // and one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
     bodies.iter_mut().enumerate().for_each(|(i, b)| {
         let counter = i as u64 * 7;
         b.position = Vector3 {

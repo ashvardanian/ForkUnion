@@ -1,8 +1,8 @@
 /**
- *  @brief ForkUnion probe: the `CLDEMOTE` and `PREFETCHW` encodings, or `_mm_cldemote` and `_m_prefetchw`.
- *  @author Ash Vardanian
  *  @file probes/x86_cldemote.cpp
+ *  @author Ash Vardanian
  *  @date September 7, 2026
+ *  @brief ForkUnion probe: the `CLDEMOTE`/`PREFETCHW` encodings, or `_mm_cldemote`/`_m_prefetchw`.
  */
 #if !(defined(__x86_64__) || defined(_M_X64))
 #error "x86-64 only"

@@ -72,8 +72,9 @@ struct Topology:
             `TOPOLOGY_UNAVAILABLE` and an exhausted allocator with `BAD_ALLOC`.
         """
         self.library = library
-        # The C API answers NULL when the harvest fails, and Mojo's `Pointer` is non-null by
-        # design, so the address is checked before it becomes one.
+        # The C API answers NULL when the harvest fails, and Mojo's `Pointer` is non-null by design,
+        # so the address is checked before it becomes one.
+        #
         # ? An allocation failure and a machine that will not describe itself now arrive apart.
         # Stack storage the C side writes through; see `OutHandle` for why the origin is `Any`.
         var out = stack_allocation[1, Int]()
@@ -409,8 +410,8 @@ def name_capabilities(library: Library, capabilities: Capabilities) raises Error
     if status != 0:
         raise Error(ErrorKind.of(status), "fu_name_capabilities")
     var written = Int(out[unsafe_offset=0])
-    # The C side null-terminates and truncates to fit, so clamp before trusting the count, and
-    # stop at the terminator in case it wrote one early.
+    # The C side null-terminates and truncates to fit, so clamp before trusting the count, and stop
+    # at the terminator in case it wrote one early.
     var length = min(written, _NAME_BUFFER_BYTES)
     for index in range(length):
         if buffer[index] == 0:
