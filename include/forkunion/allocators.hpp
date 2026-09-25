@@ -138,6 +138,8 @@ struct linux_numa_allocator {
      *      allocation fails or the size is not a multiple of `sizeof(value_type)`.
      */
     allocation_result<value_type *, size_type> allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
+        assert(std::has_single_bit(page_size_bytes) && "A page is a power of two bytes, which rules out zero");
+        assert(memory_domain_id_ >= 0 && "A default-constructed allocator names no memory domain");
         size_type const size_bytes = size * sizeof(value_type);
         size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
 
@@ -496,6 +498,8 @@ struct freebsd_numa_allocator {
         : memory_domain_id_(o.memory_domain_id()), default_page_size_(o.default_page_size()) {}
 
     allocation_result<value_type *, size_type> allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
+        assert(std::has_single_bit(page_size_bytes) && "A page is a power of two bytes, which rules out zero");
+        assert(memory_domain_id_ >= 0 && "A default-constructed allocator names no memory domain");
         size_type const size_bytes = size * sizeof(value_type);
         size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
         if (aligned_size_bytes % sizeof(value_type)) return {}; // ! Not a size multiple

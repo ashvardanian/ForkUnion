@@ -12,8 +12,8 @@
  *  A dispatcher runs one generation on a caller-inclusive pool with two workers, contributes its
  *  own slice inside the join, and after the completion step reads every worker's result.
  *  `-Dwithout_decrement_acquire` weakens the @c acq_rel decrements to release: the last contributor
- *  drops the acquire on its peers, and the join reads a stale result. The companion PlusCal script
- *  models the same scenario in `flat_pool.pml`.
+ *  drops the acquire on its peers, and the join reads a stale result. The companion Promela model
+ *  covers the same scenario in `flat_pool.pml`.
  */
 #include <cstddef> // `std::size_t`
 
@@ -33,6 +33,8 @@ std::atomic<std::size_t> epoch {0};
 std::size_t fork_state = 0;
 std::size_t results[contributors_k] = {0, 0, 0};
 
+/** One slice: the fork state, the result, the decrement, and the completion step for
+ *  the last one. */
 void contribute(std::size_t thread_index, std::size_t generation) noexcept {
     verify(fork_state == generation);
     results[thread_index] = generation;
@@ -41,6 +43,7 @@ void contribute(std::size_t thread_index, std::size_t generation) noexcept {
     if (before_decrement == 1) epoch.fetch_add(1, std::memory_order_release);
 }
 
+/** A worker: waits for the dispatch with acquire, then contributes the slice named by @p slot. */
 void *work(void *slot) noexcept {
     std::size_t const thread_index = *static_cast<std::size_t *>(slot);
     std::size_t new_epoch;
@@ -54,17 +57,17 @@ int main() {
     thread_t const workers[2] = {spawn(work, const_cast<std::size_t *>(&slots[1])),
                                  spawn(work, const_cast<std::size_t *>(&slots[2]))};
 
-    // unsafe_for_threads: the fork, the countdown reset, the release step of the epoch
+    // The fork, the countdown reset, the release step of the epoch: `flat_pool::unsafe_for_threads`
     verify(threads_to_sync.load(std::memory_order_acquire) == 0);
     fork_state = 1;
     threads_to_sync.store(contributors_k, std::memory_order_relaxed);
     std::size_t const generation = epoch.fetch_add(1, std::memory_order_release) + 1;
 
-    // unsafe_join: the caller's slice, then the wait for the completion step
+    // The caller's slice, then the wait for the completion step: `flat_pool::unsafe_join`
     if (epoch.load(std::memory_order_acquire) == generation) contribute(0, generation);
     while (epoch.load(std::memory_order_acquire) == generation) {}
 
-    // is_complete: a true result synchronizes with every contributor
+    // A true `flat_pool::is_complete` synchronizes with every contributor
     verify(results[1] == generation);
     verify(results[2] == generation);
     join(workers[0]);

@@ -1861,6 +1861,14 @@ int probe();
 #endif
 FIXTURE
 
+assert_rejects "verification citing a line number" "pins a citation to a line number" verification/README.md <<'FIXTURE'
+The cursors are published in `types.hpp:2281-2292`, before the dispatch.
+FIXTURE
+
+assert_accepts "verification citing a symbol and its file" verification/README.md <<'FIXTURE'
+The cursors are published in `invoke_for_n_dynamic::reset_slices_` in `types.hpp`, before the dispatch.
+FIXTURE
+
 # endregion ForkUnion Fixtures
 
 # region Commit Message Fixtures

@@ -138,7 +138,7 @@ verify weak_memory_litmus.pml pass -Dmemory=sequential -Dshape=far_add_before_re
 verify weak_memory_litmus.pml pass -Dshape=far_add_before_release
 verify weak_memory_litmus.pml fail -Dmemory=far -Dshape=far_add_before_release
 
-section "for_n_dynamic.pml: private cursors, the coprime steal, the static prongs, the overshoot bound, and the join"
+section "for_n_dynamic.pml: private cursors, the coprime steal, the static prongs, the overshoot bound, the join, and no reset in flight"
 verify for_n_dynamic.pml pass -Dmemory=sequential
 verify for_n_dynamic.pml pass
 verify for_n_dynamic.pml pass -Dtasks=2
@@ -149,6 +149,7 @@ verify for_n_dynamic.pml fail -Dmemory=sequential -Dwithout_claim_guard
 verify for_n_dynamic.pml pass -Dmemory=sequential -Dwithout_probe
 verify for_n_dynamic.pml pass -Dmemory=sequential -Dwithout_single_visit
 verify for_n_dynamic.pml fail -Dmemory=sequential -Dwithout_probe -Dwithout_single_visit
+verify for_n_dynamic.pml fail -Dmemory=sequential -Dscenario=nested
 
 section "distributed_pool.pml: the lockstep dispatch, the ANDed completion, the caller-first join, and spin_mutex"
 verify distributed_pool.pml pass -Dmemory=sequential -Dgenerations=2
@@ -160,7 +161,7 @@ verify distributed_pool.pml pass -Dscenario=locked
 verify distributed_pool.pml fail -Dscenario=locked -Dwithout_lock_acquire
 verify distributed_pool.pml fail -Dscenario=locked -Dwithout_unlock_release
 
-section "flat_pool.pml: the epoch clock, the countdown, and what a completed join sees"
+section "flat_pool.pml: the epoch clock, the countdown, what a completed join sees, and the C shim's callback slot"
 verify flat_pool.pml pass -Dmemory=sequential
 verify flat_pool.pml pass
 verify flat_pool.pml fail -Dwithout_decrement_acquire
@@ -175,6 +176,12 @@ verify flat_pool.pml pass -Dmemory=sequential -Dscenario=polling
 verify flat_pool.pml pass -Dscenario=polling -Dgenerations=1
 verify flat_pool.pml fail -Dscenario=polling -Dgenerations=1 -Dwithout_complete_acquire
 verify flat_pool.pml fail -Dmemory=sequential -Dscenario=polling -Depoch_modulus=2
+verify flat_pool.pml pass -Dmemory=sequential -Dscenario=redispatch
+verify flat_pool.pml pass -Dscenario=redispatch
+verify flat_pool.pml fail -Dmemory=sequential -Dscenario=redispatch -Dwithout_join_before_dispatch
+verify flat_pool.pml pass -Dmemory=sequential -Dscenario=stale_join
+verify flat_pool.pml pass -Dscenario=stale_join
+verify flat_pool.pml fail -Dmemory=sequential -Dscenario=stale_join -Dwithout_generation_check
 
 section "standard_atomic_ref.cpp: the portable conditional and extremal loops under GenMC"
 if genmc_ready; then

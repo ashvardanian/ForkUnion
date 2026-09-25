@@ -7,10 +7,11 @@ Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com)
 - `weak_memory.pml` — the C++ memory model as views, for Promela: relaxed, acquire, release, `acq_rel`, both fences, release sequences.
 - `weak_memory_litmus.pml` — the calibration: the classic shapes, each asserting the outcome RC11 forbids.
   `check.sh` expects exactly RC11's verdicts.
-- `flat_pool.pml` — `flat_pool`: the epoch clock, the countdown, what a completed join sees, the moods, a re-spawn, and a poll on a stale token.
-  Scenarios: `-Dscenario=moods`, `respawn`, `polling`.
+- `flat_pool.pml` — `flat_pool`: the epoch clock, the countdown, what a completed join sees, the moods, a re-spawn, a poll on a stale token, and the C shim's callback slot.
+  Scenarios: `-Dscenario=moods`, `respawn`, `polling`, `redispatch`, `stale_join`.
 - `flat_pool.cpp` — the same words under GenMC.
-- `for_n_dynamic.pml` — `for_n_dynamic`: one private cursor per thread, the coprime steal, the static prongs, the overshoot bound, and the join.
+- `for_n_dynamic.pml` — `for_n_dynamic`: one private cursor per thread, the coprime steal, the static prongs, the overshoot bound, the join, and no reset in flight.
+  Scenarios: `-Dscenario=nested`.
 - `distributed_pool.pml` — `distributed_pool`: the lockstep dispatch over colocations, the ANDed completion, the caller-first join, and `spin_mutex` under a slice.
   Scenarios: `-Dscenario=overlap`, `locked`.
 - `standard_atomic_ref.cpp` — the portable `fetch_add_if_at_most` and `fetch_max` loops of `standard_atomic_ref` under GenMC, the real header.
@@ -19,6 +20,12 @@ Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com)
 ## Conventions
 
 Every model opens the same way: the file docblock, the include, then the names.
+The comments follow the C++ headers' rules, and the pre-commit hook checks `*.pml` with the same Doxygen checks.
+The file docblock opens with `@file`, `@author`, `@date` and a `@brief` of at most three lines, then the body, where each invariant and each scenario is a paragraph opening with its subject.
+Every `inline` and `proctype`, and every documented group of `#define`s, carries a `/** */` docblock directly above it whose first sentence is its summary.
+A note over a whole `#if` branch is a plain `/* */` above the `#if`, and `//` is kept for notes inside a body.
+Inside a block, a single name reads `@c name`, a parameter of the inline below reads `@p name`, and a span of several tokens stays in backticks.
+Code is cited by symbol and file, as `flat_pool::unsafe_join` in `flat.hpp`, never by line number, which drifts with every edit above it.
 The module fixes its own shape, `thread_count`, `location_count` and `history_depth`, the most writes one word ever receives, the initial one included, as the maxima over every model.
 Everything is lowercase snake case; Spin's own `-DSAFETY` in the runner is the only capital.
 A thread index is `<role>_thread`, apart from the process that plays the role; processes that come in numbers name themselves as they start.
@@ -52,9 +59,10 @@ A dispatch waking a chilled pool restored the workers' scheduling class with `SC
 The same wake-up was one `compare_exchange_weak` outside any loop, which may fail spuriously on load-linked architectures; on a flat pool that only costs latency, but a colocated worker still in its startup wait after a `sleep` leaves it only when the mood stops being `chill_k`, and a dispatch whose exchange failed would never release it while its join waited for it forever.
 `flat_pool.pml -Dscenario=moods -Dwithout_strong_wake` shows the stuck pair; the exchange is strong now, the same instruction on x86.
 `terminate` was documented as callable from any thread at any time, and asserts that no task is running and the last dispatch was joined; the docs say so now.
+The C shim's `fu_pool_unsafe_join` cleared its callback slot on any token, so a stale join during a live dispatch left the live join with nothing to run and a worker calling through the cleared slot; `flat_pool.pml -Dscenario=stale_join -Dwithout_generation_check` shows it, and the shim clears the slot only for the generation it published now.
 
 Three things stand as they are, and the models say why.
-The release on each cursor in `reset_slices_` is redundant, since the dispatch's release on the epoch carries every cursor and end to every worker; `-Dpublish_relaxed` passes to show it, and the release stays.
+The release on each cursor in `invoke_for_n_dynamic::reset_slices_` is redundant, since the dispatch's release on the epoch carries every cursor and end to every worker; `-Dpublish_relaxed` passes to show it, and the release stays.
 The workers re-check the mood only under a capped wait, which bounds a `sleep` or a `terminate` notice to one timeout; `-Dwithout_wait_cap` is the uncapped monitor, and a stuck worker.
 The epoch's width aliases at the debug widths, as the header prices: `-Depoch_modulus=2` under `-Dscenario=polling` makes a stale token name the live generation, and the stale join contributes a slice that is not its own.
 A `broadcast_join` kept alive across a `terminate` and a `spawn` would alias after one re-spawn rather than after 2^bits epochs, since `terminate` resets the epoch; it asserts every dispatch joined, so nothing outlives it by contract.
@@ -66,7 +74,7 @@ A `broadcast_join` kept alive across a `terminate` and a `spawn` would alias aft
 GENMC=~/genmc/build/bin/genmc ./check.sh     # both
 ```
 
-The suite's 59 verdicts take about twenty seconds four at a time, which is the default; the far model is skipped throughout, since no pool path posts a relaxed no-return add.
+The suite's 66 verdicts take about twenty seconds four at a time, which is the default; the far model is skipped throughout, since no pool path posts a relaxed no-return add.
 `GENMC_CLANG` names the compiler GenMC was built with, `clang++` by default; `GENMC_SECONDS` caps one client, 300 by default; `GENMC_UNROLL` gives every loop that many turns, 3 by default, since GenMC treats a weak compare-exchange as one that may fail spuriously and a read-first retry loop never ends for it.
 Every verdict runs in its own directory, `VERIFY_JOBS` at a time, four by default since each verifier holds a hash table of its own, and the lines print in the order they were queued once the last one lands.
 

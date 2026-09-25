@@ -184,7 +184,10 @@ struct standard_atomic_ref {
     /** The runtime bits a reference needs admitted before it may run - none here. */
     static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
 
-    explicit standard_atomic_ref(value_type_ &word) noexcept : word_(&word) {}
+    explicit standard_atomic_ref(value_type_ &word) noexcept : word_(&word) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % std::atomic_ref<value_type_>::required_alignment == 0 &&
+               "std::atomic_ref needs the word at its required alignment");
+    }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return reference_().load(order);
@@ -323,7 +326,10 @@ struct standard_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
     static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
 
-    explicit standard_atomic_ref(value_type_ const &word) noexcept : word_(&word) {}
+    explicit standard_atomic_ref(value_type_ const &word) noexcept : word_(&word) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % std::atomic_ref<value_type_>::required_alignment == 0 &&
+               "std::atomic_ref needs the word at its required alignment");
+    }
 
     /** A temporary would die before the reference does. */
     standard_atomic_ref(value_type_ const &&) = delete;
@@ -415,7 +421,10 @@ struct x86_cmpccxadd_atomic_ref {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k;
 
-    explicit x86_cmpccxadd_atomic_ref(value_type_ &word) noexcept : word_(&word) {}
+    explicit x86_cmpccxadd_atomic_ref(value_type_ &word) noexcept : word_(&word) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return portable_().load(order);
@@ -631,7 +640,10 @@ struct x86_raoint_atomic_ref {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k | capability_x86_raoint_k;
 
-    explicit x86_raoint_atomic_ref(value_type_ &word) noexcept : word_(&word) {}
+    explicit x86_raoint_atomic_ref(value_type_ &word) noexcept : word_(&word) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return weaker_().load(order);
@@ -1920,7 +1932,10 @@ struct arm64_lse_atomic_ref {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k;
 
-    explicit arm64_lse_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {}
+    explicit arm64_lse_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         if (order == std::memory_order_relaxed) {
@@ -2132,7 +2147,10 @@ struct arm64_lse_atomic_ref<value_type_ const> {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k;
 
-    explicit arm64_lse_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {}
+    explicit arm64_lse_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     /** A temporary would die before the reference does. */
     arm64_lse_atomic_ref(value_type_ const &&) = delete;
@@ -2199,7 +2217,10 @@ struct arm64_rcpc_atomic_ref {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k | capability_arm64_rcpc_k;
 
-    explicit arm64_rcpc_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {}
+    explicit arm64_rcpc_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         if (order != std::memory_order_acquire && order != std::memory_order_consume) return weaker_().load(order);
@@ -2326,7 +2347,10 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k | capability_arm64_rcpc_k;
 
-    explicit arm64_rcpc_atomic_ref(value_type_ const &word) noexcept : word_(&word) {}
+    explicit arm64_rcpc_atomic_ref(value_type_ const &word) noexcept : word_(&word) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     /** A temporary would die before the reference does. */
     arm64_rcpc_atomic_ref(value_type_ const &&) = delete;
@@ -2625,7 +2649,10 @@ struct risc5_atomic_ref {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k;
 
-    explicit risc5_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {}
+    explicit risc5_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         if (order == std::memory_order_seq_cst) risc5_fence_rw_rw();
@@ -2816,7 +2843,10 @@ struct risc5_atomic_ref<value_type_ const> {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k;
 
-    explicit risc5_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {}
+    explicit risc5_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     /** A temporary would die before the reference does. */
     risc5_atomic_ref(value_type_ const &&) = delete;
@@ -2879,7 +2909,10 @@ struct risc5_zacas_atomic_ref {
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k | capability_risc5_zacas_k;
 
-    explicit risc5_zacas_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {}
+    explicit risc5_zacas_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return weaker_().load(order);

@@ -24,6 +24,8 @@ std::uint32_t admitted = 0;
 std::uint32_t admissions[2] = {0, 0};
 std::uint32_t highest = 0;
 
+/** Admits one through @c fetch_add_if_at_most against the ceiling, and records in @p slot whether
+ *  it got in. */
 void *admit(void *slot) noexcept {
     std::uint32_t const observed =
         fu::standard_atomic_ref<std::uint32_t>(admitted).fetch_add_if_at_most(1, ceiling_k, std::memory_order_relaxed);
@@ -31,6 +33,7 @@ void *admit(void *slot) noexcept {
     return nullptr;
 }
 
+/** Raises the shared maximum to the value @p operand points to, through @c fetch_max. */
 void *raise(void *operand) noexcept {
     fu::standard_atomic_ref<std::uint32_t>(highest).fetch_max(*static_cast<std::uint32_t *>(operand),
                                                               std::memory_order_relaxed);

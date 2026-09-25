@@ -1,39 +1,46 @@
 /**
- *  `distributed_pool` from `include/forkunion/distributed.hpp`: one dispatch fanned over every
- *  colocation's own epoch and countdown, in lockstep, so one generation token names them all;
- *  the join runs the caller's slice on its own colocation first and waits for the others
- *  after; `is_complete` is true only once every colocation stepped past the token.
+ *  @file verification/distributed_pool.pml
+ *  @author Ash Vardanian
+ *  @date September 11, 2026
+ *  @brief Spin model of @c distributed_pool from `include/forkunion/distributed.hpp`: one dispatch
+ *      fanned over every colocation's own epoch and countdown, in lockstep.
  *
- *  A dispatcher on a caller-inclusive pool of two colocations, the first with the caller and
- *  one worker, the second with one worker, and a poller; one round under views, two under
- *  `-Dmemory=sequential -Dgenerations=2`, where the state space allows it. Each round the dispatcher resets
- *  the second colocation's countdown and steps its epoch with a release, then the first's,
- *  and asserts the two tokens agree; the join contributes the caller's slice to the first
- *  colocation, waits for its completion step, then waits for the second's; the poller reads
- *  both epochs with acquire until both differ from the token, and then reads every result.
- *  The workers are the colocated loop: they wait on their epoch, contribute, count down with
- *  `acq_rel`, and the last one steps the epoch with a release; the fork word is dropped,
- *  since `flat_pool.pml` covers it.
+ *  One generation token names every colocation; the join runs the caller's slice on its own
+ *  colocation first and waits for the others after; @c is_complete is true only once every
+ *  colocation stepped past the token.
  *
- *  Invariants:
- *  - lockstep: both dispatches return the same token, and after the join both epochs are past
- *    it. `-Dwithout_dispatch_before_join` joins the second colocation before dispatching to
- *    it: the join returns stale, and the round ends with that colocation still running;
- *  - completion: a poller that saw both epochs past the token reads every worker's result of
- *    that round, the acquire on each epoch carrying its colocation's contributors;
- *  - `-Dscenario=overlap`: the second colocation's workers start their slices only once the
- *    caller has contributed its own, a remote colocation that lags the caller. The join as
- *    written passes, since the caller's slice runs before any remote wait;
- *    `-Dwithout_caller_first_join` waits for the second colocation first, and both sides wait
- *    on each other forever, which Spin reports as an invalid end state;
- *  - `-Dscenario=locked`: every slice takes `spin_mutex` around one read and one write of a
- *    tally, the lock an acquire exchange retried after a wait on the flag, the unlock a
- *    release store; the joiner reads the tally of every contributor.
- *    `-Dwithout_lock_acquire` and `-Dwithout_unlock_release` each lose an increment.
+ *  A dispatcher on a caller-inclusive pool of two colocations, the first with the caller and one
+ *  worker, the second with one worker, and a poller; one round under views, two under
+ *  `-Dmemory=sequential -Dgenerations=2`, where the state space allows it. Each round the
+ *  dispatcher resets the second colocation's countdown and steps its epoch with a release, then
+ *  the first's, and asserts the two tokens agree; the join contributes the caller's slice to the
+ *  first colocation, waits for its completion step, then waits for the second's; the poller reads
+ *  both epochs with acquire until both differ from the token, and then reads every result. The
+ *  workers are the colocated loop: they wait on their epoch, contribute, count down with
+ *  @c acq_rel, and the last one steps the epoch with a release; the fork word is dropped, since
+ *  `flat_pool.pml` covers it.
+ *
+ *  Lockstep: both dispatches return the same token, and after the join both epochs are past it.
+ *  `-Dwithout_dispatch_before_join` joins the second colocation before dispatching to it: the join
+ *  returns stale, and the round ends with that colocation still running.
+ *
+ *  Completion: a poller that saw both epochs past the token reads every worker's result of that
+ *  round, the acquire on each epoch carrying its colocation's contributors.
+ *
+ *  Under `-Dscenario=overlap`, the second colocation's workers start their slices only once the
+ *  caller has contributed its own, a remote colocation that lags the caller. The join as written
+ *  passes, since the caller's slice runs before any remote wait; `-Dwithout_caller_first_join`
+ *  waits for the second colocation first, and both sides wait on each other forever, which Spin
+ *  reports as an invalid end state.
+ *
+ *  Under `-Dscenario=locked`, every slice takes @c spin_mutex around one read and one write of a
+ *  tally, the lock an acquire exchange retried after a wait on the flag, the unlock a release
+ *  store; the joiner reads the tally of every contributor. `-Dwithout_lock_acquire` and
+ *  `-Dwithout_unlock_release` each lose an increment.
  */
 #include "weak_memory.pml"
 
-// The knob's values are integers, so a typo fails the range check below.
+/** The knob's values are integers, so a typo fails the range check below. */
 #define plain 1
 #define overlap 2
 #define locked 3
@@ -44,15 +51,15 @@
 #error "scenario is plain, overlap or locked"
 #endif
 
-// The threads, by role, apart from the processes that play them; the workers name themselves,
-// worker 1 on the first colocation and worker 2 on the second.
+/** The threads, by role, apart from the processes that play them; the workers name themselves,
+ *  worker 1 on the first colocation and worker 2 on the second. */
 #define dispatcher_thread 0
 #define poller_thread 3
 #define colocation_of(worker) ((worker) - 1)
 
-// The words, by the member each stands for: each colocation's clock and countdown, one result
-// word per worker, and either the token handed to the poller, or the mutex's flag and the
-// tally under it, which the locked scenario has instead of a poller.
+/** The words, by the member each stands for: each colocation's clock and countdown, one result word
+ *  per worker, and either the token handed to the poller, or the mutex's flag and the tally under
+ *  it, which the locked scenario has instead of a poller. */
 #define epoch(colocation) (colocation)
 #define threads_to_sync(colocation) (2 + (colocation))
 #define result(worker) (3 + (worker))
@@ -60,7 +67,8 @@
 #define flag 7
 #define tally 8
 
-// The scenario's sizes: the rounds, and the contributors, the caller among the first colocation's.
+/** The scenario's sizes: the rounds, and the contributors, the caller counted among those of
+ *  the first colocation. */
 #ifndef generations
 #define generations 1
 #endif
@@ -85,7 +93,8 @@ bool terminated;
 bool caller_contributed; // the caller's slice of the current round ran
 byte ran[3 * (generations + 1)]; // slices run, per contributor and round
 
-// spin_mutex around one increment of the tally: types.hpp:1682-1693
+/** One increment of the tally under @c spin_mutex, whose @c spin_mutex::lock and
+ *  @c spin_mutex::unlock live in `types.hpp`. */
 inline count_under_lock(t) {
     do
     :: read_modify_write_if(t, flag, lock_order, seen_flag == 0, seen_flag, 1);
@@ -99,7 +108,9 @@ inline count_under_lock(t) {
     store(t, flag, unlock_order, 0)
 }
 
-// one slice: the result or the tally, the countdown, and the completion step by the last one: distributed.hpp:738-744, 894-899
+/** One slice: the result or the tally, the countdown, and the completion step by the last one,
+ *  as @c colocated_pool::unsafe_join and @c colocated_pool::_worker_loop_body in
+ *  `distributed.hpp` run it. */
 inline contribute(t, colocation, generation) {
     atomic {
         ran[(t) * (generations + 1) + round_of(generation)]++;
@@ -121,14 +132,16 @@ inline contribute(t, colocation, generation) {
     fi
 }
 
-// unsafe_for_threads on one colocation: the countdown reset relaxed, the epoch stepped with a release: flat.hpp:494, 504
+/** The dispatch on one colocation: the countdown reset relaxed, the epoch stepped with a release,
+ *  as @c colocated_pool::unsafe_for_threads in `distributed.hpp` does. */
 inline dispatch(colocation, contributing, generation) {
     store(dispatcher_thread, threads_to_sync(colocation), order_relaxed, contributing);
     read_modify_write(dispatcher_thread, epoch(colocation), order_release, observed, observed + 1);
     generation = observed + 1
 }
 
-// unsafe_join on one colocation: stale tokens return at once, else the wait for the completion step: distributed.hpp:732, 748-751
+/** The join on one colocation: stale tokens return at once, else the wait for the completion step,
+ *  as in @c colocated_pool::unsafe_join in `distributed.hpp`. */
 inline join(colocation, generation) {
     load(dispatcher_thread, epoch(colocation), order_acquire, seen_epoch);
     if
@@ -145,11 +158,13 @@ inline join(colocation, generation) {
     fi
 }
 
+/** The caller: dispatches to every colocation, joins them caller first, and checks the round. */
 active proctype dispatcher() {
     int round, observed, generation, remote_generation, seen_epoch, before, seen_flag, seen_tally;
     for (round : 1 .. generations) {
         caller_contributed = false;
-        // the distributed dispatch: every remote colocation first, then the caller's, and the tokens agree: distributed.hpp:1558-1571
+        // Every remote colocation first, then the caller's, and the tokens agree:
+        // `distributed_pool::unsafe_for_threads` in `distributed.hpp`
 #ifdef without_dispatch_before_join
         dispatch(0, 2, generation);
 #else
@@ -158,10 +173,11 @@ active proctype dispatcher() {
         assert(remote_generation == generation);
 #endif
 #if scenario != locked
-        // the token, handed to the poller as a `broadcast_join` hands it, with a synchronization
+        // The token, handed to the poller as a `broadcast_join` hands it, with a synchronization
         store(dispatcher_thread, token, order_release, generation);
 #endif
-        // the distributed join: the caller's colocation first, its slice inside, then the rest: distributed.hpp:1592-1599
+        // The caller's colocation first, its slice inside, then the rest:
+        // `distributed_pool::unsafe_join` in `distributed.hpp`
 #ifdef without_caller_first_join
         join(1, generation);
 #endif
@@ -187,6 +203,7 @@ active proctype dispatcher() {
     (workers_exited == 2)
 }
 
+/** A worker: the colocated loop on its own colocation's epoch, until the caller terminates. */
 active [2] proctype worker() {
     byte me, colocation;
     int last_epoch, new_epoch, before, observed, seen_flag, seen_tally;
@@ -211,7 +228,9 @@ active [2] proctype worker() {
 }
 
 #if scenario != locked
-// is_complete over every colocation, then the results of the round it watched: distributed.hpp:1581-1585
+
+/** The poll over every colocation, then the results of the round it watched:
+ *  @c distributed_pool::is_complete in `distributed.hpp`. */
 active proctype poller() {
     int seen_first, seen_second, seen_result, watched;
     byte contributor;
@@ -220,7 +239,8 @@ active proctype poller() {
     :: load(poller_thread, token, order_acquire, watched);
        if :: watched != 0 -> break :: else fi
     od;
-    // the poll waits for a step it has not seen, so a stuck pool is a stuck poller and not a spinning one
+    // The poll waits for a step it has not seen, so a stuck pool is a stuck poller and not
+    // a spinning one
     do
     :: (newest_value(epoch(0)) != watched && newest_value(epoch(1)) != watched) ->
        load(poller_thread, epoch(0), order_acquire, seen_first);

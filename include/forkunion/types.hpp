@@ -1641,7 +1641,10 @@ class dynamic_padded_array {
     dynamic_padded_array() noexcept = default;
 
     explicit dynamic_padded_array(allocator_t const &alloc, std::size_t bytes_per_object = sizeof(object_t)) noexcept
-        : bytes_per_object_(bytes_per_object), allocator_(alloc) {}
+        : bytes_per_object_(bytes_per_object), allocator_(alloc) {
+        assert(bytes_per_object >= sizeof(object_t) && bytes_per_object % alignof(object_t) == 0 &&
+               "Every object needs a whole slot at its own alignment");
+    }
 
     dynamic_padded_array(dynamic_padded_array &&o) noexcept
         : raw_(std::exchange(o.raw_, nullptr)), raw_owned_(std::exchange(o.raw_owned_, nullptr)),
@@ -1722,7 +1725,11 @@ class dynamic_padded_array {
     object_t const *data() const noexcept { return ptr(0); }
     std::size_t size() const noexcept { return objects_count_; }
     std::size_t stride() const noexcept { return bytes_per_object_; }
-    void set_stride(std::size_t b) noexcept { bytes_per_object_ = b ? b : sizeof(object_t); }
+    void set_stride(std::size_t b) noexcept {
+        assert(objects_count_ == 0 && "Restriding live objects would move them under their owners");
+        assert((!b || (b >= sizeof(object_t) && b % alignof(object_t) == 0)) && "Every object needs a whole slot");
+        bytes_per_object_ = b ? b : sizeof(object_t);
+    }
     explicit operator bool() const noexcept { return raw_ != nullptr && objects_count_ > 0; }
 };
 

@@ -136,7 +136,7 @@ blank_c_comments_preserving_columns() { # blank_c_comments_preserving_columns < 
 # mode judges the documentation around code, not the working notes inside it.
 lines_outside_function_bodies() {
     case "$staged_path" in
-    *.h | *.hpp | *.c | *.cpp | *.cc | *.cu | *.cuh | *.rs)
+    *.h | *.hpp | *.c | *.cpp | *.cc | *.cu | *.cuh | *.rs | *.pml)
         printf '%s\n' "$staged_file_text" | blank_c_comments_preserving_columns | awk '
             {
                 text = $0
@@ -1993,7 +1993,7 @@ check_single_space_between_sentences() {
 # Routes one staged file through every shared check its extension calls for, reading the `staged_*` globals.
 run_shared_checks() {
     case "$staged_path" in
-    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh)
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.pml)
         check_param_has_direction
         check_markdown_emphasis_absent_in_comments
         check_markup_command_without_backticks
@@ -2069,7 +2069,7 @@ run_shared_checks() {
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h) check_harness_namespace_matches_directory ;;
     esac
     case "$staged_path" in
-    *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh | *.rs | *.zig | *.mojo | *.md)
+    *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh | *.rs | *.zig | *.mojo | *.md | *.pml)
         check_ascii_arrows
         check_backward_references
         check_sibling_justification
@@ -2205,8 +2205,21 @@ check_macro_names_current() {
         "            they are always 0 or 1, so test them with #if:"
 }
 
+# Rejects a `<file>.<ext>:<line>` citation in a verification model, client or note, because a line number
+# drifts with every edit above it; cite the symbol and its file, as `drain_claim` in `types.hpp`.
+check_verification_cites_symbols() {
+    local pinned
+    pinned=$(printf '%s\n' "$staged_added_text" | grep -E '[A-Za-z0-9_]\.[A-Za-z]+:[0-9]' || true)
+    [ -z "$pinned" ] || reject_with_reason "$pinned" \
+        "$staged_path pins a citation to a line number, which drifts with every edit above it;" \
+        "            cite the symbol and its file instead, as \`drain_claim\` in \`types.hpp\`:"
+}
+
 # Routes one staged file through the checks only ForkUnion has.
 run_project_checks() {
+    case "$staged_path" in
+    verification/*) check_verification_cites_symbols ;;
+    esac
     case "$staged_path" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.inl)
         check_platform_macros_through_vocabulary
