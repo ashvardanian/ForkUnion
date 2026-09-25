@@ -10,9 +10,8 @@ pointer. `OwnedDLHandle.get_function` would run `dlsym` on every call and parame
 the return type, leaving arguments unchecked; a dispatch on the hot path cannot afford either.
 """
 
-from std.ffi import OwnedDLHandle, __fn_type_is_cabi, c_int, c_size_t
+from std.ffi import DEFAULT_RTLD, RTLD, OwnedDLHandle, __fn_type_is_cabi, c_int, c_size_t
 from std.memory import ArcPointer
-from std.sys.info import CompilationTarget
 
 from forkunion.allocators import (
     AllocateAtLeastOnDomain,
@@ -57,9 +56,10 @@ from forkunion.topology import (
 )
 from forkunion.types import Error, ErrorKind
 
-comptime LIBRARY_FILE = StaticString("libforkunion.dylib" if CompilationTarget.is_macos() else "libforkunion.so")
-"""The loader already searches the environment's library directory, because `mojo build` bakes it
-into the binary's runpath, so an unqualified name is enough for a library installed there."""
+comptime LIBRARY_FILE = StaticString("libforkunion.so")
+"""The name `build-native` installs on every platform, macOS included. The loader already searches
+the environment's library directory, because `mojo build` bakes it into the binary's runpath, so an
+unqualified name is enough for a library installed there."""
 
 comptime BINDING_MAJOR = 3
 """The major version this binding was written against; a mismatch is refused at load."""
@@ -298,7 +298,9 @@ struct _Loaded:
 
     def __init__(out self) raises Error:
         try:
-            self.handle = OwnedDLHandle(String(LIBRARY_FILE))
+            # A release reads its entry point, then drops the last `Library` before the call, so
+            # the final `dlclose` must leave the code mapped.
+            self.handle = OwnedDLHandle(String(LIBRARY_FILE), DEFAULT_RTLD | RTLD.NODELETE)
         except:
             raise Error(ErrorKind.LIBRARY_MISSING, LIBRARY_FILE)
         self.symbols = Symbols(self.handle)
@@ -312,13 +314,13 @@ struct _Loaded:
 struct Library(ImplicitlyCopyable):
     """A reference to the loaded core, cheap to copy and shared by everything it creates.
 
-    Every handle carries one, which is what keeps the shared object mapped for as long as anything
-    can still call into it. It is a loader reference, not a topology reference - the C API is
+    Every handle carries one, which is what keeps the symbols resolved for as long as anything can
+    still call into them. It is a loader reference, not a topology reference - the C API is
     explicit that a pool never retains the topology it spawned from.
     """
 
     var shared: ArcPointer[_Loaded]
-    """The handle and its symbols, refcounted so the last holder unmaps the object."""
+    """The handle and its symbols, refcounted so the last holder closes the handle."""
 
     def __init__(out self) raises Error:
         """Opens the shared object and resolves it, which every handle then shares.

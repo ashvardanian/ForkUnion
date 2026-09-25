@@ -31,7 +31,7 @@ Environment variables, matching the sibling benchmarks:
 from max.algorithm import parallelize
 
 from std.os import abort, getenv
-from std.sys import num_logical_cores
+from std.sys import exit, stderr
 from std.time import perf_counter_ns
 
 from forkunion import (
@@ -67,9 +67,12 @@ def parse_int(name: StaticString, fallback: Int) -> Int:
     if text.byte_length() == 0:
         return fallback
     try:
-        return Int(text)
+        var value = Int(text)
+        if value >= 0:
+            return value
     except:
-        abort(t"{name}=\"{text}\" does not parse")
+        pass
+    abort(t"{name}=\"{text}\" does not parse")
 
 
 def parse_float(name: StaticString, fallback: Float64) -> Float64:
@@ -163,10 +166,10 @@ struct Round(ImplicitlyCopyable, TrivialRegisterPassable):
     var old_labels: Pointer[UInt32, MutUntrackedOrigin]
     var new_labels: Pointer[UInt32, MutUntrackedOrigin]
     var counters: Pointer[CacheAligned[UInt64], MutUntrackedOrigin]
-    var replica_offsets: Pointer[UInt64, MutUntrackedOrigin]
-    var replica_columns: Pointer[UInt32, MutUntrackedOrigin]
-    var replica_offsets_stride: Int
-    var replica_columns_stride: Int
+    var replica_offsets: Pointer[Pointer[UInt64, MutUntrackedOrigin], MutUntrackedOrigin]
+    """Each memory domain's copy of `row_offsets`, at wherever the page-rounded stride put it."""
+    var replica_columns: Pointer[Pointer[UInt32, MutUntrackedOrigin], MutUntrackedOrigin]
+    """Each memory domain's copy of `column_indices`, likewise."""
     var local_memory: Pointer[Int32, MutUntrackedOrigin]
 
 
@@ -202,8 +205,8 @@ def label_vertex_replicated(task: Int, at: ThreadInDomain, mut round: Round):
     var vertex = task
     var domain = Int(round.local_memory[unsafe_offset=at.compute_domain])
     var local = Graph(
-        Pointer(to=round.replica_offsets[unsafe_offset=domain * round.replica_offsets_stride]),
-        Pointer(to=round.replica_columns[unsafe_offset=domain * round.replica_columns_stride]),
+        round.replica_offsets[unsafe_offset=domain],
+        round.replica_columns[unsafe_offset=domain],
         round.graph.vertices,
         round.graph.directed_edges,
     )
@@ -374,8 +377,6 @@ def converge_on_pool[
             counter_base,
             template.replica_offsets,
             template.replica_columns,
-            template.replica_offsets_stride,
-            template.replica_columns_stride,
             template.local_memory,
         )
         if dynamic:
@@ -421,7 +422,7 @@ def main() raises:
     var scale = parse_int("PROPAGATION_SCALE", 14)
     var communities = parse_int("PROPAGATION_COMMUNITIES", 64)
     var edge_factor = parse_int("PROPAGATION_EDGE_FACTOR", 16)
-    var threads = parse_int("FORKUNION_THREADS", num_logical_cores())
+    var threads = parse_int("FORKUNION_THREADS", 0)
     var budget = Int(parse_float("FORKUNION_BUDGET_SECS", 10) * 1e9)
     var iterations = parse_int("FORKUNION_ITERATIONS", 0)
     var backend = getenv("FORKUNION_BACKEND")
@@ -435,21 +436,26 @@ def main() raises:
         or backend == "max_parallelize"
     )
     if not known:
-        print(t"Unsupported backend: '{backend}'")
-        print("  forkunion_static_shared")
-        print("  forkunion_dynamic_shared")
-        print("  forkunion_static_replicated")
-        print("  forkunion_dynamic_replicated")
-        print("  max_parallelize")
-        return
+        print(t"Unsupported backend: '{backend}'", file=stderr)
+        print("  forkunion_static_shared", file=stderr)
+        print("  forkunion_dynamic_shared", file=stderr)
+        print("  forkunion_static_replicated", file=stderr)
+        print("  forkunion_dynamic_replicated", file=stderr)
+        print("  max_parallelize", file=stderr)
+        exit(1)
     var dynamic = "dynamic" in backend
     var replicated = "replicated" in backend
     var baseline = backend == "max_parallelize"
     var check_text = getenv("PROPAGATION_CHECK")
     var check = check_text.byte_length() > 0 and check_text != "0" and check_text != "false"
+    if (communities << scale) > (1 << 32):
+        print("PROPAGATION_COMMUNITIES << PROPAGATION_SCALE must fit 32-bit vertex indices", file=stderr)
+        exit(1)
 
     var library = Library()
     var topology = Topology(library)
+    if threads == 0:
+        threads = topology.logical_cores_count()
     var pool = Pool(topology, threads=threads, name="propagation")
 
     var row_offsets = List[UInt64]()
@@ -473,9 +479,10 @@ def main() raises:
 
     # Per-domain CSR replicas for the `_replicated` cells; only the immutable CSR replicates - the
     # label buffers stay shared by nature, since every round must see every neighbour's last label.
-    var domains = topology.memory_domains_count()
     var replica_offsets = Optional[ReplicatedArray[DType.uint64]](None)
     var replica_columns = Optional[ReplicatedArray[DType.uint32]](None)
+    var offsets_bases = List[Pointer[UInt64, MutUntrackedOrigin]]()
+    var columns_bases = List[Pointer[UInt32, MutUntrackedOrigin]]()
     var local_memory = List[Int32](length=max(topology.compute_domains_count(), 1), fill=0)
     for index in range(topology.compute_domains_count()):
         local_memory[index] = Int32(topology.local_memory_of(ComputeDomain(index)).index)
@@ -484,15 +491,17 @@ def main() raises:
             replica_offsets = ReplicatedArray[DType.uint64].new(topology, vertices + 1)
             replica_columns = ReplicatedArray[DType.uint32].new(topology, directed_edges)
         except:
-            print(t"Unsupported backend: '{backend}' - no symmetric mapping on this machine")
-            return
-        for domain in range(domains):
+            print("Failed to replicate the graph across memory domains", file=stderr)
+            exit(1)
+        for domain in range(replica_offsets.value().memory_domains_count()):
             var offsets_replica = replica_offsets.value().replica(MemoryDomain(domain))
             for index in range(vertices + 1):
                 offsets_replica[unsafe_offset=index] = row_offsets[index]
+            offsets_bases.append(offsets_replica.unsafe_origin_cast[MutUntrackedOrigin]())
             var columns_replica = replica_columns.value().replica(MemoryDomain(domain))
             for index in range(directed_edges):
                 columns_replica[unsafe_offset=index] = column_indices[index]
+            columns_bases.append(columns_replica.unsafe_origin_cast[MutUntrackedOrigin]())
 
     # The label and counter pointers are refreshed every round; these are the same buffers.
     var template = Round(
@@ -500,41 +509,33 @@ def main() raises:
         labels_a.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         labels_b.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         counters.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
-        replica_offsets.value()
-        .replica(MemoryDomain(0))
-        .unsafe_origin_cast[MutUntrackedOrigin]() if replicated else graph.row_offsets,
-        replica_columns.value()
-        .replica(MemoryDomain(0))
-        .unsafe_origin_cast[MutUntrackedOrigin]() if replicated else graph.column_indices,
-        vertices + 1,
-        directed_edges,
+        offsets_bases.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
+        columns_bases.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         local_memory.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
     )
 
-    var rounds = 0
+    @parameter
+    def one_pass() raises -> Int:
+        if baseline:
+            return converge_with_parallelize(template, vertices, threads, labels_a, labels_b)
+        if replicated:
+            return converge_on_pool[label_vertex_replicated](
+                pool, template, vertices, labels_a, labels_b, counters, dynamic
+            )
+        return converge_on_pool[label_vertex](pool, template, vertices, labels_a, labels_b, counters, dynamic)
+
+    # One untimed warmup pass: page-faults and cache warming would otherwise bias the first timed
+    # pass, and by a different amount for each backend.
+    var rounds = one_pass()
     var passes = 0
     var started = perf_counter_ns()
     if iterations > 0:
         for _ in range(iterations):
-            if baseline:
-                rounds = converge_with_parallelize(template, vertices, threads, labels_a, labels_b)
-            elif replicated:
-                rounds = converge_on_pool[label_vertex_replicated](
-                    pool, template, vertices, labels_a, labels_b, counters, dynamic
-                )
-            else:
-                rounds = converge_on_pool[label_vertex](pool, template, vertices, labels_a, labels_b, counters, dynamic)
+            rounds = one_pass()
         passes = iterations
     else:
         while True:
-            if baseline:
-                rounds = converge_with_parallelize(template, vertices, threads, labels_a, labels_b)
-            elif replicated:
-                rounds = converge_on_pool[label_vertex_replicated](
-                    pool, template, vertices, labels_a, labels_b, counters, dynamic
-                )
-            else:
-                rounds = converge_on_pool[label_vertex](pool, template, vertices, labels_a, labels_b, counters, dynamic)
+            rounds = one_pass()
             passes += 1
             if Int(perf_counter_ns() - started) >= budget:
                 break
@@ -571,5 +572,7 @@ def main() raises:
     _ = row_offsets^
     _ = column_indices^
     _ = local_memory^
+    _ = offsets_bases^
+    _ = columns_bases^
     _ = replica_offsets^
     _ = replica_columns^

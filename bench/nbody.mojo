@@ -35,6 +35,7 @@ from max.algorithm import parallelize
 from std.math import floor
 from std.memory import bitcast
 from std.os import abort, getenv
+from std.sys import exit, stderr
 from std.time import perf_counter_ns
 
 from forkunion import (
@@ -42,6 +43,7 @@ from forkunion import (
     Library,
     MemoryDomain,
     Pool,
+    TasksRange,
     ThreadInDomain,
     ReplicatedArray,
     Topology,
@@ -79,9 +81,12 @@ def parse_int(name: StaticString, fallback: Int) -> Int:
     if text.byte_length() == 0:
         return fallback
     try:
-        return Int(text)
+        var value = Int(text)
+        if value >= 0:
+            return value
     except:
-        abort(t"{name}=\"{text}\" does not parse")
+        pass
+    abort(t"{name}=\"{text}\" does not parse")
 
 
 def parse_float(name: StaticString, fallback: Float64) -> Float64:
@@ -139,6 +144,11 @@ struct Bodies(ImplicitlyCopyable, TrivialRegisterPassable):
     var force_y: Pointer[Float32, MutUntrackedOrigin]
     var force_z: Pointer[Float32, MutUntrackedOrigin]
     var count: Int
+    var replicas: Pointer[Pointer[Float32, MutUntrackedOrigin], MutUntrackedOrigin]
+    """Each memory domain's copy of the positions and masses, as four runs of `count`."""
+    var replicas_count: Int
+    var local_memory: Pointer[Int, MutUntrackedOrigin]
+    """Each compute domain's nearest memory domain, probed once so no kernel calls the FFI."""
 
 
 @always_inline
@@ -199,6 +209,33 @@ def force_prong(task: Int, at: ThreadInDomain, mut bodies: Bodies):
     bodies.force_z[unsafe_offset=task] = force[2]
 
 
+def refresh_replicas(slice: TasksRange, at: ThreadInDomain, mut bodies: Bodies):
+    """Copies one slice of the canonical positions and masses into every memory domain's replica."""
+    var n = bodies.count
+    for domain in range(bodies.replicas_count):
+        var replica = bodies.replicas[unsafe_offset=domain]
+        for index in range(slice.first, slice.first + slice.count):
+            replica[unsafe_offset=index] = bodies.position_x[unsafe_offset=index]
+            replica[unsafe_offset=n + index] = bodies.position_y[unsafe_offset=index]
+            replica[unsafe_offset=2 * n + index] = bodies.position_z[unsafe_offset=index]
+            replica[unsafe_offset=3 * n + index] = bodies.mass[unsafe_offset=index]
+
+
+def force_replicated_prong(task: Int, at: ThreadInDomain, mut bodies: Bodies):
+    """The same first pass, reading the replica on this thread's own memory domain."""
+    var n = bodies.count
+    var replica = bodies.replicas[unsafe_offset=bodies.local_memory[unsafe_offset=at.compute_domain]]
+    var local = bodies
+    local.position_x = replica
+    local.position_y = Pointer(to=replica[unsafe_offset=n])
+    local.position_z = Pointer(to=replica[unsafe_offset=2 * n])
+    local.mass = Pointer(to=replica[unsafe_offset=3 * n])
+    var force = net_force(local, task)
+    bodies.force_x[unsafe_offset=task] = force[0]
+    bodies.force_y[unsafe_offset=task] = force[1]
+    bodies.force_z[unsafe_offset=task] = force[2]
+
+
 def apply_prong(task: Int, at: ThreadInDomain, mut bodies: Bodies):
     """The second pass: integrate each body by its accumulated force.
 
@@ -216,6 +253,16 @@ def apply_prong(task: Int, at: ThreadInDomain, mut bodies: Bodies):
     bodies.position_x[unsafe_offset=index] -= floor(bodies.position_x[unsafe_offset=index])
     bodies.position_y[unsafe_offset=index] -= floor(bodies.position_y[unsafe_offset=index])
     bodies.position_z[unsafe_offset=index] -= floor(bodies.position_z[unsafe_offset=index])
+
+
+def for_n_scheduled[
+    work: def(Int, ThreadInDomain, mut Bodies) thin -> None
+](pool: Pool, dynamic: Bool, count: Int, mut bodies: Bodies) raises:
+    """Runs `work` over `[0, count)`, statically pre-split or work-stolen."""
+    if dynamic:
+        pool.for_n_dynamic[work](count, bodies)
+    else:
+        pool.for_n[work](count, bodies)
 
 
 def main() raises:
@@ -242,13 +289,13 @@ def main() raises:
         or backend == "max_parallelize"
     )
     if not known:
-        print(t"Unsupported backend: '{backend}'")
-        print("  forkunion_static_shared")
-        print("  forkunion_dynamic_shared")
-        print("  forkunion_static_replicated")
-        print("  forkunion_dynamic_replicated")
-        print("  max_parallelize")
-        return
+        print(t"Unsupported backend: '{backend}'", file=stderr)
+        print("  forkunion_static_shared", file=stderr)
+        print("  forkunion_dynamic_shared", file=stderr)
+        print("  forkunion_static_replicated", file=stderr)
+        print("  forkunion_dynamic_replicated", file=stderr)
+        print("  max_parallelize", file=stderr)
+        exit(1)
     var dynamic = "dynamic" in backend
     var replicated = "replicated" in backend
     var baseline = backend == "max_parallelize"
@@ -277,6 +324,19 @@ def main() raises:
         velocity_z[index] = random_unit(counter + 5)
         mass[index] = Float32(1.0e10) + random_unit(counter + 6) * mass_span
 
+    # The replicated cells copy the positions and masses into every memory domain once per step; on
+    # a single-domain machine that collapses to one replica, so the cell still runs.
+    var replicas = Optional[ReplicatedArray[DType.float32]](None)
+    var replica_bases = List[Pointer[Float32, MutUntrackedOrigin]]()
+    if replicated:
+        replicas = ReplicatedArray[DType.float32].new(topology, count * 4)
+        for domain in range(replicas.value().memory_domains_count()):
+            var base = replicas.value().replica(MemoryDomain(domain))
+            replica_bases.append(base.unsafe_origin_cast[MutUntrackedOrigin]())
+    var local_memory = List[Int](length=max(topology.compute_domains_count(), 1), fill=0)
+    for index in range(topology.compute_domains_count()):
+        local_memory[index] = topology.local_memory_of(ComputeDomain(index)).index
+
     var bodies = Bodies(
         position_x.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         position_y.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
@@ -289,15 +349,12 @@ def main() raises:
         force_y.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         force_z.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         count,
+        replica_bases.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
+        len(replica_bases),
+        local_memory.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
     )
 
     var pool = Pool(topology, threads=threads, name="nbody")
-
-    # The replicated cells copy the read side into every memory domain once per iteration; on a
-    # single-domain machine that collapses to one replica, so the cell still runs.
-    var replicas = Optional[ReplicatedArray[DType.float32]](None)
-    if replicated:
-        replicas = ReplicatedArray[DType.float32].new(topology, count * 3)
 
     # A fixed time budget beats a fixed iteration count: the window is long enough to amortize
     # scheduling noise, and reports the rate sustained. `FORKUNION_ITERATIONS` sets an exact count.
@@ -319,12 +376,13 @@ def main() raises:
         if baseline:
             parallelize[baseline_force](count, threads)
             parallelize[baseline_apply](count, threads)
-        elif dynamic:
-            pool.for_n_dynamic[force_prong](count, bodies)
-            pool.for_n[apply_prong](count, bodies)
+        elif replicated:
+            pool.for_slices[refresh_replicas](count, bodies)
+            for_n_scheduled[force_replicated_prong](pool, dynamic, count, bodies)
+            for_n_scheduled[apply_prong](pool, dynamic, count, bodies)
         else:
-            pool.for_n[force_prong](count, bodies)
-            pool.for_n[apply_prong](count, bodies)
+            for_n_scheduled[force_prong](pool, dynamic, count, bodies)
+            for_n_scheduled[apply_prong](pool, dynamic, count, bodies)
 
     var budget = Int(budget_seconds * 1e9)
     var started = perf_counter_ns()
@@ -358,4 +416,6 @@ def main() raises:
     _ = force_x^
     _ = force_y^
     _ = force_z^
+    _ = replica_bases^
+    _ = local_memory^
     _ = replicas^
