@@ -323,6 +323,9 @@ struct opaque_pool_t {
     /** Callback held across a non-blocking @c fu_pool_unsafe_for_threads until its join. */
     fu_for_threads_t current_callback {nullptr};
 
+    /** The generation the held callback went out as; joining any other token leaves it alone. */
+    fu_generation_t current_generation {0};
+
     /** The caller's pool name, kept so a re-spawn can rebuild the variant without losing it. */
     char name[FU_POOL_NAME_CAPACITY] {};
 
@@ -1004,14 +1007,23 @@ fu_status_t fu_pool_caller_exclusivity(fu_pool_t pool, fu_caller_exclusivity_t *
     return fu_success_k;
 }
 
+/** The compute domains the pool in @p variants spans, or zero for an empty one. */
+static std::size_t compute_domains_count(pool_variants_t &variants) noexcept {
+    return visit([](auto &variant) { return variant.compute_domains_count(); }, variants, std::size_t {0});
+}
+
+/** Whether @p variants holds workers; neither a never-spawned nor a terminated pool does. */
+static bool spawned(pool_variants_t &variants) noexcept {
+    return visit([](auto &variant) { return variant.threads_count() != 0; }, variants, false);
+}
+
 fu_status_t fu_pool_compute_domains_count(fu_pool_t pool, size_t *count_out) {
     if (!count_out) return fu_invalid_argument_k;
     *count_out = poisoned_size_k;
     if (!pool) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
-    *count_out =
-        visit([](auto &variant) { return variant.compute_domains_count(); }, opaque->variants, std::size_t {0});
+    *count_out = compute_domains_count(opaque->variants);
     return fu_success_k;
 }
 
@@ -1021,6 +1033,8 @@ fu_status_t fu_pool_threads_count_in(fu_pool_t pool, size_t compute_domain_index
     if (!pool) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
+    // The pools check the domain with an `assert` alone, which vanishes under NDEBUG.
+    if (compute_domain_index >= compute_domains_count(opaque->variants)) return fu_invalid_argument_k;
     *threads_out = visit([=](auto &variant) { return variant.threads_count(compute_domain_index); }, opaque->variants,
                          std::size_t {0});
     return fu_success_k;
@@ -1043,6 +1057,7 @@ fu_status_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index,
     if (!pool) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
+    if (compute_domain_index >= compute_domains_count(opaque->variants)) return fu_invalid_argument_k;
     // Local index 0 is the first thread of every domain, so it is a real answer.
     *local_index_out =
         visit([=](auto &variant) { return variant.thread_local_index(global_thread_index, compute_domain_index); },
@@ -1070,8 +1085,8 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
-    // cannot tell from a completed dispatch.
-    if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
+    // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
+    if (!spawned(opaque->variants)) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
             variant.for_threads([=](fu::thread_in_domain_t pinned) noexcept { //
@@ -1086,8 +1101,8 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
-    // cannot tell from a completed dispatch.
-    if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
+    // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
+    if (!spawned(opaque->variants)) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
             variant.for_slices(n, [=](fu::tasks_range_t range, fu::thread_in_domain_t at) noexcept { //
@@ -1102,8 +1117,8 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_l
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
-    // cannot tell from a completed dispatch.
-    if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
+    // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
+    if (!spawned(opaque->variants)) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
             variant.for_n(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
@@ -1118,8 +1133,8 @@ fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callba
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
-    // cannot tell from a completed dispatch.
-    if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
+    // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
+    if (!spawned(opaque->variants)) return fu_not_spawned_k;
     visit(
         [&](auto &variant) {
             variant.for_n_dynamic(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
@@ -1140,11 +1155,12 @@ fu_status_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback
     *generation_out = 0;
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
-    if (opaque->variants.kind_ == fu::pool_kind_t::unknown_k) return fu_not_spawned_k;
+    if (!spawned(opaque->variants)) return fu_not_spawned_k;
     opaque->current_context = context;
     opaque->current_callback = callback;
     *generation_out = visit([&](auto &variant) -> fu_generation_t { return variant.unsafe_for_threads(*opaque); },
                             opaque->variants, fu_generation_t {0});
+    opaque->current_generation = *generation_out;
     return fu_success_k;
 }
 
@@ -1168,7 +1184,7 @@ fu_status_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation, fu_b
 void fu_pool_unsafe_join(fu_pool_t pool, fu_generation_t generation) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
-    if (opaque->current_callback == nullptr) return; // Idempotent: nothing is in flight
+    if (opaque->current_callback == nullptr || generation != opaque->current_generation) return; // ? Idle, or stale
     visit(
         [generation](auto &variant) {
             variant.unsafe_join(

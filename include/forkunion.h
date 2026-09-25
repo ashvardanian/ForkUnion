@@ -146,7 +146,7 @@ typedef enum fu_status_t {
     /** The pool is already spawned; terminate it first. */
     fu_already_spawned_k = -6,
 
-    /** The pool was never spawned. */
+    /** The pool holds no workers: it was never spawned, or was terminated since. */
     fu_not_spawned_k = -7,
 
     /** The OS declined to create a thread - a resource limit, or permissions. */
@@ -872,7 +872,8 @@ fu_status_t fu_pool_compute_domains_count(fu_pool_t pool, size_t *count_out);
 /**
  *  @brief The worker count in one compute domain of the pool.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @param[in] compute_domain_index In [0, `fu_pool_compute_domains_count(pool)`); unchecked.
+ *  @param[in] compute_domain_index In [0, `fu_pool_compute_domains_count(pool)`), or the call
+ *      returns @c fu_invalid_argument_k.
  *  @return Threads in that domain, or 0 if uninitialized.
  *  @note Not synchronized.
  *  @sa fu_pool_compute_domains_count.
@@ -892,7 +893,7 @@ fu_status_t fu_pool_threads_count(fu_pool_t pool, size_t *threads_out);
  *  @param[in] pool Thread pool handle, must not be NULL.
  *  @param[in] global_thread_index The global thread index to convert.
  *  @param[in] compute_domain_index Index of the compute_domain, must be <
- *      `fu_pool_compute_domains_count(pool)`.
+ *      `fu_pool_compute_domains_count(pool)`, else @c fu_invalid_argument_k.
  *  @return Local thread index within the specified compute_domain.
  */
 fu_status_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size_t compute_domain_index,

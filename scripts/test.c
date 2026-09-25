@@ -59,16 +59,16 @@ static bool test_spawn_success(fu_capabilities_t mask) {
     return true;
 }
 
-/** Context for the @c for_threads test. */
+/** Context for the @c for_threads and generation tests. */
 struct for_threads_context_t {
-    atomic_bool *visited;
+    atomic_size_t *visits;
 };
 
-/** Marks the calling worker's slot in the shared @c visited array. */
+/** Counts a visit in the calling worker's slot of the shared @c visits array. */
 static void for_threads_callback(void *context_punned, size_t thread, size_t compute_domain) {
     (void)compute_domain;
     struct for_threads_context_t *context = (struct for_threads_context_t *)context_punned;
-    atomic_store(&context->visited[thread], true);
+    atomic_fetch_add(&context->visits[thread], 1);
 }
 
 /** One @c for_threads broadcast must visit every worker exactly once, none skipped. */
@@ -81,18 +81,13 @@ static bool test_for_threads(fu_capabilities_t mask) {
         fu_pool_delete(pool);
         return false;
     }
-    atomic_bool *visited = calloc(threads_count, sizeof(atomic_bool));
-    struct for_threads_context_t context = {.visited = visited};
+    atomic_size_t *visits = calloc(threads_count, sizeof(atomic_size_t));
+    struct for_threads_context_t context = {.visits = visits};
 
     bool result = fu_pool_for_threads(pool, for_threads_callback, &context) == fu_success_k;
-    for (size_t i = 0; i < threads_count && result; ++i) {
-        if (!atomic_load(&visited[i])) {
-            result = false;
-            break;
-        }
-    }
+    for (size_t i = 0; i < threads_count && result; ++i) result = atomic_load(&visits[i]) == 1;
 
-    free(visited);
+    free(visits);
     fu_pool_delete(pool);
     return result;
 }
@@ -174,43 +169,45 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
 }
 
 /**
- *  @brief The poll-then-join pattern on a caller-exclusive pool: dispatch, overlap, poll, join.
+ *  @brief Two unsafe dispatches, each polled and joined by its token, on either caller exclusivity.
  *
- *  Generation tokens are always odd, @c fu_pool_is_complete must eventually turn true without the
- *  caller contributing work, and the join must observe every worker's visit.
+ *  Generation tokens are always odd, and on an exclusive pool @c fu_pool_is_complete must turn true
+ *  without the caller contributing work. Joining the first token again while the second dispatch is
+ *  in flight must leave that dispatch alone: an inclusive pool runs the caller's slice only inside
+ *  the join, so a stale join that dropped the held callback would leave slot 0 unvisited.
  */
 static bool test_generation_polling(fu_capabilities_t mask) {
-    // Polling before join is the caller-exclusive pattern: no caller slice is owed.
-    fu_pool_t pool = spawn_default_pool("test_generation", mask, preferred_exclusivity());
-    if (!pool) return false;
+    fu_caller_exclusivity_t const exclusivities[] = {preferred_exclusivity(), fu_caller_inclusive_k};
+    bool result = true;
+    for (size_t e = 0; e != 2 && result; ++e) {
+        fu_pool_t pool = spawn_default_pool("test_generation", mask, exclusivities[e]);
+        size_t threads_count = 0;
+        if (!pool || fu_pool_threads_count(pool, &threads_count) != fu_success_k) {
+            fu_pool_delete(pool);
+            return false;
+        }
+        atomic_size_t *visits = calloc(threads_count, sizeof(atomic_size_t));
+        struct for_threads_context_t context = {.visits = visits};
 
-    size_t threads_count = 0;
-    if (fu_pool_threads_count(pool, &threads_count) != fu_success_k) {
+        fu_generation_t first = 0;
+        for (size_t dispatch = 0; dispatch != 2 && result; ++dispatch) {
+            fu_generation_t generation = 0;
+            result = fu_pool_unsafe_for_threads(pool, for_threads_callback, &context, &generation) == fu_success_k &&
+                     (generation & 1u) == 1;
+            if (!result) break;
+            if (dispatch == 0) first = generation;
+            else fu_pool_unsafe_join(pool, first); // ? Stale by now, so it must be a no-op
+
+            // Polling before join is the caller-exclusive pattern: no caller slice is owed.
+            fu_bool_t complete = exclusivities[e] == fu_caller_inclusive_k;
+            while (!complete && fu_pool_is_complete(pool, generation, &complete) == fu_success_k) {}
+            fu_pool_unsafe_join(pool, generation);
+            for (size_t i = 0; i < threads_count && result; ++i) result = atomic_load(&visits[i]) == dispatch + 1;
+        }
+
+        free(visits);
         fu_pool_delete(pool);
-        return false;
     }
-    atomic_bool *visited = calloc(threads_count, sizeof(atomic_bool));
-    struct for_threads_context_t context = {.visited = visited};
-
-    fu_generation_t generation = 0;
-    bool result = fu_pool_unsafe_for_threads(pool, for_threads_callback, &context, &generation) == fu_success_k;
-
-    if (result && (generation & 1u) == 0) result = false; /* Tokens are always odd */
-    else if (result) {
-        fu_caller_exclusivity_t exclusivity = fu_caller_inclusive_k;
-        if (fu_pool_caller_exclusivity(pool, &exclusivity) != fu_success_k) result = false;
-        fu_bool_t complete = exclusivity == fu_caller_inclusive_k;
-        while (!complete && fu_pool_is_complete(pool, generation, &complete) == fu_success_k) {}
-        fu_pool_unsafe_join(pool, generation);
-        for (size_t i = 0; i < threads_count; ++i)
-            if (!atomic_load(&visited[i])) {
-                result = false;
-                break;
-            }
-    }
-
-    free(visited);
-    fu_pool_delete(pool);
     return result;
 }
 
@@ -323,6 +320,14 @@ static bool test_for_n(fu_capabilities_t mask) {
 
         result = (atomic_load(&context.counter) == default_parallel_tasks_k) &&
                  contains_iota(visited, default_parallel_tasks_k);
+    }
+
+    if (result) {
+        // A terminated pool has no threads to split the tasks between, so it refuses the dispatch.
+        fu_pool_terminate(pool);
+        atomic_store(&context.counter, 0);
+        result = fu_pool_for_n(pool, default_parallel_tasks_k, for_n_callback, &context) == fu_not_spawned_k &&
+                 atomic_load(&context.counter) == 0;
     }
 
     free(visited);
@@ -638,6 +643,11 @@ static bool test_pool_domain_accounting(fu_capabilities_t mask) {
         prefix += local_threads;
     }
     if (prefix != threads) result = false;
+
+    // One past the last domain is refused rather than read out of bounds.
+    size_t past_the_end = 0;
+    if (fu_pool_threads_count_in(pool, domains, &past_the_end) != fu_invalid_argument_k) result = false;
+    if (fu_pool_locate_thread_in(pool, 0, domains, &past_the_end) != fu_invalid_argument_k) result = false;
 
     fu_pool_delete(pool);
     return result;
