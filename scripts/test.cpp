@@ -9,6 +9,8 @@
  *  that cannot drift from what executes. Asserts stay live whatever the build type, which is what
  *  the `#undef NDEBUG` below buys: a failure reproducing only in Release is the one worth catching.
  */
+#undef NDEBUG // ? Before every include, or the library's asserts are already compiled out
+
 #include <cstdio>  // `std::printf`, `std::fprintf`
 #include <cstdlib> // `EXIT_FAILURE`, `EXIT_SUCCESS`
 #include <cstring> // `std::strrchr`
@@ -21,8 +23,6 @@
 #include <forkunion.hpp>
 
 namespace fu = ashvardanian::forkunion;
-
-#undef NDEBUG // ? Keep any library asserts live in the test binary
 
 /*  @c backtrace is glibc or Apple only; Bionic, FreeBSD and musl ship `<execinfo.h>` without it. */
 #if FU_ON_POSIX

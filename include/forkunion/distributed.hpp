@@ -907,7 +907,11 @@ struct colocated_pool {
                                     thread_handle))
                     break;
 #endif
-            assert(local_thread_index < numa_pthreads_count && "Thread index must be in [0, threads_count)");
+            // ! Always on: a missed lookup would index one past the end of `pthreads_` in release
+            if (local_thread_index == numa_pthreads_count) {
+                std::fputs("ForkUnion: a worker thread found no slot of its own in the pool\n", stderr);
+                std::abort();
+            }
 
             // Publish the kernel thread id to shared memory. On Windows it already holds this
             // value; re-storing it is harmless and keeps the publish uniform across platforms.

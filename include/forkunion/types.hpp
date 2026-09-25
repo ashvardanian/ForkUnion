@@ -1931,9 +1931,8 @@ struct indexed_split {
      *  @param[in] threads_count The number of threads to split the tasks into; can't be zero.
      */
     inline indexed_split(index_t const tasks_count, index_t const threads_count) noexcept
-        : quotient_(tasks_count / threads_count), remainder_(tasks_count % threads_count) {
-        assert(threads_count > 0 && "Threads count must be greater than zero, or expect division by zero");
-    }
+        : quotient_((assert(threads_count > 0 && "No threads to split between"), tasks_count / threads_count)),
+          remainder_(tasks_count % threads_count) {}
 
     inline tasks_range_t operator[](index_t const i) const noexcept {
         index_t const begin = static_cast<index_t>(quotient_ * i + (i < remainder_ ? i : remainder_));
@@ -2052,9 +2051,7 @@ struct coprime_permutation_range {
      */
     coprime_permutation_range(index_t const start, index_t const length, index_t const seed) noexcept
         : start_(start), length_(length), stride_(pick_stride(seed, length_)),
-          first_offset_(static_cast<index_t>(seed % length)) {
-        assert(length_ > 0 && "Length must be greater than zero, or expect division by zero");
-    }
+          first_offset_((assert(length > 0 && "Nothing to permute"), static_cast<index_t>(seed % length))) {}
 
     /**
      *  @note The seed shifts where the walk @b starts, not only how it steps. Deriving the stride

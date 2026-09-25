@@ -251,8 +251,12 @@ struct log_numa_topology_t {
             char const *socket_prefix = is_last_socket ? "   " : "│  ";
             char const *node_connector = is_last_node_in_socket ? "└─ " : "├─ ";
 
-            // Start building node line
-            int pos = std::snprintf(                                                      //
+            // `snprintf` returns what it wanted to write; the clamp keeps a truncated row in bounds
+            int pos = 0;
+            auto const advance = [&](int written) noexcept {
+                if (written > 0) pos = (std::min)(pos + written, static_cast<int>(sizeof(line_buffer)) - 1);
+            };
+            advance(std::snprintf(                                                        //
                 line_buffer, sizeof(line_buffer),                                         //
                 "%s%s%s%sNode%s %s%d%s • %sCores:%s %s%s (%zu)%s • %sMemory:%s %s%s%s",   //
                 colors.dim(), socket_prefix, node_connector,                              //
@@ -261,7 +265,7 @@ struct log_numa_topology_t {
                 colors.green(), /* "Cores:" */ colors.reset(),                            //
                 colors.bold_green(), cores_str, node.logical_cores_count, colors.reset(), //
                 colors.yellow(), /* "Memory:" */ colors.reset(),                          //
-                colors.bold_yellow(), memory_str, colors.reset());
+                colors.bold_yellow(), memory_str, colors.reset()));
 
             // Add huge pages if any exist
             auto const &page_settings = node.page_sizes;
@@ -272,21 +276,19 @@ struct log_numa_topology_t {
                 if (ps.bytes_per_page <= 4096) continue; // Skip regular pages
 
                 if (first_page) {
-                    pos += static_cast<std::size_t>(std::snprintf(                      //
-                        line_buffer + pos, sizeof(line_buffer) - pos, " • %sPages:%s ", //
-                        colors.magenta(), /* "Pages:" */ colors.reset()));
+                    advance(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " • %sPages:%s ", //
+                                          colors.magenta(), /* "Pages:" */ colors.reset()));
                     first_page = false;
                 }
-                else pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " "));
+                else advance(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " "));
 
                 char page_size_str[32], page_volume_str[32];
                 std::size_t free_bytes = ps.free_pages * ps.bytes_per_page;
                 log_memory_volume_t {}(ps.bytes_per_page, page_size_str, sizeof(page_size_str), colorless);
                 log_memory_volume_t {}(free_bytes, page_volume_str, sizeof(page_volume_str), colorless);
 
-                pos += static_cast<std::size_t>(std::snprintf(                   //
-                    line_buffer + pos, sizeof(line_buffer) - pos, "%s%s (%s)%s", //
-                    colors.bold_magenta(), page_size_str, page_volume_str, colors.reset()));
+                advance(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%s (%s)%s", //
+                                      colors.bold_magenta(), page_size_str, page_volume_str, colors.reset()));
             }
 
             std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "\n");
