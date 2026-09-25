@@ -799,7 +799,7 @@ int probe(void);
 FIXTURE
 
 assert_accepts "comment in a macro padded to its backslash" include/numkong/probe.h <<'FIXTURE'
-#define PROBE_(name)                                                                                   \
+#define probe_(name)                                                                                   \
     /* Short note inside a macro body. */                                                             \
     int name(void)
 FIXTURE
@@ -1629,12 +1629,12 @@ def erase[Scratch: AnyType, //](context: Context) -> Context:
 FIXTURE
 
 assert_accepts "ASCII arrow after a dereference in a macro" include/numkong/probe.h <<'FIXTURE'
-#define PROBE_READ(header, width) \
+#define probe_read_(header, width) \
     *width = header->column_count;
 FIXTURE
 
 assert_accepts "ASCII arrow in a C macro body" include/numkong/probe.h <<'FIXTURE'
-#define PROBE_FIELD(pointer) ((pointer)->field)
+#define probe_field_(pointer) ((pointer)->field)
 FIXTURE
 
 assert_rejects "glued bidirectional ASCII arrow" "writes an arrow as" include/numkong/probe.h <<'FIXTURE'

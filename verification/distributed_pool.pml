@@ -97,7 +97,7 @@ byte ran[3 * (generations + 1)]; // slices run, per contributor and round
  *  @c spin_mutex::unlock live in `types.hpp`. */
 inline count_under_lock(t) {
     do
-    :: read_modify_write_if(t, flag, lock_order, seen_flag == 0, seen_flag, 1);
+    :: read_modify_write(t, flag, lock_order, seen_flag, 1); // the exchange, unconditional as in the header
        if
        :: seen_flag == 0 -> break
        :: else -> (newest_value(flag) == 0)

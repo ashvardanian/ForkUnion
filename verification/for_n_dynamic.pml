@@ -2,8 +2,9 @@
  *  @file verification/for_n_dynamic.pml
  *  @author Ash Vardanian
  *  @date September 11, 2026
- *  @brief Spin model of @c for_n_dynamic from `include/forkunion/types.hpp`, on @c flat_pool from
- *      `flat.hpp`: one private cursor per thread, published by the caller before the dispatch.
+ *  @brief Spin model of @c invoke_for_n_dynamic from `include/forkunion/types.hpp`, behind
+ *      @c flat_pool::for_n_dynamic in `flat.hpp`: one private cursor per thread, published by the
+ *      caller before the dispatch.
  *
  *  Each thread drains its own slice with relaxed adds, runs one static prong from the trailing
  *  tasks, then walks its neighbours' slices in a coprime order and drains them too, one task per

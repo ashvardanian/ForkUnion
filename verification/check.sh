@@ -183,7 +183,7 @@ verify flat_pool.pml pass -Dmemory=sequential -Dscenario=stale_join
 verify flat_pool.pml pass -Dscenario=stale_join
 verify flat_pool.pml fail -Dmemory=sequential -Dscenario=stale_join -Dwithout_generation_check
 
-section "standard_atomic_ref.cpp: the portable conditional and extremal loops under GenMC"
+section "GenMC clients: the portable conditional and extremal loops, and the fork-join words"
 if genmc_ready; then
     verify_client standard_atomic_ref.cpp pass -I../include
     verify_client flat_pool.cpp pass

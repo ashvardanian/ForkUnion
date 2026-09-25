@@ -301,55 +301,42 @@ struct log_numa_topology_t {
     }
 };
 
-/** Logs the CPU and memory capabilities as a two-row tree, one bullet per recognized bit. */
+/** Logs a capability mask as a two-row tree, CPU bits then OS facilities, by @c capability_name. */
 struct log_capabilities_t {
 
-    /** One bullet of a row: the bit that earns it and the label it prints as. */
-    struct bullet_t {
-        capabilities_t bit;
-        char const *label;
-    };
-
     /**
-     *  @brief Logs detected capability bits as a two-row tree: one row for CPU, one for RAM.
-     *  @param[in] caps Bit-mask to render, where every recognized bit becomes one bullet.
+     *  @brief Logs every named bit of @p caps as a bullet: one row for the CPU, one for the OS.
+     *  @param[in] caps Bit-mask to render, where every named bit becomes one bullet.
      *  @param[in] colors Whether to emit ANSI colour codes, and which.
      *  @param[in] output Destination stream, defaulting to @c stdout.
-     *  @note Lists only instruction and memory-placement bits; an empty row prints "None detected".
+     *  @note An empty row prints "None detected".
      */
     void operator()(capabilities_t caps, logging_colors_t colors, std::FILE *output = stdout) const noexcept {
 
-        // One row of the tree: the branch glyph and title, then every present bit as a bullet in
-        // the row's tint, or a dim placeholder when none is.
-        auto print_row = [&](char const *branch, char const *title, char const *tint, auto const &bullets) noexcept {
+        constexpr unsigned int os_facilities_k =
+            capability_os_threads_k | capability_topology_k | capability_place_threads_by_affinity_k |
+            capability_place_threads_by_core_class_k | capability_reschedule_threads_by_class_k |
+            capability_place_memory_on_domain_k | capability_place_huge_pages_on_domain_k |
+            capability_huge_transparent_pages_k | capability_colocate_pools_on_domain_k;
+
+        // One row of the tree: the branch glyph and title, then every present bit of the row as a
+        // bullet in the row's tint, or a dim placeholder when none is.
+        auto print_row = [&](char const *branch, char const *title, char const *tint, unsigned int row) noexcept {
             std::fprintf(output, "%s%s %s%s:%s ", colors.dim(), branch, colors.cyan(), title, colors.reset());
             bool first = true;
-            for (bullet_t const &bullet : bullets) {
-                if (!(caps & bullet.bit)) continue;
-                std::fprintf(output, "%s%s%s%s", first ? "" : " • ", tint, bullet.label, colors.reset());
+            for (unsigned int bit = 1; bit != 0; bit <<= 1) {
+                char const *const name = capability_name(static_cast<capabilities_t>(bit));
+                if (!(caps & row & bit) || !name) continue;
+                std::fprintf(output, "%s%s%s%s", first ? "" : " • ", tint, name, colors.reset());
                 first = false;
             }
             if (first) std::fprintf(output, "%sNone detected%s", colors.dim(), colors.reset());
             std::fprintf(output, "\n");
         };
 
-        constexpr bullet_t cpu_bullets[] = {
-            {capability_x86_pause_k, "x86 PAUSE"},         {capability_x86_tpause_k, "x86 TPAUSE"},
-            {capability_x86_cmpccxadd_k, "x86 CMPCCXADD"}, {capability_x86_raoint_k, "x86 RAO-INT"},
-            {capability_arm64_yield_k, "ARM64 YIELD"},     {capability_arm64_wfet_k, "ARM64 WFET"},
-            {capability_arm64_lse_k, "ARM64 LSE"},         {capability_arm64_rcpc_k, "ARM64 RCPC"},
-            {capability_risc5_pause_k, "RISC-V PAUSE"},    {capability_risc5_wrs_k, "RISC-V WRS"},
-            {capability_risc5_atomic_k, "RISC-V A"},       {capability_risc5_zacas_k, "RISC-V ZACAS"},
-        };
-        constexpr bullet_t ram_bullets[] = {
-            {capability_place_memory_on_domain_k, "NUMA"},
-            {capability_place_huge_pages_on_domain_k, "Huge Pages"},
-            {capability_huge_transparent_pages_k, "Transparent Huge Pages"},
-        };
-
         std::fprintf(output, "%sSystem Capabilities%s\n", colors.bold_cyan(), colors.reset());
-        print_row("├─", "CPU", colors.bold_green(), cpu_bullets);
-        print_row("└─", "RAM", colors.bold_yellow(), ram_bullets);
+        print_row("├─", "CPU", colors.bold_green(), ~os_facilities_k);
+        print_row("└─", "OS", colors.bold_yellow(), os_facilities_k);
         std::fprintf(output, "\n");
     }
 };

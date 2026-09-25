@@ -95,7 +95,7 @@
 #define spawned 6
 #define handles 7
 #define token 8
-#define callback 8
+#define current_callback 8
 
 /** The scenario's sizes, the moods the pool moves through, and the epoch's width: 2^64 in the
  *  header, @c epoch_modulus here, small enough to wrap on request, as @c generation_modulus is in
@@ -144,7 +144,7 @@ inline contribute(t, generation) {
 #if through_c_shim
     // The trampoline reads the slot on every contributor, and round r publishes callback r:
     // `opaque_pool_t::operator()` in `c/forkunion.cpp`
-    load(t, callback, order_relaxed, seen_callback);
+    load(t, current_callback, order_relaxed, seen_callback);
     assert(seen_callback == ((generation) + 1) / 2);
 #endif
     atomic {
@@ -180,6 +180,7 @@ inline spawn() {
 /** Die with a release after the last join, the joins, then the resets:
  *  @c flat_pool::terminate in `flat.hpp`. */
 inline terminate() {
+    // The header's two asserts read seq_cst; acquire is the strongest order the module spells.
     load(dispatcher_thread, threads_to_sync, order_acquire, observed);
     assert(observed == 0);
     load(dispatcher_thread, epoch, order_acquire, observed);
@@ -216,15 +217,15 @@ inline join(joined) {
 #ifdef without_generation_check
 #define joins_the_slot(joined) (seen_callback != 0)
 #else
-#define joins_the_slot(joined) (seen_callback != 0 && (joined) == published_generation)
+#define joins_the_slot(joined) (seen_callback != 0 && (joined) == current_generation)
 #endif
 
 /** An empty slot or another generation's token returns at once, else the pool's join, then the
  *  clear: @c fu_pool_unsafe_join in `c/forkunion.cpp`. */
 inline c_join(joined) {
-    load(dispatcher_thread, callback, order_relaxed, seen_callback);
+    load(dispatcher_thread, current_callback, order_relaxed, seen_callback);
     if
-    :: joins_the_slot(joined) -> join(joined); store(dispatcher_thread, callback, order_relaxed, 0)
+    :: joins_the_slot(joined) -> join(joined); store(dispatcher_thread, current_callback, order_relaxed, 0)
     :: else
     fi
 }
@@ -244,7 +245,7 @@ inline join_and_check() {
 
 /** The caller: spawns, dispatches and joins every round, then lets the workers go. */
 active proctype dispatcher() {
-    int round, observed, generation, seen_epoch, before, seen_fork, exited_before_reset, seen_callback, stale_generation, published_generation;
+    int round, observed, generation, seen_epoch, before, seen_fork, exited_before_reset, seen_callback, stale_generation, current_generation;
     bool exchanged;
     spawn();
     for (round : 1 .. rounds) {
@@ -263,7 +264,7 @@ active proctype dispatcher() {
 #endif
 #if through_c_shim
         // The slot first, then the pool's own dispatch: `fu_pool_unsafe_for_threads`
-        store(dispatcher_thread, callback, order_relaxed, round);
+        store(dispatcher_thread, current_callback, order_relaxed, round);
 #endif
         // One dispatch in flight, fully joined before the next: `flat_pool::unsafe_for_threads`
         load(dispatcher_thread, threads_to_sync, order_acquire, observed);
@@ -287,7 +288,7 @@ active proctype dispatcher() {
         read_modify_write(dispatcher_thread, epoch, order_release, observed, stepped(observed));
         generation = stepped(observed);
 #if through_c_shim
-        published_generation = generation;
+        current_generation = generation;
 #endif
 #if scenario == polling
         if :: round == 1 -> store(dispatcher_thread, token, order_release, generation) :: else fi;

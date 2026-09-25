@@ -14,7 +14,7 @@ Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com)
   Scenarios: `-Dscenario=nested`.
 - `distributed_pool.pml` — `distributed_pool`: the lockstep dispatch over colocations, the ANDed completion, the caller-first join, and `spin_mutex` under a slice.
   Scenarios: `-Dscenario=overlap`, `locked`.
-- `standard_atomic_ref.cpp` — the portable `fetch_add_if_at_most` and `fetch_max` loops of `standard_atomic_ref` under GenMC, the real header.
+- `standard_atomic_ref.cpp` — the portable `fetch_max` loop of `standard_atomic_ref` and the `atomic_fetch_add_if_at_most` loop it forwards to, under GenMC, the real header.
 - `genmc.hpp` — what a client takes from GenMC: `spawn`, `join`, `verify`.
 
 ## Conventions
@@ -27,7 +27,7 @@ A note over a whole `#if` branch is a plain `/* */` above the `#if`, and `//` is
 Inside a block, a single name reads `@c name`, a parameter of the inline below reads `@p name`, and a span of several tokens stays in backticks.
 Code is cited by symbol and file, as `flat_pool::unsafe_join` in `flat.hpp`, never by line number, which drifts with every edit above it.
 The module fixes its own shape, `thread_count`, `location_count` and `history_depth`, the most writes one word ever receives, the initial one included, as the maxima over every model.
-Everything is lowercase snake case; Spin's own `-DSAFETY` in the runner is the only capital.
+Everything is lowercase snake case; pan's own `-DSAFETY`, `-DCOLLAPSE` and `-DVECTORSZ` in the runner are the only capitals.
 A thread index is `<role>_thread`, apart from the process that plays the role; processes that come in numbers name themselves as they start.
 A word carries the name of the C++ member it stands for, without the trailing underscore, or a small accessor like `row_lock(id)` when several rows share a shape.
 Sizes and values are plain nouns; a parameter a `-D` may override sits under `#ifndef`.
@@ -38,7 +38,7 @@ USearch's models include `weak_memory.pml` by the same name through a forwarding
 
 ## Three memory models, one interface
 
-Every model passes its own thread index to `load`, `store`, `read_modify_write`, `compare_exchange`, `add_no_return`, `fence_acquire` and `fence_release`, and `-Dmemory=` picks the memory model at `spin -a` time:
+Every model passes its own thread index to `load`, `store`, `read_modify_write`, `read_modify_write_if`, `compare_exchange`, `add_no_return`, `fence_acquire` and `fence_release`, and `-Dmemory=` picks the memory model at `spin -a` time:
 
 - `-Dmemory=sequential`: one copy of every location, every access one step.
 The protocol layer, and where logic bugs are found first.

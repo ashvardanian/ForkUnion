@@ -17,7 +17,9 @@
  *
  *  - @c sequential: one copy of every location, every access a single step.
  *  - @c views, the default: the views above.
- *  - @c far: the views, plus a relaxed no-return add is posted rather than performed.
+ *  - @c far: the views, plus a relaxed no-return add is posted rather than performed. The bit
+ *    forms RAO-INT posts the same way, @c aand, @c aor and @c axor, have no inline here, since no
+ *    model needs one; a model that adds one follows @c add_no_return.
  *
  *  The @c sequential model is the protocol layer: fast, and the place to find logic bugs first.
  *
