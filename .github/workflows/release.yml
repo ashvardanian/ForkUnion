@@ -19,7 +19,7 @@ permissions:
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -40,6 +40,8 @@ jobs:
             README.md:^\s*forkunion\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
             README.md:archive/refs/tags/v(\d+\.\d+\.\d+)\.tar\.gz
             build.zig.zon:^\s*\.version = "(\d+\.\d+\.\d+)"
+            pixi.toml:^version = "(\d+\.\d+\.\d+)"
+            README.md:^\s*forkunion\s*=\s*\{git\s*=\s*"[^"]+",\s*tag\s*=\s*"v(\d+\.\d+\.\d+)"\}
           update-major-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
             include/forkunion/types.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
@@ -57,7 +59,7 @@ jobs:
   rebase:
     name: Rebase Dev. Branch
     needs: versioning
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout the latest code
         uses: actions/checkout@v7
@@ -80,7 +82,7 @@ jobs:
 
   publish_rust:
     name: Publish Rust
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: versioning
     steps:
       - name: Checkout

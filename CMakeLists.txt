@@ -35,7 +35,7 @@ project(
 )
 
 # Control strict interface warnings for consumers
-option(FORKUNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
+option(FORKUNION_WERROR "Propagate strict warnings (including -Werror) to consumers" OFF)
 option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL pool" OFF)
 
 # Each kernel facility the library can use is a tri-state: AUTO, ON, or OFF.
@@ -45,8 +45,8 @@ option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL 
 # the derivation rules in exactly one place, instead of spread across CMakeLists.txt, build.rs, and build.zig, where
 # they would drift.
 #
-# ON and OFF pass `-DFU_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say - is
-# rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
+# ON and OFF pass `-DFORKUNION_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say -
+# is rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
 # realistically toggles, each a tri-state cache entry. The finer ones - cache sharing, thread QoS, scheduling class -
 # are AUTO-only: the header derives them, and only `FORKUNION_PORTABLE` forces them off. Rust and Zig expose this same
 # set.
@@ -73,8 +73,9 @@ set_property(CACHE FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY PROPERTY STRINGS "AU
 
 # Every optional capability macro, coarse and fine - the set `FORKUNION_PORTABLE` zeroes.
 set(FORKUNION_OPTIONAL_MACROS
-    FU_WITH_TOPOLOGY FU_WITH_PLACE_THREADS_BY_AFFINITY FU_WITH_PLACE_THREADS_BY_CORE_CLASS
-    FU_WITH_RESCHEDULE_THREADS_BY_CLASS FU_WITH_PLACE_MEMORY_ON_DOMAIN FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+    FORKUNION_WITH_TOPOLOGY FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
+    FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
+    FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
 )
 
 # Header-only interface library
@@ -83,15 +84,20 @@ target_include_directories(
     forkunion_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 
-# C++17 is the floor consumers must clear, not a ceiling: `cxx_std_17` raises a consumer below it up to 17 and leaves
-# one already at 20/23 alone, so the C++20 fast paths - concepts, the `atomic_ref` monitor, `std::popcount` - stay
-# available to whoever asks for them. No `CXX_STANDARD` property here - it governs only a target's own compilation, and
-# an INTERFACE library has none, so it would be a no-op that reads like a cap. The pre-compiled libraries below pin
-# themselves to 20.
-target_compile_features(forkunion_header INTERFACE cxx_std_17)
+# C++20 is the floor consumers must clear, not a ceiling: `cxx_std_20` raises a consumer below it and leaves one at 23
+# alone. No `CXX_STANDARD` property here - it governs only a target's own compilation, and an INTERFACE library has
+# none, so it would be a no-op that reads like a cap.
+target_compile_features(forkunion_header INTERFACE cxx_std_20)
+
+# One compile probe per capability bit under `probes/`, `FORKUNION_TARGET_<BIT>=0/1`: the verdicts reach the units that
+# admit rungs at runtime, never `forkunion_header`, whose consumers read the compilation target's promise in
+# `types.hpp`.
+include(cmake/fu_x86_isa_probes.cmake)
+include(cmake/fu_arm64_isa_probes.cmake)
+include(cmake/fu_risc5_isa_probes.cmake)
 
 # Strictest possible compilation flags with fatal warnings
-if (FORKUNION_STRICT)
+if (FORKUNION_WERROR)
     target_compile_options(
         forkunion_header
         INTERFACE # GCC/Clang: Maximum warnings + treat warnings as errors + security hardening
@@ -108,20 +114,21 @@ if (FORKUNION_STRICT)
                   -Wno-sign-conversion
                   -Wno-unused-function
                   -Wshadow
-                  -Wnon-virtual-dtor
-                  -Wold-style-cast
-                  -Woverloaded-virtual
-                  -Wsign-promo
                   -Wno-null-dereference
                   -Wdouble-promotion>
+                  # C++ only: GCC rejects these on the C tests and on a consumer's C sources
+                  $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wnon-virtual-dtor
+                  -Wold-style-cast
+                  -Woverloaded-virtual
+                  -Wsign-promo>
+                  $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wuseless-cast>
                   $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo>>:-Wno-unused-variable>
                   # Additional GCC-specific warnings
                   $<$<CXX_COMPILER_ID:GNU>:-Wmisleading-indentation
                   -Wduplicated-cond
                   -Wduplicated-branches
                   -Wlogical-op
-                  -Wno-null-dereference
-                  -Wuseless-cast>
+                  -Wno-null-dereference>
                   # Additional Clang-specific warnings
                   $<$<CXX_COMPILER_ID:Clang>:-Wmost
                   -Wthread-safety
@@ -159,10 +166,10 @@ add_library(forkunion_static STATIC c/forkunion.cpp)
 
 # What a consumer picks between, spelled as what they get:
 #
-# forkunion::header - the C++ core alone. Capabilities are baked in by the `FU_WITH_*` macros and `preferred_yield_t` at
-# compile time, so the binary is only as capable as the machine that built it. forkunion::static - the C ABI,
-# dispatching on `fu_runtime_capabilities()`, linked into the consumer's binary. forkunion::shared - the same C ABI, one
-# copy per process rather than one per consumer.
+# forkunion::header - the C++ core alone. Capabilities are baked in by the `FORKUNION_WITH_*` macros, and each
+# `FORKUNION_TARGET_<BIT>` reads what the compilation target promises, so `preferred_yield_t` is as capable as the
+# target the consumer compiled for. forkunion::static - the C ABI, dispatching on `fu_runtime_capabilities()`, linked
+# into the consumer's binary. forkunion::shared - the same C ABI, one copy per process rather than one per consumer.
 #
 # The `static`/`shared` split is linkage, not dispatch: both run the same runtime-dispatched TU above, and a process
 # that links two static copies gets two pools and two topologies. `EXPORT_NAME` carries these spellings into the
@@ -177,13 +184,8 @@ add_library(forkunion::header ALIAS forkunion_header)
 add_library(forkunion::static ALIAS forkunion_static)
 add_library(forkunion::shared ALIAS forkunion_shared)
 
-# Prefer C++20 for library builds
-set_target_properties(
-    forkunion_shared forkunion_static
-    PROPERTIES CXX_STANDARD 20
-               CXX_STANDARD_REQUIRED ON
-               CXX_EXTENSIONS OFF
-)
+# The pre-compiled libraries inherit C++20 from the header target; keep it strict, without GNU extensions
+set_target_properties(forkunion_shared forkunion_static PROPERTIES CXX_EXTENSIONS OFF)
 
 # `SOVERSION` carries the major alone - the only break the C ABI admits, matching `SameMajorVersion` below.
 set_target_properties(forkunion_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
@@ -203,6 +205,10 @@ set_target_properties(forkunion_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 target_link_libraries(forkunion_shared PUBLIC forkunion_header)
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
 
+# Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `c/forkunion.cpp`.
+target_compile_definitions(forkunion_shared PRIVATE ${fu_compile_definitions_})
+target_compile_definitions(forkunion_static PRIVATE ${fu_compile_definitions_})
+
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
 set(HAS_CFP FALSE)
@@ -213,7 +219,7 @@ target_compile_options(
     forkunion_shared
     PRIVATE # Stack protection and buffer overflow detection
             $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
-            # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_STRICT. Allowlist the
+            # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_WERROR. Allowlist the
             # optimized configs, since an empty `CMAKE_BUILD_TYPE` is not Debug yet emits no `-O`. The `-U` disarms
             # distributions that predefine it, whose redefinition would warn on the same path.
             $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
@@ -282,7 +288,7 @@ if (CPPCHECK_EXECUTABLE)
     add_custom_target(
         cppcheck
         COMMAND
-            ${CPPCHECK_EXECUTABLE} --enable=all --std=c++17 --verbose --quiet --error-exitcode=1
+            ${CPPCHECK_EXECUTABLE} --enable=all --std=c++20 --verbose --quiet --error-exitcode=1
             --suppress=missingIncludeSystem --suppress=unusedFunction --suppress=unmatchedSuppression
             --suppress=ConfigurationNotChecked --suppress=knownConditionTrueFalse --suppress=shadowFunction
             --suppress=shadowVariable --suppress=useStlAlgorithm --suppress=noExplicitConstructor
@@ -298,24 +304,28 @@ if (CLANG_TIDY_EXECUTABLE)
         COMMAND
             ${CLANG_TIDY_EXECUTABLE} --config-file=${CMAKE_CURRENT_SOURCE_DIR}/.clang-tidy --quiet
             ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp ${CMAKE_CURRENT_SOURCE_DIR}/c/*.cpp --
-            -I${CMAKE_CURRENT_SOURCE_DIR}/include -std=c++17
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include -std=c++20
         COMMENT "Running clang-tidy static analysis"
     )
 endif ()
 
-# Tests & benchmarking scripts
+# Tests & benchmarks
 include(CTest)
 
 # Default ON only when ForkUnion is the top-level project, so an `add_subdirectory` consumer does not inherit the
-# `scripts/` targets - and does not have to remember to switch them off.
-option(FORKUNION_BUILD_TESTS "Build forkunion tests" ${PROJECT_IS_TOP_LEVEL})
+# `test/` and `bench/` targets - and does not have to remember to switch them off.
+option(FORKUNION_BUILD_TEST "Build the tests in test/" ${PROJECT_IS_TOP_LEVEL})
+option(FORKUNION_BUILD_BENCH "Build the benchmarks in bench/" ${PROJECT_IS_TOP_LEVEL})
 option(FORKUNION_TEST_SKIP_STRESS "Run only the tests' correctness suite, skipping the slow throughput/stress cases"
        OFF
 )
 
-if (BUILD_TESTING AND FORKUNION_BUILD_TESTS)
+if (BUILD_TESTING AND FORKUNION_BUILD_TEST)
     enable_testing()
-    add_subdirectory(scripts)
+    add_subdirectory(test)
+endif ()
+if (FORKUNION_BUILD_BENCH)
+    add_subdirectory(bench)
 endif ()
 
 # Install rules. Default ON only when ForkUnion is the top-level project: an `add_subdirectory` consumer installing
@@ -478,8 +488,8 @@ else ()
     # No environment check precedes these. Forcing topology or placement ON used to need libnuma on the build host, and
     # so needed a sentence here rather than a wall of missing symbols at link time; now it needs a Linux kernel, which
     # the header checks for itself. A capability the platform cannot honour still stops at an `#error` in `types.hpp`.
-    forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FU_WITH_TOPOLOGY)
-    forkunion_apply("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FU_WITH_PLACE_MEMORY_ON_DOMAIN)
-    forkunion_apply("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
-    forkunion_apply("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FU_WITH_PLACE_THREADS_BY_AFFINITY)
+    forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FORKUNION_WITH_TOPOLOGY)
+    forkunion_apply("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN)
+    forkunion_apply("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
+    forkunion_apply("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY)
 endif ()

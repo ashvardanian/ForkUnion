@@ -1,0 +1,4 @@
+# `mojo format` is a fork of Black and discovers this file the way Black does, so the width lives
+# here rather than in every invocation. It matches `.clang-format`'s ColumnLimit and `.dprint.json`.
+[tool.black]
+line-length = 120

@@ -14,7 +14,7 @@ homepage = "https://github.com/ashvardanian/ForkUnion"
 keywords = ["numa", "parallel", "thread-pool", "allocator", "no-std"]
 categories = ["concurrency", "os::linux-apis", "no-std"]
 # Leading slashes anchor to the package root; Cargo matches these like gitignore, so a bare `README.md`
-# also picked up every one under `build*/_deps/`. The two scripts are here because `[[bin]]` names them.
+# also picked up every one under `build*/_deps/`. The two benchmarks are here because `[[bin]]` names them.
 include = [
     "/Cargo.toml",
     "/README.md",
@@ -23,8 +23,8 @@ include = [
     "/rust/**",
     "/include/**",
     "/c/**",
-    "/scripts/nbody.rs",
-    "/scripts/propagation.rs",
+    "/bench/nbody.rs",
+    "/bench/propagation.rs",
 ]
 links = "forkunion"
 
@@ -33,7 +33,7 @@ name = "forkunion"
 path = "rust/forkunion.rs"
 
 [build-dependencies]
-cc = "1.2.40"
+cc = "1.4.5"
 
 [features]
 default = ["std"]
@@ -59,14 +59,14 @@ rpath = false     # On some systems, setting this to false can help with optimiz
 # their baseline runtimes, so library consumers never pull Rayon or Tokio.
 [[bin]]
 name = "forkunion_nbody"
-path = "scripts/nbody.rs"
+path = "bench/nbody.rs"
 test = false
 bench = false
 required-features = ["benchmarks"]
 
 [[bin]]
 name = "forkunion_propagation"
-path = "scripts/propagation.rs"
+path = "bench/propagation.rs"
 test = false
 bench = false
 required-features = ["benchmarks"]

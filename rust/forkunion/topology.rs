@@ -1,7 +1,11 @@
 //! Machine topology, capabilities, and library version - the read-only view of the hardware.
 //!
 //! Owns the `fu_topology_*`, capability, and version FFI; mirrors the C++ `topology` header.
+//!
+//! File: rust/forkunion/topology.rs
+//! Author: Ash Vardanian
 
+use crate::types::{Error, Result, Status};
 use core::ffi::{c_char, c_int, c_void};
 
 extern "C" {
@@ -10,57 +14,31 @@ extern "C" {
     fn fu_version_patch() -> c_int;
     fn fu_comptime_capabilities() -> u32;
     fn fu_runtime_capabilities() -> u32;
-    fn fu_name_capabilities(caps: u32, buf: *mut c_char, len: usize) -> usize;
+    fn fu_name_capabilities(caps: u32, buf: *mut c_char, len: usize, written_out: *mut usize) -> c_int;
 
-    fn fu_topology_new() -> *mut c_void;
+    fn fu_topology_new(topology_out: *mut *mut c_void) -> c_int;
     fn fu_topology_delete(topology: *mut c_void);
-
-    fn fu_logical_cores_count_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
-    fn fu_logical_cores_count(topology: *mut c_void) -> usize;
-    fn fu_compute_domains_count(topology: *mut c_void) -> usize;
-    fn fu_compute_level_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
-    fn fu_compute_levels_count(topology: *mut c_void) -> usize;
-    fn fu_compute_capacity_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
-    fn fu_compute_cache_bytes_in(topology: *mut c_void, compute_domain_index: usize) -> usize;
-
-    fn fu_memory_domains_count(topology: *mut c_void) -> usize;
-    fn fu_local_memory_of(topology: *mut c_void, compute_domain_index: usize) -> usize;
-    fn fu_volume_ram_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
-    fn fu_volume_ram(topology: *mut c_void) -> usize;
-    fn fu_volume_huge_pages_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
-    fn fu_volume_huge_pages(topology: *mut c_void) -> usize;
-    fn fu_huge_pages_count_in(topology: *mut c_void, memory_domain_index: usize) -> usize;
-    fn fu_huge_pages_count(topology: *mut c_void) -> usize;
-    fn fu_memory_domain_id_at_index(topology: *mut c_void, memory_domain_index: usize) -> i32;
+    fn fu_logical_cores_count_in(topology: *mut c_void, compute_domain_index: usize, cores_out: *mut usize) -> c_int;
+    fn fu_logical_cores_count(topology: *mut c_void, cores_out: *mut usize) -> c_int;
+    fn fu_compute_domains_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
+    fn fu_compute_level_in(topology: *mut c_void, compute_domain_index: usize, level_out: *mut usize) -> c_int;
+    fn fu_compute_levels_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
+    fn fu_compute_capacity_in(topology: *mut c_void, compute_domain_index: usize, capacity_out: *mut usize) -> c_int;
+    fn fu_compute_cache_bytes_in(topology: *mut c_void, compute_domain_index: usize, bytes_out: *mut usize) -> c_int;
+    fn fu_memory_domains_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
+    fn fu_local_memory_of(topology: *mut c_void, compute_domain_index: usize, memory_domain_out: *mut usize) -> c_int;
+    fn fu_volume_ram_in(topology: *mut c_void, memory_domain_index: usize, bytes_out: *mut usize) -> c_int;
+    fn fu_volume_ram(topology: *mut c_void, bytes_out: *mut usize) -> c_int;
+    fn fu_volume_huge_pages_in(topology: *mut c_void, memory_domain_index: usize, bytes_out: *mut usize) -> c_int;
+    fn fu_volume_huge_pages(topology: *mut c_void, bytes_out: *mut usize) -> c_int;
+    fn fu_huge_pages_count_in(topology: *mut c_void, memory_domain_index: usize, pages_out: *mut usize) -> c_int;
+    fn fu_huge_pages_count(topology: *mut c_void, pages_out: *mut usize) -> c_int;
+    fn fu_memory_domain_id_at_index(
+        topology: *mut c_void,
+        memory_domain_index: usize,
+        memory_domain_id_out: *mut i32,
+    ) -> c_int;
 }
-
-/// Error types that can occur during thread pool operations.
-#[derive(Debug)]
-pub enum Error {
-    /// Thread pool creation failed
-    CreationFailed,
-    /// Thread spawning failed
-    SpawnFailed,
-    /// Invalid parameter provided
-    InvalidParameter,
-    /// Platform not supported
-    UnsupportedPlatform,
-}
-
-#[cfg(feature = "std")]
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CreationFailed => write!(f, "failed to create thread pool"),
-            Self::SpawnFailed => write!(f, "failed to spawn worker threads"),
-            Self::InvalidParameter => write!(f, "invalid parameter provided"),
-            Self::UnsupportedPlatform => write!(f, "platform not supported"),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for Error {}
 
 /// Everything the library can do, whether decided when it was compiled or found on this machine.
 ///
@@ -118,53 +96,70 @@ impl Capabilities {
     /// The domain-aware `colocated_pool` and `distributed_pool` are compiled in.
     pub const COLOCATE_POOLS_ON_DOMAIN: Capabilities = Capabilities(1 << 14);
 
+    /// `CLDEMOTE` moves a just-written line toward the shared LLC and retains it. Reporting-only:
+    /// the emitter is chosen at compile time by `FORKUNION_WITH_DEMOTE_CACHE_LINES`, never
+    /// dispatched.
+    pub const X86_CLDEMOTE: Capabilities = Capabilities(1 << 15);
+    /// `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
+    /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+    pub const ARM64_DC_CVAC: Capabilities = Capabilities(1 << 16);
+    /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
+    /// hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+    pub const RISC5_ZICBOM: Capabilities = Capabilities(1 << 17);
+
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub const ALL: Capabilities = Capabilities(u32::MAX);
 
     /// Whether every bit of `other` is set in `self`.
+    #[must_use]
     pub const fn contains(self, other: Capabilities) -> bool {
         (self.0 & other.0) == other.0
     }
 }
 
 /// Returns the major version number of the ForkUnion library.
+#[must_use]
 pub fn version_major() -> usize {
     unsafe { fu_version_major() as usize }
 }
 
 /// Returns the minor version number of the ForkUnion library.
+#[must_use]
 pub fn version_minor() -> usize {
     unsafe { fu_version_minor() as usize }
 }
 
 /// Returns the patch version number of the ForkUnion library.
+#[must_use]
 pub fn version_patch() -> usize {
     unsafe { fu_version_patch() as usize }
 }
 
 /// Returns the library version as a tuple of (major, minor, patch).
+#[must_use]
 pub fn version() -> (usize, usize, usize) {
     (version_major(), version_minor(), version_patch())
 }
 
 /// Which kernel facilities this build of ForkUnion was compiled to use.
+#[must_use]
 pub fn comptime_capabilities() -> Capabilities {
     Capabilities(unsafe { fu_comptime_capabilities() })
 }
 
 /// Formats a capability bitset into a comma-separated name list, like `"threads,topology"`.
 ///
-/// POLISH: returns an owned `String` because `fu_name_capabilities` writes into a caller
-/// buffer rather than handing back a static pointer; a fixed-capacity stack type would avoid
-/// the allocation. Returns `None` if the C side reports it could not format the names.
+/// POLISH: returns an owned `String`, since `fu_name_capabilities` writes into a caller buffer, not
+/// a static pointer; a fixed-capacity stack type would avoid this allocation.
 #[cfg(feature = "std")]
-pub fn name_capabilities(caps: Capabilities) -> Option<std::string::String> {
-    let mut buf = [0u8; 256];
-    let written =
-        unsafe { fu_name_capabilities(caps.0, buf.as_mut_ptr() as *mut c_char, buf.len()) };
-    if written == 0 {
-        return None;
-    }
+pub fn name_capabilities(caps: Capabilities) -> Result<std::string::String> {
+    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
+    let mut buf = [0u8; 512];
+    let mut written = 0usize;
+    Error::check(
+        unsafe { fu_name_capabilities(caps.0, buf.as_mut_ptr() as *mut c_char, buf.len(), &mut written) },
+        "fu_name_capabilities",
+    )?;
     let len = core::cmp::min(written, buf.len());
     // Trim any trailing NUL the C side may have written.
     let bytes = &buf[..len];
@@ -172,52 +167,54 @@ pub fn name_capabilities(caps: Capabilities) -> Option<std::string::String> {
         Some(nul) => &bytes[..nul],
         None => bytes,
     };
-    core::str::from_utf8(bytes)
-        .ok()
-        .map(std::string::String::from)
+    match core::str::from_utf8(bytes) {
+        Ok(text) => Ok(std::string::String::from(text)),
+        Err(_) => Err(Error::new(Status::Unknown, "fu_name_capabilities wrote invalid UTF-8")),
+    }
 }
 
 /// The set [`comptime_capabilities`] bits, comma-separated, like `"threads,topology"`.
 #[cfg(feature = "std")]
-pub fn comptime_capabilities_string() -> Option<std::string::String> {
+pub fn comptime_capabilities_string() -> Result<std::string::String> {
     name_capabilities(comptime_capabilities())
 }
 
 /// Which features this machine turned out to offer, probing the CPU and the memory system.
+#[must_use]
 pub fn runtime_capabilities() -> Capabilities {
     Capabilities(unsafe { fu_runtime_capabilities() })
 }
 
 /// The set [`runtime_capabilities`] bits, comma-separated, like `"arm64_yield,numa_aware"`.
 #[cfg(feature = "std")]
-pub fn runtime_capabilities_string() -> Option<std::string::String> {
+pub fn runtime_capabilities_string() -> Result<std::string::String> {
     name_capabilities(runtime_capabilities())
 }
 
-/// A position in the topology's array of **compute** domains, in `[0, compute_domains_count())`.
+/// A position in the topology's array of __compute__ domains, in `[0, compute_domains_count())`.
 ///
 /// Distinct from [`MemoryDomain`], and deliberately not interchangeable with it. The two axes are
-/// indexed independently: an Apple M5 Pro reports three compute domains over a single memory domain,
-/// so a compute index of `2` names no memory domain at all.
+/// indexed independently: an Apple M5 Pro reports three compute domains over a single memory
+/// domain, so a compute index of `2` names no memory domain at all.
 ///
-/// This is not hypothetical. Handing a compute-domain index to `DomainAllocator::new`, which expects a
-/// memory-domain index, compiles and works on every machine where the two counts happen to match, then
-/// misplaces memory where they diverge. Unlike a C++ `enum`, a newtype also refuses
-/// `slice[compute_domain]`, because `Index<usize>` will not accept it - which is the other half of the
-/// same bug.
+/// This is not hypothetical. Handing a compute-domain index to `DomainAllocator::new`, which
+/// expects a memory-domain index, compiles and works on every machine where the two counts happen
+/// to match, then misplaces memory where they diverge. Unlike a C++ `enum`, a newtype also refuses
+/// `slice[compute_domain]`, because `Index<usize>` will not accept it - which is the other half of
+/// the same bug.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComputeDomain(pub usize);
 
-/// A position in the topology's array of **memory** domains, in `[0, memory_domains_count())`.
-/// See [`ComputeDomain`] for why these are separate types.
+/// A position in the topology's array of __memory__ domains, in `[0, memory_domains_count())`, kept
+/// separate from [`ComputeDomain`] for the reasons given there.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomain(pub usize);
 
 /// An OS memory-domain id - a NUMA node - the allocators key off, obtained from
 /// [`Topology::memory_domain_id_at_index`]; `-1` when there is none.
 ///
-/// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS id the
-/// kernel labels a node with. A [`DomainAllocator`] holds only this id, so it - and every
+/// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS id
+/// the kernel labels a node with. A [`DomainAllocator`] holds only this id, so it - and every
 /// [`AllocationResult`] it hands out - is free of the topology handle and can outlive it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomainId(pub i32);
@@ -225,6 +222,7 @@ pub struct MemoryDomainId(pub i32);
 impl ComputeDomain {
     /// The raw index, for the FFI boundary and for arithmetic.
     #[inline]
+    #[must_use]
     pub fn get(self) -> usize {
         self.0
     }
@@ -233,6 +231,7 @@ impl ComputeDomain {
 impl MemoryDomain {
     /// The raw index, for the FFI boundary and for arithmetic.
     #[inline]
+    #[must_use]
     pub fn get(self) -> usize {
         self.0
     }
@@ -241,12 +240,14 @@ impl MemoryDomain {
 impl MemoryDomainId {
     /// The raw OS id, for the FFI boundary; `-1` names no domain.
     #[inline]
+    #[must_use]
     pub fn get(self) -> i32 {
         self.0
     }
 
     /// Whether this id names a real domain rather than the `-1` sentinel.
     #[inline]
+    #[must_use]
     pub fn is_valid(self) -> bool {
         self.0 >= 0
     }
@@ -256,8 +257,8 @@ impl MemoryDomainId {
 ///
 /// The topology is discovered once, when [`Topology::new`] is called, and every affinity query,
 /// NUMA allocation, and pool spawn is answered against this handle rather than a process-wide
-/// singleton. Create one near the start of a program and share it (`&Topology`) with the pools
-/// and allocators that need it; it is [`Send`] + [`Sync`], so a single handle serves every thread.
+/// singleton. Create one near the start of a program and share it (`&Topology`) with the pools and
+/// allocators that need it; it is [`Send`] + [`Sync`], so a single handle serves every thread.
 ///
 /// # Examples
 ///
@@ -265,8 +266,8 @@ impl MemoryDomainId {
 /// use forkunion::*;
 ///
 /// let topology = Topology::new().expect("Failed to probe topology");
-/// let cores = topology.logical_cores_count();
-/// let pool = ThreadPool::try_spawn(&topology, cores.max(1)).expect("Failed to spawn pool");
+/// let cores = topology.logical_cores_count().unwrap();
+/// let pool = ThreadPool::spawn(&topology, cores.max(1)).expect("Failed to spawn pool");
 /// assert_eq!(pool.threads_count(), cores.max(1));
 /// ```
 pub struct Topology {
@@ -282,11 +283,10 @@ impl Topology {
     /// # Errors
     ///
     /// Returns [`Error::CreationFailed`] if the C side could not allocate or populate the handle.
-    pub fn new() -> Result<Self, Error> {
-        let inner = unsafe { fu_topology_new() };
-        if inner.is_null() {
-            return Err(Error::CreationFailed);
-        }
+    pub fn new() -> Result<Self> {
+        let mut inner: *mut c_void = core::ptr::null_mut();
+        // ? An allocation failure and a machine that will not describe itself now arrive apart.
+        Error::check(unsafe { fu_topology_new(&mut inner) }, "fu_topology_new")?;
         Ok(Self { inner })
     }
 
@@ -298,35 +298,55 @@ impl Topology {
     /// Returns the number of logical cores backing a given compute domain.
     ///
     /// Zero if `compute_domain` is out of range. Use it to size a per-compute-domain pool
-    /// ([`ThreadPool::try_spawn_on`]) or to weight work across uneven compute domains.
-    pub fn logical_cores_count_in(&self, compute_domain: ComputeDomain) -> usize {
-        unsafe { fu_logical_cores_count_in(self.inner, compute_domain.get()) }
+    /// ([`ThreadPool::spawn_on`]) or to weight work across uneven compute domains.
+    pub fn logical_cores_count_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_logical_cores_count_in(self.inner, compute_domain.get(), &mut answer) },
+            "fu_logical_cores_count_in",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the number of logical CPU cores available on the system.
-    pub fn logical_cores_count(&self) -> usize {
-        unsafe { fu_logical_cores_count(self.inner) }
+    pub fn logical_cores_count(&self) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_logical_cores_count(self.inner, &mut answer) },
+            "fu_logical_cores_count",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the number of distinct thread compute_domains available.
     ///
     /// A "compute_domain" represents a group of threads that share the same:
-    /// - **NUMA memory domain** - threads with fast local memory access
-    /// - **Quality-of-Service level** - P-cores vs E-cores on heterogeneous CPUs
-    /// - **Cache hierarchy** - threads sharing L3 cache
+    /// - __NUMA memory domain__ - threads with fast local memory access
+    /// - __Quality-of-Service level__ - P-cores vs E-cores on heterogeneous CPUs
+    /// - __Cache hierarchy__ - threads sharing L3 cache
     ///
     /// # Typical Values
     ///
     /// - `1` on most desktop, laptop, or IoT platforms with unified memory
     /// - `2-8` on typical dual-socket servers or heterogeneous mobile chips
     /// - `4-32` on high-end cloud servers with multiple sockets
-    pub fn compute_domains_count(&self) -> usize {
-        unsafe { fu_compute_domains_count(self.inner) }
+    pub fn compute_domains_count(&self) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_compute_domains_count(self.inner, &mut answer) },
+            "fu_compute_domains_count",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the performance level of a compute domain (higher = more performant).
-    pub fn compute_level_in(&self, compute_domain: ComputeDomain) -> usize {
-        unsafe { fu_compute_level_in(self.inner, compute_domain.get()) }
+    pub fn compute_level_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_compute_level_in(self.inner, compute_domain.get(), &mut answer) },
+            "fu_compute_level_in",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the number of distinct Quality-of-Service levels.
@@ -334,8 +354,13 @@ impl Topology {
     /// May be smaller than [`compute_domains_count`](Self::compute_domains_count), as several
     /// domains can share one level - equally-fast cores may still be split across cache clusters,
     /// or across NUMA nodes.
-    pub fn compute_levels_count(&self) -> usize {
-        unsafe { fu_compute_levels_count(self.inner) }
+    pub fn compute_levels_count(&self) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_compute_levels_count(self.inner, &mut answer) },
+            "fu_compute_levels_count",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the relative throughput of one core in a compute domain (0 if unknown).
@@ -344,67 +369,117 @@ impl Topology {
     /// This is the number to weight work by - [`compute_level_in`](Self::compute_level_in) is a
     /// dense ordinal and must never be divided by. Platforms that rank cores without rating them
     /// report 0 here; fall back to [`threads_count_in`](ThreadPool::threads_count_in) when they do.
-    pub fn compute_capacity_in(&self, compute_domain: ComputeDomain) -> usize {
-        unsafe { fu_compute_capacity_in(self.inner, compute_domain.get()) }
+    pub fn compute_capacity_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_compute_capacity_in(self.inner, compute_domain.get(), &mut answer) },
+            "fu_compute_capacity_in",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
     ///
     /// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
     /// deserves - domains of equal throughput may back onto very differently sized caches.
-    pub fn compute_cache_bytes_in(&self, compute_domain: ComputeDomain) -> usize {
-        unsafe { fu_compute_cache_bytes_in(self.inner, compute_domain.get()) }
+    pub fn compute_cache_bytes_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_compute_cache_bytes_in(self.inner, compute_domain.get(), &mut answer) },
+            "fu_compute_cache_bytes_in",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the number of memory domains available.
-    pub fn memory_domains_count(&self) -> usize {
-        unsafe { fu_memory_domains_count(self.inner) }
+    pub fn memory_domains_count(&self) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_memory_domains_count(self.inner, &mut answer) },
+            "fu_memory_domains_count",
+        )?;
+        Ok(answer)
     }
 
     /// Resolves a memory domain's dense index to the OS id a [`DomainAllocator`] takes.
     ///
-    /// Returns [`MemoryDomainId(-1)`](MemoryDomainId) if the index is out of range. The id is the one
-    /// place the topology is consulted for allocation; once resolved, the allocator needs it alone.
-    pub fn memory_domain_id_at_index(&self, memory_domain: MemoryDomain) -> MemoryDomainId {
-        MemoryDomainId(unsafe { fu_memory_domain_id_at_index(self.inner, memory_domain.get()) })
+    /// A real domain may itself carry `-1` where the OS names none, so an out-of-range index is a
+    /// reported failure rather than the same sentinel.
+    pub fn memory_domain_id_at_index(&self, memory_domain: MemoryDomain) -> Result<MemoryDomainId> {
+        let mut raw: i32 = -1;
+        Error::check(
+            unsafe { fu_memory_domain_id_at_index(self.inner, memory_domain.get(), &mut raw) },
+            "fu_memory_domain_id_at_index",
+        )?;
+        Ok(MemoryDomainId(raw))
     }
 
-    /// Returns the memory domain nearest a given compute domain (its local allocation target).
+    /// Returns the memory domain nearest a given compute domain, its local allocation target.
     ///
     /// Performance - tiers, latencies, bandwidths, distances - is not the topology's to declare:
     /// harvest a [`Fabric`](crate::Fabric) to measure it in-process.
-    pub fn local_memory_of(&self, compute_domain: ComputeDomain) -> MemoryDomain {
-        MemoryDomain(unsafe { fu_local_memory_of(self.inner, compute_domain.get()) })
+    pub fn local_memory_of(&self, compute_domain: ComputeDomain) -> Result<MemoryDomain> {
+        let mut answer = usize::MAX;
+        let raw = unsafe { fu_local_memory_of(self.inner, compute_domain.get(), &mut answer) };
+        Error::check(raw, "fu_local_memory_of")?;
+        Ok(MemoryDomain(answer))
     }
 
-    /// Returns the RAM volume (bytes) held by a given memory domain (0 if out of range).
-    pub fn volume_ram_in(&self, memory_domain: MemoryDomain) -> usize {
-        unsafe { fu_volume_ram_in(self.inner, memory_domain.get()) }
+    /// Returns the RAM volume, in bytes, held by a given memory domain (0 if out of range).
+    pub fn volume_ram_in(&self, memory_domain: MemoryDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_volume_ram_in(self.inner, memory_domain.get(), &mut answer) },
+            "fu_volume_ram_in",
+        )?;
+        Ok(answer)
     }
 
-    /// Returns the total RAM volume (bytes) across all memory domains, regardless of page size.
-    pub fn volume_ram(&self) -> usize {
-        unsafe { fu_volume_ram(self.inner) }
+    /// Returns the total RAM volume, in bytes, across all memory domains, regardless of page size.
+    pub fn volume_ram(&self) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(unsafe { fu_volume_ram(self.inner, &mut answer) }, "fu_volume_ram")?;
+        Ok(answer)
     }
 
-    /// Returns the huge-page volume (bytes) available on a given memory domain (0 if out of range).
-    pub fn volume_huge_pages_in(&self, memory_domain: MemoryDomain) -> usize {
-        unsafe { fu_volume_huge_pages_in(self.inner, memory_domain.get()) }
+    /// Returns the huge-page volume, in bytes, on a given memory domain (0 if out of range).
+    pub fn volume_huge_pages_in(&self, memory_domain: MemoryDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_volume_huge_pages_in(self.inner, memory_domain.get(), &mut answer) },
+            "fu_volume_huge_pages_in",
+        )?;
+        Ok(answer)
     }
 
-    /// Returns the total huge-page volume (bytes) across all memory domains.
-    pub fn volume_huge_pages(&self) -> usize {
-        unsafe { fu_volume_huge_pages(self.inner) }
+    /// Returns the total huge-page volume, in bytes, across all memory domains.
+    pub fn volume_huge_pages(&self) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_volume_huge_pages(self.inner, &mut answer) },
+            "fu_volume_huge_pages",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the number of free huge pages in a given memory domain (0 if out of range).
-    pub fn huge_pages_count_in(&self, memory_domain: MemoryDomain) -> usize {
-        unsafe { fu_huge_pages_count_in(self.inner, memory_domain.get()) }
+    pub fn huge_pages_count_in(&self, memory_domain: MemoryDomain) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_huge_pages_count_in(self.inner, memory_domain.get(), &mut answer) },
+            "fu_huge_pages_count_in",
+        )?;
+        Ok(answer)
     }
 
     /// Returns the total number of free huge pages across all memory domains.
-    pub fn huge_pages_count(&self) -> usize {
-        unsafe { fu_huge_pages_count(self.inner) }
+    pub fn huge_pages_count(&self) -> Result<usize> {
+        let mut answer = usize::MAX;
+        Error::check(
+            unsafe { fu_huge_pages_count(self.inner, &mut answer) },
+            "fu_huge_pages_count",
+        )?;
+        Ok(answer)
     }
 }
 
@@ -419,9 +494,9 @@ impl Drop for Topology {
 /// Defines whether the calling thread participates in task execution.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CallerExclusivity {
-    /// The calling thread participates in the workload (spawns N-1 workers)
+    /// The calling thread participates in the workload, spawning N-1 workers
     Inclusive = 0,
-    /// The calling thread only coordinates, doesn't execute tasks (spawns N workers)
+    /// The calling thread only coordinates, doesn't execute tasks, spawning N workers
     Exclusive = 1,
 }
 
@@ -433,7 +508,7 @@ pub(crate) mod tests {
     #[inline]
     pub(crate) fn hw_threads() -> usize {
         let topology = Topology::new().unwrap();
-        topology.logical_cores_count().max(1)
+        topology.logical_cores_count().unwrap_or(1).max(1)
     }
 
     #[cfg_attr(miri, ignore)]
@@ -444,16 +519,15 @@ pub(crate) mod tests {
         let runtime = runtime_capabilities();
         std::println!("Comptime: {:?}", comptime_capabilities_string());
         std::println!("Runtime:  {:?}", runtime_capabilities_string());
-        assert!(runtime_capabilities_string().is_some());
+        assert!(runtime_capabilities_string().is_ok());
 
         // Threads are the one facility every supported platform has.
         assert!(comptime.contains(Capabilities::OS_THREADS));
 
-        // The aggregate is implied, never hand-set: pools need threads and a topology to spawn onto.
+        // The aggregate is implied, never hand-set: pools need threads and a topology to spawn.
         assert_eq!(
             comptime.contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN),
-            comptime.contains(Capabilities::OS_THREADS)
-                && comptime.contains(Capabilities::TOPOLOGY)
+            comptime.contains(Capabilities::OS_THREADS) && comptime.contains(Capabilities::TOPOLOGY)
         );
 
         // Placing pages on a node presumes we discovered the nodes.
@@ -463,7 +537,7 @@ pub(crate) mod tests {
 
         // Whatever we can construct, we can only construct because a capability was compiled in.
         if !comptime.contains(Capabilities::COLOCATE_POOLS_ON_DOMAIN) {
-            assert_eq!(topology.compute_domains_count(), 1);
+            assert_eq!(topology.compute_domains_count().unwrap(), 1);
         }
 
         // One facility, two questions of the same bit: a machine can only _offer_ page placement if
@@ -477,14 +551,12 @@ pub(crate) mod tests {
     #[test]
     fn system_info() {
         let topology = Topology::new().unwrap();
-        let cores = topology.logical_cores_count();
-        let numa = topology.memory_domains_count();
-        let compute_domains = topology.compute_domains_count();
-        let qos = topology.compute_levels_count();
+        let cores = topology.logical_cores_count().unwrap();
+        let numa = topology.memory_domains_count().unwrap();
+        let compute_domains = topology.compute_domains_count().unwrap();
+        let qos = topology.compute_levels_count().unwrap();
 
-        std::println!(
-            "Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}"
-        );
+        std::println!("Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}");
         assert!(cores > 0);
     }
 
@@ -492,30 +564,30 @@ pub(crate) mod tests {
     #[test]
     fn topology_axes() {
         let topology = Topology::new().unwrap();
-        let compute_domains = topology.compute_domains_count();
-        let compute_levels = topology.compute_levels_count();
-        let memory_domains = topology.memory_domains_count();
+        let compute_domains = topology.compute_domains_count().unwrap();
+        let compute_levels = topology.compute_levels_count().unwrap();
+        let memory_domains = topology.memory_domains_count().unwrap();
         assert!(compute_domains > 0 && memory_domains > 0);
 
         // Levels are dense ranks over domains, so they can never outnumber them.
         assert!(compute_levels <= compute_domains);
 
         for domain in (0..compute_domains).map(ComputeDomain) {
-            assert!(topology.compute_level_in(domain) < compute_levels.max(1));
-            assert!(topology.local_memory_of(domain).get() < memory_domains);
-            // Capacity and cache are magnitudes, unknown as 0 - never negative, never asserted nonzero.
-            let _capacity = topology.compute_capacity_in(domain);
-            let _cache_bytes = topology.compute_cache_bytes_in(domain);
+            assert!(topology.compute_level_in(domain).unwrap() < compute_levels.max(1));
+            assert!(topology.local_memory_of(domain).unwrap().get() < memory_domains);
+            // Capacity and cache are magnitudes; 0 is unknown, never negative, nonzero unasserted.
+            let _capacity = topology.compute_capacity_in(domain).unwrap();
+            let _cache_bytes = topology.compute_cache_bytes_in(domain).unwrap();
         }
 
-        // Out-of-range indices must saturate to 0 rather than trap or read past the topology.
-        assert_eq!(
-            topology.compute_capacity_in(ComputeDomain(compute_domains + 64)),
-            0
-        );
-        assert_eq!(
-            topology.compute_cache_bytes_in(ComputeDomain(compute_domains + 64)),
-            0
-        );
+        // An index this machine does not have is absence, and now says so instead of answering 0 -
+        // which was indistinguishable from a domain that genuinely rates zero.
+        assert!(topology
+            .compute_capacity_in(ComputeDomain(compute_domains + 64))
+            .is_err());
+        assert!(topology
+            .compute_cache_bytes_in(ComputeDomain(compute_domains + 64))
+            .is_err());
+        assert!(topology.local_memory_of(ComputeDomain(compute_domains + 64)).is_err());
     }
 }

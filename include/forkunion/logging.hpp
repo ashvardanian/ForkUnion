@@ -1,5 +1,7 @@
 /**
- *  @file logging.hpp
+ *  @file include/forkunion/logging.hpp
+ *  @author Ash Vardanian
+ *  @date June 29, 2025
  *  @brief Human-readable dumps of the harvested topology and capabilities.
  *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
  */
@@ -11,20 +13,32 @@ namespace forkunion {
 
 /**
  *  @brief Detects if the output stream supports ANSI color codes.
+ *  @note Every accessor below returns its escape sequence when colors are on, and an empty string
+ *      when they are off, so call sites interpolate them unconditionally.
  */
 struct logging_colors_t {
+
+    /** Whether the accessors emit escape sequences or empty strings. */
     bool use_colors_ = false;
 
+    /**
+     *  @brief Forces coloring on or off, bypassing the terminal probe.
+     *  @param[in] use_colors Whether the accessors should emit ANSI escape sequences.
+     */
     explicit logging_colors_t(bool use_colors) noexcept : use_colors_(use_colors) {}
 
+    /**
+     *  @brief Probes @c stdout and enables coloring only for a terminal advertising it.
+     *  @note On POSIX @c TERM must name a color-capable terminal; Windows is assumed capable.
+     */
     explicit logging_colors_t() noexcept {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
         if (!::_isatty(_fileno(stdout))) return;
 #endif
-#if FU_ON_POSIX
+#if FORKUNION_OS_POSIX_
         if (!::isatty(STDOUT_FILENO)) return;
 #endif
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
         // On Windows, assume color support is available
         use_colors_ = true;
 #else
@@ -61,11 +75,18 @@ struct logging_colors_t {
     char const *bold_gray() const noexcept { return use_colors_ ? "\033[1;90m" : ""; }
 };
 
-/**
- *  @brief Formats memory volume in @p `bytes` with appropriate units and precision, like @b "1.5 GiB".
- */
+/** Formats memory volume in @p bytes with appropriate units and precision, like @b "1.5 GiB". */
 struct log_memory_volume_t {
 
+    /**
+     *  @brief Prints @p bytes into @p buffer in binary units, switching at every 1024-fold step.
+     *  @param[in] bytes Volume to format, rendered with one decimal place from a KiB upwards.
+     *  @param[out] buffer Destination for the NUL-terminated string.
+     *  @param[in] buffer_size Capacity of @p buffer in bytes, including the terminator.
+     *  @param[in] colors Palette tinting the number and its unit.
+     *  @note Output is truncated to fit and always NUL-terminated; escape sequences count against
+     *      the budget, so allow 64 bytes for colored output.
+     */
     void operator()(std::size_t bytes, char *buffer, std::size_t buffer_size, logging_colors_t colors) const noexcept {
 
         char const *value_color = colors.bold_white();
@@ -99,11 +120,20 @@ struct log_memory_volume_t {
     }
 };
 
-/**
- *  @brief Formats a set of CPU core IDs in a compact and readable way, like @b "0-3,5,7,8,10-12".
- */
+/** Formats a set of CPU core IDs in a compact and readable way, like @b "0-3,5,7,8,10-12". */
 struct log_core_range_t {
 
+    /**
+     *  @brief Prints @p count core IDs into @p buffer, collapsing a contiguous run into a range.
+     *  @param[in] core_ids Core IDs to format, expected in ascending order; may be empty.
+     *  @param[in] count Number of entries in @p core_ids.
+     *  @param[out] buffer Destination for the NUL-terminated string.
+     *  @param[in] buffer_size Capacity of @p buffer in bytes, including the terminator.
+     *  @param[in] colors Palette tinting the numbers.
+     *  @note An empty set prints "none", a contiguous one prints "first-last", and beyond 8 cores
+     *      the middle is elided with an ellipsis.
+     *  @note Truncated to fit and always NUL-terminated; allow 256 bytes for colored output.
+     */
     void operator()(                                  //
         core_id_t const *core_ids, std::size_t count, //
         char *buffer, std::size_t buffer_size, logging_colors_t colors) const noexcept {
@@ -151,16 +181,16 @@ struct log_core_range_t {
     }
 };
 
-/**
- *  @brief NUMA topology logger with compact tree design and color support.
- */
+/** NUMA topology logger with compact tree design and color support. */
 struct log_numa_topology_t {
 
     /**
      *  @brief Logs NUMA topology in compact tree format with colors.
-     *  @param topology The NUMA topology to log
-     *  @param colors Color scheme for output formatting
-     *  @param output Output file stream (defaults to stdout)
+     *  @param[in] topology The harvested topology: sockets, domains, cores, and page sizes printed.
+     *  @param[in] colors Whether to emit ANSI colour codes, and which.
+     *  @param[in] output Destination stream, defaulting to @c stdout.
+     *  @note An empty topology prints "No NUMA nodes detected"; only page sizes above 4 KiB print.
+     *  @note Each row assembles in a 1024-byte line buffer, so an unusually wide row is truncated.
      */
     template <std::size_t max_page_sizes_, typename allocator_type_>
     void operator()(machine_topology<max_page_sizes_, allocator_type_> const &topology, logging_colors_t colors,
@@ -221,8 +251,12 @@ struct log_numa_topology_t {
             char const *socket_prefix = is_last_socket ? "   " : "│  ";
             char const *node_connector = is_last_node_in_socket ? "└─ " : "├─ ";
 
-            // Start building node line
-            int pos = std::snprintf(                                                      //
+            // `snprintf` returns what it wanted to write; the clamp keeps a truncated row in bounds
+            int pos = 0;
+            auto const advance = [&](int written) noexcept {
+                if (written > 0) pos = (std::min)(pos + written, static_cast<int>(sizeof(line_buffer)) - 1);
+            };
+            advance(std::snprintf(                                                        //
                 line_buffer, sizeof(line_buffer),                                         //
                 "%s%s%s%sNode%s %s%d%s • %sCores:%s %s%s (%zu)%s • %sMemory:%s %s%s%s",   //
                 colors.dim(), socket_prefix, node_connector,                              //
@@ -231,7 +265,7 @@ struct log_numa_topology_t {
                 colors.green(), /* "Cores:" */ colors.reset(),                            //
                 colors.bold_green(), cores_str, node.logical_cores_count, colors.reset(), //
                 colors.yellow(), /* "Memory:" */ colors.reset(),                          //
-                colors.bold_yellow(), memory_str, colors.reset());
+                colors.bold_yellow(), memory_str, colors.reset()));
 
             // Add huge pages if any exist
             auto const &page_settings = node.page_sizes;
@@ -242,22 +276,19 @@ struct log_numa_topology_t {
                 if (ps.bytes_per_page <= 4096) continue; // Skip regular pages
 
                 if (first_page) {
-                    pos += static_cast<std::size_t>(std::snprintf(                      //
-                        line_buffer + pos, sizeof(line_buffer) - pos, " • %sPages:%s ", //
-                        colors.magenta(), /* "Pages:" */ colors.reset()));
+                    advance(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " • %sPages:%s ", //
+                                          colors.magenta(), /* "Pages:" */ colors.reset()));
                     first_page = false;
                 }
-                else
-                    pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " "));
+                else advance(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " "));
 
                 char page_size_str[32], page_volume_str[32];
                 std::size_t free_bytes = ps.free_pages * ps.bytes_per_page;
                 log_memory_volume_t {}(ps.bytes_per_page, page_size_str, sizeof(page_size_str), colorless);
                 log_memory_volume_t {}(free_bytes, page_volume_str, sizeof(page_volume_str), colorless);
 
-                pos += static_cast<std::size_t>(std::snprintf(                   //
-                    line_buffer + pos, sizeof(line_buffer) - pos, "%s%s (%s)%s", //
-                    colors.bold_magenta(), page_size_str, page_volume_str, colors.reset()));
+                advance(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%s (%s)%s", //
+                                      colors.bold_magenta(), page_size_str, page_volume_str, colors.reset()));
             }
 
             std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "\n");
@@ -270,99 +301,43 @@ struct log_numa_topology_t {
     }
 };
 
-/**
- *  @brief Logs CPU and memory capabilities summary with compact formatting.
- */
+/** Logs a capability mask as a two-row tree, CPU bits then OS facilities, by @c capability_name. */
 struct log_capabilities_t {
 
+    /**
+     *  @brief Logs every named bit of @p caps as a bullet: one row for the CPU, one for the OS.
+     *  @param[in] caps Bit-mask to render, where every named bit becomes one bullet.
+     *  @param[in] colors Whether to emit ANSI colour codes, and which.
+     *  @param[in] output Destination stream, defaulting to @c stdout.
+     *  @note An empty row prints "None detected".
+     */
     void operator()(capabilities_t caps, logging_colors_t colors, std::FILE *output = stdout) const noexcept {
 
-        // Line buffer for assembly
-        char line_buffer[1024];
+        constexpr unsigned int os_facilities_k =
+            capability_os_threads_k | capability_topology_k | capability_place_threads_by_affinity_k |
+            capability_place_threads_by_core_class_k | capability_reschedule_threads_by_class_k |
+            capability_place_memory_on_domain_k | capability_place_huge_pages_on_domain_k |
+            capability_huge_transparent_pages_k | capability_colocate_pools_on_domain_k;
 
-        // Helper lambda to flush line buffer
-        auto flush_line = [&]() { std::fprintf(output, "%s", line_buffer); };
+        // One row of the tree: the branch glyph and title, then every present bit of the row as a
+        // bullet in the row's tint, or a dim placeholder when none is.
+        auto print_row = [&](char const *branch, char const *title, char const *tint, unsigned int row) noexcept {
+            std::fprintf(output, "%s%s %s%s:%s ", colors.dim(), branch, colors.cyan(), title, colors.reset());
+            bool first = true;
+            for (unsigned int bit = 1; bit != 0; bit <<= 1) {
+                char const *const name = capability_name(static_cast<capabilities_t>(bit));
+                if (!(caps & row & bit) || !name) continue;
+                std::fprintf(output, "%s%s%s%s", first ? "" : " • ", tint, name, colors.reset());
+                first = false;
+            }
+            if (first) std::fprintf(output, "%sNone detected%s", colors.dim(), colors.reset());
+            std::fprintf(output, "\n");
+        };
 
-        // Main header
-        std::snprintf(line_buffer, sizeof(line_buffer), "%sSystem Capabilities%s\n", colors.bold_cyan(),
-                      colors.reset());
-        flush_line();
-
-        // CPU Capabilities row
-        std::snprintf(line_buffer, sizeof(line_buffer), "%s├─ %sCPU:%s ", colors.dim(), colors.cyan(), colors.reset());
-        std::size_t pos = std::strlen(line_buffer);
-
-        bool first_cpu = true;
-        if (caps & capability_x86_pause_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sx86 PAUSE%s",
-                                                       first_cpu ? "" : " • ", colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_x86_tpause_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sx86 TPAUSE%s",
-                                                       first_cpu ? "" : " • ", colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_arm64_yield_k) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%s%sARM64 YIELD%s", first_cpu ? "" : " • ",
-                                                          colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_arm64_wfet_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sARM64 WFET%s",
-                                                       first_cpu ? "" : " • ", colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-        if (caps & capability_risc5_pause_k) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%s%sRISC-V PAUSE%s", first_cpu ? "" : " • ",
-                                                          colors.bold_green(), colors.reset()));
-            first_cpu = false;
-        }
-
-        if (first_cpu) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%sNone detected%s", colors.dim(), colors.reset()));
-        }
-
-        std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "\n");
-        flush_line();
-
-        // Memory Capabilities row
-        std::snprintf(line_buffer, sizeof(line_buffer), "%s└─ %sRAM:%s ", colors.dim(), colors.cyan(), colors.reset());
-        pos = std::strlen(line_buffer);
-
-        bool first_mem = true;
-        if (caps & capability_place_memory_on_domain_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sNUMA%s",
-                                                       first_mem ? "" : " • ", colors.bold_yellow(), colors.reset()));
-            first_mem = false;
-        }
-        if (caps & capability_place_huge_pages_on_domain_k) {
-            pos +=
-                static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "%s%sHuge Pages%s",
-                                                       first_mem ? "" : " • ", colors.bold_yellow(), colors.reset()));
-            first_mem = false;
-        }
-        if (caps & capability_huge_transparent_pages_k) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%s%sTransparent Huge Pages%s", first_mem ? "" : " • ",
-                                                          colors.bold_yellow(), colors.reset()));
-            first_mem = false;
-        }
-
-        if (first_mem) {
-            pos += static_cast<std::size_t>(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos,
-                                                          "%sNone detected%s", colors.dim(), colors.reset()));
-        }
-
-        std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, "\n\n");
-        flush_line();
+        std::fprintf(output, "%sSystem Capabilities%s\n", colors.bold_cyan(), colors.reset());
+        print_row("├─", "CPU", colors.bold_green(), ~os_facilities_k);
+        print_row("└─", "OS", colors.bold_yellow(), os_facilities_k);
+        std::fprintf(output, "\n");
     }
 };
 

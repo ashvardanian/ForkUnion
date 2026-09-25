@@ -1,175 +1,175 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
-    "version": "0.2.0",
-    "configurations": [
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug C++ with GDB",
+      "type": "cppdbg",
+      "request": "launch",
+      "preLaunchTask": "Build: Debug with GDB",
+      "program": "${workspaceFolder}/build_debug/forkunion_test_cpp20",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "setupCommands": [
         {
-            "name": "Debug C++ with GDB",
-            "type": "cppdbg",
-            "request": "launch",
-            "preLaunchTask": "Build: Debug with GDB",
-            "program": "${workspaceFolder}/build_debug/forkunion_test_cpp20",
-            "cwd": "${workspaceFolder}",
-            "args": [],
-            "setupCommands": [
-                {
-                    // Display content in STL containers pretty
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                },
-                {
-                    "text": "break pending on"
-                },
-                {
-                    "text": "break abort"
-                },
-                {
-                    "text": "break exit"
-                }
-            ],
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
-                }
-            ],
-            "stopAtEntry": false,
-            "linux": {
-                "MIMode": "gdb"
-            },
-            "windows": {
-                "program": "${workspaceFolder}\\build_debug\\scripts\\forkunion_test_cpp20.exe",
-                "MIMode": "gdb",
-                "miDebuggerPath": "C:\\MinGw\\bin\\gdb.exe"
-            }
+          // Display content in STL containers pretty
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
         },
         {
-            "name": "Debug C++ i386 with GDB",
-            "type": "cppdbg",
-            "request": "launch",
-            "preLaunchTask": "Build: Debug i386 with GDB",
-            "program": "${workspaceFolder}/build_i386/forkunion_test_cpp20",
-            "cwd": "${workspaceFolder}",
-            "args": [],
-            "setupCommands": [
-                {
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                },
-                {
-                    "text": "break pending on"
-                },
-                {
-                    "text": "break abort"
-                },
-                {
-                    "text": "break exit"
-                }
-            ],
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
-                }
-            ],
-            "stopAtEntry": false,
-            "targetArchitecture": "x86",
-            "linux": {
-                "MIMode": "gdb"
-            }
+          "text": "break pending on"
         },
         {
-            "name": "Debug C++ with LLDB",
-            "type": "cppdbg",
-            "request": "launch",
-            "preLaunchTask": "Build: Debug with LLDB",
-            "program": "${workspaceFolder}/build_debug/forkunion_test_cpp20",
-            "cwd": "${workspaceFolder}",
-            "args": [],
-            "setupCommands": [
-                {
-                    // Display content in STL containers pretty
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                }
-            ],
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
-                }
-            ],
-            "stopAtEntry": false,
-            "linux": {
-                "MIMode": "gdb"
-            },
-            "osx": {
-                "MIMode": "lldb"
-            }
+          "text": "break abort"
         },
         {
-            "name": "Debug N-Body with GDB",
-            "type": "cppdbg",
-            "request": "launch",
-            "preLaunchTask": "Build: Debug with GDB",
-            "program": "${workspaceFolder}/build_debug/forkunion_nbody",
-            "cwd": "${workspaceFolder}",
-            "args": [],
-            "setupCommands": [
-                {
-                    // Display content in STL containers pretty
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                }
-            ],
-            "environment": [
-                {
-                    "name": "ASAN_OPTIONS",
-                    "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
-                },
-                {
-                    "name": "NBODY_COUNT",
-                    "value": "128"
-                },
-                {
-                    "name": "NBODY_THREADS",
-                    "value": "17"
-                },
-                {
-                    "name": "NBODY_ITERATIONS",
-                    "value": "1000000"
-                },
-                {
-                    "name": "NBODY_BACKEND",
-                    "value": "forkunion_dynamic"
-                }
-            ],
-            "stopAtEntry": false,
-            "linux": {
-                "MIMode": "gdb"
-            },
-            "osx": {
-                "MIMode": "lldb"
-            }
-        },
-        {
-            "name": "Debug Rust",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": ["test"]
-            },
-            "program": "${cargo:program}",
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "env": {},
-            "sourceLanguages": ["rust"],
-            "lldb.adapter": "/absolute/path/to/codelldb/adapter/codelldb"
+          "text": "break exit"
         }
-    ]
+      ],
+      "environment": [
+        {
+          "name": "ASAN_OPTIONS",
+          "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
+        }
+      ],
+      "stopAtEntry": false,
+      "linux": {
+        "MIMode": "gdb"
+      },
+      "windows": {
+        "program": "${workspaceFolder}\\build_debug\\forkunion_test_cpp20.exe",
+        "MIMode": "gdb",
+        "miDebuggerPath": "C:\\MinGw\\bin\\gdb.exe"
+      }
+    },
+    {
+      "name": "Debug C++ i386 with GDB",
+      "type": "cppdbg",
+      "request": "launch",
+      "preLaunchTask": "Build: Debug i386 with GDB",
+      "program": "${workspaceFolder}/build_i386/forkunion_test_cpp20",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        },
+        {
+          "text": "break pending on"
+        },
+        {
+          "text": "break abort"
+        },
+        {
+          "text": "break exit"
+        }
+      ],
+      "environment": [
+        {
+          "name": "ASAN_OPTIONS",
+          "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
+        }
+      ],
+      "stopAtEntry": false,
+      "targetArchitecture": "x86",
+      "linux": {
+        "MIMode": "gdb"
+      }
+    },
+    {
+      "name": "Debug C++ with LLDB",
+      "type": "cppdbg",
+      "request": "launch",
+      "preLaunchTask": "Build: Debug with LLDB",
+      "program": "${workspaceFolder}/build_debug/forkunion_test_cpp20",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "setupCommands": [
+        {
+          // Display content in STL containers pretty
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "environment": [
+        {
+          "name": "ASAN_OPTIONS",
+          "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
+        }
+      ],
+      "stopAtEntry": false,
+      "linux": {
+        "MIMode": "gdb"
+      },
+      "osx": {
+        "MIMode": "lldb"
+      }
+    },
+    {
+      "name": "Debug N-Body with GDB",
+      "type": "cppdbg",
+      "request": "launch",
+      "preLaunchTask": "Build: Debug with GDB",
+      "program": "${workspaceFolder}/build_debug/forkunion_nbody",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "setupCommands": [
+        {
+          // Display content in STL containers pretty
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "environment": [
+        {
+          "name": "ASAN_OPTIONS",
+          "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
+        },
+        {
+          "name": "NBODY_COUNT",
+          "value": "128"
+        },
+        {
+          "name": "FORKUNION_THREADS",
+          "value": "17"
+        },
+        {
+          "name": "FORKUNION_ITERATIONS",
+          "value": "1000000"
+        },
+        {
+          "name": "FORKUNION_BACKEND",
+          "value": "forkunion_dynamic"
+        }
+      ],
+      "stopAtEntry": false,
+      "linux": {
+        "MIMode": "gdb"
+      },
+      "osx": {
+        "MIMode": "lldb"
+      }
+    },
+    {
+      "name": "Debug Rust",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test"]
+      },
+      "program": "${cargo:program}",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {},
+      "sourceLanguages": ["rust"],
+      "lldb.adapter": "/absolute/path/to/codelldb/adapter/codelldb"
+    }
+  ]
 }

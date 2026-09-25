@@ -1,71 +1,71 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "Build: Debug with GDB",
-            "command": "cmake -D CMAKE_BUILD_TYPE=Debug -B build_debug && cmake --build build_debug --config Debug",
-            "args": [],
-            "type": "shell",
-            "linux": {
-                "environment": [
-                    {
-                        "name": "CXX",
-                        "value": "g++"
-                    },
-                    {
-                        "name": "CC",
-                        "value": "gcc"
-                    }
-                ]
-            }
-        },
-        {
-            "label": "Build: Debug with LLDB",
-            "command": "cmake -D CMAKE_BUILD_TYPE=Debug -B build_debug && cmake --build build_debug --config Debug",
-            "args": [],
-            "type": "shell",
-            "linux": {
-                "environment": [
-                    {
-                        "name": "CXX",
-                        "value": "clang++-15"
-                    },
-                    {
-                        "name": "CC",
-                        "value": "clang-15"
-                    }
-                ]
-            },
-            "osx": {
-                "environment": [
-                    {
-                        "name": "CXX",
-                        "value": "$(brew --prefix llvm)/bin/clang++"
-                    },
-                    {
-                        "name": "CC",
-                        "value": "$(brew --prefix llvm)/bin/clang"
-                    }
-                ]
-            }
-        },
-        {
-            "label": "Build: Debug i386 with GDB",
-            "command": "cmake -D CMAKE_BUILD_TYPE=Debug -D CMAKE_C_FLAGS=-m32 -D CMAKE_CXX_FLAGS=-m32 -D CMAKE_EXE_LINKER_FLAGS=-m32 -B build_i386 && cmake --build build_i386 --config Debug",
-            "args": [],
-            "type": "shell",
-            "linux": {
-                "environment": [
-                    {
-                        "name": "CXX",
-                        "value": "g++"
-                    },
-                    {
-                        "name": "CC",
-                        "value": "gcc"
-                    }
-                ]
-            }
-        }
-    ]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build: Debug with GDB",
+      "command": "cmake -D CMAKE_BUILD_TYPE=Debug -B build_debug && cmake --build build_debug --config Debug",
+      "args": [],
+      "type": "shell",
+      "linux": {
+        "environment": [
+          {
+            "name": "CXX",
+            "value": "g++"
+          },
+          {
+            "name": "CC",
+            "value": "gcc"
+          }
+        ]
+      }
+    },
+    {
+      "label": "Build: Debug with LLDB",
+      "command": "cmake -D CMAKE_BUILD_TYPE=Debug -B build_debug && cmake --build build_debug --config Debug",
+      "args": [],
+      "type": "shell",
+      "linux": {
+        "environment": [
+          {
+            "name": "CXX",
+            "value": "clang++-15"
+          },
+          {
+            "name": "CC",
+            "value": "clang-15"
+          }
+        ]
+      },
+      "osx": {
+        "environment": [
+          {
+            "name": "CXX",
+            "value": "$(brew --prefix llvm)/bin/clang++"
+          },
+          {
+            "name": "CC",
+            "value": "$(brew --prefix llvm)/bin/clang"
+          }
+        ]
+      }
+    },
+    {
+      "label": "Build: Debug i386 with GDB",
+      "command": "cmake -D CMAKE_BUILD_TYPE=Debug -D CMAKE_C_FLAGS=-m32 -D CMAKE_CXX_FLAGS=-m32 -D CMAKE_EXE_LINKER_FLAGS=-m32 -B build_i386 && cmake --build build_i386 --config Debug",
+      "args": [],
+      "type": "shell",
+      "linux": {
+        "environment": [
+          {
+            "name": "CXX",
+            "value": "g++"
+          },
+          {
+            "name": "CC",
+            "value": "gcc"
+          }
+        ]
+      }
+    }
+  ]
 }
