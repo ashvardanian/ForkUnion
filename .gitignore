@@ -35,6 +35,9 @@
 /build*/
 /Testing/
 
+# Per-developer preset overrides: toolchain paths that are true of one machine, not of the project
+CMakeUserPresets.json
+
 # Rust build artifacts. `Cargo.lock` is tracked - this package ships `[[bin]]` targets, and CI needs `--locked`.
 target/
 .cache/

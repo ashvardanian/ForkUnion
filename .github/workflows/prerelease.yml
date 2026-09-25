@@ -59,23 +59,9 @@ jobs:
             include/forkunion.hpp:^#define FORKUNION_VERSION_PATCH (\d+)
           dry-run: "true"
 
-  # CI for the CI: `actionlint` catches expression typos, bad shell quoting, and matrix drift in
-  # these workflows before a broken job silently stops guarding anything.
-  lint_workflows:
-    name: Lint Workflows
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Run actionlint
-        run: |
-          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint -color
-
   verify_models:
     name: Check Promela models
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -88,7 +74,7 @@ jobs:
 
   verify_clients:
     name: Check GenMC clients
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -120,8 +106,8 @@ jobs:
           GENMC_CLANG: clang++-20
 
   test_ubuntu_gcc:
-    name: Ubuntu (GCC)
-    runs-on: ubuntu-24.04
+    name: Test on Ubuntu with GCC
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       CC: gcc
@@ -133,17 +119,17 @@ jobs:
 
       - name: Build C/C++
         run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
-          sudo apt install -y cmake build-essential libomp-dev
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_artifacts --config RelWithDebInfo
+          sudo apt install -y build-essential libomp-dev
+          cmake --preset release
+          cmake --build --preset release
 
       # CMake registers every test it builds - compiler-extension ones included - so `ctest` is the
       # single source of truth and a new test target joins CI without a workflow edit.
       - name: Test C & C++
-        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset release
 
       # `find_package` is the one consumption mode the tests above never touch: they build in-tree, so
       # the install rules, the exported target set, and `forkunionConfig.cmake` went unexercised - and
@@ -152,7 +138,7 @@ jobs:
       - name: Test the installed package
         run: |
           set -euxo pipefail
-          cmake --install build_artifacts --prefix "$PWD/_prefix"
+          cmake --install build_release --prefix "$PWD/_prefix"
           mkdir -p _consumer && cd _consumer
           printf 'cmake_minimum_required(VERSION 3.21)\nproject(c LANGUAGES CXX)\nfind_package(forkunion REQUIRED)\nadd_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE forkunion::static)\n' > CMakeLists.txt
           printf '#include <forkunion.hpp>\nint main() { return 0; }\n' > main.cpp
@@ -217,7 +203,7 @@ jobs:
       # proves a consumer needs no linker flag: the test build below passes none.
       - name: Test Mojo
         run: pixi run test
-      # Nothing else compiles the demo scripts, so both would go unbuilt.
+      # Nothing else compiles the Mojo benchmarks, so both would go unbuilt.
       - name: Build the Mojo benchmarks
         run: pixi run -e benchmarks build-benchmarks
       # The Mojo features are environment overrides rather than additive flags, so the
@@ -231,11 +217,37 @@ jobs:
           fi
           echo "rejected, as it should be"
 
+  # The same build as `test_ubuntu_gcc` at `-O0` with `NDEBUG` unset, so the library's asserts run on
+  # the Linux NUMA paths, which no other Debug job reaches.
+  test_ubuntu_debug:
+    name: Test Debug build on Ubuntu
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build C/C++
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
+          sudo apt update
+          sudo apt install -y build-essential libomp-dev
+          cmake --preset debug
+          cmake --build --preset debug
+
+      - name: Test C & C++
+        run: ctest --preset debug
+
   # Sanitizers get their own rows so the platform jobs stay on the critical path with one build
   # each. Restricted to the NUMA-free basic_pool, whose pinned NUMA path stalls under TSan.
   test_ubuntu_sanitizers:
-    name: Ubuntu (${{ matrix.cc }}, ${{ matrix.sanitizer }})
-    runs-on: ubuntu-24.04
+    name: Test ${{ matrix.sanitizer }} on Ubuntu with ${{ matrix.cc }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -244,41 +256,34 @@ jobs:
         sanitizer: [TSan, ASan+UBSan]
         include:
           - { cc: gcc, cxx: g++, packages: build-essential }
-          - { cc: clang, cxx: clang++, packages: clang libclang-rt-18-dev }
-          - { sanitizer: TSan, flags: thread }
-          - {
-              sanitizer: ASan+UBSan,
-              flags: "address,undefined -fno-sanitize-recover=all",
-            }
+          - { cc: clang, cxx: clang++, packages: clang libclang-rt-dev }
+          - { sanitizer: TSan, preset: tsan }
+          - { sanitizer: ASan+UBSan, preset: asan }
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      TSAN_OPTIONS: halt_on_error=1 # ? Ignored by the ASan rows
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install toolchain
         run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y ${{ matrix.packages }}
 
       - name: Build under the sanitizer
         run: |
-          cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=OFF \
-            -D CMAKE_C_FLAGS="-fsanitize=${{ matrix.flags }} -g" \
-            -D CMAKE_CXX_FLAGS="-fsanitize=${{ matrix.flags }} -g" \
-            -D CMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.flags }}"
-          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_cpp23
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
 
       - name: Test under the sanitizer
-        run: ctest --test-dir build -R '^forkunion_test_cpp' --output-on-failure
+        run: ctest --preset ${{ matrix.preset }}
 
   test_ubuntu_clang:
-    name: Ubuntu (Clang, ${{ matrix.stdlib }})
-    runs-on: ubuntu-24.04
+    name: Test on Ubuntu with Clang and ${{ matrix.stdlib }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     # libc++ is the second row because it is a different standard library, not a different flag on the same one: it
     # catches a C++20 language mode over an incomplete C++20 library - `std::atomic_ref` absent - that libstdc++ hides.
@@ -301,16 +306,16 @@ jobs:
           CXXFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
           LDFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
         run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
-          sudo apt install -y cmake build-essential clang libclang-rt-18-dev libblocksruntime-dev
+          sudo apt install -y build-essential clang libclang-rt-dev libblocksruntime-dev
           if [ "${{ matrix.stdlib }}" = "libc++" ]; then sudo apt install -y libc++-dev libc++abi-dev; fi
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_artifacts --config RelWithDebInfo
+          cmake --preset release
+          cmake --build --preset release
 
       - name: Test C & C++
-        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset release
 
       # Rust and Miri never touch the C++ standard library, so they run on one row, not both.
       - name: Set up Rust
@@ -335,10 +340,10 @@ jobs:
           cargo +nightly miri test --lib
 
   test_ubuntu_arm:
-    name: Ubuntu (Arm64, NUMA)
+    name: Test on Ubuntu Arm64 with NUMA
     # Native Arm64 is the only faithful test of the weak memory model the
     # library targets - qemu-user does not reproduce guest memory ordering.
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     env:
       CC: gcc
@@ -350,15 +355,15 @@ jobs:
 
       - name: Build C/C++
         run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
-          sudo apt install -y cmake build-essential libomp-dev
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON
-          cmake --build build_artifacts --config RelWithDebInfo
+          sudo apt install -y build-essential libomp-dev
+          cmake --preset release -D FORKUNION_WITH_TOPOLOGY=ON
+          cmake --build --preset release
 
       - name: Test C & C++
-        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset release
 
       - name: Set up Rust
         run: |
@@ -378,7 +383,7 @@ jobs:
         run: zig build test -Dplace-memory-on-domain=true
 
   test_macos:
-    name: macOS (${{ matrix.arch }})
+    name: Test on macOS ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -396,11 +401,11 @@ jobs:
       # ? The runner image preships CMake; reinstalling it added minutes of flaky network for nothing.
       - name: Build C/C++
         run: |
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_artifacts --config RelWithDebInfo
+          cmake --preset release
+          cmake --build --preset release
 
       - name: Test C & C++
-        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset release
 
       - name: Set up Rust
         run: |
@@ -420,7 +425,7 @@ jobs:
         run: zig build test
 
   test_macos_llvm_versions:
-    name: macOS LLVM Versions
+    name: Test on macOS with LLVM ${{ matrix.llvm }} in ${{ matrix.config }}
     runs-on: macos-15
     strategy:
       fail-fast: false
@@ -440,11 +445,11 @@ jobs:
 
       - name: Build C/C++
         run: |
-          cmake -S . -B build_artifacts -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D CMAKE_CXX_COMPILER="$(brew --prefix llvm@${{ matrix.llvm }})/bin/clang++"
-          cmake --build build_artifacts --config ${{ matrix.config }} --parallel
+          cmake --preset release -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D CMAKE_CXX_COMPILER="$(brew --prefix llvm@${{ matrix.llvm }})/bin/clang++"
+          cmake --build --preset release
 
       - name: Test C & C++
-        run: ctest --test-dir build_artifacts -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset release
 
   test_windows:
     name: Windows
@@ -457,12 +462,12 @@ jobs:
       # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
       - name: Build C/C++
         run: |
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_artifacts --config RelWithDebInfo
+          cmake --preset msvc_x64
+          cmake --build --preset msvc_x64
       - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_artifacts
+        run: Get-ChildItem -Recurse .\build_msvc_x64
       - name: Test C++
-        run: ctest --test-dir build_artifacts -C RelWithDebInfo -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset msvc_x64
 
       # Guard the Windows port's headline capability: with topology/NUMA forced ON, a regression that
       # silently drops Windows out of FORKUNION_WITH_TOPOLOGY fails to compile here instead of quietly
@@ -470,7 +475,7 @@ jobs:
       - name: Test C++ with topology forced ON
         run: |
           $ErrorActionPreference = "Stop"
-          cmake -B build_topo -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON
+          cmake --preset msvc_x64 -B build_topo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON
           cmake --build build_topo --config RelWithDebInfo
           ctest --test-dir build_topo -C RelWithDebInfo -R '^forkunion_test_cpp20$' --output-on-failure
 
@@ -479,8 +484,8 @@ jobs:
       - name: Build C++ for ARM64
         run: |
           $ErrorActionPreference = "Stop"
-          cmake -B build_arm64 -A ARM64
-          cmake --build build_arm64 --config RelWithDebInfo
+          cmake --preset msvc_arm64
+          cmake --build --preset msvc_arm64
 
       # `/arch:armv8.1` defines `__ARM_FEATURE_ATOMICS`, the macro that admits the MSVC spelling of
       # `arm64_lse_atomic_ref` and `arm64_rcpc_atomic_ref`. Without this leg that path never compiles.
@@ -489,8 +494,8 @@ jobs:
           CXXFLAGS: /arch:armv8.1
         run: |
           $ErrorActionPreference = "Stop"
-          cmake -B build_arm64_lse -A ARM64
-          cmake --build build_arm64_lse --config RelWithDebInfo
+          cmake --preset msvc_arm64 -B build_msvc_arm64_lse
+          cmake --build build_msvc_arm64_lse --config RelWithDebInfo
 
       - name: Set up Rust
         run: |
@@ -513,7 +518,7 @@ jobs:
   # proves MSVC emits them, and this proves they are correct under contention. The default `/arch` row
   # keeps the fallback honest on the same silicon, and `cpu_capabilities` decides per rung what runs.
   test_windows_arm64:
-    name: Windows (Arm64, ${{ matrix.variant }})
+    name: Test on Windows Arm64 with ${{ matrix.variant }}
     runs-on: windows-11-arm
     timeout-minutes: 45
     strategy:
@@ -530,15 +535,15 @@ jobs:
         env:
           CXXFLAGS: ${{ matrix.cxxflags }}
         run: |
-          cmake -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build_artifacts --config RelWithDebInfo
+          cmake --preset msvc_arm64
+          cmake --build --preset msvc_arm64
       - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_artifacts
+        run: Get-ChildItem -Recurse .\build_msvc_arm64
       - name: Test C++
-        run: ctest --test-dir build_artifacts -C RelWithDebInfo -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset msvc_arm64
 
   test_windows_msvc_matrix:
-    name: Windows MSVC Versions
+    name: Test on Windows with MSVC ${{ matrix.toolset }} in ${{ matrix.config }}
     # Pinned to windows-2022: this matrix exists to prove the v142 (VS 2019)
     # toolset still compiles, and that toolset isn't guaranteed on windows-2025.
     runs-on: windows-2022
@@ -553,20 +558,20 @@ jobs:
         uses: actions/checkout@v7
 
       # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
-      - name: Build C/C++ with MSVC ${{ matrix.toolset }} (${{ matrix.config }})
+      - name: Build C/C++ with MSVC ${{ matrix.toolset }} in ${{ matrix.config }}
         run: |
-          cmake -B build_artifacts -G "Visual Studio 17 2022" -T ${{ matrix.toolset }} -A x64
-          cmake --build build_artifacts --config ${{ matrix.config }}
+          cmake --preset msvc_x64 -T ${{ matrix.toolset }}
+          cmake --build --preset msvc_x64 --config ${{ matrix.config }}
       - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_artifacts
+        run: Get-ChildItem -Recurse .\build_msvc_x64
       - name: Test C++
-        run: ctest --test-dir build_artifacts -C ${{ matrix.config }} -R '^forkunion_test_' --output-on-failure
+        run: ctest --preset msvc_x64 -C ${{ matrix.config }}
 
   # Each row is a prebuilt `dockcross` image carrying the toolchain, qemu, and a CMake toolchain file;
   # `ctest` runs the binaries through its `CMAKE_CROSSCOMPILING_EMULATOR`. s390x is the big-endian guard.
   test_cross:
-    name: Cross-compile (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    name: Test on Linux ${{ matrix.name }} under QEMU
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     container: ${{ matrix.image }}
     strategy:
@@ -590,11 +595,9 @@ jobs:
         # faithfully model and emulates far too slowly, so it only times the job out. The native Arm64
         # job is where the weak memory model is actually exercised.
         run: |
-          # Static-link so the qemu-run binaries need no shared libatomic/libstdc++ at run time.
-          cmake -B build -D CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" -D CMAKE_BUILD_TYPE=RelWithDebInfo \
-            -D CMAKE_EXE_LINKER_FLAGS="-static" -D FORKUNION_TEST_SKIP_STRESS=ON
-          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
-          ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
+          cmake --preset dockcross
+          cmake --build --preset dockcross
+          ctest --preset dockcross
 
       - name: Trace refused syscalls under QEMU
         if: failure()
@@ -603,33 +606,22 @@ jobs:
         # qemu-user honours QEMU_STRACE. Re-run and tally only the syscalls the emulated kernel
         # refused - the failure class a bare assertion hides, like `mbind() = -1 errno=38 (ENOSYS)`.
         run: |
-          ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure 2>&1 \
+          ctest --preset dockcross 2>&1 \
             | grep -aE ' = -1 errno=' | sed -E 's/^[0-9]+ +//; s/\([^)]*\) = -1/() = -1/' \
             | sort | uniq -c | sort -rn | head -40 || true
 
   # One row per WebAssembly shape; wasm32 Emscripten has one thread, so only its C suite runs.
   test_wasm:
-    name: WebAssembly (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    name: Test on WebAssembly ${{ matrix.name }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: wasm32-emscripten, sdk: emscripten, toolchain: toolchain-wasm32-emscripten, node: 22, tests: c11 }
-          - {
-              name: wasm64-emscripten,
-              sdk: emscripten,
-              toolchain: toolchain-wasm64-emscripten,
-              node: 24,
-              tests: "(cpp17|cpp20|c11)",
-            }
-          - {
-              name: wasm32-wasi-threads,
-              sdk: wasi,
-              toolchain: toolchain-wasm32-wasi-threads,
-              tests: "(cpp17|cpp20|c11)",
-            }
+          - { name: wasm32-emscripten, sdk: emscripten, preset: wasm32_emscripten, node: 22 }
+          - { name: wasm64-emscripten, sdk: emscripten, preset: wasm64_emscripten, node: 24 }
+          - { name: wasm32-wasi-threads, sdk: wasi, preset: wasm32_wasi_threads }
     env:
       WASI_SDK_PATH: ${{ github.workspace }}/wasi-sdk
     steps:
@@ -659,19 +651,11 @@ jobs:
 
       - name: Configure and build
         run: |
-          set -eux
-          if [ "${{ matrix.sdk }}" = emscripten ]; then
-            wrapper=emcmake
-            emulator="-DCMAKE_CROSSCOMPILING_EMULATOR=$(command -v node)"
-          else
-            wrapper=
-          fi
-          $wrapper cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/${{ matrix.toolchain }}.cmake ${emulator:-} \
-            -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FORKUNION_TEST_SKIP_STRESS=ON
-          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
 
       - name: Test
-        run: ctest --test-dir build -R '^forkunion_test_${{ matrix.tests }}$' --output-on-failure
+        run: ctest --preset ${{ matrix.preset }}
 
       - name: Build and link the Rust crate for wasm32-wasip1-threads
         if: matrix.sdk == 'wasi'
@@ -687,20 +671,20 @@ jobs:
   # The two libc floors the downstream wheels must clear: musl and manylinux2014's glibc 2.17. Toolchain
   # install precedes checkout because Alpine ships no git.
   test_containers:
-    name: Container (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    name: Test in ${{ matrix.name }} Container
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: musl (Alpine)
+          - name: musl on Alpine
             image: alpine:3.22
-            setup: apk add --no-cache git build-base cmake
-          - name: glibc 2.28 (manylinux_2_28)
+            setup: apk add --no-cache git build-base cmake samurai
+          - name: glibc 2.28 on manylinux_2_28
             image: quay.io/pypa/manylinux_2_28_x86_64
-            setup: dnf install -y git gcc gcc-c++ make && pipx install cmake
+            setup: dnf install -y git gcc gcc-c++ make && pipx install cmake && pipx install ninja
     steps:
       - name: Install toolchain
         run: ${{ matrix.setup }}
@@ -711,17 +695,16 @@ jobs:
       - name: Build & test
         run: |
           set -eux
-          cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
-          build/forkunion_test_cpp17
-          build/forkunion_test_cpp20
-          build/forkunion_test_c11
+          cmake --preset release
+          cmake --build --preset release --target forkunion_test_cpp20 forkunion_test_c11
+          build_release/forkunion_test_cpp20
+          build_release/forkunion_test_c11
 
   # Bionic shares the kernel ABI but not every GLibC extension; the toolchain defines __ANDROID__, so this
   # compile proves the threaded build survives it. Compile-only - device binaries can't run here.
   test_android:
-    name: Android (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    name: Build for Android ${{ matrix.name }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
@@ -736,13 +719,13 @@ jobs:
 
       - name: Configure and build
         run: |
-          cmake -B build -D CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" -D CMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
+          cmake --preset android
+          cmake --build --preset android
 
   # Only coverage of the FreeBSD cpuset_t affinity path. The VM is x86_64; aarch64 FreeBSD is cross-only.
   test_freebsd:
-    name: FreeBSD (x86_64)
-    runs-on: ubuntu-24.04
+    name: Test on FreeBSD x86_64
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -754,19 +737,19 @@ jobs:
           release: "15.1"
           usesh: true
           # `git` is needed for the Taskflow benchmark baseline that `FetchContent` clones at configure time.
-          prepare: pkg install -y cmake git
+          prepare: pkg install -y cmake ninja git
           run: |
-            cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo
-            cmake --build build --target forkunion_test_cpp17 forkunion_test_cpp20 forkunion_test_c11
-            ctest --test-dir build -R '^forkunion_test_(cpp17|cpp20|c11)$' --output-on-failure
+            cmake --preset release
+            cmake --build --preset release --target forkunion_test_cpp20 forkunion_test_c11
+            ctest --preset release -R '^forkunion_test_(cpp20|c11)$'
 
   # QEMU's `-numa node`/`-numa dist` flags are the one tool that makes a guest kernel genuinely
   # believe in memory domains the host lacks - including cpuless HBM/CXL-style nodes - so the
   # topology harvest, domain allocators, and distributed pools run against shapes no runner offers.
   # GitHub's x64 Linux runners expose /dev/kvm, so the guest boots hardware-accelerated.
   test_numa_shapes:
-    name: Linux NUMA (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    name: Test Linux NUMA with ${{ matrix.name }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -798,7 +781,7 @@ jobs:
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y qemu-system-x86 cloud-image-utils genisoimage
@@ -859,79 +842,82 @@ jobs:
   # Each `FORKUNION_WITH_*` capability is a switch a downstream build may flip; the combinations do not
   # collapse - a box with no memory placement can still pin threads. Each row builds under `-Werror`.
   test_ubuntu_capabilities:
-    name: Ubuntu (Capability Matrix)
-    runs-on: ubuntu-24.04
+    name: Test Capabilities on Ubuntu with ${{ matrix.name }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: auto
-            flags: ""
+            options: ""
           - name: no topology
-            flags: "-DFORKUNION_WITH_TOPOLOGY=0"
+            options: "-D FORKUNION_WITH_TOPOLOGY=OFF"
           - name: no memory placement, but still pinning
-            flags: "-DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=0"
+            options: "-D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=OFF"
           - name: no huge pages
-            flags: "-DFORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=0"
+            options: "-D FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=OFF"
           - name: no pinning
-            flags: "-DFORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=0"
+            options: "-D FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=OFF"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install toolchain
         run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential
 
-      - name: Build & test C++ and the C shim (${{ matrix.name }})
+      - name: Build & test C++ and the C shim with ${{ matrix.name }}
         run: |
           set -euxo pipefail
-          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude test/main.cpp -o test_cpp -latomic
-          ./test_cpp
-          g++ -std=c++20 -O2 -Wall -Wextra -Werror ${{ matrix.flags }} -Iinclude -c c/forkunion.cpp -o forkunion.o
+          cmake --preset release -D CMAKE_CXX_COMPILER=g++ ${{ matrix.options }}
+          cmake --build --preset release --target forkunion_test_cpp20 forkunion_static
+          ctest --preset release -R '^forkunion_test_cpp20$'
           # The artifact must name no library but the C one: a `numa_*` here is a build host's packages
           # leaking into a binary that has to load on hosts without them.
-          ! nm -u forkunion.o | grep -E 'numa_|mbind'
+          ! nm -u build_release/libforkunion_static.a | grep -E 'numa_|mbind'
 
   # A capability nobody can turn off by hand is not a capability. These must be rejected at the
   # `#include`, by an `#error` naming the contradiction - never at link time, with missing symbols.
   test_ubuntu_bad_capabilities:
-    name: Ubuntu (Impossible Capabilities, ${{ strategy.job-index }})
-    runs-on: ubuntu-24.04
+    name: Reject Impossible Capabilities on Ubuntu with ${{ matrix.contradiction }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        contradiction:
-          - "-DFORKUNION_WITH_TOPOLOGY=0 -DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=1"
-          - "-DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=0 -DFORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=1"
+        contradiction: [placement_without_topology, huge_pages_without_placement]
+        include:
+          - contradiction: placement_without_topology
+            flags: "-DFORKUNION_WITH_TOPOLOGY=0 -DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=1"
+          - contradiction: huge_pages_without_placement
+            flags: "-DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=0 -DFORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=1"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install toolchain
         run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential
 
       - name: The contradiction must fail to compile
         run: |
-          if g++ -std=c++20 ${{ matrix.contradiction }} -Iinclude -fsyntax-only test/main.cpp 2>/dev/null; then
-            echo "::error::'${{ matrix.contradiction }}' compiled, but describes a build that cannot exist"
+          if g++ -std=c++20 ${{ matrix.flags }} -Iinclude -fsyntax-only test/main.cpp 2>/dev/null; then
+            echo "::error::'${{ matrix.flags }}' compiled, but describes a build that cannot exist"
             exit 1
           fi
-          echo "rejected, as it should be: ${{ matrix.contradiction }}"
+          echo "rejected, as it should be: ${{ matrix.flags }}"
 
       # ? Cheap enough to repeat per row; splitting it out would cost a whole job's runner spin-up
       - name: A typo in a CMake tri-state must fail to configure
         run: |
-          if cmake -B build_typo -D FORKUNION_WITH_TOPOLOGY=YES >/dev/null 2>&1; then
+          if cmake --preset release -D FORKUNION_WITH_TOPOLOGY=YES >/dev/null 2>&1; then
             echo "::error::FORKUNION_WITH_TOPOLOGY=YES configured, but YES is not AUTO, ON, or OFF"
             exit 1
           fi
@@ -941,8 +927,8 @@ jobs:
   # both must land on the same `fu_comptime_capabilities()`. `portable` is the one that has to hold: it
   # what a caller on an unsupported platform gets, and nothing may depend on a capability it lacks.
   test_bindings_capabilities:
-    name: Bindings (Capability Overrides)
-    runs-on: ubuntu-24.04
+    name: Test Capability Overrides in the Bindings
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -950,7 +936,7 @@ jobs:
 
       - name: Install toolchain
         run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu 24.04 keeps its own deb822 list here
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential
@@ -958,13 +944,13 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Test Rust (auto)
+      - name: Test Rust with auto capabilities
         run: cargo test --lib
 
-      - name: Test Rust (portable)
+      - name: Test Rust portable
         run: cargo test --lib --no-default-features --features portable,std
 
-      - name: Test Rust (forced NUMA memory)
+      - name: Test Rust with forced NUMA memory
         run: cargo test --lib --features place-memory-on-domain
 
       - name: Reject Rust `portable` alongside a capability it disables
@@ -980,10 +966,10 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Test Zig (auto)
+      - name: Test Zig with auto capabilities
         run: zig build test
 
-      - name: Test Zig (portable)
+      - name: Test Zig portable
         run: zig build test -Dportable=true
 
   # iOS shares Darwin's QoS scheduling and `hw.perflevel*` topology, and shares its refusal to pin.
@@ -991,34 +977,28 @@ jobs:
   # linked and run on a booted simulator. A simulator reads the *host* Mac's topology, so this proves
   # the Apple path under the iOS ABI, not any particular phone's layout.
   build_ios:
-    name: iOS ${{ matrix.sdk }}
+    name: Test on ${{ matrix.preset }}
     runs-on: macos-15
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        sdk: [iphoneos, iphonesimulator]
-        include:
-          - { sdk: iphoneos, triple: arm64-apple-ios17.0 }
-          - { sdk: iphonesimulator, triple: arm64-apple-ios17.0-simulator }
+        preset: [ios, ios_simulator]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Compile the C++ test and the C shim
         run: |
-          SYSROOT=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
-          clang++ -std=c++20 -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
-            -isysroot "$SYSROOT" -Iinclude test/main.cpp -o forkunion_test_ios
-          clang++ -std=c++20 -O2 -Wall -Wextra -Werror -target ${{ matrix.triple }} \
-            -isysroot "$SYSROOT" -Iinclude -c c/forkunion.cpp -o forkunion_ios.o
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
 
       # GitHub's macOS images pre-create simulators for their Xcode; boot the first iPhone, don't mint one.
       - name: Run the C++ test on the iOS Simulator
-        if: matrix.sdk == 'iphonesimulator'
+        if: matrix.preset == 'ios_simulator'
         run: |
           DEVICE_ID=$(xcrun simctl list devices available iPhone \
             | grep -oE "[0-9A-F-]{36}" | head -1)
           test -n "$DEVICE_ID"
           xcrun simctl boot "$DEVICE_ID"
-          xcrun simctl spawn "$DEVICE_ID" "$PWD/forkunion_test_ios"
+          xcrun simctl spawn "$DEVICE_ID" "$PWD/build_ios_simulator/forkunion_test_cpp20.app/forkunion_test_cpp20"

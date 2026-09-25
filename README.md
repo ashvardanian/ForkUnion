@@ -14,7 +14,7 @@ That bet compounds as sockets multiply: Intel Xeon Platinum and NVIDIA Vera pack
 > [Full tables ↓](#performance)
 
 It is exhaustively tested for boundary-condition scheduling with miniaturized `uint8_t` indices, even runs on your big-endian 32-bit IBM mainframe, and ships with `no_std` and Miri coverage.
-The core is a C++ 17 library; the C 99, Rust, Zig, and Mojo APIs bind it, and all five can pin threads to [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual cores and allocate node-local memory.
+The core is a C++ 20 library; the C 99, Rust, Zig, and Mojo APIs bind it, and all five can pin threads to [NUMA](https://en.wikipedia.org/wiki/Non-uniform_memory_access) nodes or individual cores and allocate node-local memory.
 Despite being far more deeply tied to hardware and the OS than most alternatives, ForkUnion runs on __six operating systems__ — Linux, FreeBSD, Windows, macOS, Android, and iOS — including asymmetric compute and memory topologies.
 Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux, FreeBSD, and Windows, and elsewhere allocation falls back to a single memory domain.
 It also compiles to __WebAssembly__, where the pools are real in the two shapes that carry threads — Emscripten with `-pthread` over a shared memory, and `wasm32-wasip1-threads` under a runtime like Wasmtime — and collapse to the calling thread in a plain single-threaded module.
@@ -1026,34 +1026,34 @@ Now, the Rust library is a wrapper over the C binding of the C++ core implementa
 ## Testing and Benchmarking
 
 Toolchain floors, never caps.
-The header needs __C++17__, and a C++20+ consumer keeps its own standard — gaining concepts, the `atomic_ref` waiter, and `std::popcount` — while the pre-compiled libraries build at C++20 regardless.
+The header needs __C++20__, a C++23 consumer keeps its own standard, and the pre-compiled libraries build at C++20 regardless.
 The C ABI needs __C99__, and the build tooling __CMake 3.21__, __Rust 1.84__, __Zig 0.16__, and __Mojo 1.0__.
 
-To run the C++ tests, use CMake:
+To run the C++ tests, use the CMake presets CI uses; `cmake --list-presets` shows the ones this machine can build:
 
 ```bash
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D BUILD_TESTING=ON
-cmake --build build_release --config Release -j
-ctest --test-dir build_release                  # run all tests
+cmake --workflow --preset release               # configure, build, and run every test
 build_release/forkunion_nbody                   # run the benchmarks
+cmake --workflow --preset asan                  # or `tsan`
 ```
 
 For C++ debug builds, consider using the VS Code debugger presets or the following commands:
 
 ```bash
-cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D BUILD_TESTING=ON
-cmake --build build_debug --config Debug        # build with Debug symbols
+cmake --preset debug && cmake --build --preset debug
 build_debug/forkunion_test_cpp20                # run a single test executable
 ```
 
-To cross-compile for WebAssembly, pick the toolchain file for the shape you need, and `ctest` runs the binaries through Node or Wasmtime:
+To cross-compile for WebAssembly, pick the preset for the shape you need, and `ctest` runs the binaries through Node or Wasmtime:
 
 ```bash
-emcmake cmake -B build_wasm32 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake      # one thread, loads in any page
-emcmake cmake -B build_wasm64 -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm64-emscripten.cmake      # shared memory and 64-bit addressing
-cmake -B build_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi-threads.cmake              # wasi-threads under Wasmtime
-cmake --build build_wasm64 && ctest --test-dir build_wasm64
+cmake --preset wasm32_emscripten                # one thread, loads in any page
+cmake --preset wasm64_emscripten                # shared memory and 64-bit addressing
+cmake --preset wasm32_wasi_threads              # wasi-threads under Wasmtime
+cmake --build --preset wasm64_emscripten && ctest --preset wasm64_emscripten
 ```
+
+Machine-specific settings, like a compiler path, belong in an untracked `CMakeUserPresets.json`.
 
 The wasm32 module has one thread, so its pool spawns caller-inclusive and the multi-threaded tests only compile there; the other two shapes run the whole suite.
 

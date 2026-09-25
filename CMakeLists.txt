@@ -35,7 +35,7 @@ project(
 )
 
 # Control strict interface warnings for consumers
-option(FORKUNION_STRICT "Propagate strict warnings (including -Werror) to consumers" OFF)
+option(FORKUNION_WERROR "Propagate strict warnings (including -Werror) to consumers" OFF)
 option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL pool" OFF)
 
 # Each kernel facility the library can use is a tri-state: AUTO, ON, or OFF.
@@ -97,7 +97,7 @@ include(cmake/fu_arm64_isa_probes.cmake)
 include(cmake/fu_risc5_isa_probes.cmake)
 
 # Strictest possible compilation flags with fatal warnings
-if (FORKUNION_STRICT)
+if (FORKUNION_WERROR)
     target_compile_options(
         forkunion_header
         INTERFACE # GCC/Clang: Maximum warnings + treat warnings as errors + security hardening
@@ -219,7 +219,7 @@ target_compile_options(
     forkunion_shared
     PRIVATE # Stack protection and buffer overflow detection
             $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
-            # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_STRICT. Allowlist the
+            # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_WERROR. Allowlist the
             # optimized configs, since an empty `CMAKE_BUILD_TYPE` is not Debug yet emits no `-O`. The `-U` disarms
             # distributions that predefine it, whose redefinition would warn on the same path.
             $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
@@ -314,14 +314,17 @@ include(CTest)
 
 # Default ON only when ForkUnion is the top-level project, so an `add_subdirectory` consumer does not inherit the
 # `test/` and `bench/` targets - and does not have to remember to switch them off.
-option(FORKUNION_BUILD_TESTS "Build forkunion tests" ${PROJECT_IS_TOP_LEVEL})
+option(FORKUNION_BUILD_TEST "Build the tests in test/" ${PROJECT_IS_TOP_LEVEL})
+option(FORKUNION_BUILD_BENCH "Build the benchmarks in bench/" ${PROJECT_IS_TOP_LEVEL})
 option(FORKUNION_TEST_SKIP_STRESS "Run only the tests' correctness suite, skipping the slow throughput/stress cases"
        OFF
 )
 
-if (BUILD_TESTING AND FORKUNION_BUILD_TESTS)
+if (BUILD_TESTING AND FORKUNION_BUILD_TEST)
     enable_testing()
     add_subdirectory(test)
+endif ()
+if (FORKUNION_BUILD_BENCH)
     add_subdirectory(bench)
 endif ()
 
