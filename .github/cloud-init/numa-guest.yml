@@ -33,9 +33,11 @@ runcmd:
     #include <stdio.h>
     #include <forkunion.h>
     int main(void) {
-        fu_topology_t topology = fu_topology_new();
-        if (!topology) return 1;
-        printf("FU_VM_HARVESTED=%zu nodes\n", fu_memory_domains_count(topology));
+        fu_topology_t topology = NULL;
+        size_t domains = 0;
+        if (fu_topology_new(&topology) != fu_success_k) return 1;
+        if (fu_memory_domains_count(topology, &domains) != fu_success_k) return 1;
+        printf("FU_VM_HARVESTED=%zu nodes\n", domains);
         fu_topology_delete(topology);
         return 0;
     }

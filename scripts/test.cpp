@@ -878,8 +878,6 @@ static void test_for_n() noexcept {
     auto pool = maker.construct();
     expect(fu::succeeded(pool.spawn(maker.scope())));
 
-    using pool_t = decltype(pool);
-
     pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
         // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
@@ -1275,7 +1273,7 @@ static void expect_spawn_shape_dispatches_(std::size_t const threads) noexcept {
 
     fu::distributed_pool_t pool("forkunion");
     expect(fu::succeeded(pool.spawn(machine_topology, threads)));
-    expect_eq(static_cast<std::size_t>(pool.threads_count()), threads); // ! A shape was silently resized
+    expect_eq(pool.threads_count(), threads); // ! A shape was silently resized
 
     pool.for_n_dynamic(tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
@@ -1314,7 +1312,7 @@ void log_numa_topology() noexcept {
 
     // Log topology and capabilities
     fu::log_numa_topology_t {}(machine_topology, colors);
-    fu::log_capabilities_t {}(static_cast<fu::capabilities_t>(cpu_caps | ram_caps), colors);
+    fu::log_capabilities_t {}(cpu_caps | ram_caps, colors);
 
 #else
     std::printf("%sNUMA support not compiled in%s\n", colors.dim(), colors.reset());

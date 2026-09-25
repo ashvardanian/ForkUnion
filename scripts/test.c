@@ -738,7 +738,7 @@ static bool test_gcc_nested_functions(fu_capabilities_t mask) {
     size_t num_tasks = 100;
 
     // GCC nested function - captures local variables
-    void nested_callback(void *context, size_t task, size_t thread, size_t compute_domain) {
+    __extension__ void nested_callback(void *context, size_t task, size_t thread, size_t compute_domain) {
         (void)context;
         (void)thread;
         (void)compute_domain;

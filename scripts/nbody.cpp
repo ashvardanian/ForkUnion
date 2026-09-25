@@ -242,10 +242,10 @@ struct nbody_context_t {
     tf::Executor *taskflow = nullptr;
 
     /** Force-accumulation graph, built once and re-run every step. */
-    std::optional<tf::Taskflow> force_pass;
+    std::optional<tf::Taskflow> force_pass = std::nullopt;
 
     /** Position-update graph, built once and re-run every step. */
-    std::optional<tf::Taskflow> apply_pass;
+    std::optional<tf::Taskflow> apply_pass = std::nullopt;
 };
 
 /** Pre-split across threads vs work-stolen. */

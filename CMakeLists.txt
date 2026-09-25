@@ -112,20 +112,21 @@ if (FORKUNION_STRICT)
                   -Wno-sign-conversion
                   -Wno-unused-function
                   -Wshadow
-                  -Wnon-virtual-dtor
-                  -Wold-style-cast
-                  -Woverloaded-virtual
-                  -Wsign-promo
                   -Wno-null-dereference
                   -Wdouble-promotion>
+                  # C++ only: GCC rejects these on the C tests and on a consumer's C sources
+                  $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wnon-virtual-dtor
+                  -Wold-style-cast
+                  -Woverloaded-virtual
+                  -Wsign-promo>
+                  $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wuseless-cast>
                   $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo>>:-Wno-unused-variable>
                   # Additional GCC-specific warnings
                   $<$<CXX_COMPILER_ID:GNU>:-Wmisleading-indentation
                   -Wduplicated-cond
                   -Wduplicated-branches
                   -Wlogical-op
-                  -Wno-null-dereference
-                  -Wuseless-cast>
+                  -Wno-null-dereference>
                   # Additional Clang-specific warnings
                   $<$<CXX_COMPILER_ID:Clang>:-Wmost
                   -Wthread-safety

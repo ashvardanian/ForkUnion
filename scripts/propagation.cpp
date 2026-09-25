@@ -61,10 +61,11 @@
  *  PROPAGATION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
  *  @endcode
  */
-#include <cstdint> // `std::uint32_t`
-#include <cstdio>  // `std::printf`
-#include <cstdlib> // `std::getenv`, `EXIT_SUCCESS`
-#include <cstring> // `std::memcpy`, `std::memcmp`
+#include <cinttypes> // `PRIu64`
+#include <cstdint>   // `std::uint32_t`
+#include <cstdio>    // `std::printf`
+#include <cstdlib>   // `std::getenv`, `EXIT_SUCCESS`
+#include <cstring>   // `std::memcpy`, `std::memcmp`
 
 #include <algorithm>   // `std::sort`, `std::unique`, `std::min`
 #include <chrono>      // `std::chrono::steady_clock`
@@ -172,7 +173,7 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
             vertex_t row = 0, column = 0;
             for (int bit = static_cast<int>(scale) - 1; bit >= 0; --bit) {
                 unsigned const r = random_percent(e * 64 + static_cast<std::size_t>(bit)); // ? `a=57 b=19 c=19 d=5`
-                vertex_t const step = static_cast<vertex_t>(1u) << bit;
+                vertex_t const step = 1u << bit;
                 if (r < 57) continue; // ? Stay in the dense quadrant
                 else if (r < 76) column |= step;
                 else if (r < 95) row |= step;
@@ -571,8 +572,7 @@ int main() {
     }
     csr_view_t const graph = host.view();
     vertex_t const vertices = graph.vertices();
-    std::printf("vertices %u, directed edges %zu, communities %zu\n", vertices, static_cast<std::size_t>(graph.edges()),
-                communities);
+    std::printf("vertices %u, directed edges %" PRIu64 ", communities %zu\n", vertices, graph.edges(), communities);
 
     backend_t const *selected = nullptr;
     for (backend_t const &entry : backends_k)

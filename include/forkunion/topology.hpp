@@ -200,7 +200,7 @@ class core_mask {
     void add(core_id_t const core) noexcept {
         if (core < 0 || static_cast<std::size_t>(core) >= capacity()) return;
         std::size_t const bit = static_cast<std::size_t>(core);
-        words_[bit / bits_per_word_k] |= static_cast<core_mask_word_t>(core_mask_word_t {1} << (bit % bits_per_word_k));
+        words_[bit / bits_per_word_k] |= core_mask_word_t {1} << (bit % bits_per_word_k);
     }
 
     bool contains(core_id_t const core) const noexcept {

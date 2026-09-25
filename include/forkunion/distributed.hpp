@@ -728,7 +728,7 @@ struct colocated_pool {
         bool const was_chilling = mood_.compare_exchange_strong( //
             may_be_chilling, mood_t::grind_k,                    //
             std::memory_order_relaxed, std::memory_order_relaxed);
-        generation_t const generation = static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
+        generation_t const generation = epoch_.fetch_add(1, std::memory_order_release) + 1;
 
         // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
 #if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
@@ -1877,7 +1877,7 @@ inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_doma
     std::uint64_t bytes = (std::max)((std::max)(largest_cache * 8, std::uint64_t(128) << 20),
                                      static_cast<std::uint64_t>(widest_domain_threads) * (std::uint64_t(8) << 20));
     if (target.volume_ram) bytes = (std::min)(bytes, static_cast<std::uint64_t>(target.volume_ram) / 8);
-    return static_cast<std::size_t>((std::min)(bytes, static_cast<std::uint64_t>(~std::size_t(0)) / 2));
+    return static_cast<std::size_t>((std::min)(bytes, std::uint64_t {~std::size_t(0)} / 2));
 }
 
 /** Marks a fabric position the pool has no worker on - cpuless, or beyond a partial spawn. */
@@ -1934,7 +1934,7 @@ inline status_t measure_bandwidth_edges_(machine_topology_t const &topology, poo
         std::size_t const domain_threads = pool.threads_count(initiator);
         indexed_split<std::size_t> const stripes(words, domain_threads);
 
-        std::size_t best_megabytes_per_second = 0;
+        std::uint64_t best_megabytes_per_second = 0;
         for (std::size_t repeat = 0; repeat != 3; ++repeat) {
             auto const started = std::chrono::steady_clock::now();
             pool.for_threads([&](std::size_t const thread) noexcept {
@@ -1949,16 +1949,16 @@ inline status_t measure_bandwidth_edges_(machine_topology_t const &topology, poo
                            std::uint64_t(1));
             std::uint64_t folded = 0;
             for (std::size_t thread = 0; thread != domain_threads; ++thread) folded ^= checksums[first_thread + thread];
-            std::size_t const megabytes_per_second =
-                static_cast<std::size_t>(static_cast<std::uint64_t>(words) * sizeof(std::uint64_t) * 1000u /
-                                         nanoseconds) +
+            std::uint64_t const megabytes_per_second =
+                static_cast<std::uint64_t>(words) * sizeof(std::uint64_t) * 1000u / nanoseconds +
                 (folded == 0x5Fu); // ? The data-dependent tail defeats elision
             best_megabytes_per_second = (std::max)(best_megabytes_per_second, megabytes_per_second);
         }
 
         // ? A bandwidth-only observation: the streaming experiment says nothing about latency
         measured_edge_t const edge {static_cast<compute_domain_index_t>(initiator),
-                                    static_cast<memory_domain_index_t>(target), 0, best_megabytes_per_second};
+                                    static_cast<memory_domain_index_t>(target), 0,
+                                    static_cast<std::size_t>(best_megabytes_per_second)};
         if (status_t const added = edges.push_back(edge); failed(added)) return added;
     }
     return status_t::success_k;

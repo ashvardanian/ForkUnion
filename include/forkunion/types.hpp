@@ -1694,8 +1694,7 @@ class dynamic_padded_array {
         raw_owned_ = raw;
         if constexpr (over_aligned_k) {
             auto const address = reinterpret_cast<std::uintptr_t>(raw);
-            auto const aligned =
-                (address + object_alignment_k - 1) & ~static_cast<std::uintptr_t>(object_alignment_k - 1);
+            auto const aligned = (address + object_alignment_k - 1) & ~(object_alignment_k - 1);
             raw = reinterpret_cast<char *>(aligned);
         }
         raw_ = raw;

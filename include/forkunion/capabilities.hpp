@@ -974,9 +974,7 @@ inline capabilities_t ram_capabilities() noexcept {
  *  @brief Which features this machine turned out to offer, probing the CPU and the memory system.
  *  @sa comptime_capabilities for what this build is able to ask for in the first place.
  */
-inline capabilities_t runtime_capabilities() noexcept {
-    return static_cast<capabilities_t>(cpu_capabilities() | ram_capabilities());
-}
+inline capabilities_t runtime_capabilities() noexcept { return cpu_capabilities() | ram_capabilities(); }
 
 /**
  *  @brief Which kernel facilities this translation unit was built to use, one bit per `FU_WITH_*`.

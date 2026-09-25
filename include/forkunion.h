@@ -175,10 +175,10 @@ typedef enum fu_status_t {
 char const *fu_status_to_string(fu_status_t status);
 
 /** Capacity of a pool name including its null terminator; a longer name is clipped to fit. */
-#define FU_POOL_NAME_CAPACITY ((size_t)16)
+#define FU_POOL_NAME_CAPACITY 16
 
 /** Buffer size @c fu_name_capabilities never overruns, including its null terminator. */
-#define FU_CAPABILITIES_NAME_CAPACITY ((size_t)512)
+#define FU_CAPABILITIES_NAME_CAPACITY 512
 
 /** Opaque, cross-platform handle for the machine topology; immutable once constructed. */
 typedef void *fu_topology_t;

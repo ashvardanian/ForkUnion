@@ -358,8 +358,7 @@ static void destroy_variant(pool_variants_t &variants) noexcept {
 
 /** This machine's capabilities - CPU busy-wait waiters and memory facilities - probed once. */
 static fu::capabilities_t machine_capabilities(void) {
-    static fu::capabilities_t const capabilities =
-        static_cast<fu::capabilities_t>(fu::cpu_capabilities() | fu::ram_capabilities());
+    static fu::capabilities_t const capabilities = fu::cpu_capabilities() | fu::ram_capabilities();
     return capabilities;
 }
 
