@@ -153,7 +153,7 @@ pub const Pool = struct {
     pub fn init(topo: Topology, options: PoolOptions) Error!Pool {
         // SAFETY: the C library copies the name into an internal buffer immediately, then clips it
         // to whatever the platform's thread naming accepts - it only has to null-terminate a copy.
-        // `FU_POOL_NAME_CAPACITY`; the C side clips anything longer.
+        // `FORKUNION_POOL_NAME_CAPACITY`; the C side clips anything longer.
         var name_buf: [16]u8 = undefined;
         const name_z: ?[*:0]const u8 = if (options.name) |given|
             std.fmt.bufPrintZ(&name_buf, "{s}", .{given[0..@min(given.len, name_buf.len - 1)]}) catch unreachable

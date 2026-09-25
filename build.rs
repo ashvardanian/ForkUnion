@@ -1,8 +1,8 @@
 //! Compiles the C++ core and decides which kernel facilities it may use.
 //!
 //! The derivation rules live in `include/forkunion/types.hpp`, not here. By default this script
-//! defines no `FU_WITH_*` macro at all and lets the header work it out from the platform. Cargo
-//! features only ever _override_ that.
+//! defines no `FORKUNION_WITH_*` macro at all and lets the header work it out from the platform.
+//! Cargo features only ever _override_ that.
 //!
 //! Nothing here probes the build host. The core reads its topology from sysfs and places memory by
 //! syscall, so there is no `libnuma` to find and no artifact that differs by where it was built.
@@ -24,12 +24,12 @@ use std::path::Path;
 
 /// Every optional capability, in the order `types.hpp` declares them.
 const OPTIONAL_CAPABILITIES: [&str; 6] = [
-    "FU_WITH_TOPOLOGY",
-    "FU_WITH_PLACE_THREADS_BY_AFFINITY",
-    "FU_WITH_PLACE_THREADS_BY_CORE_CLASS",
-    "FU_WITH_RESCHEDULE_THREADS_BY_CLASS",
-    "FU_WITH_PLACE_MEMORY_ON_DOMAIN",
-    "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
+    "FORKUNION_WITH_TOPOLOGY",
+    "FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY",
+    "FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS",
+    "FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS",
+    "FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN",
+    "FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
 ];
 
 fn main() -> Result<(), cc::Error> {
@@ -68,16 +68,16 @@ fn main() -> Result<(), cc::Error> {
         }
     } else {
         if force_topology {
-            build.define("FU_WITH_TOPOLOGY", "1");
+            build.define("FORKUNION_WITH_TOPOLOGY", "1");
         }
         if force_place_memory_on_domain {
-            build.define("FU_WITH_PLACE_MEMORY_ON_DOMAIN", "1");
+            build.define("FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN", "1");
         }
         if force_place_huge_pages_on_domain {
-            build.define("FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN", "1");
+            build.define("FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN", "1");
         }
         if force_place_threads_by_affinity {
-            build.define("FU_WITH_PLACE_THREADS_BY_AFFINITY", "1");
+            build.define("FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY", "1");
         }
     }
 

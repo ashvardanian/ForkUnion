@@ -11,9 +11,9 @@
 # chains to it and adds only what ForkUnion needs. It sees a toolchain file or an emulator of yours only as the single
 # argument `-DCMAKE_TOOLCHAIN_FILE=…` or `-DCMAKE_CROSSCOMPILING_EMULATOR=…`; spelled with a space, its own wins.
 #
-# Without `-pthread` a module has one thread and no shared memory, so `FU_WITH_SHARED_MEMORY` derives 0: a consumer
-# spawns one caller-inclusive thread and never constructs a `std::thread`, which Emscripten would abort on. The pool
-# tests spawn more, so this shape compiles them without running them; the threaded module is the wasm64 file.
+# Without `-pthread` a module has one thread and no shared memory, so `FORKUNION_WITH_SHARED_MEMORY` derives 0: a
+# consumer spawns one caller-inclusive thread and never constructs a `std::thread`, which Emscripten would abort on. The
+# pool tests spawn more, so this shape compiles them without running them; the threaded module is the wasm64 file.
 
 if (NOT DEFINED ENV{EMSDK})
     message(FATAL_ERROR "EMSDK is unset; source the SDK's `emsdk_env.sh` before configuring.")

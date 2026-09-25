@@ -29,7 +29,7 @@
  *  }
  *
  *  int main(int argc, char *argv[]) {
- *      char capabilities[FU_CAPABILITIES_NAME_CAPACITY];
+ *      char capabilities[FORKUNION_CAPABILITIES_NAME_CAPACITY];
  *      size_t capabilities_length;
  *      fu_name_capabilities(fu_runtime_capabilities(), capabilities, sizeof(capabilities), &capabilities_length);
  *      printf("ForkUnion capabilities: %s\n", capabilities);
@@ -175,10 +175,10 @@ typedef enum fu_status_t {
 char const *fu_status_to_string(fu_status_t status);
 
 /** Capacity of a pool name including its null terminator; a longer name is clipped to fit. */
-#define FU_POOL_NAME_CAPACITY 16
+#define FORKUNION_POOL_NAME_CAPACITY 16
 
 /** Buffer size @c fu_name_capabilities never overruns, including its null terminator. */
-#define FU_CAPABILITIES_NAME_CAPACITY 512
+#define FORKUNION_CAPABILITIES_NAME_CAPACITY 512
 
 /** Opaque, cross-platform handle for the machine topology; immutable once constructed. */
 typedef void *fu_topology_t;
@@ -297,7 +297,7 @@ typedef enum fu_capabilities_t {
 
     /**
      *  @brief Own the raw OS thread handle instead of a @c std::thread - the substrate every thread
-     *      lever below stands on. Built: @c FU_WITH_OS_THREADS.
+     *      lever below stands on. Built: @c FORKUNION_WITH_OS_THREADS.
      *  @sa fu_capability_place_threads_by_affinity_k, fu_capability_place_threads_by_core_class_k
      *      and fu_capability_reschedule_threads_by_class_k - the levers needing the handle.
      */
@@ -305,7 +305,7 @@ typedef enum fu_capabilities_t {
 
     /**
      *  @brief Enumerate this machine's cores, compute domains, and memory domains - the root every
-     *      placement needs. Built: @c FU_WITH_TOPOLOGY.
+     *      placement needs. Built: @c FORKUNION_WITH_TOPOLOGY.
      *  @sa fu_capability_place_memory_on_domain_k and fu_capability_colocate_pools_on_domain_k
      *      - the placements standing on it.
      */
@@ -313,35 +313,35 @@ typedef enum fu_capabilities_t {
 
     /**
      *  @brief Bind a thread to a set of cores, choosing where it runs.
-     *      Built: @c FU_WITH_PLACE_THREADS_BY_AFFINITY.
+     *      Built: @c FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY.
      *  @sa fu_capability_os_threads_k - the owned handle this needs.
      */
     fu_capability_place_threads_by_affinity_k = 1 << 8,
 
     /**
      *  @brief Steer a thread onto a class of core at creation, choosing where it runs.
-     *      Built: @c FU_WITH_PLACE_THREADS_BY_CORE_CLASS.
+     *      Built: @c FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS.
      *  @sa fu_capability_os_threads_k - the owned handle this needs.
      */
     fu_capability_place_threads_by_core_class_k = 1 << 9,
 
     /**
      *  @brief Reclass a thread's scheduler to sleep or wake it, choosing when it runs.
-     *      Built: @c FU_WITH_RESCHEDULE_THREADS_BY_CLASS.
+     *      Built: @c FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS.
      *  @sa fu_capability_os_threads_k - the owned handle this needs.
      */
     fu_capability_reschedule_threads_by_class_k = 1 << 10,
 
     /**
      *  @brief Place a buffer's pages on a chosen memory domain. Built:
-     *      @c FU_WITH_PLACE_MEMORY_ON_DOMAIN.
+     *      @c FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN.
      *  @sa fu_capability_topology_k - the enumerated domains this places onto.
      */
     fu_capability_place_memory_on_domain_k = 1 << 11,
 
     /**
      *  @brief Place larger-than-base pages on a chosen memory domain, a narrower case of memory
-     *      placement. Built: @c FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN.
+     *      placement. Built: @c FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN.
      *  @sa fu_capability_place_memory_on_domain_k - the placement this specializes.
      */
     fu_capability_place_huge_pages_on_domain_k = 1 << 12,
@@ -354,7 +354,7 @@ typedef enum fu_capabilities_t {
 
     /**
      *  @brief The domain-aware @c colocated_pool and @c distributed_pool are compiled.
-     *      Built: @c FU_WITH_COLOCATE_POOLS_ON_DOMAIN.
+     *      Built: @c FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN.
      *  @sa fu_capability_os_threads_k and fu_capability_topology_k - both are needed, memory
      *      placement is not.
      */
@@ -362,7 +362,7 @@ typedef enum fu_capabilities_t {
 
     /** @c CLDEMOTE moves a just-written line from this core's private caches toward the shared LLC
      *  and retains it there. Reporting-only: the emitter is chosen at compile time by
-     *  @c FU_WITH_DEMOTE_CACHE_LINES, never dispatched. */
+     *  @c FORKUNION_WITH_DEMOTE_CACHE_LINES, never dispatched. */
     fu_capability_x86_cldemote_k = 1 << 15,
 
     /** `DC CVAC` cleans a dirty line to the coherency point, AArch64's nearest demote. Set where
@@ -415,7 +415,7 @@ typedef enum fu_capabilities_t {
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers
      *  in one intersection with @c fu_runtime_capabilities. */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
-                                fu_capability_arm64_wfet_k | fu_capability_risc5_pause_k | fu_capability_risc5_wrs_k,
+        fu_capability_arm64_wfet_k | fu_capability_risc5_pause_k | fu_capability_risc5_wrs_k,
 
     /**
      *  @brief All-ones allow-mask: pass to @c fu_pool_new to disable capability filtering.

@@ -4,7 +4,7 @@
  *  @date June 27, 2025
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
  */
-#define FU_RUNTIME_DISPATCH 1 // every rung the toolchain builds; `select_pool` admits them at runtime
+#define FORKUNION_RUNTIME_DISPATCH 1 // every rung the toolchain builds; `select_pool` admits them at runtime
 
 #include <cstdint> // `std::uint8_t`
 
@@ -28,7 +28,7 @@ template <typename yield_type_, typename cache_hints_type_>
 struct pool_for<fu::pool_kind_t::flat_k, yield_type_, cache_hints_type_> {
     using type = fu::flat_pool<thread_allocator_t, yield_type_, cache_hints_type_>;
 };
-#if FU_WITH_OS_THREADS
+#if FORKUNION_WITH_OS_THREADS
 template <typename yield_type_, typename cache_hints_type_>
 struct pool_for<fu::pool_kind_t::colocated_k, yield_type_, cache_hints_type_> {
     using type = fu::colocated_pool<yield_type_, cache_hints_type_>;
@@ -60,67 +60,67 @@ struct pool_variants_t {
      *  out per shape. A missed entry cannot silently under-size the storage: @c construct
      *  static-asserts every pool it places against these bounds, so drift fails the build. */
     using pool_traits_t = max_size_align< //
-#if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
+#if FORKUNION_TARGET_X86_TPAUSE && FORKUNION_TARGET_X86_CLDEMOTE
         fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::x86_cache_hints_t>, //
 #endif
-#if FU_TARGET_X86_TPAUSE
+#if FORKUNION_TARGET_X86_TPAUSE
         fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::standard_cache_hints_t>, //
 #endif
-#if FU_TARGET_X86_PAUSE
+#if FORKUNION_TARGET_X86_PAUSE
         fu::flat_pool<thread_allocator_t, fu::x86_pause_t, fu::standard_cache_hints_t>, //
 #endif
-#if FU_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFET
         fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
 #endif
-#if FU_TARGET_ARM64_YIELD
+#if FORKUNION_TARGET_ARM64_YIELD
         fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
 #endif
-#if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
 #endif
-#if FU_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
 #endif
-#if FU_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISC5_PAUSE
         fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
 
-#if FU_WITH_OS_THREADS
+#if FORKUNION_WITH_OS_THREADS
         fu::colocated_pool<fu::standard_yield_t, fu::standard_cache_hints_t>,   // Single-compute-domain pools
         fu::distributed_pool<fu::standard_yield_t, fu::standard_cache_hints_t>, // Whole-machine pools
-#if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
+#if FORKUNION_TARGET_X86_TPAUSE && FORKUNION_TARGET_X86_CLDEMOTE
         fu::colocated_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>,   //
         fu::distributed_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>, //
 #endif
-#if FU_TARGET_X86_TPAUSE
+#if FORKUNION_TARGET_X86_TPAUSE
         fu::colocated_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>,   //
         fu::distributed_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>, //
 #endif
-#if FU_TARGET_X86_PAUSE
+#if FORKUNION_TARGET_X86_PAUSE
         fu::colocated_pool<fu::x86_pause_t, fu::standard_cache_hints_t>,   //
         fu::distributed_pool<fu::x86_pause_t, fu::standard_cache_hints_t>, //
 #endif
-#if FU_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFET
         fu::colocated_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>,   //
         fu::distributed_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
 #endif
-#if FU_TARGET_ARM64_YIELD
+#if FORKUNION_TARGET_ARM64_YIELD
         fu::colocated_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>,   //
         fu::distributed_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
 #endif
-#if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
         fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
 #endif
-#if FU_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS
         fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
 #endif
-#if FU_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISC5_PAUSE
         fu::colocated_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
-#endif // FU_WITH_OS_THREADS
+#endif // FORKUNION_WITH_OS_THREADS
 
         fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
         >;
@@ -186,41 +186,41 @@ static auto select_pool([[maybe_unused]] fu::capabilities_t const bits, action_t
     // WAITPKG ships in Tremont, Alder Lake, and Sapphire Rapids onward; CLDEMOTE only ever shipped
     // alongside it (Tremont, SPR, GNR - fused off on Alder/Raptor/Meteor client parts), so the
     // (pause + cldemote) cell has no silicon and is deliberately not offered.
-#if FU_TARGET_X86_TPAUSE && FU_TARGET_X86_CLDEMOTE
+#if FORKUNION_TARGET_X86_TPAUSE && FORKUNION_TARGET_X86_CLDEMOTE
     if (selects<fu::x86_tpause_t, fu::x86_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::x86_tpause_t, fu::x86_cache_hints_t>::type> {});
 #endif
-#if FU_TARGET_X86_TPAUSE
+#if FORKUNION_TARGET_X86_TPAUSE
     if (selects<fu::x86_tpause_t, fu::standard_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::x86_tpause_t, fu::standard_cache_hints_t>::type> {});
 #endif
-#if FU_TARGET_X86_PAUSE
+#if FORKUNION_TARGET_X86_PAUSE
     if (selects<fu::x86_pause_t, fu::standard_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::x86_pause_t, fu::standard_cache_hints_t>::type> {});
 #endif
     // `DC CVAC` legality is an OS property (`SCTLR_EL1.UCI`), so the hints half is decided at
     // compile time by `preferred_cache_hints_t` - the clean on Linux, a no-op elsewhere - and the
     // runtime axis stays the waiter alone.
-#if FU_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFET
     if (selects<fu::arm64_wfet_t, fu::preferred_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::arm64_wfet_t, fu::preferred_cache_hints_t>::type> {});
 #endif
-#if FU_TARGET_ARM64_YIELD
+#if FORKUNION_TARGET_ARM64_YIELD
     if (selects<fu::arm64_yield_t, fu::preferred_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::preferred_cache_hints_t>::type> {});
 #endif
     // RVA23 mandates Zawrs and Zicbom together, so the monitored waiter travels with the
     // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space `prefetch.w`
     // promotion that can never fault.
-#if FU_TARGET_RISC5_WRS && FU_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
     if (selects<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
 #endif
-#if FU_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS
     if (selects<fu::risc5_wrs_t, fu::risc5_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cache_hints_t>::type> {});
 #endif
-#if FU_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISC5_PAUSE
     if (selects<fu::risc5_pause_t, fu::risc5_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_pause_t, fu::risc5_cache_hints_t>::type> {});
 #endif
@@ -257,7 +257,7 @@ inline fu_status_t lower(fu::status_t status) noexcept { return static_cast<fu_s
 template <typename visitor_type_, typename result_type_>
 result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_type_ empty) {
     switch (variants.kind_) {
-#if FU_WITH_OS_THREADS
+#if FORKUNION_WITH_OS_THREADS
     case fu::pool_kind_t::colocated_k: return visit_kind<fu::pool_kind_t::colocated_k>(visitor, variants);
     case fu::pool_kind_t::distributed_k: return visit_kind<fu::pool_kind_t::distributed_k>(visitor, variants);
 #else
@@ -274,7 +274,7 @@ result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_ty
 template <typename visitor_type_>
 void visit(visitor_type_ &&visitor, pool_variants_t &variants) {
     switch (variants.kind_) {
-#if FU_WITH_OS_THREADS
+#if FORKUNION_WITH_OS_THREADS
     case fu::pool_kind_t::colocated_k: visit_kind<fu::pool_kind_t::colocated_k>(visitor, variants); break;
     case fu::pool_kind_t::distributed_k: visit_kind<fu::pool_kind_t::distributed_k>(visitor, variants); break;
 #else
@@ -327,7 +327,7 @@ struct opaque_pool_t {
     fu_generation_t current_generation {0};
 
     /** The caller's pool name, kept so a re-spawn can rebuild the variant without losing it. */
-    char name[FU_POOL_NAME_CAPACITY] {};
+    char name[FORKUNION_POOL_NAME_CAPACITY] {};
 
     opaque_pool_t(char const *pool_name, fu::capabilities_t pool_capabilities) noexcept : effective(pool_capabilities) {
         char const *const source = pool_name ? pool_name : "forkunion";
@@ -800,7 +800,7 @@ static fu_status_t spawn_flat(opaque_pool_t *opaque, size_t threads, fu::caller_
                                                      opaque->variants));
 }
 
-#if FU_WITH_OS_THREADS
+#if FORKUNION_WITH_OS_THREADS
 
 /** Rebuilds @p opaque distributed if it holds another shape, then spawns across the machine. */
 static fu_status_t spawn_distributed(opaque_pool_t *opaque, fu::machine_topology_t const &machine, size_t threads,

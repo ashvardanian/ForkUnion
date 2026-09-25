@@ -1,5 +1,5 @@
 /**
- *  @file scripts/test.c
+ *  @file test/main.c
  *  @author Ash Vardanian
  *  @date October 11, 2025
  *  @brief Tests the `fu_*` C ABI: spawns, loops, generation tokens, topology, fabric, allocation.
@@ -735,6 +735,7 @@ static bool test_gcc_nested_functions(fu_capabilities_t mask) {
     if (!pool) return false;
 
     atomic_size_t counter = 0;
+    atomic_bool out_of_bounds = false;
     size_t num_tasks = 100;
 
     // GCC nested function - captures local variables
@@ -743,11 +744,11 @@ static bool test_gcc_nested_functions(fu_capabilities_t mask) {
         (void)thread;
         (void)compute_domain;
         atomic_fetch_add(&counter, 1);
-        if (task % 20 == 0) printf("  GCC nested: Task %zu\n", task);
+        if (task >= num_tasks) atomic_store(&out_of_bounds, true);
     }
 
-    bool result =
-        fu_pool_for_n(pool, num_tasks, nested_callback, NULL) == fu_success_k && atomic_load(&counter) == num_tasks;
+    bool result = fu_pool_for_n(pool, num_tasks, nested_callback, NULL) == fu_success_k &&
+                  atomic_load(&counter) == num_tasks && !atomic_load(&out_of_bounds);
     fu_pool_delete(pool);
     return result;
 }
@@ -777,6 +778,7 @@ static bool test_clang_blocks(fu_capabilities_t mask) {
     if (!pool) return false;
 
     __block atomic_size_t counter = 0;
+    __block atomic_bool out_of_bounds = false;
     size_t num_tasks = 100;
 
     // Clang block - captures local variables with __block
@@ -785,7 +787,7 @@ static bool test_clang_blocks(fu_capabilities_t mask) {
       (void)thread;
       (void)compute_domain;
       atomic_fetch_add(&counter, 1);
-      if (task % 20 == 0) printf("  Clang block: Task %zu\n", task);
+      if (task >= num_tasks) atomic_store(&out_of_bounds, true);
     };
 
     task_block_t heap_block = Block_copy(my_block);
@@ -795,7 +797,7 @@ static bool test_clang_blocks(fu_capabilities_t mask) {
 
     Block_release(heap_block);
 
-    bool result = atomic_load(&counter) == num_tasks;
+    bool result = atomic_load(&counter) == num_tasks && !atomic_load(&out_of_bounds);
     fu_pool_delete(pool);
     return result;
 }
@@ -835,8 +837,8 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
 #endif
     };
 
-    // `FU_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
-    char mask_name[FU_CAPABILITIES_NAME_CAPACITY];
+    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
+    char mask_name[FORKUNION_CAPABILITIES_NAME_CAPACITY];
     size_t mask_name_length = 0;
     if (fu_name_capabilities(mask, mask_name, sizeof(mask_name), &mask_name_length) != fu_success_k)
         mask_name[0] = '\0';
@@ -850,7 +852,7 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
 }
 
 int main(void) {
-    printf("Welcome to the ForkUnion library test suite (C API)!\n");
+    printf("ForkUnion %d.%d.%d\n", fu_version_major(), fu_version_minor(), fu_version_patch());
 
     fu_capabilities_t const comptime_mask = fu_comptime_capabilities();
     fu_capabilities_t const runtime_mask = fu_runtime_capabilities();
@@ -860,7 +862,8 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    char comptime_mask_name[FU_CAPABILITIES_NAME_CAPACITY], runtime_mask_name[FU_CAPABILITIES_NAME_CAPACITY];
+    char comptime_mask_name[FORKUNION_CAPABILITIES_NAME_CAPACITY],
+        runtime_mask_name[FORKUNION_CAPABILITIES_NAME_CAPACITY];
     size_t comptime_name_length = 0, runtime_name_length = 0;
     if (fu_name_capabilities(comptime_mask, comptime_mask_name, sizeof(comptime_mask_name), &comptime_name_length) !=
         fu_success_k)
@@ -877,11 +880,11 @@ int main(void) {
         fu_topology_delete(machine_topology);
         return EXIT_FAILURE;
     }
-    printf("Compiled with:      %s\n", comptime_mask_name);
-    printf("Running on:         %s\n", runtime_mask_name);
-    printf("Logical cores:      %zu\n", cores);
-    printf("Memory domains:     %zu\n", memory_domains);
-    printf("Compute domains:    %zu\n", compute_domains);
+    printf("- Compiled for: %s\n", comptime_mask_name);
+    printf("- This machine: %s\n", runtime_mask_name);
+    printf("- Logical cores: %zu\n", cores);
+    printf("- Memory domains: %zu\n", memory_domains);
+    printf("- Compute domains: %zu\n", compute_domains);
 
     // One entry per silicon-real cell of the shim's `select_pool` cascade, hints included, so every
     // curated pool variant a machine can offer is constructed and dispatched at least once.

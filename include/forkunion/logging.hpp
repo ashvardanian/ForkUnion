@@ -32,13 +32,13 @@ struct logging_colors_t {
      *  @note On POSIX @c TERM must name a color-capable terminal; Windows is assumed capable.
      */
     explicit logging_colors_t() noexcept {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
         if (!::_isatty(_fileno(stdout))) return;
 #endif
-#if FU_ON_POSIX
+#if FORKUNION_OS_POSIX_
         if (!::isatty(STDOUT_FILENO)) return;
 #endif
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
         // On Windows, assume color support is available
         use_colors_ = true;
 #else

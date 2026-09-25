@@ -1,5 +1,5 @@
 /**
- *  @file scripts/test.cpp
+ *  @file test/main.cpp
  *  @author Ash Vardanian
  *  @date May 2, 2025
  *  @brief Unit and stress tests for the pools, the harvested topology, and the parallel algorithms.
@@ -17,6 +17,7 @@
 
 #include <algorithm>   // `std::sort`
 #include <bit>         // `std::bit_floor`
+#include <string_view> // `std::string_view`
 #include <type_traits> // `std::is_integral`, `std::is_enum`
 #include <vector>      // `std::vector`
 
@@ -25,20 +26,28 @@
 namespace fu = ashvardanian::forkunion;
 
 /*  @c backtrace is glibc or Apple only; Bionic, FreeBSD and musl ship `<execinfo.h>` without it. */
-#if FU_ON_POSIX
+#if FORKUNION_OS_POSIX_
 #include <csignal>  // `std::signal`, `std::raise`
 #include <unistd.h> // `::write`, `STDERR_FILENO`
-#if (FU_ON_GLIBC || FU_ON_APPLE) && __has_include(<execinfo.h>)
+#if (FORKUNION_HAS_GLIBC_ || FORKUNION_OS_APPLE_) && __has_include(<execinfo.h>)
 #include <execinfo.h> // `::backtrace`, `::backtrace_symbols_fd`
-#define FU_TEST_WITH_BACKTRACE_ 1
+#define FORKUNION_TEST_WITH_BACKTRACE_ 1
 #endif
 #endif
 
 /** Correctness only: the throughput/stress suite hammers a race window a slow emulator neither
  *  reproduces nor runs in tolerable time. @c FORKUNION_TEST_SKIP_STRESS in CMake defines this to 1
  *  for the cross builds; native builds leave it 0 and run the full suite. */
-#ifndef FU_TEST_SKIP_STRESS_
-#define FU_TEST_SKIP_STRESS_ 0
+#ifndef FORKUNION_TEST_SKIP_STRESS_
+#define FORKUNION_TEST_SKIP_STRESS_ 0
+#endif
+
+#if defined(__SANITIZE_THREAD__)
+#define FORKUNION_TEST_UNDER_TSAN_ 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define FORKUNION_TEST_UNDER_TSAN_ 1
+#endif
 #endif
 
 /** Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
@@ -109,13 +118,14 @@ static void expect_ne_(a_type_ const &a, b_type_ const &b, char const *expr, cha
         return;        \
     } while (0)
 
-#if FU_ON_POSIX
+#if FORKUNION_OS_POSIX_
 
 /** Adds a backtrace to a fatal signal; the flushed `Running ...` line names the test. */
 extern "C" void on_fatal_signal_(int signal_number) noexcept {
-    ssize_t const written = ::write(STDERR_FILENO, "\nCRASH - backtrace:\n", 20);
+    constexpr std::string_view message = "\nCRASH - backtrace:\n";
+    ssize_t const written = ::write(STDERR_FILENO, message.data(), message.size());
     (void)written; // ? Best-effort in a handler; still re-raise below
-#if FU_TEST_WITH_BACKTRACE_
+#if FORKUNION_TEST_WITH_BACKTRACE_
     void *frames[64];
     ::backtrace_symbols_fd(frames, ::backtrace(frames, 64), STDERR_FILENO);
 #endif
@@ -147,7 +157,7 @@ template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, 
 template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
                              std::uint8_t>;
 
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 template struct fu::colocated_pool<>;
 template struct fu::distributed_pool<>;
 #endif
@@ -229,7 +239,7 @@ void test_coprime_permutation() noexcept {
 /**
  *  @brief Checks that a harvested topology is internally consistent, on whatever host runs it.
  *
- *  Deliberately @b not gated on @c FU_WITH_PLACE_MEMORY_ON_DOMAIN: some platforms harvest a
+ *  Deliberately @b not gated on @c FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN: some platforms harvest a
  *  topology without compiling the NUMA pools, so gating this on the pools leaves their harvest
  *  wholly untested. A host with no harvest at all reports @c false and is skipped rather than
  *  failed - the absence of a topology is not a broken topology.
@@ -283,7 +293,7 @@ struct make_pool_t {
     }
 };
 
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 static fu::machine_topology_t machine_topology;
 
 /** Makes @c colocated_pool_ts scoped to the machine's first compute domain. */
@@ -301,7 +311,7 @@ struct make_distributed_pool_t {
 };
 #endif
 
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 
 /**
  *  @brief The tier derivation must rank a synthetic edge log by bandwidth first, latency second.
@@ -397,7 +407,7 @@ static void test_measured_fabric() noexcept {
     expect(fabric.memory_latency(fu::compute_domain_index_t {},
                                  topology.local_memory_of(fu::compute_domain_index_t {})) > 0);
 }
-#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#endif // FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 
 /** Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
 static void test_spawn_zero() noexcept {
@@ -1263,7 +1273,7 @@ static void test_sharded_array() noexcept {
     expect_eq(tiny.at(home.memory_domain, home.local_index), 42u);
 }
 
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 
 /** One distributed pool of exactly @p threads workers must dispatch every task exactly once. */
 static void expect_spawn_shape_dispatches_(std::size_t const threads) noexcept {
@@ -1295,31 +1305,37 @@ static void test_distributed_spawn_shapes() noexcept {
     std::size_t const shapes[] = {1, 2, cores > 1 ? cores - 1 : 1, cores + 3};
     for (std::size_t const threads : shapes) expect_spawn_shape_dispatches_(threads);
 }
-#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#endif // FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
+
+/** Prints @p label, then each bit of @p capabilities by its @c capability_name, comma-separated. */
+static void log_capabilities(char const *label, fu::capabilities_t const capabilities) noexcept {
+    std::printf("%s", label);
+    char const *separator = "";
+    for (unsigned int bit = 1; bit != 0; bit <<= 1) {
+        char const *const name = fu::capability_name(static_cast<fu::capabilities_t>(bit));
+        if (!(capabilities & bit) || !name) continue;
+        std::printf("%s%s", separator, name);
+        separator = ",";
+    }
+    std::printf("\n");
+}
 
 /** Enhanced NUMA topology logging function using the logger class. */
 void log_numa_topology() noexcept {
     fu::logging_colors_t colors;
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
     // Harvest topology
     if (fu::failed(machine_topology.harvest())) {
         std::fprintf(stderr, "%sX Failed to harvest NUMA topology%s\n", colors.bold_red(), colors.reset());
         std::exit(EXIT_FAILURE);
     }
-
-    fu::capabilities_t cpu_caps = fu::cpu_capabilities();
-    fu::capabilities_t ram_caps = fu::ram_capabilities();
-
-    // Log topology and capabilities
     fu::log_numa_topology_t {}(machine_topology, colors);
-    fu::log_capabilities_t {}(cpu_caps | ram_caps, colors);
-
 #else
     std::printf("%sNUMA support not compiled in%s\n", colors.dim(), colors.reset());
-#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#endif // FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 }
 
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN && FORKUNION_OS_LINUX_ && FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
 
 /**
  *  @brief A pool sizes itself from the cores we were given, and hands the caller back its own mask.
@@ -1361,7 +1377,7 @@ static void test_caller_affinity_preserved() noexcept {
     (void)fu::restore_thread_cores(original); // ? Leave the process as we found it
     expect(succeeded);
 }
-#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN && FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
+#endif // FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN && FORKUNION_OS_LINUX_ && FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
 
 #if defined(__cpp_lib_atomic_ref) && defined(__cpp_lib_bit_cast)
 
@@ -1508,6 +1524,13 @@ static void check_atomic_ref() noexcept {
     }
     check_atomic_ref_words<atomic_ref_>();
     check_atomic_ref_extensions<atomic_ref_>();
+#if defined(FORKUNION_TEST_UNDER_TSAN_)
+    // TSan sees no inline asm, so an ISA reference's spin lock reads as a race, or hangs under it.
+    if (needed) {
+        skip_("ThreadSanitizer cannot see inline asm");
+        return;
+    }
+#endif
     check_atomic_ref_under_contention<atomic_ref_>();
 }
 
@@ -1516,22 +1539,22 @@ static void check_atomic_ref() noexcept {
 static void test_atomic_refs() noexcept {
     check_atomic_ref<fu::standard_atomic_ref>();
     check_atomic_verbs();
-#if FU_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X86_CMPCCXADD
     check_atomic_ref<fu::x86_cmpccxadd_atomic_ref>();
 #endif
-#if FU_TARGET_X86_RAOINT
+#if FORKUNION_TARGET_X86_RAOINT
     check_atomic_ref<fu::x86_raoint_atomic_ref>();
 #endif
-#if FU_TARGET_ARM64_LSE
+#if FORKUNION_TARGET_ARM64_LSE
     check_atomic_ref<fu::arm64_lse_atomic_ref>();
 #endif
-#if FU_TARGET_ARM64_RCPC
+#if FORKUNION_TARGET_ARM64_RCPC
     check_atomic_ref<fu::arm64_rcpc_atomic_ref>();
 #endif
-#if FU_TARGET_RISC5_ATOMIC
+#if FORKUNION_TARGET_RISC5_ATOMIC
     check_atomic_ref<fu::risc5_atomic_ref>();
 #endif
-#if FU_TARGET_RISC5_ZACAS
+#if FORKUNION_TARGET_RISC5_ZACAS
     check_atomic_ref<fu::risc5_zacas_atomic_ref>();
 #endif
 }
@@ -1547,7 +1570,9 @@ static void test_atomic_refs() noexcept { skip("no `std::atomic_ref`"); }
 int main(void) {
     install_crash_handlers_();
 
-    std::printf("Welcome to the ForkUnion library test suite!\n");
+    std::printf("ForkUnion %d.%d.%d\n", FORKUNION_VERSION_MAJOR, FORKUNION_VERSION_MINOR, FORKUNION_VERSION_PATCH);
+    log_capabilities("- Compiled for: ", fu::comptime_capabilities());
+    log_capabilities("- This machine: ", fu::runtime_capabilities());
     log_numa_topology();
 
     std::printf("Starting unit tests...\n");
@@ -1591,7 +1616,7 @@ int main(void) {
         {"`terminate` avoided", test_mixed_restart<false>},                           //
         {"`terminate` and re-spawn", test_mixed_restart<true>},                       //
         {"`terminate` and re-spawn churn", test_spawn_terminate_churn},               //
-#if FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
         // Uniform Memory Access (UMA) tests for threads pinned to the same NUMA node
         {"UMA `spawn` normal", test_spawn_success<make_colocated_pool_t>},
         {"UMA `caller_exclusivity` query", test_caller_exclusivity_query<make_colocated_pool_t>},
@@ -1643,10 +1668,10 @@ int main(void) {
         {"NUMA `terminate` avoided", test_mixed_restart<false, make_distributed_pool_t>},
         {"NUMA `terminate` and re-spawn", test_mixed_restart<true, make_distributed_pool_t>},
         {"NUMA `terminate` and re-spawn churn", test_spawn_terminate_churn<make_distributed_pool_t>},
-#if FU_ON_LINUX && FU_WITH_PLACE_THREADS_BY_AFFINITY
+#if FORKUNION_OS_LINUX_ && FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
         {"NUMA caller affinity preserved", test_caller_affinity_preserved},
 #endif
-#endif // FU_WITH_COLOCATE_POOLS_ON_DOMAIN
+#endif // FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
     };
 
     std::size_t const total_unit_tests = sizeof(unit_tests) / sizeof(unit_tests[0]);
@@ -1658,12 +1683,12 @@ int main(void) {
     }
     std::printf("All %zu unit tests passed\n", total_unit_tests);
 
-#if FU_TEST_SKIP_STRESS_
+#if FORKUNION_TEST_SKIP_STRESS_
     // The stress suite hammers the dispatch/join race window for millions of epochs. A qemu-user
     // emulator neither reproduces the guest memory model this probes nor runs it in tolerable time,
     // so the cross builds define it away and lean on the native Arm64 job, where the weak memory
     // model is actually exercised.
-    std::printf("Skipping stress tests: built with FU_TEST_SKIP_STRESS_\n");
+    std::printf("Skipping stress tests: built with FORKUNION_TEST_SKIP_STRESS_\n");
 #else
     // Start stress-testing the implementation
     std::printf("Starting stress tests...\n");

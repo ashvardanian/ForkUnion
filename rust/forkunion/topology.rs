@@ -97,7 +97,8 @@ impl Capabilities {
     pub const COLOCATE_POOLS_ON_DOMAIN: Capabilities = Capabilities(1 << 14);
 
     /// `CLDEMOTE` moves a just-written line toward the shared LLC and retains it. Reporting-only:
-    /// the emitter is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, never dispatched.
+    /// the emitter is chosen at compile time by `FORKUNION_WITH_DEMOTE_CACHE_LINES`, never
+    /// dispatched.
     pub const X86_CLDEMOTE: Capabilities = Capabilities(1 << 15);
     /// `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
     /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
@@ -152,7 +153,7 @@ pub fn comptime_capabilities() -> Capabilities {
 /// a static pointer; a fixed-capacity stack type would avoid this allocation.
 #[cfg(feature = "std")]
 pub fn name_capabilities(caps: Capabilities) -> Result<std::string::String> {
-    // `FU_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
+    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
     let mut buf = [0u8; 512];
     let mut written = 0usize;
     Error::check(

@@ -45,8 +45,8 @@ option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL 
 # the derivation rules in exactly one place, instead of spread across CMakeLists.txt, build.rs, and build.zig, where
 # they would drift.
 #
-# ON and OFF pass `-DFU_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say - is
-# rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
+# ON and OFF pass `-DFORKUNION_WITH_<CAP>=1` or `=0`, overriding the header. An impossible ON - pinning on Apple, say -
+# is rejected by an `#error` in `types.hpp`, not by a check duplicated here. The four coarse facilities a build
 # realistically toggles, each a tri-state cache entry. The finer ones - cache sharing, thread QoS, scheduling class -
 # are AUTO-only: the header derives them, and only `FORKUNION_PORTABLE` forces them off. Rust and Zig expose this same
 # set.
@@ -73,8 +73,9 @@ set_property(CACHE FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY PROPERTY STRINGS "AU
 
 # Every optional capability macro, coarse and fine - the set `FORKUNION_PORTABLE` zeroes.
 set(FORKUNION_OPTIONAL_MACROS
-    FU_WITH_TOPOLOGY FU_WITH_PLACE_THREADS_BY_AFFINITY FU_WITH_PLACE_THREADS_BY_CORE_CLASS
-    FU_WITH_RESCHEDULE_THREADS_BY_CLASS FU_WITH_PLACE_MEMORY_ON_DOMAIN FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+    FORKUNION_WITH_TOPOLOGY FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
+    FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
+    FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
 )
 
 # Header-only interface library
@@ -88,8 +89,9 @@ target_include_directories(
 # none, so it would be a no-op that reads like a cap.
 target_compile_features(forkunion_header INTERFACE cxx_std_20)
 
-# One compile probe per capability bit under `probes/`, `FU_TARGET_<BIT>=0/1`: the verdicts reach the units that admit
-# rungs at runtime, never `forkunion_header`, whose consumers read the compilation target's promise in `types.hpp`.
+# One compile probe per capability bit under `probes/`, `FORKUNION_TARGET_<BIT>=0/1`: the verdicts reach the units that
+# admit rungs at runtime, never `forkunion_header`, whose consumers read the compilation target's promise in
+# `types.hpp`.
 include(cmake/fu_x86_isa_probes.cmake)
 include(cmake/fu_arm64_isa_probes.cmake)
 include(cmake/fu_risc5_isa_probes.cmake)
@@ -164,10 +166,10 @@ add_library(forkunion_static STATIC c/forkunion.cpp)
 
 # What a consumer picks between, spelled as what they get:
 #
-# forkunion::header - the C++ core alone. Capabilities are baked in by the `FU_WITH_*` macros, and each
-# `FU_TARGET_<BIT>` reads what the compilation target promises, so `preferred_yield_t` is as capable as the target the
-# consumer compiled for. forkunion::static - the C ABI, dispatching on `fu_runtime_capabilities()`, linked into the
-# consumer's binary. forkunion::shared - the same C ABI, one copy per process rather than one per consumer.
+# forkunion::header - the C++ core alone. Capabilities are baked in by the `FORKUNION_WITH_*` macros, and each
+# `FORKUNION_TARGET_<BIT>` reads what the compilation target promises, so `preferred_yield_t` is as capable as the
+# target the consumer compiled for. forkunion::static - the C ABI, dispatching on `fu_runtime_capabilities()`, linked
+# into the consumer's binary. forkunion::shared - the same C ABI, one copy per process rather than one per consumer.
 #
 # The `static`/`shared` split is linkage, not dispatch: both run the same runtime-dispatched TU above, and a process
 # that links two static copies gets two pools and two topologies. `EXPORT_NAME` carries these spellings into the
@@ -307,11 +309,11 @@ if (CLANG_TIDY_EXECUTABLE)
     )
 endif ()
 
-# Tests & benchmarking scripts
+# Tests & benchmarks
 include(CTest)
 
 # Default ON only when ForkUnion is the top-level project, so an `add_subdirectory` consumer does not inherit the
-# `scripts/` targets - and does not have to remember to switch them off.
+# `test/` and `bench/` targets - and does not have to remember to switch them off.
 option(FORKUNION_BUILD_TESTS "Build forkunion tests" ${PROJECT_IS_TOP_LEVEL})
 option(FORKUNION_TEST_SKIP_STRESS "Run only the tests' correctness suite, skipping the slow throughput/stress cases"
        OFF
@@ -319,7 +321,8 @@ option(FORKUNION_TEST_SKIP_STRESS "Run only the tests' correctness suite, skippi
 
 if (BUILD_TESTING AND FORKUNION_BUILD_TESTS)
     enable_testing()
-    add_subdirectory(scripts)
+    add_subdirectory(test)
+    add_subdirectory(bench)
 endif ()
 
 # Install rules. Default ON only when ForkUnion is the top-level project: an `add_subdirectory` consumer installing
@@ -482,8 +485,8 @@ else ()
     # No environment check precedes these. Forcing topology or placement ON used to need libnuma on the build host, and
     # so needed a sentence here rather than a wall of missing symbols at link time; now it needs a Linux kernel, which
     # the header checks for itself. A capability the platform cannot honour still stops at an `#error` in `types.hpp`.
-    forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FU_WITH_TOPOLOGY)
-    forkunion_apply("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FU_WITH_PLACE_MEMORY_ON_DOMAIN)
-    forkunion_apply("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
-    forkunion_apply("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FU_WITH_PLACE_THREADS_BY_AFFINITY)
+    forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FORKUNION_WITH_TOPOLOGY)
+    forkunion_apply("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN)
+    forkunion_apply("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
+    forkunion_apply("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY)
 endif ()

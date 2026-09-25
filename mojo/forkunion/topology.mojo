@@ -50,7 +50,7 @@ comptime MemoryDomainIdAt = def(Handle, c_size_t, Pointer[Int32, MutAnyOrigin]) 
 
 
 comptime _NAME_BUFFER_BYTES = 512
-"""Enough for every capability name the C side can emit; matches `FU_CAPABILITIES_NAME_CAPACITY`."""
+"""Enough for every capability name the C side can emit; matches `FORKUNION_CAPABILITIES_NAME_CAPACITY`."""
 
 
 struct Topology:

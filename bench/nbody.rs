@@ -3,10 +3,10 @@
 //! To control the script, several environment variables are used:
 //!
 //! - `NBODY_COUNT` - number of bodies in the simulation - default the thread count.
-//! - `NBODY_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
-//! - `NBODY_ITERATIONS` - run an exact iteration count instead, when set.
-//! - `NBODY_BACKEND` - backend to use for the simulation - default `forkunion_static_shared`.
-//! - `NBODY_THREADS` - threads to use for the simulation - default the hardware thread count.
+//! - `FORKUNION_BUDGET_SECS` - wall-clock budget per run, reporting the mean rate - default 10.
+//! - `FORKUNION_ITERATIONS` - run an exact iteration count instead, when set.
+//! - `FORKUNION_BACKEND` - backend to use for the simulation - default `forkunion_static_shared`.
+//! - `FORKUNION_THREADS` - threads to use for the simulation - default the hardware thread count.
 //!
 //! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`,
 //! plus Rust-only `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the
@@ -30,13 +30,13 @@
 //! RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
 //!
 //! # Benchmark each backend
-//! NBODY_COUNT=512 NBODY_BACKEND=rayon_static target/release/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared target/release/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=tokio target/release/forkunion_nbody
+//! NBODY_COUNT=512 FORKUNION_BACKEND=rayon_static target/release/forkunion_nbody
+//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared target/release/forkunion_nbody
+//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
+//! NBODY_COUNT=512 FORKUNION_BACKEND=tokio target/release/forkunion_nbody
 //! ```
 //!
-//! File: scripts/nbody.rs
+//! File: bench/nbody.rs
 //! Author: Ash Vardanian
 use std::env;
 use std::error::Error;
@@ -181,26 +181,16 @@ fn hardware_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
-/// Parses a fractional environment variable, or `fallback` when unset or unparseable.
-fn env_f64(name: &str, fallback: f64) -> f64 {
-    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
-}
-
-/// Parses an unsigned environment variable, or `fallback` when unset or unparseable.
-fn env_usize(name: &str, fallback: usize) -> usize {
-    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
-}
-
-/// Reads an environment variable as a string, or `fallback` when unset.
-fn env_string(name: &str, fallback: &str) -> String {
-    env::var(name).unwrap_or_else(|_| fallback.into())
-}
-
-/// Whether an environment variable is present at all - part of the shared env-helper trio, kept for
-/// parity with the other demos even though this one reads no boolean knobs.
-#[allow(dead_code)]
-fn env_flag(name: &str) -> bool {
-    env::var(name).is_ok()
+/// Reads an environment variable as `T`, or `fallback` when it is unset or empty; aborts naming the
+/// variable when the text does not parse, so a typo never becomes a silent default.
+fn env_variable<T: std::str::FromStr>(name: &str, fallback: T) -> T {
+    match env::var(name) {
+        Ok(text) if !text.is_empty() => text.parse().unwrap_or_else(|_| {
+            eprintln!("{name}=\"{text}\" does not parse");
+            std::process::abort()
+        }),
+        _ => fallback,
+    }
 }
 
 /// Everything a backend reads or writes for one simulation step; the harness owns the lifetimes and
@@ -628,11 +618,11 @@ const BACKENDS: &[Backend] = &[
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Every knob this script understands, read once, up front.
-    let count = env_usize("NBODY_COUNT", 0);
-    let budget_seconds = env_f64("NBODY_SECONDS", 10.0); // ? The primary knob: a fixed window
-    let iterations = env_usize("NBODY_ITERATIONS", 0); // ? Overrides with an exact count when set
-    let backend = env_string("NBODY_BACKEND", "forkunion_static_shared");
-    let mut threads = env_usize("NBODY_THREADS", 0);
+    let count = env_variable("NBODY_COUNT", 0_usize);
+    let budget_seconds = env_variable("FORKUNION_BUDGET_SECS", 10.0_f64); // ? The primary knob: a fixed window
+    let iterations = env_variable("FORKUNION_ITERATIONS", 0_usize); // ? Overrides with an exact count when set
+    let backend = env_variable("FORKUNION_BACKEND", String::from("forkunion_static_shared"));
+    let mut threads = env_variable("FORKUNION_THREADS", 0_usize);
     if threads == 0 {
         threads = hardware_threads();
     }
@@ -727,7 +717,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
     // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    // no per-backend iteration guessing. `NBODY_ITERATIONS` forces an exact count instead.
+    // no per-backend iteration guessing. `FORKUNION_ITERATIONS` forces an exact count instead.
     let started = Instant::now();
     let mut passes = 0usize;
     if iterations > 0 {

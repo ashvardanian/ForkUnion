@@ -218,8 +218,25 @@ int main() {
 For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
 Every kernel and ISA facility the library uses is detected by default.
 CMake pins each with an `AUTO`/`ON`/`OFF` tri-state like `-D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON` or `-D FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=OFF`.
-Finer preprocessor gates - like the cache-line hints `FU_WITH_DEMOTE_CACHE_LINES` and `FU_WITH_PROMOTE_CACHE_LINES`, which push a just-written line toward the shared last-level cache via x86 `CLDEMOTE`, Arm `DC CVAC`, or RISC-V `Zicbom` so a consumer core finds it faster - accept the same overrides as compile definitions.
+Finer preprocessor gates - like the cache-line hints `FORKUNION_WITH_DEMOTE_CACHE_LINES` and `FORKUNION_WITH_PROMOTE_CACHE_LINES`, which push a just-written line toward the shared last-level cache via x86 `CLDEMOTE`, Arm `DC CVAC`, or RISC-V `Zicbom` so a consumer core finds it faster - accept the same overrides as compile definitions.
 Call `fu_comptime_capabilities()` to see what survived the build, `fu_runtime_capabilities()` to see what the machine underneath actually offers, and `fu_name_capabilities()` to render either mask as text - every binding exposes the same trio, Rust and Mojo spelling it `runtime_capabilities()` and Zig `runtimeCapabilities`, alongside a version accessor: `fu_version_major`/`_minor`/`_patch` in C, `version()` in Rust, Zig, and Mojo, and the `FORKUNION_VERSION_*` macros in C++.
+
+Every all-caps name starts with the full project name, `FORKUNION_`.
+A trailing `_` marks a name as internal: it may change in any release, and nothing outside this repository may define or test it.
+A name without it is a public contract, either a switch you may set or a value you may read.
+
+| Family                   | Form                         | Example                      |
+| :----------------------- | :--------------------------- | :--------------------------- |
+| ISA capability bit       | `FORKUNION_TARGET_<BIT>`     | `FORKUNION_TARGET_X86_PAUSE` |
+| Dispatch mode            | `FORKUNION_RUNTIME_DISPATCH` |                              |
+| Optional feature         | `FORKUNION_WITH_<FEATURE>`   | `FORKUNION_WITH_TOPOLOGY`    |
+| Permission for a liberty | `FORKUNION_ALLOW_<LIBERTY>`  | `FORKUNION_ALLOW_UNSAFE`     |
+| Architecture fact        | `FORKUNION_ARCH_<ARCH>_`     | `FORKUNION_ARCH_X86_64_`     |
+| Operating-system fact    | `FORKUNION_OS_<OS>_`         | `FORKUNION_OS_LINUX_`        |
+| Toolchain fact           | `FORKUNION_HAS_<FEATURE>_`   | `FORKUNION_HAS_INLINE_ASM_`  |
+
+Architectures are spelled `X86_64`, `X86_32`, `ARM64`, `RISCV64`, `PPC64`, `S390X` and `WASM`.
+Every name in these families is always defined, as 0 or 1, and tested with `#if`, never with `defined(...)`.
 
 ### Intro in Zig
 
@@ -917,7 +934,7 @@ Zig additionally mirrors Rust's `for_slices_mut` as `forSlicesMut`, which hands 
 Two benchmarks measure two different things, each against the same runtimes — __ForkUnion__, [__OpenMP__](https://www.openmp.org), [__Rayon__](https://github.com/rayon-rs/rayon), and [__Taskflow__](https://github.com/taskflow/taskflow) — on deliberately equal footing ¹.
 N-body stresses the __dispatch path__: every task costs the same, so what is left over is scheduling latency.
 Connected Components by label propagation stresses the __fork-join frequency__: one bandwidth-bound sweep per round until no label changes, so every round re-pays the dispatch-and-join tax.
-Implementations live in `scripts/nbody.{cpp,rs,zig,mojo}` and `scripts/propagation.{cpp,rs,zig,mojo}`, and every binary generates a __bit-identical graph__ from the same counter-based SplitMix64 generator, so cells compare exactly across languages.
+Implementations live in `bench/nbody.{cpp,rs,zig,mojo}` and `bench/propagation.{cpp,rs,zig,mojo}`, and every binary generates a __bit-identical graph__ from the same counter-based SplitMix64 generator, so cells compare exactly across languages.
 
 ### N-Body — Dispatch Latency
 
@@ -951,7 +968,7 @@ What the spread means - all on the 128× SPR, same binaries, same graph:
 - __Which of those two columns leads is a toolchain detail__: the compilers vectorize the identical kernel slightly differently - on the 24× i9, LLVM widens the fast-inverse-square-root to 256-bit lanes where MinGW-GCC keeps its integer lanes at 128-bit, so Rust pulls ahead - and Rust can, in rare cases, reach more of a host's instruction set through runtime dispatch.
 
 > ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, one warmup pass, and the same one-vertex dynamic grain in every runtime.
-> The finer per-benchmark protocol - scheduling equivalents, page-placement controls, and what each knob defaults to - lives in the `scripts/nbody.*` and `scripts/propagation.*` headers.
+> The finer per-benchmark protocol - scheduling equivalents, page-placement controls, and what each knob defaults to - lives in the `bench/nbody.*` and `bench/propagation.*` headers.
 
 You can rerun these benchmarks with the following commands:
 
@@ -960,12 +977,12 @@ cmake -B build_release -D CMAKE_BUILD_TYPE=Release
 cmake --build build_release --config Release
 # Rust examples: plain `cargo build` grants neither flag, so parity needs both set explicitly
 RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
-# N-body: microseconds per dispatch, sustained over a fixed window (NBODY_SECONDS, default 10 s)
-NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
-NBODY_COUNT=512 NBODY_BACKEND=taskflow_dynamic build_release/forkunion_nbody
+# N-body: microseconds per dispatch, sustained over a fixed window (FORKUNION_BUDGET_SECS, default 10 s)
+NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+NBODY_COUNT=512 FORKUNION_BACKEND=taskflow_dynamic build_release/forkunion_nbody
 # Connected components: traversal throughput on a necklace graph; PROPAGATION_COMMUNITIES controls the rounds
-PROPAGATION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
-PROPAGATION_BACKEND=rayon_dynamic target/release/forkunion_propagation
+FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
+FORKUNION_BACKEND=rayon_dynamic target/release/forkunion_propagation
 ```
 
 ## Safety & Logic
@@ -1113,14 +1130,14 @@ zig build test --summary all               # run tests
 zig build -Dplace-memory-on-domain=true    # require NUMA-aware allocations (Linux)
 zig build -Dportable=true                  # STL thread pool only
 
-# Run benchmarks from the `scripts` directory
-cd scripts
+# Run benchmarks from the `bench` directory
+cd bench
 zig build -Doptimize=ReleaseFast
-NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
-PROPAGATION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
+NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
+FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
 ```
 
-Check the `scripts/nbody.zig` and `scripts/propagation.zig` headers for additional benchmarking options.
+Check the `bench/nbody.zig` and `bench/propagation.zig` headers for additional benchmarking options.
 
 ---
 
@@ -1136,8 +1153,8 @@ The benchmarks sit in their own environment because their baseline needs `max`, 
 Both take the same environment variables as the other ports, the four `forkunion_{static,dynamic}_{shared,replicated}` cells, and a `max_parallelize` baseline:
 
 ```bash
-NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated pixi run -e benchmarks nbody
-PROPAGATION_BACKEND=max_parallelize pixi run -e benchmarks propagation
+NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated pixi run -e benchmarks nbody
+FORKUNION_BACKEND=max_parallelize pixi run -e benchmarks propagation
 PROPAGATION_CHECK=1 pixi run -e benchmarks propagation   # converge serially too, and fail on any disagreement
 ```
 
@@ -1146,7 +1163,7 @@ The suite's own per-test durations are not wall clock — a pool's workers busy-
 ```bash
 pixi run -e portable test   # the STL thread pool only
 pixi run -e numa test       # require NUMA-aware allocations
-mojo format mojo/forkunion/*.mojo scripts/*.mojo   # width pinned in pyproject.toml
+mojo format mojo/forkunion/*.mojo test/*.mojo bench/*.mojo   # width pinned in pyproject.toml
 ```
 
 ## Citation

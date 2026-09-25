@@ -101,7 +101,8 @@ pub const Capabilities = packed struct(u32) {
     colocate_pools_on_domain: bool = false,
 
     /// `CLDEMOTE` moves a just-written line toward the shared LLC and retains it. Reporting-only:
-    /// the emitter is chosen at compile time by `FU_WITH_DEMOTE_CACHE_LINES`, never dispatched.
+    /// the emitter is chosen at compile time by `FORKUNION_WITH_DEMOTE_CACHE_LINES`, never
+    /// dispatched.
     x86_cldemote: bool = false,
     /// `DC CVAC` cleans a dirty line to the coherency point - AArch64's nearest demote. Set where
     /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
@@ -329,7 +330,7 @@ test "capability bits match the C ABI numbering" {
 test "system capabilities" {
     const comptime_caps = comptimeCapabilities();
     const runtime_caps = runtimeCapabilities();
-    // `FU_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
+    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
     var runtime_buf: [512]u8 = undefined;
     try std.testing.expect((try runtimeCapabilitiesString(&runtime_buf)).len > 0);
 

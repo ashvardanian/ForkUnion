@@ -1,19 +1,19 @@
 # Toolchain probes
 
 One probe per instruction-level capability bit of `capabilities_t`, each emitting exactly what the header emits for that bit: a mnemonic, a raw encoding, or the intrinsic MSVC reaches it through.
-The `cmake/fu_<arch>_isa_probes.cmake` files compile them at configure time into one `fu_compile_definitions_` list of `FU_TARGET_<BIT>=0/1`, handed privately to the compiled libraries and the tests, never to `forkunion::header`.
-A consumer's own unit derives each bit in `types.hpp` - what the toolchain builds when it sets `FU_RUNTIME_DISPATCH`, what the compilation target promises otherwise.
+The `cmake/fu_<arch>_isa_probes.cmake` files compile them at configure time into one `fu_compile_definitions_` list of `FORKUNION_TARGET_<BIT>=0/1`, handed privately to the compiled libraries and the tests, never to `forkunion::header`.
+A consumer's own unit derives each bit in `types.hpp` - what the toolchain builds when it sets `FORKUNION_RUNTIME_DISPATCH`, what the compilation target promises otherwise.
 
 The verdict answers one question: can this toolchain build this bit's path.
 Every extension instruction is a raw encoding, so those probes fail only where `__asm__` is missing.
 The LSE and RCpc mnemonics ride on `.arch_extension`, which every assembler of the last decade takes.
 MSVC has no inline assembly and spells both rungs as intrinsics instead, so those two probes carry a second arm.
-`__ldapr32` needs no flag, while the LSE arithmetic goes through `_Interlocked*`, which stays inline only under `/arch:armv8.1`, so the LSE probe asks for that flag through `__ARM_FEATURE_ATOMICS`, the same macro `FU_DETECT_ARM64_ATOMIC_INTRINSICS_` keys the header's definitions on.
+`__ldapr32` needs no flag, while the LSE arithmetic goes through `_Interlocked*`, which stays inline only under `/arch:armv8.1`, so the LSE probe asks for that flag through `__ARM_FEATURE_ATOMICS`, the same macro `FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_` keys the header's definitions on.
 A baseline MSVC therefore answers LSE 0 and RCpc 1, and the demotion in `types.hpp` takes the child rung down with its parent.
 The RISC-V base atomics are the A extension's own mnemonics, so that probe also needs the extension in `-march`, as every `rv64gc` build has.
 Whether the CPU has the instruction is the runtime's question, answered by `cpu_capabilities()`, never by a probe.
 
-The OS-level bits - owned threads, topology, placements, transparent huge pages - have no probe: the `FU_WITH_*` tri-states and the runtime answer those.
+The OS-level bits - owned threads, topology, placements, transparent huge pages - have no probe: the `FORKUNION_WITH_*` tri-states and the runtime answer those.
 
 | bit                                                                     | probe                                                                           | needs                                           |
 | :---------------------------------------------------------------------- | :------------------------------------------------------------------------------ | :---------------------------------------------- |

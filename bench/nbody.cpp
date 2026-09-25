@@ -1,5 +1,5 @@
 /**
- *  @file scripts/nbody.cpp
+ *  @file bench/nbody.cpp
  *  @author Ash Vardanian
  *  @date May 23, 2025
  *  @brief Demo app: N-Body simulation with ForkUnion and OpenMP.
@@ -7,11 +7,11 @@
  *  To control the script, several environment variables are used:
  *
  *  - @c NBODY_COUNT - number of bodies in the simulation, defaulting to the number of threads.
- *  - @c NBODY_SECONDS - wall-clock budget per run, reporting the sustained rate - default 10.
- *  - @c NBODY_ITERATIONS - run an exact iteration count instead, when set.
- *  - @c NBODY_BACKEND - backend to use for the simulation, defaulting to
+ *  - @c FORKUNION_BUDGET_SECS - wall-clock budget per run, reporting the mean rate - default 10.
+ *  - @c FORKUNION_ITERATIONS - run an exact iteration count instead, when set.
+ *  - @c FORKUNION_BACKEND - backend to use for the simulation, defaulting to
  *    @c forkunion_static_shared.
- *  - @c NBODY_THREADS - number of threads to use, defaulting to the hardware thread count.
+ *  - @c FORKUNION_THREADS - number of threads to use, defaulting to the hardware thread count.
  *
  *  The backends include: `forkunion_{static,dynamic}_{shared,replicated}`,
  *  `openmp_{static,dynamic}`, and `taskflow_{static,dynamic}`.
@@ -20,7 +20,7 @@
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release
  *  cmake --build build_release --config Release
- *  NBODY_COUNT=128 NBODY_THREADS=$(nproc) build_release/forkunion_nbody
+ *  NBODY_COUNT=128 FORKUNION_THREADS=$(nproc) build_release/forkunion_nbody
  *  @endcode
  *
  *  Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
@@ -32,10 +32,10 @@
  *  To benchmark each backend:
  *
  *  @code{.sh}
- *  NBODY_COUNT=512 NBODY_BACKEND=openmp_static build_release/forkunion_nbody
- *  NBODY_COUNT=512 NBODY_BACKEND=openmp_dynamic build_release/forkunion_nbody
- *  NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
- *  NBODY_COUNT=512 NBODY_BACKEND=forkunion_dynamic_shared build_release/forkunion_nbody
+ *  NBODY_COUNT=512 FORKUNION_BACKEND=openmp_static build_release/forkunion_nbody
+ *  NBODY_COUNT=512 FORKUNION_BACKEND=openmp_dynamic build_release/forkunion_nbody
+ *  NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+ *  NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_dynamic_shared build_release/forkunion_nbody
  *  @endcode
  *
  *  On macOS, you may need to install OpenMP support via Homebrew:
@@ -48,8 +48,8 @@
  *    -D CMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \
  *    -D CMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib"
  *  cmake --build build_release --config Release
- *  NBODY_COUNT=512 NBODY_THREADS=$(sysctl -n hw.logicalcpu) \
- *    NBODY_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+ *  NBODY_COUNT=512 FORKUNION_THREADS=$(sysctl -n hw.logicalcpu) \
+ *    FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
  *  @endcode
  */
 #include <cmath>   // `std::floor`
@@ -73,7 +73,10 @@
 
 #include <forkunion.hpp>
 
+#include "harness.hpp" // `env_variable`, `log_environment`
+
 namespace fu = ashvardanian::forkunion;
+using fu::bench::env_variable;
 
 #pragma region Shared Logic
 
@@ -392,36 +395,13 @@ static constexpr backend_t backends_k[] = {
 
 #pragma endregion Backends
 
-/** Reads an environment variable, or @p fallback when unset - @c getenv_s on MSVC. */
-static char const *env_string(char const *name, char const *fallback) noexcept {
-#if defined(_MSC_VER)
-    static thread_local char buffer[256];
-    std::size_t required = 0;
-    return (getenv_s(&required, buffer, sizeof(buffer), name) == 0 && required > 0) ? buffer : fallback;
-#else
-    char const *value = std::getenv(name);
-    return value ? value : fallback;
-#endif
-}
-
-/** Parses a fractional environment variable, or @p fallback when unset. */
-static double env_double(char const *name, double fallback) noexcept {
-    char const *value = env_string(name, nullptr);
-    return value ? std::atof(value) : fallback;
-}
-
-/** Parses an unsigned environment variable, or @p fallback when unset. */
-static std::size_t env_usize(char const *name, std::size_t fallback) noexcept {
-    char const *value = env_string(name, nullptr);
-    return value ? static_cast<std::size_t>(std::strtoull(value, nullptr, 10)) : fallback;
-}
-
 int main() {
-    std::size_t n = env_usize("NBODY_COUNT", 0);
-    double const budget_seconds = env_double("NBODY_SECONDS", 10);   // ? The primary knob: a fixed window
-    std::size_t const iterations = env_usize("NBODY_ITERATIONS", 0); // ? Overrides with an exact count when set
-    std::string_view const backend = env_string("NBODY_BACKEND", "forkunion_static_shared");
-    std::size_t threads = env_usize("NBODY_THREADS", 0);
+    fu::bench::log_environment();
+    std::size_t n = env_variable("NBODY_COUNT", std::size_t {0});
+    double const budget_seconds = env_variable("FORKUNION_BUDGET_SECS", 10.0); // ? The primary knob: a fixed window
+    std::size_t const iterations = env_variable("FORKUNION_ITERATIONS", std::size_t {0}); // ? Exact count when set
+    std::string_view const backend = env_variable("FORKUNION_BACKEND", "forkunion_static_shared");
+    std::size_t threads = env_variable("FORKUNION_THREADS", std::size_t {0});
     if (threads == 0) threads = fu::allowed_cores_count();
     if (n == 0) n = threads;
 
@@ -494,7 +474,7 @@ int main() {
     if (taskflow) context.taskflow = &*taskflow;
     // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
     // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    // no per-backend iteration guessing. `NBODY_ITERATIONS` forces an exact count instead.
+    // no per-backend iteration guessing. `FORKUNION_ITERATIONS` forces an exact count instead.
     auto const started = std::chrono::steady_clock::now();
     std::size_t passes = 0;
     if (iterations > 0)

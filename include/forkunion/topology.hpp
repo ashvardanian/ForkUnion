@@ -7,7 +7,7 @@
  */
 #pragma once
 #include "capabilities.hpp"
-#if FU_ON_LINUX && FU_WITH_OS_THREADS
+#if FORKUNION_OS_LINUX_ && FORKUNION_WITH_OS_THREADS
 #include <sys/syscall.h> // `SYS_gettid`
 #include <unistd.h>      // `syscall`
 #endif
@@ -26,17 +26,17 @@ namespace forkunion {
  *  scheduler or a profiler will show you; neither is a @c pthread_t.
  */
 inline std::uint64_t current_thread_id() noexcept {
-#if FU_ON_LINUX && FU_WITH_OS_THREADS
+#if FORKUNION_OS_LINUX_ && FORKUNION_WITH_OS_THREADS
     // The `gettid()` wrapper only appeared in glibc 2.30; the syscall reaches every libc.
     return static_cast<std::uint64_t>(::syscall(SYS_gettid));
-#elif FU_ON_APPLE
+#elif FORKUNION_OS_APPLE_
     std::uint64_t thread_id = 0;
     ::pthread_threadid_np(nullptr, &thread_id);
     return thread_id;
-#elif FU_ON_WINDOWS && FU_WITH_OS_THREADS
+#elif FORKUNION_OS_WINDOWS_ && FORKUNION_WITH_OS_THREADS
     // A `DWORD` that a debugger or Task Manager will show you; distinct from the `HANDLE`.
     return static_cast<std::uint64_t>(::GetCurrentThreadId());
-#elif FU_ON_FREEBSD
+#elif FORKUNION_OS_FREEBSD_
     // The kernel's lwpid, which is what `rtprio_thread` addresses; distinct from the `pthread_t`.
     return static_cast<std::uint64_t>(::pthread_getthreadid_np());
 #else
@@ -52,11 +52,11 @@ inline std::uint64_t current_thread_id() noexcept {
  *  call, the worker names itself once it is running - the one shape both kernels agree on.
  */
 inline void set_current_thread_name([[maybe_unused]] char const *thread_name) noexcept {
-#if FU_ON_LINUX && FU_WITH_OS_THREADS
+#if FORKUNION_OS_LINUX_ && FORKUNION_WITH_OS_THREADS
     (void)::pthread_setname_np(::pthread_self(), thread_name);
-#elif FU_ON_APPLE
+#elif FORKUNION_OS_APPLE_
     (void)::pthread_setname_np(thread_name);
-#elif FU_ON_WINDOWS && FU_WITH_OS_THREADS
+#elif FORKUNION_OS_WINDOWS_ && FORKUNION_WITH_OS_THREADS
     // `SetThreadDescription` wants UTF-16 and only exists on Windows 10 1607+. Resolve it at
     // runtime so a binary keeps loading on older Windows, where the name is simply not applied -
     // the same "best effort, never fatal" contract the POSIX paths keep.
@@ -87,10 +87,10 @@ inline void set_current_thread_name([[maybe_unused]] char const *thread_name) no
  *  reserves IDs for cores that are offline right now. Elsewhere the distinction does not exist.
  */
 inline std::size_t possible_cores() noexcept {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
     DWORD const configured = ::GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     if (configured > 0) return static_cast<std::size_t>(configured);
-#elif FU_ON_POSIX
+#elif FORKUNION_OS_POSIX_
     // ! Not `_SC_NPROCESSORS_ONLN`: a core that is offline right now still owns an ID, and a mask
     // ! sized to the online count would refuse to name it.
     long const configured = ::sysconf(_SC_NPROCESSORS_CONF);
@@ -108,7 +108,7 @@ inline std::size_t possible_cores() noexcept {
  *  table threaded through its signature. The low 6 bits hold the in-group index (a mask is 64 bits,
  *  so the index is 0..63); the remaining bits hold the group number. Everywhere else a @c core_id_t
  *  is still just an opaque, comparable id - only the pinning path decodes it. */
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
 inline constexpr int win_core_group_shift_k = 6;
 inline constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
 
@@ -122,17 +122,17 @@ inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
 }
 inline WORD win_core_group(core_id_t id) noexcept { return static_cast<WORD>(id >> win_core_group_shift_k); }
 inline unsigned win_core_index(core_id_t id) noexcept { return static_cast<unsigned>(id & win_core_index_mask_k); }
-#endif // FU_ON_WINDOWS
+#endif // FORKUNION_OS_WINDOWS_
 
 /*  The unit each kernel writes its affinity mask in. Deliberately not @c std::uint64_t everywhere:
  *  a glibc @c cpu_set_t is an array of @c __cpu_mask, a FreeBSD @c cpuset_t an array of @c long,
  *  and a Windows @c GROUP_AFFINITY carries one 64-bit @c KAFFINITY. Matching the word keeps the
  *  aliasing below honest on 32-bit and big-endian targets alike. */
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
 using core_mask_word_t = KAFFINITY;
-#elif FU_ON_FREEBSD
+#elif FORKUNION_OS_FREEBSD_
 using core_mask_word_t = long;
-#elif FU_ON_POSIX
+#elif FORKUNION_OS_POSIX_
 using core_mask_word_t = unsigned long;
 #else
 using core_mask_word_t = std::uint64_t;
@@ -174,7 +174,7 @@ class core_mask {
      *      with 80 processors still emits ids up to 103, and sizing by core count would drop them.
      */
     static std::size_t id_space() noexcept {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
         WORD const groups = ::GetActiveProcessorGroupCount();
         return static_cast<std::size_t>(groups ? groups : 1) * win_processors_per_group_k;
 #else
@@ -228,7 +228,7 @@ using core_mask_t = core_mask<>;
  *  @return false where the platform exposes no such mask, which is @b not an error.
  */
 inline status_t capture_thread_cores([[maybe_unused]] core_mask_t &cores) noexcept {
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
     // A `cpu_set_t` is an array of `__cpu_mask`, exactly `core_mask_word_t` here. The kernel
     // rejects a buffer smaller than its cpumask; grow once instead of guessing `nr_cpu_ids`.
     std::size_t cores_to_fit = core_mask_t::id_space();
@@ -241,7 +241,7 @@ inline status_t capture_thread_cores([[maybe_unused]] core_mask_t &cores) noexce
     cores.reset();
     return status_t::unsupported_k;
 
-#elif FU_ON_WINDOWS
+#elif FORKUNION_OS_WINDOWS_
     // A thread lives in one processor group at a time, so that group's mask is its allowed set.
     if (status_t const grew = cores.resize(); failed(grew)) return grew;
     GROUP_AFFINITY affinity = {};
@@ -250,7 +250,7 @@ inline status_t capture_thread_cores([[maybe_unused]] core_mask_t &cores) noexce
         if (affinity.Mask & (static_cast<KAFFINITY>(1) << bit)) cores.add(win_encode_core_id(affinity.Group, bit));
     return status_t::success_k;
 
-#elif FU_ON_FREEBSD
+#elif FORKUNION_OS_FREEBSD_
     // ! FreeBSD spells `sched_getaffinity` as `cpuset_getaffinity`; `-1` means "this thread".
     if (status_t const grew = cores.resize(); failed(grew)) return grew;
     if (::cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, cores.bytes(),
@@ -287,7 +287,7 @@ inline std::size_t allowed_cores_count() noexcept {
 #pragma region Thread Placement
 
 /** The OS thread handle a @c colocated_pool stores, joins, and pins - one per worker. */
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
 
 /** From @c CreateThread; identity is tracked by thread id, not this. */
 using native_thread_t = HANDLE;
@@ -312,7 +312,7 @@ using native_thread_t = pthread_t;
  */
 inline status_t apply_thread_cores([[maybe_unused]] native_thread_t thread,
                                    [[maybe_unused]] core_mask_t const &cores) noexcept {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
     // Every core in a compute domain shares a processor group, so one `GROUP_AFFINITY` covers them,
     // and a thread cannot span groups. Cores from another group are a caller error, not a mask.
     GROUP_AFFINITY affinity = {};
@@ -329,13 +329,13 @@ inline status_t apply_thread_cores([[maybe_unused]] native_thread_t thread,
     return ::SetThreadGroupAffinity(thread, &affinity, nullptr) != 0 ? status_t::success_k
                                                                      : status_t::permission_denied_k;
 
-#elif FU_ON_FREEBSD
+#elif FORKUNION_OS_FREEBSD_
     if (!cores.valid()) return status_t::invalid_argument_k;
     return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpuset_t const *>(cores.data())) == 0
                ? status_t::success_k
                : status_t::permission_denied_k;
 
-#elif FU_ON_ANDROID
+#elif FORKUNION_OS_ANDROID_
     // Bionic gained `pthread_setaffinity_np` only at NDK API 36, so pin through `sched_setaffinity`
     // on the thread's tid instead - it works at every level, with `pthread_gettid_np` from API 21
     // mapping the handle to that tid.
@@ -345,7 +345,7 @@ inline status_t apply_thread_cores([[maybe_unused]] native_thread_t thread,
                ? status_t::success_k
                : status_t::permission_denied_k;
 
-#elif FU_WITH_PLACE_THREADS_BY_AFFINITY
+#elif FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
     if (!cores.valid()) return status_t::invalid_argument_k;
     return ::pthread_setaffinity_np(thread, cores.bytes(), static_cast<cpu_set_t const *>(cores.data())) == 0
                ? status_t::success_k
@@ -364,7 +364,7 @@ inline status_t apply_thread_cores([[maybe_unused]] native_thread_t thread,
  */
 inline status_t pin_thread_to_cores([[maybe_unused]] native_thread_t thread, [[maybe_unused]] core_id_t const *cores,
                                     [[maybe_unused]] std::size_t const count) noexcept {
-#if FU_WITH_PLACE_THREADS_BY_AFFINITY
+#if FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
     if (count == 0) return status_t::invalid_argument_k;
     core_mask_t mask;
     if (status_t const grew = mask.resize(); failed(grew)) return grew;
@@ -391,9 +391,9 @@ inline status_t pin_thread_to_cores([[maybe_unused]] native_thread_t thread, [[m
  *  @c numa_run_on_node would rewrite the very CPU mask we just restored.
  */
 inline status_t restore_thread_cores([[maybe_unused]] core_mask_t const &saved) noexcept {
-#if FU_WITH_PLACE_THREADS_BY_AFFINITY
+#if FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
     if (!saved.valid()) return status_t::invalid_argument_k;
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
     return apply_thread_cores(::GetCurrentThread(), saved);
 #else
     return apply_thread_cores(::pthread_self(), saved);
@@ -406,7 +406,7 @@ inline status_t restore_thread_cores([[maybe_unused]] core_mask_t const &saved) 
 #pragma endregion Thread Placement
 
 #pragma region Sysfs Readers
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
 
 /**
  *  @brief Reads one unsigned integer out of a `/sys` or `/proc` file.
@@ -440,7 +440,7 @@ inline status_t read_line_at_path(char const *path, char *line, std::size_t cons
     if (length == line_capacity - 1 && line[line_capacity - 2] != '\n') return status_t::topology_unavailable_k;
     return status_t::success_k;
 }
-#endif // FU_ON_LINUX
+#endif // FORKUNION_OS_LINUX_
 #pragma endregion Sysfs Readers
 
 #pragma region Memory Inventory
@@ -476,9 +476,9 @@ inline constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull
  *  @note On Linux, this is the system page size, which may differ from Huge Pages sizes.
  */
 inline std::size_t ram_page_size() noexcept {
-#if FU_ON_POSIX
+#if FORKUNION_OS_POSIX_
     return static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
-#elif FU_ON_WINDOWS
+#elif FORKUNION_OS_WINDOWS_
     SYSTEM_INFO system_info;
     ::GetSystemInfo(&system_info);
     return static_cast<std::size_t>(system_info.dwPageSize);
@@ -493,7 +493,7 @@ inline std::size_t ram_page_size() noexcept {
  *  @note This function provides cross-platform detection of total physical memory.
  */
 inline std::size_t volume_ram() noexcept {
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
     // On Linux, read from /proc/meminfo
     FILE *meminfo_file = ::fopen("/proc/meminfo", "r");
     if (!meminfo_file) return 0;
@@ -510,20 +510,20 @@ inline std::size_t volume_ram() noexcept {
     }
     ::fclose(meminfo_file);
     return 0;
-#elif FU_ON_APPLE
+#elif FORKUNION_OS_APPLE_
     // On macOS, use sysctl
     int mib[2] = {CTL_HW, HW_MEMSIZE};
     std::uint64_t memory_bytes = 0;
     std::size_t size = sizeof(memory_bytes);
     if (::sysctl(mib, 2, &memory_bytes, &size, nullptr, 0) == 0) return static_cast<std::size_t>(memory_bytes);
     return 0;
-#elif FU_ON_WINDOWS
+#elif FORKUNION_OS_WINDOWS_
     // On Windows, use GlobalMemoryStatusEx
     MEMORYSTATUSEX mem_status;
     mem_status.dwLength = sizeof(mem_status);
     if (::GlobalMemoryStatusEx(&mem_status)) return static_cast<std::size_t>(mem_status.ullTotalPhys);
     return 0;
-#elif FU_ON_POSIX
+#elif FORKUNION_OS_POSIX_
     // On other Unix systems, try sysconf
     long pages = ::sysconf(_SC_PHYS_PAGES);
     long page_size = ::sysconf(_SC_PAGE_SIZE);
@@ -601,7 +601,7 @@ class ram_page_settings {
     status_t harvest([[maybe_unused]] memory_domain_id_t memory_domain_id) noexcept {
         assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FORKUNION_OS_LINUX_
 
         sizes_.clear();
 
@@ -703,7 +703,7 @@ class ram_page_settings {
 
         return status_t::success_k;
 
-#elif FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_WINDOWS
+#elif FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FORKUNION_OS_WINDOWS_
         // Windows exposes exactly one large-page size, and only when the caller holds the
         // `SeLockMemoryPrivilege`; there is no per-node pool to enumerate or reserve.
         fu_unused_(memory_domain_id);
@@ -824,7 +824,7 @@ struct compute_domain_t {
 
     /** QoS ordinal, sorted least-to-most performant. */
     std::size_t compute_level {0};
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 
     /**
      *  @brief Apple's absolute class for these cores, from `hw.perflevelN.name`; -1 when unnamed.
@@ -876,7 +876,7 @@ inline socket_id_t socket_id_of_core([[maybe_unused]] core_id_t core_id) noexcep
 
     int socket_id = -1;
 
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
     char socket_path[256];
     int path_result = std::snprintf(      //
         socket_path, sizeof(socket_path), //
@@ -906,7 +906,7 @@ inline std::size_t capacity_of_core([[maybe_unused]] core_id_t core_id) noexcept
 
     std::size_t capacity = 0;
 
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
     char capacity_path[256];
     int path_result = std::snprintf(          //
         capacity_path, sizeof(capacity_path), //
@@ -977,7 +977,7 @@ inline bool cpu_list_within(char const *line, core_id_t const *cores, std::size_
 inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
                                        [[maybe_unused]] core_id_t const *domain_cores,
                                        [[maybe_unused]] std::size_t domain_cores_count) noexcept {
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
     std::size_t deepest_bytes = 0;
     for (int index = 0; index < 16; ++index) {
         char path[256];
@@ -1023,7 +1023,7 @@ inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
     if (deepest_bytes) return deepest_bytes;
 #endif
 
-#if FU_DETECT_ARCH_X86_64_
+#if FORKUNION_ARCH_X86_64_
     // CPUID reports the executing core's caches: exact on homogeneous parts, and only a fallback
     // where the per-core sysfs above is absent, so hybrid mislabeling never reaches Linux.
     // ? AMD mirrors Intel's deterministic leaf 0x4 at 0x8000001D
@@ -1072,7 +1072,7 @@ inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
  *  through to the caller's compiled default rather than sizing an arena.
  */
 inline std::size_t cache_line_bytes() noexcept {
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
     if (FILE *file = ::fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r")) {
         unsigned long long parsed = 0;
         bool const parsed_one = ::fscanf(file, "%llu", &parsed) == 1;
@@ -1081,7 +1081,7 @@ inline std::size_t cache_line_bytes() noexcept {
             return static_cast<std::size_t>(parsed);
     }
 #endif
-#if FU_ON_APPLE
+#if FORKUNION_OS_APPLE_
     // The widest line across both core tiers, so a P-core's 128 is never rounded down to an
     // E-core's 64. Spelled out rather than routed through `apple_sysctl_uint`, which the Platform
     // Probes region below defines only after this one.
@@ -1091,7 +1091,7 @@ inline std::size_t cache_line_bytes() noexcept {
         apple_line >= 16 && apple_line <= 1024 && std::has_single_bit(apple_line))
         return static_cast<std::size_t>(apple_line);
 #endif
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
     DWORD windows_length = 0;
     ::GetLogicalProcessorInformationEx(RelationCache, nullptr, &windows_length);
     if (windows_length)
@@ -1111,7 +1111,7 @@ inline std::size_t cache_line_bytes() noexcept {
             if (widest >= 16 && widest <= 1024 && std::has_single_bit(widest)) return widest;
         }
 #endif
-#if FU_DETECT_ARCH_X86_64_
+#if FORKUNION_ARCH_X86_64_
     // EBX[11:0] of the deterministic leaf holds the line size less one; AMD mirrors leaf 0x4 at
     // 0x8000001D. Subleaf 0 is L1D, whose line every other level shares on every x86 part.
     std::uint32_t const line_deterministic_leaf = 0x8000'001Du;
@@ -1138,7 +1138,7 @@ inline std::size_t cache_line_bytes() noexcept {
 inline std::size_t destructive_interference_bytes() noexcept {
     std::size_t const line = cache_line_bytes();
     if (line == 0) return 0;
-    return FU_DETECT_ARCH_X86_64_ ? line * 2 : line;
+    return FORKUNION_ARCH_X86_64_ ? line * 2 : line;
 }
 
 #pragma endregion Cache Hierarchy
@@ -1148,7 +1148,7 @@ inline std::size_t destructive_interference_bytes() noexcept {
 #pragma region Linux Memory Domains
 /*  Everything @c libnuma was asked for, asked of `/sys/devices/system/node` instead - which is
  *  where @c libnuma read it from too. */
-#if FU_WITH_TOPOLOGY && FU_ON_LINUX
+#if FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
 
 inline constexpr char const *sysfs_node_root_k = "/sys/devices/system/node";
 
@@ -1230,11 +1230,11 @@ inline status_t capture_memory_domain_cores(memory_domain_id_t const id, core_ma
     });
     return status_t::success_k;
 }
-#endif // FU_WITH_TOPOLOGY && FU_ON_LINUX
+#endif // FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
 #pragma endregion Linux Memory Domains
 
 #pragma region Windows Processor Groups
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
 
 /**
  *  @brief One accumulator per processor group and efficiency class: the union of that class's core
@@ -1302,11 +1302,11 @@ inline socket_id_t win_socket_for_node( //
     }
     return fallback;
 }
-#endif // FU_ON_WINDOWS
+#endif // FORKUNION_OS_WINDOWS_
 #pragma endregion Windows Processor Groups
 
 #pragma region Apple Performance Levels
-#if FU_ON_APPLE
+#if FORKUNION_OS_APPLE_
 
 /**
  *  @brief Reads an unsigned integer @c sysctl by name, like "hw.nperflevels", or 0 if unavailable.
@@ -1318,11 +1318,11 @@ inline std::size_t apple_sysctl_uint(char const *name) noexcept {
     if (::sysctlbyname(name, &value, &length, nullptr, 0) != 0) return 0;
     return static_cast<std::size_t>(value);
 }
-#endif // FU_ON_APPLE
+#endif // FORKUNION_OS_APPLE_
 
 /*  The core-quality kit exists for one consumer, the QoS class a @c colocated_pool assigns at
  *  spawn, so that capability gates it: disabling it drops producer, field, and consumer alike. */
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 
 /** Reads a string @c sysctl by name into @p out, NUL-terminated, and empty where it is missing. */
 inline void apple_sysctl_string(char const *name, char *out, std::size_t cap) noexcept {
@@ -1372,7 +1372,7 @@ inline core_quality_t apple_core_quality_from_name(char const *name) noexcept {
     }
     return apple_performance_k;
 }
-#endif // FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#endif // FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 #pragma endregion Apple Performance Levels
 
 #pragma endregion Platform Probes
@@ -1554,9 +1554,9 @@ struct machine_topology {
      *  @return false only if the core count is zero or an allocation fails.
      *
      *  The uniform view used when no richer topology source exists - a build without
-     *  @c FU_WITH_TOPOLOGY, or a machine the kernel reports no NUMA for. Every query then returns a
-     *  sensible whole-machine answer and a @c distributed_pool degenerates to one domain, so
-     *  @c fu_topology_t is usable anywhere.
+     *  @c FORKUNION_WITH_TOPOLOGY, or a machine the kernel reports no NUMA for. Every query then
+     *  returns a sensible whole-machine answer and a @c distributed_pool degenerates to one domain,
+     *  so @c fu_topology_t is usable anywhere.
      */
     status_t harvest_portable() noexcept {
         reset();
@@ -1618,7 +1618,7 @@ struct machine_topology {
 #pragma endregion Portable Harvest
 
 #pragma region FreeBSD Harvest
-#if FU_ON_FREEBSD
+#if FORKUNION_OS_FREEBSD_
 
     /**
      *  @brief Harvests memory domains and cores through the in-kernel @c cpuset/NUMA framework.
@@ -1733,7 +1733,7 @@ struct machine_topology {
         compute_levels_count_ = 1;
         return status_t::success_k;
     }
-#endif // FU_ON_FREEBSD
+#endif // FORKUNION_OS_FREEBSD_
 #pragma endregion FreeBSD Harvest
 
 #pragma region Linux Harvest and Dispatch
@@ -1747,7 +1747,7 @@ struct machine_topology {
      *  pool always sees at least one compute and one memory domain.
      */
     status_t harvest() noexcept {
-#if FU_WITH_TOPOLOGY && FU_ON_LINUX
+#if FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
         reset();
 
         // The cores this process may actually run on. A cgroup `cpuset` or a `taskset` narrows it,
@@ -1932,12 +1932,12 @@ struct machine_topology {
         // `measured_fabric::harvest` in `distributed.hpp` derives real tiers from observed
         // bandwidths, latency splitting ties.
         return status_t::success_k; // ? Every scratch array above frees itself here
-#endif                              // FU_WITH_TOPOLOGY
-#if FU_ON_APPLE
+#endif                              // FORKUNION_WITH_TOPOLOGY
+#if FORKUNION_OS_APPLE_
         return harvest_apple();
-#elif FU_ON_WINDOWS
+#elif FORKUNION_OS_WINDOWS_
         return harvest_windows();
-#elif FU_ON_FREEBSD
+#elif FORKUNION_OS_FREEBSD_
         return harvest_freebsd();
 #else
         return harvest_portable();
@@ -1947,7 +1947,7 @@ struct machine_topology {
 #pragma endregion Linux Harvest and Dispatch
 
 #pragma region Apple Harvest
-#if FU_ON_APPLE
+#if FORKUNION_OS_APPLE_
 
     /**
      *  @brief Harvests the Apple Silicon topology from @c sysctl performance levels.
@@ -2021,7 +2021,7 @@ struct machine_topology {
             // ? A level with no `cpusperl2` is one undivided cluster, not zero-sized ones.
             if (cores_per_cluster == 0 || cores_per_cluster > level_cores) cores_per_cluster = level_cores;
 
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
             // The absolute class the QoS choice keys on; a hidden name (a locked-down sandbox)
             // parses to a big tier, never to efficiency cores.
             std::snprintf(name, sizeof(name), "hw.perflevel%zu.name", level);
@@ -2039,7 +2039,7 @@ struct machine_topology {
                 domain.memory_domain_id = 0;
                 domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
                 domain.compute_level = level_rank; // ? Sibling clusters share their level's rank
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
                 domain.apple_core_quality = level_quality;
 #endif
                 domain.capacity = 0;
@@ -2077,11 +2077,11 @@ struct machine_topology {
         compute_levels_count_ = levels_written; // ! Several clusters may share one level - not `domains_written`
         return status_t::success_k;
     }
-#endif // FU_ON_APPLE
+#endif // FORKUNION_OS_APPLE_
 #pragma endregion Apple Harvest
 
 #pragma region Windows Harvest
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
 
     /**
      *  @brief Harvests the Windows topology from @c GetLogicalProcessorInformationEx.
@@ -2333,7 +2333,7 @@ struct machine_topology {
         std::free(package_buf);
         return status_t::topology_unavailable_k;
     }
-#endif // FU_ON_WINDOWS
+#endif // FORKUNION_OS_WINDOWS_
 #pragma endregion Windows Harvest
 };
 

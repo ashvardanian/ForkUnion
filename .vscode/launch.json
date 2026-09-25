@@ -40,7 +40,7 @@
         "MIMode": "gdb"
       },
       "windows": {
-        "program": "${workspaceFolder}\\build_debug\\scripts\\forkunion_test_cpp20.exe",
+        "program": "${workspaceFolder}\\build_debug\\forkunion_test_cpp20.exe",
         "MIMode": "gdb",
         "miDebuggerPath": "C:\\MinGw\\bin\\gdb.exe"
       }
@@ -137,15 +137,15 @@
           "value": "128"
         },
         {
-          "name": "NBODY_THREADS",
+          "name": "FORKUNION_THREADS",
           "value": "17"
         },
         {
-          "name": "NBODY_ITERATIONS",
+          "name": "FORKUNION_ITERATIONS",
           "value": "1000000"
         },
         {
-          "name": "NBODY_BACKEND",
+          "name": "FORKUNION_BACKEND",
           "value": "forkunion_dynamic"
         }
       ],

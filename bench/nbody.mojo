@@ -19,14 +19,14 @@ count to the machine instead of guessing it.
 Environment variables:
 
 - `NBODY_COUNT` - number of bodies, default the thread count.
-- `NBODY_SECONDS` - wall-clock budget per run, reporting the sustained rate, default 10.
-- `NBODY_ITERATIONS` - run an exact iteration count instead, when set.
-- `NBODY_BACKEND` - one of the backend names above, default `forkunion_static_shared`.
-- `NBODY_THREADS` - number of threads, default the logical core count.
+- `FORKUNION_BUDGET_SECS` - wall-clock budget per run, reporting the sustained rate, default 10.
+- `FORKUNION_ITERATIONS` - run an exact iteration count instead, when set.
+- `FORKUNION_BACKEND` - one of the backend names above, default `forkunion_static_shared`.
+- `FORKUNION_THREADS` - number of threads, default the logical core count.
 
 ```sh
-NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared pixi run nbody
-NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated pixi run nbody
+NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared pixi run nbody
+NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated pixi run nbody
 ```
 """
 
@@ -34,7 +34,7 @@ from max.algorithm import parallelize
 
 from std.math import floor
 from std.memory import bitcast
-from std.os import getenv
+from std.os import abort, getenv
 from std.time import perf_counter_ns
 
 from forkunion import (
@@ -81,7 +81,7 @@ def parse_int(name: StaticString, fallback: Int) -> Int:
     try:
         return Int(text)
     except:
-        return fallback
+        abort(t"{name}=\"{text}\" does not parse")
 
 
 def parse_float(name: StaticString, fallback: Float64) -> Float64:
@@ -91,7 +91,7 @@ def parse_float(name: StaticString, fallback: Float64) -> Float64:
     try:
         return Float64(text)
     except:
-        return fallback
+        abort(t"{name}=\"{text}\" does not parse")
 
 
 @always_inline
@@ -222,15 +222,15 @@ def main() raises:
     var library = Library()
     var topology = Topology(library)
 
-    var threads = parse_int("NBODY_THREADS", 0)
+    var threads = parse_int("FORKUNION_THREADS", 0)
     if threads == 0:
         threads = topology.logical_cores_count()
-    var budget_seconds = parse_float("NBODY_SECONDS", 10)
-    var iterations = parse_int("NBODY_ITERATIONS", 0)
+    var budget_seconds = parse_float("FORKUNION_BUDGET_SECS", 10)
+    var iterations = parse_int("FORKUNION_ITERATIONS", 0)
     var count = parse_int("NBODY_COUNT", 0)
     if count == 0:
         count = threads
-    var backend = getenv("NBODY_BACKEND")
+    var backend = getenv("FORKUNION_BACKEND")
     if backend.byte_length() == 0:
         backend = String("forkunion_static_shared")
 
@@ -300,7 +300,7 @@ def main() raises:
         replicas = ReplicatedArray[DType.float32].new(topology, count * 3)
 
     # A fixed time budget beats a fixed iteration count: the window is long enough to amortize
-    # scheduling noise, and reports the rate sustained. `NBODY_ITERATIONS` forces an exact count.
+    # scheduling noise, and reports the rate sustained. `FORKUNION_ITERATIONS` sets an exact count.
     # `parallelize` takes a capturing closure, which is exactly what ForkUnion cannot accept; the
     # baseline therefore reads the same bodies through the same flat pointers, with no scratch.
     @parameter

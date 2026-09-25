@@ -12,10 +12,10 @@
 # chains to it and adds only what ForkUnion needs. It sees a toolchain file or an emulator of yours only as the single
 # argument `-DCMAKE_TOOLCHAIN_FILE=…` or `-DCMAKE_CROSSCOMPILING_EMULATOR=…`; spelled with a space, its own wins.
 #
-# `-pthread` defines `__EMSCRIPTEN_PTHREADS__`, so `FU_WITH_SHARED_MEMORY` derives 1 and the pools are real. The width
-# and the threads feature are whole-module choices, so both are fixed here: a page serves this module only when it is
-# cross-origin isolated, and Node runs it from 24 on, where memory64 is on by default. The single-threaded module is the
-# wasm32 file.
+# `-pthread` defines `__EMSCRIPTEN_PTHREADS__`, so `FORKUNION_WITH_SHARED_MEMORY` derives 1 and the pools are real. The
+# width and the threads feature are whole-module choices, so both are fixed here: a page serves this module only when it
+# is cross-origin isolated, and Node runs it from 24 on, where memory64 is on by default. The single-threaded module is
+# the wasm32 file.
 
 if (NOT DEFINED ENV{EMSDK})
     message(FATAL_ERROR "EMSDK is unset; source the SDK's `emsdk_env.sh` before configuring.")

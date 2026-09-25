@@ -307,7 +307,8 @@ class flat_pool {
         if (threads_count_ != 0) return status_t::already_spawned_k;
 
         // ! Without OS threads the caller is the only thread
-        if (!FU_WITH_OS_THREADS && (threads > 1 || exclusivity == caller_exclusive_k)) return status_t::unsupported_k;
+        if (!FORKUNION_WITH_OS_THREADS && (threads > 1 || exclusivity == caller_exclusive_k))
+            return status_t::unsupported_k;
 
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
 
@@ -340,7 +341,7 @@ class flat_pool {
         thread_index_t const worker_threads = threads - use_caller_thread;
         auto spawn_worker = [&](thread_index_t i) noexcept -> bool {
             thread_index_t const i_with_caller = i + use_caller_thread;
-#if FU_ALLOW_UNSAFE
+#if FORKUNION_ALLOW_UNSAFE
             try {
                 workers_[i_with_caller].worker = std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
                 return true;

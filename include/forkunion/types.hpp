@@ -51,13 +51,13 @@
 #define FORKUNION_VERSION_PATCH 3
 
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
-#define FU_DETECT_EXCEPTIONS_ 1
+#define FORKUNION_HAS_EXCEPTIONS_ 1
 #else
-#define FU_DETECT_EXCEPTIONS_ 0
+#define FORKUNION_HAS_EXCEPTIONS_ 0
 #endif
 
-#if !defined(FU_ALLOW_UNSAFE)
-#define FU_ALLOW_UNSAFE FU_DETECT_EXCEPTIONS_
+#if !defined(FORKUNION_ALLOW_UNSAFE)
+#define FORKUNION_ALLOW_UNSAFE FORKUNION_HAS_EXCEPTIONS_
 #endif
 
 #pragma region Platform Identity
@@ -66,57 +66,57 @@
  *  derive the capabilities below. Nothing else in the library may ask @c __linux__ again. Identity
  *  is the kernel ABI - pthreads, @c sched_setaffinity, @c gettid, `/proc`, `/sys` - which Android
  *  shares in full, and which is all the capabilities below now ask for. What Bionic lacks is GLibC,
- *  and that is the separate @c FU_ON_GLIBC axis below; it gates no capability, because none is
- *  glibc's to grant. */
+ *  and that is the separate @c FORKUNION_HAS_GLIBC_ axis below; it gates no capability, because
+ *  none is glibc's to grant. */
 #if defined(__linux__)
-#define FU_ON_LINUX 1
+#define FORKUNION_OS_LINUX_ 1
 #else
-#define FU_ON_LINUX 0
+#define FORKUNION_OS_LINUX_ 0
 #endif
 
 /** A Bionic sub-identity of Linux: Android shares the kernel ABI but not every GLibC extension, so
  *  the handful of capabilities that differ - affinity, whose @c pthread_setaffinity_np Bionic lacks
  *  before NDK 36 - key on this rather than re-asking @c __ANDROID__ at the use site. */
 #if defined(__ANDROID__)
-#define FU_ON_ANDROID 1
+#define FORKUNION_OS_ANDROID_ 1
 #else
-#define FU_ON_ANDROID 0
+#define FORKUNION_OS_ANDROID_ 0
 #endif
 
 #if defined(__APPLE__)
-#define FU_ON_APPLE 1
+#define FORKUNION_OS_APPLE_ 1
 #else
-#define FU_ON_APPLE 0
+#define FORKUNION_OS_APPLE_ 0
 #endif
 
 #if defined(_WIN32)
-#define FU_ON_WINDOWS 1
+#define FORKUNION_OS_WINDOWS_ 1
 #else
-#define FU_ON_WINDOWS 0
+#define FORKUNION_OS_WINDOWS_ 0
 #endif
 
 #if defined(__FreeBSD__)
-#define FU_ON_FREEBSD 1
+#define FORKUNION_OS_FREEBSD_ 1
 #else
-#define FU_ON_FREEBSD 0
+#define FORKUNION_OS_FREEBSD_ 0
 #endif
 
 /**
  *  @brief A sandbox rather than a kernel: the module is compiled once and run by whichever runtime
  *      loads it, so there is no affinity, no `/proc`, and no memory domain to place onto.
  *
- *  What it does have depends on how it was built, which is @c FU_WITH_SHARED_MEMORY below rather
- *  than anything here.
+ *  What it does have depends on how it was built, which is @c FORKUNION_WITH_SHARED_MEMORY below
+ *  rather than anything here.
  */
 #if defined(__wasm__) || defined(__EMSCRIPTEN__)
-#define FU_ON_WASM 1
+#define FORKUNION_ARCH_WASM_ 1
 #else
-#define FU_ON_WASM 0
+#define FORKUNION_ARCH_WASM_ 0
 #endif
 
-#define FU_ON_POSIX (FU_ON_LINUX || FU_ON_APPLE || FU_ON_FREEBSD)
+#define FORKUNION_OS_POSIX_ (FORKUNION_OS_LINUX_ || FORKUNION_OS_APPLE_ || FORKUNION_OS_FREEBSD_)
 
-#if FU_ON_LINUX && __has_include(<features.h>)
+#if FORKUNION_OS_LINUX_ && __has_include(<features.h>)
 #include <features.h> // `__GLIBC__`
 #endif
 
@@ -124,28 +124,28 @@
  *  on Apple and FreeBSD, whose libc is not glibc. Gates no capability below: sysfs and the syscall
  *  table are the kernel's, and every libc on Linux shares them. */
 #if defined(__GLIBC__)
-#define FU_ON_GLIBC 1
+#define FORKUNION_HAS_GLIBC_ 1
 #else
-#define FU_ON_GLIBC 0
+#define FORKUNION_HAS_GLIBC_ 0
 #endif
 
 /** The kernel UAPI headers ship separately from libc - `linux-headers` on Alpine and other musl
  *  distributions - so `<linux/mman.h>` must be probed, not assumed from the platform. */
-#if FU_ON_LINUX && __has_include(<linux/mman.h>)
-#define FU_DETECT_LINUX_MMAN_ 1
+#if FORKUNION_OS_LINUX_ && __has_include(<linux/mman.h>)
+#define FORKUNION_HAS_LINUX_MMAN_ 1
 #else
-#define FU_DETECT_LINUX_MMAN_ 0
+#define FORKUNION_HAS_LINUX_MMAN_ 0
 #endif
 #pragma endregion Platform Identity
 
 /*  Layer 2 is capabilities. Each answers exactly one question, and is named for the @b kernel @b
  *  facility rather than for the library that happens to provide it - so Windows'
- *  @c VirtualAllocExNuma satisfies @c FU_WITH_PLACE_MEMORY_ON_DOMAIN without a second macro.
+ *  @c VirtualAllocExNuma satisfies @c FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN without a second macro.
  *
  *  Every one auto-derives from Layer 1, and from the capabilities it leans on - so switching one
- *  off cascades to everything downstream, and `-DFU_WITH_TOPOLOGY=0` alone yields a coherent build
- *  rather than an `#error` about the four capabilities it silently orphaned. The `#error`s below
- *  then only ever fire on a contradiction the caller wrote out by hand.
+ *  off cascades to everything downstream, and `-DFORKUNION_WITH_TOPOLOGY=0` alone yields a coherent
+ *  build rather than an `#error` about the four capabilities it silently orphaned. The `#error`s
+ *  below then only ever fire on a contradiction the caller wrote out by hand.
  *
  *  A build system may @b override, never re-derive: that keeps the default in exactly one place,
  *  not duplicated across CMake, `build.rs`, and `build.zig`, where three copies would drift. */
@@ -157,19 +157,20 @@
  *      choice: @c -pthread gives each worker its own Web Worker over shared memory; without it, one
  *      thread means @c std::atomic degenerates to plain loads, with nothing to contend.
  */
-#if !defined(FU_WITH_SHARED_MEMORY)
-#if !FU_ON_WASM
-#define FU_WITH_SHARED_MEMORY 1
+#if !defined(FORKUNION_WITH_SHARED_MEMORY)
+#if !FORKUNION_ARCH_WASM_
+#define FORKUNION_WITH_SHARED_MEMORY 1
 #elif defined(__EMSCRIPTEN_PTHREADS__) || defined(_REENTRANT)
-#define FU_WITH_SHARED_MEMORY 1
+#define FORKUNION_WITH_SHARED_MEMORY 1
 #else
-#define FU_WITH_SHARED_MEMORY 0
+#define FORKUNION_WITH_SHARED_MEMORY 0
 #endif
 #endif
 
 /** Can we create operating-system threads directly, rather than through @c std::thread? */
-#if !defined(FU_WITH_OS_THREADS)
-#define FU_WITH_OS_THREADS (FU_ON_POSIX || FU_ON_WINDOWS || (FU_ON_WASM && FU_WITH_SHARED_MEMORY))
+#if !defined(FORKUNION_WITH_OS_THREADS)
+#define FORKUNION_WITH_OS_THREADS \
+    (FORKUNION_OS_POSIX_ || FORKUNION_OS_WINDOWS_ || (FORKUNION_ARCH_WASM_ && FORKUNION_WITH_SHARED_MEMORY))
 #endif
 
 /**
@@ -182,25 +183,27 @@
  *  `/sys/devices/system/node`, which the kernel mounts wherever there are domains to report, so
  *  neither libc nor `libnuma-dev` on the build host gates it.
  */
-#if !defined(FU_WITH_TOPOLOGY)
-#define FU_WITH_TOPOLOGY (FU_ON_APPLE || FU_ON_WINDOWS || FU_ON_FREEBSD || FU_ON_LINUX)
+#if !defined(FORKUNION_WITH_TOPOLOGY)
+#define FORKUNION_WITH_TOPOLOGY \
+    (FORKUNION_OS_APPLE_ || FORKUNION_OS_WINDOWS_ || FORKUNION_OS_FREEBSD_ || FORKUNION_OS_LINUX_)
 #endif
 
 /**
  *  @brief Can we bind a thread to a set of cores, and have the kernel honour it?
- *  @note Deliberately independent of @c FU_WITH_PLACE_MEMORY_ON_DOMAIN. @c pthread_setaffinity_np
- *      needs no @c libnuma, and a Linux box without it could pin perfectly well - it simply never
- *      did, because a single NUMA macro guarded both.
+ *  @note Deliberately independent of @c FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN.
+ *      @c pthread_setaffinity_np needs no @c libnuma, and a Linux box without it could pin
+ *      perfectly well - it simply never did, because a single NUMA macro guarded both.
  *  @note False on Apple Silicon, where `thread_policy_set(THREAD_AFFINITY_POLICY)` answers
- *      @c KERN_NOT_SUPPORTED. Its only placement lever is @c FU_WITH_PLACE_THREADS_BY_CORE_CLASS.
+ *      @c KERN_NOT_SUPPORTED. Its only placement lever is
+ *      @c FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS.
  */
-#if !defined(FU_WITH_PLACE_THREADS_BY_AFFINITY)
-#define FU_WITH_PLACE_THREADS_BY_AFFINITY (FU_ON_LINUX || FU_ON_FREEBSD || FU_ON_WINDOWS)
+#if !defined(FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY)
+#define FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_ || FORKUNION_OS_WINDOWS_)
 #endif
 
 /** Can we hint which class of core a thread should run on, at creation time? */
-#if !defined(FU_WITH_PLACE_THREADS_BY_CORE_CLASS)
-#define FU_WITH_PLACE_THREADS_BY_CORE_CLASS FU_ON_APPLE
+#if !defined(FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS)
+#define FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS FORKUNION_OS_APPLE_
 #endif
 
 /**
@@ -208,16 +211,17 @@
  *  @note Linux spells it `sched_setscheduler(SCHED_IDLE)`; FreeBSD rejects @c SCHED_IDLE but
  *      reaches the same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`.
  */
-#if !defined(FU_WITH_RESCHEDULE_THREADS_BY_CLASS)
-#define FU_WITH_RESCHEDULE_THREADS_BY_CLASS (FU_ON_LINUX || FU_ON_FREEBSD)
+#if !defined(FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS)
+#define FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_)
 #endif
 
 /** Can we place pages on a chosen memory domain? */
-#if !defined(FU_WITH_PLACE_MEMORY_ON_DOMAIN)
+#if !defined(FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN)
 
 /** Linux places with @c mbind; Windows with @c VirtualAllocExNuma; FreeBSD sets the thread's
  *  @c domainset to a PREFER policy and first-touches. Same capability, named for the facility. */
-#define FU_WITH_PLACE_MEMORY_ON_DOMAIN ((FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_TOPOLOGY)
+#define FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN \
+    ((FORKUNION_OS_LINUX_ || FORKUNION_OS_WINDOWS_ || FORKUNION_OS_FREEBSD_) && FORKUNION_WITH_TOPOLOGY)
 #endif
 
 /**
@@ -232,9 +236,10 @@
  *  the platform alone does not guarantee the header, and assuming it would fail at `#include`, not
  *  at a check.
  */
-#if !defined(FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
-#define FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN \
-    (((FU_ON_LINUX && FU_DETECT_LINUX_MMAN_) || FU_ON_WINDOWS || FU_ON_FREEBSD) && FU_WITH_PLACE_MEMORY_ON_DOMAIN)
+#if !defined(FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
+#define FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN                                                              \
+    (((FORKUNION_OS_LINUX_ && FORKUNION_HAS_LINUX_MMAN_) || FORKUNION_OS_WINDOWS_ || FORKUNION_OS_FREEBSD_) && \
+     FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN)
 #endif
 
 /*  Layer 3 is aggregates. Never hand-written, always implied, so they cannot drift.  */
@@ -247,28 +252,29 @@
  *  Mac is one, and conflating these erased both pools from every platform but Linux - including the
  *  ones whose topology we already harvest.
  */
-#define FU_WITH_COLOCATE_POOLS_ON_DOMAIN (FU_WITH_OS_THREADS && FU_WITH_TOPOLOGY)
+#define FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN (FORKUNION_WITH_OS_THREADS && FORKUNION_WITH_TOPOLOGY)
 
 /*  A bad override should fail at the `#include`, not at link time - whether it is a contradiction
  *  the caller wrote by hand, or a retired spelling that would otherwise be silently ignored,
  *  handing a build system or a downstream a default build unlike the one it asked for. */
-#if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_APPLE
+#if FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY && FORKUNION_OS_APPLE_
 #error \
-    "FU_WITH_PLACE_THREADS_BY_AFFINITY: Apple answers KERN_NOT_SUPPORTED to thread_policy_set; pinning cannot be forced on"
+    "FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY: Apple answers KERN_NOT_SUPPORTED to thread_policy_set; pinning cannot be forced on"
 #endif
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && !(FU_ON_LINUX || FU_ON_WINDOWS || FU_ON_FREEBSD)
-#error "FU_WITH_PLACE_MEMORY_ON_DOMAIN needs a kernel that can place pages on a node"
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && !(FORKUNION_OS_LINUX_ || FORKUNION_OS_WINDOWS_ || FORKUNION_OS_FREEBSD_)
+#error "FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN needs a kernel that can place pages on a node"
 #endif
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && !FU_WITH_TOPOLOGY
-#error "FU_WITH_PLACE_MEMORY_ON_DOMAIN places pages on domains we would not have discovered"
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && !FORKUNION_WITH_TOPOLOGY
+#error "FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN places pages on domains we would not have discovered"
 #endif
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && !FU_WITH_PLACE_MEMORY_ON_DOMAIN
-#error "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN places huge pages on a domain; it needs FU_WITH_PLACE_MEMORY_ON_DOMAIN"
+#if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && !FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
+#error \
+    "FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN places huge pages on a domain; it needs FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN"
 #endif
 #if defined(FU_ENABLE_NUMA) || defined(FU_WITH_NUMA_MEMORY) || defined(FU_WITH_HUGE_PAGES) || \
     defined(FU_WITH_THREAD_PINNING) || defined(FU_WITH_TOPOLOGY_METRICS)
 #error \
-    "Retired capability macro. Use FU_WITH_PLACE_MEMORY_ON_DOMAIN, FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN, or FU_WITH_PLACE_THREADS_BY_AFFINITY"
+    "Retired capability macro. Use FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN, FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN, or FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY"
 #endif
 
 /** The @c alignas width that keeps two threads' words off one line: 256-byte lines on s390x, 64 on
@@ -276,25 +282,25 @@
  *  adjacent-line prefetcher, and Apple's cores carry 128 outright. Neoverse lands there too:
  *  `aarch64-unknown-linux-gnu` cannot be told from Asahi Linux on Apple silicon, and under-padding
  *  costs far more than the bytes over-padding wastes. */
-#if !defined(FU_DEFAULT_ALIGNMENT)
+#if !defined(FORKUNION_DEFAULT_ALIGNMENT)
 #if defined(__s390x__)
-#define FU_DEFAULT_ALIGNMENT 256
-#elif FU_ON_WASM
-#define FU_DEFAULT_ALIGNMENT 64
+#define FORKUNION_DEFAULT_ALIGNMENT 256
+#elif FORKUNION_ARCH_WASM_
+#define FORKUNION_DEFAULT_ALIGNMENT 64
 #else
-#define FU_DEFAULT_ALIGNMENT 128
+#define FORKUNION_DEFAULT_ALIGNMENT 128
 #endif
 #endif
 
 #pragma endregion Platform Capabilities
 
 #pragma region Platform Headers
-#if FU_ALLOW_UNSAFE
+#if FORKUNION_ALLOW_UNSAFE
 #include <exception> // `std::exception_ptr`
 #endif
 
 /*  No `<numa.h>`, no `<numaif.h>`: sysfs needs no header, and @c mbind comes by syscall number. */
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 #include <sys/syscall.h> // `SYS_mbind`, the policy syscall no libc wraps
 #include <unistd.h>      // `syscall`
 #include <sys/mman.h>    // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`
@@ -303,40 +309,40 @@
 #endif
 #endif
 
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN && FORKUNION_OS_LINUX_
 #include <linux/mman.h> // `MAP_HUGE_2MB`, `MAP_HUGE_1GB`
 #endif
 
 /*  Both the huge-page inventory and the topology harvest walk sysfs directories - a Linux-only
  *  concern.
  *  Windows has no `<dirent.h>` under MSVC, and its large pages are probed by size, not path. */
-#if (FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN || FU_WITH_TOPOLOGY) && FU_ON_LINUX
+#if (FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN || FORKUNION_WITH_TOPOLOGY) && FORKUNION_OS_LINUX_
 #include <dirent.h> // `opendir`, `readdir`, `closedir`
 #endif
 
-#if FU_WITH_OS_THREADS && (FU_ON_POSIX || FU_ON_WASM)
+#if FORKUNION_WITH_OS_THREADS && (FORKUNION_OS_POSIX_ || FORKUNION_ARCH_WASM_)
 #include <pthread.h> // `pthread_create`, `pthread_setname_np`
 #include <ctime>     // `nanosleep`, `clock_nanosleep`
 #endif
 
-#if FU_WITH_PLACE_THREADS_BY_AFFINITY && FU_ON_POSIX
+#if FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY && FORKUNION_OS_POSIX_
 #include <cerrno>  // `errno`, `EINVAL` - the kernel's way of saying "your mask is too narrow"
 #include <sched.h> // `cpu_set_t`, `sched_getaffinity`, `pthread_setaffinity_np`
 #endif
 
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 #include <sys/qos.h> // `qos_class_t`, `pthread_attr_set_qos_class_np`
 #endif
 
-#if FU_ON_POSIX || FU_ON_WASM
+#if FORKUNION_OS_POSIX_ || FORKUNION_ARCH_WASM_
 #include <unistd.h> // `gettid`, `sysconf`, `geteuid`
 #endif
 
-#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS && FU_ON_LINUX
+#if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS && FORKUNION_OS_LINUX_
 #include <sys/resource.h> // `getrlimit`, `RLIMIT_NICE` - whether a worker may leave `SCHED_IDLE`
 #endif
 
-#if FU_ON_APPLE
+#if FORKUNION_OS_APPLE_
 #include <sys/sysctl.h> // `sysctl`
 #endif
 
@@ -344,7 +350,7 @@
  *  `<sys/sysctl.h>` on Apple - one identity-gated block pulls them once, rather than a
  *  per-capability block re-`#include`-ing `<sys/cpuset.h>` for pinning, topology, and memory
  *  placement in turn. */
-#if FU_ON_FREEBSD
+#if FORKUNION_OS_FREEBSD_
 #include <sys/param.h>     // ! Must precede `<sys/cpuset.h>`
 #include <sys/cpuset.h>    // `cpuset_t`, `cpuset_getaffinity`, `cpuset_setdomain`, `CPU_WHICH_DOMAIN`
 #include <pthread_np.h>    // `pthread_setaffinity_np`, `pthread_getthreadid_np` for the rtprio lwpid
@@ -356,7 +362,7 @@
 
 /*  @c NOMINMAX and @c _CRT_SECURE_NO_WARNINGS are already defined at the top of this header, before
  *  the CRT includes, where they can still take effect. */
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
 #include <windows.h> // `GlobalMemoryStatusEx`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`
 #include <io.h>      // `_isatty`, `_fileno`
 #if defined(_MSC_VER)
@@ -378,35 +384,35 @@
  *  assembly and the capability bits key on.
  *  A 32-bit RISC-V build lands on none of them and on the portable paths. */
 #if defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64)
-#define FU_DETECT_ARCH_ARM64_ 1
+#define FORKUNION_ARCH_ARM64_ 1
 #else
-#define FU_DETECT_ARCH_ARM64_ 0
+#define FORKUNION_ARCH_ARM64_ 0
 #endif
 #if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
-#define FU_DETECT_ARCH_X86_64_ 1
+#define FORKUNION_ARCH_X86_64_ 1
 #else
-#define FU_DETECT_ARCH_X86_64_ 0
+#define FORKUNION_ARCH_X86_64_ 0
 #endif
 #if defined(__riscv) && __riscv_xlen == 64
-#define FU_DETECT_ARCH_RISC5_ 1
+#define FORKUNION_ARCH_RISCV64_ 1
 #else
-#define FU_DETECT_ARCH_RISC5_ 0
+#define FORKUNION_ARCH_RISCV64_ 0
 #endif
 #if defined(__s390x__)
-#define FU_DETECT_ARCH_S390X_ 1
+#define FORKUNION_ARCH_S390X_ 1
 #else
-#define FU_DETECT_ARCH_S390X_ 0
+#define FORKUNION_ARCH_S390X_ 0
 #endif
 #if defined(__powerpc64__) || defined(__ppc64__)
-#define FU_DETECT_ARCH_PPC64_ 1
+#define FORKUNION_ARCH_PPC64_ 1
 #else
-#define FU_DETECT_ARCH_PPC64_ 0
+#define FORKUNION_ARCH_PPC64_ 0
 #endif
 
 #if defined(__i386__) || defined(_M_IX86)
-#define FU_DETECT_ARCH_X86_32_ 1
+#define FORKUNION_ARCH_X86_32_ 1
 #else
-#define FU_DETECT_ARCH_X86_32_ 0
+#define FORKUNION_ARCH_X86_32_ 0
 #endif
 
 #pragma endregion Language and Architecture
@@ -421,18 +427,18 @@
  *  Gates only the paths that need inline asm: hand-encoded opcodes and MSR/register reads.
  */
 #if defined(__GNUC__) || defined(__clang__)
-#define FU_DETECT_INLINE_ASM_SUPPORT_ 1
+#define FORKUNION_HAS_INLINE_ASM_ 1
 #else
-#define FU_DETECT_INLINE_ASM_SUPPORT_ 0
+#define FORKUNION_HAS_INLINE_ASM_ 0
 #endif
 
 /** Whether MSVC's cache-hint intrinsics are available: @c _mm_cldemote and @c _m_prefetchw on x64,
  *  @c __prefetch2 on AArch64 - all encoded unconditionally, no `/arch` flag needed. 1922 == VS 2019
  *  16.2, the release that introduced @c _mm_cldemote. clang-cl takes the inline-asm path above. */
 #if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER >= 1922
-#define FU_DETECT_HINT_INTRINSICS_ 1
+#define FORKUNION_HAS_HINT_INTRINSICS_ 1
 #else
-#define FU_DETECT_HINT_INTRINSICS_ 0
+#define FORKUNION_HAS_HINT_INTRINSICS_ 0
 #endif
 
 /** Whether MSVC's AArch64 atomic intrinsics are available and lower to LSE:
@@ -441,127 +447,128 @@
  *  - reported as @c __ARM_FEATURE_ATOMICS, the macro GCC and Clang publish for `+lse`. clang-cl
  *  takes the inline-asm path above. */
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64) && defined(__ARM_FEATURE_ATOMICS)
-#define FU_DETECT_ARM64_ATOMIC_INTRINSICS_ 1
+#define FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_ 1
 #else
-#define FU_DETECT_ARM64_ATOMIC_INTRINSICS_ 0
+#define FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_ 0
 #endif
 
 /** Set by a translation unit that admits rungs at runtime - the C library, a consumer's own
  *  dispatch unit built without the probes - so every path the toolchain builds is defined below. */
-#if !defined(FU_RUNTIME_DISPATCH)
-#define FU_RUNTIME_DISPATCH 0
+#if !defined(FORKUNION_RUNTIME_DISPATCH)
+#define FORKUNION_RUNTIME_DISPATCH 0
 #endif
 
 /**
- *  @brief Whether this translation unit may use the bit's path - `FU_TARGET_<BIT>`.
+ *  @brief Whether this translation unit may use the bit's path - `FORKUNION_TARGET_<BIT>`.
  *
- *  A unit with the build's probe lists or @c FU_RUNTIME_DISPATCH takes the toolchain's verdict, can
- *  it build the path: the architecture, plus inline assembly for a raw encoding or a mnemonic, or
- *  nothing more where MSVC reaches the instruction through an intrinsic. A unit without them
- *  derives the bits a compile-time default can pick from what the compilation target promises
- *  through the compiler's macro for the extension, since @c preferred_yield_t runs its pick
- *  unchecked. The trap-free hints - PAUSE, YIELD, Zihintpause, CLDEMOTE in reserved-NOP space, DC
- *  CVAC - stay on the architecture; WFET and Zicbom, which no default ever picks and a caller
+ *  A unit with the build's probe lists or @c FORKUNION_RUNTIME_DISPATCH takes the toolchain's
+ *  verdict, can it build the path: the architecture, plus inline assembly for a raw encoding or a
+ *  mnemonic, or nothing more where MSVC reaches the instruction through an intrinsic. A unit
+ *  without them derives the bits a compile-time default can pick from what the compilation target
+ *  promises through the compiler's macro for the extension, since @c preferred_yield_t runs its
+ *  pick unchecked. The trap-free hints - PAUSE, YIELD, Zihintpause, CLDEMOTE in reserved-NOP space,
+ *  DC CVAC - stay on the architecture; WFET and Zicbom, which no default ever picks and a caller
  *  admits at runtime, stay on the toolchain's verdict, WFET having no compiler macro at all.
  *
  *  The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches the two through intrinsics whose
  *  arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A extension's mnemonics need the
  *  `-march` the compiler reports.
  */
-#if !defined(FU_TARGET_X86_PAUSE)
-#define FU_TARGET_X86_PAUSE FU_DETECT_ARCH_X86_64_
+#if !defined(FORKUNION_TARGET_X86_PAUSE)
+#define FORKUNION_TARGET_X86_PAUSE FORKUNION_ARCH_X86_64_
 #endif
-#if !defined(FU_TARGET_X86_TPAUSE)
-#if FU_DETECT_ARCH_X86_64_ && (FU_RUNTIME_DISPATCH || defined(__WAITPKG__))
-#define FU_TARGET_X86_TPAUSE 1
+#if !defined(FORKUNION_TARGET_X86_TPAUSE)
+#if FORKUNION_ARCH_X86_64_ && (FORKUNION_RUNTIME_DISPATCH || defined(__WAITPKG__))
+#define FORKUNION_TARGET_X86_TPAUSE 1
 #else
-#define FU_TARGET_X86_TPAUSE 0
+#define FORKUNION_TARGET_X86_TPAUSE 0
 #endif
 #endif
-#if !defined(FU_TARGET_X86_CLDEMOTE)
-#define FU_TARGET_X86_CLDEMOTE (FU_DETECT_ARCH_X86_64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_))
+#if !defined(FORKUNION_TARGET_X86_CLDEMOTE)
+#define FORKUNION_TARGET_X86_CLDEMOTE \
+    (FORKUNION_ARCH_X86_64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_))
 #endif
-#if !defined(FU_TARGET_X86_CMPCCXADD)
-#if FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__CMPCCXADD__))
-#define FU_TARGET_X86_CMPCCXADD 1
+#if !defined(FORKUNION_TARGET_X86_CMPCCXADD)
+#if FORKUNION_ARCH_X86_64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__CMPCCXADD__))
+#define FORKUNION_TARGET_X86_CMPCCXADD 1
 #else
-#define FU_TARGET_X86_CMPCCXADD 0
+#define FORKUNION_TARGET_X86_CMPCCXADD 0
 #endif
 #endif
-#if !defined(FU_TARGET_X86_RAOINT)
-#if FU_DETECT_ARCH_X86_64_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__RAOINT__))
-#define FU_TARGET_X86_RAOINT 1
+#if !defined(FORKUNION_TARGET_X86_RAOINT)
+#if FORKUNION_ARCH_X86_64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__RAOINT__))
+#define FORKUNION_TARGET_X86_RAOINT 1
 #else
-#define FU_TARGET_X86_RAOINT 0
+#define FORKUNION_TARGET_X86_RAOINT 0
 #endif
 #endif
-#if !defined(FU_TARGET_ARM64_YIELD)
-#define FU_TARGET_ARM64_YIELD FU_DETECT_ARCH_ARM64_
+#if !defined(FORKUNION_TARGET_ARM64_YIELD)
+#define FORKUNION_TARGET_ARM64_YIELD FORKUNION_ARCH_ARM64_
 #endif
-#if !defined(FU_TARGET_ARM64_WFET)
-#define FU_TARGET_ARM64_WFET (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if !defined(FORKUNION_TARGET_ARM64_WFET)
+#define FORKUNION_TARGET_ARM64_WFET (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
-#if !defined(FU_TARGET_ARM64_DC_CVAC)
-#define FU_TARGET_ARM64_DC_CVAC (FU_DETECT_ARCH_ARM64_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if !defined(FORKUNION_TARGET_ARM64_DC_CVAC)
+#define FORKUNION_TARGET_ARM64_DC_CVAC (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
-#if !defined(FU_TARGET_ARM64_LSE)
-#if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_) && \
-    (FU_RUNTIME_DISPATCH || defined(__ARM_FEATURE_ATOMICS))
-#define FU_TARGET_ARM64_LSE 1
+#if !defined(FORKUNION_TARGET_ARM64_LSE)
+#if FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_) && \
+    (FORKUNION_RUNTIME_DISPATCH || defined(__ARM_FEATURE_ATOMICS))
+#define FORKUNION_TARGET_ARM64_LSE 1
 #else
-#define FU_TARGET_ARM64_LSE 0
+#define FORKUNION_TARGET_ARM64_LSE 0
 #endif
 #endif
-#if !defined(FU_TARGET_ARM64_RCPC)
-#if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_ARM64_ATOMIC_INTRINSICS_) && \
-    (FU_RUNTIME_DISPATCH || defined(__ARM_FEATURE_RCPC))
-#define FU_TARGET_ARM64_RCPC 1
+#if !defined(FORKUNION_TARGET_ARM64_RCPC)
+#if FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_) && \
+    (FORKUNION_RUNTIME_DISPATCH || defined(__ARM_FEATURE_RCPC))
+#define FORKUNION_TARGET_ARM64_RCPC 1
 #else
-#define FU_TARGET_ARM64_RCPC 0
+#define FORKUNION_TARGET_ARM64_RCPC 0
 #endif
 #endif
-#if !defined(FU_TARGET_RISC5_PAUSE)
-#define FU_TARGET_RISC5_PAUSE (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if !defined(FORKUNION_TARGET_RISC5_PAUSE)
+#define FORKUNION_TARGET_RISC5_PAUSE (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
-#if !defined(FU_TARGET_RISC5_WRS)
-#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__riscv_zawrs))
-#define FU_TARGET_RISC5_WRS 1
+#if !defined(FORKUNION_TARGET_RISC5_WRS)
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__riscv_zawrs))
+#define FORKUNION_TARGET_RISC5_WRS 1
 #else
-#define FU_TARGET_RISC5_WRS 0
+#define FORKUNION_TARGET_RISC5_WRS 0
 #endif
 #endif
-#if !defined(FU_TARGET_RISC5_ZICBOM)
-#define FU_TARGET_RISC5_ZICBOM (FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_)
+#if !defined(FORKUNION_TARGET_RISC5_ZICBOM)
+#define FORKUNION_TARGET_RISC5_ZICBOM (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
-#if !defined(FU_TARGET_RISC5_ATOMIC)
-#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && defined(__riscv_atomic)
-#define FU_TARGET_RISC5_ATOMIC 1
+#if !defined(FORKUNION_TARGET_RISC5_ATOMIC)
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && defined(__riscv_atomic)
+#define FORKUNION_TARGET_RISC5_ATOMIC 1
 #else
-#define FU_TARGET_RISC5_ATOMIC 0
+#define FORKUNION_TARGET_RISC5_ATOMIC 0
 #endif
 #endif
-#if !defined(FU_TARGET_RISC5_ZACAS)
-#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_ && (FU_RUNTIME_DISPATCH || defined(__riscv_zacas))
-#define FU_TARGET_RISC5_ZACAS 1
+#if !defined(FORKUNION_TARGET_RISC5_ZACAS)
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__riscv_zacas))
+#define FORKUNION_TARGET_RISC5_ZACAS 1
 #else
-#define FU_TARGET_RISC5_ZACAS 0
+#define FORKUNION_TARGET_RISC5_ZACAS 0
 #endif
 #endif
 
 /*  RCpc extends LSE, RAO-INT extends CMPCCXADD and Zacas extends the A extension, so a rung without
- *  its parent is demoted: every `#if FU_TARGET_<BIT>` region is then complete on its own and never
- *  repeats the parent's bit. */
-#if !FU_TARGET_ARM64_LSE
-#undef FU_TARGET_ARM64_RCPC
-#define FU_TARGET_ARM64_RCPC 0
+ *  its parent is demoted: every `#if FORKUNION_TARGET_<BIT>` region is then complete on its own and
+ *  never repeats the parent's bit. */
+#if !FORKUNION_TARGET_ARM64_LSE
+#undef FORKUNION_TARGET_ARM64_RCPC
+#define FORKUNION_TARGET_ARM64_RCPC 0
 #endif
-#if !FU_TARGET_X86_CMPCCXADD
-#undef FU_TARGET_X86_RAOINT
-#define FU_TARGET_X86_RAOINT 0
+#if !FORKUNION_TARGET_X86_CMPCCXADD
+#undef FORKUNION_TARGET_X86_RAOINT
+#define FORKUNION_TARGET_X86_RAOINT 0
 #endif
-#if !FU_TARGET_RISC5_ATOMIC
-#undef FU_TARGET_RISC5_ZACAS
-#define FU_TARGET_RISC5_ZACAS 0
+#if !FORKUNION_TARGET_RISC5_ATOMIC
+#undef FORKUNION_TARGET_RISC5_ZACAS
+#define FORKUNION_TARGET_RISC5_ZACAS 0
 #endif
 
 /**
@@ -573,8 +580,9 @@
  *  macro can prove, so it is reached only through the runtime capability, never this gate. Derived
  *  from the two demote bits the toolchain can build.
  */
-#if !defined(FU_WITH_DEMOTE_CACHE_LINES)
-#define FU_WITH_DEMOTE_CACHE_LINES (FU_TARGET_X86_CLDEMOTE || (FU_TARGET_ARM64_DC_CVAC && FU_ON_LINUX))
+#if !defined(FORKUNION_WITH_DEMOTE_CACHE_LINES)
+#define FORKUNION_WITH_DEMOTE_CACHE_LINES \
+    (FORKUNION_TARGET_X86_CLDEMOTE || (FORKUNION_TARGET_ARM64_DC_CVAC && FORKUNION_OS_LINUX_))
 #endif
 
 /**
@@ -583,14 +591,15 @@
  *  Every ISA here places its write-prefetch in hint space, so emission can never fault on any of
  *  them: x86 @c PREFETCHW, AArch64 `PRFM PSTL1KEEP`, RISC-V `prefetch.w`.
  */
-#if !defined(FU_WITH_PROMOTE_CACHE_LINES)
-#define FU_WITH_PROMOTE_CACHE_LINES                                   \
-    ((FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_) && \
-     (FU_DETECT_ARCH_X86_64_ || FU_DETECT_ARCH_ARM64_ || FU_DETECT_ARCH_RISC5_))
+#if !defined(FORKUNION_WITH_PROMOTE_CACHE_LINES)
+#define FORKUNION_WITH_PROMOTE_CACHE_LINES                            \
+    ((FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_) && \
+     (FORKUNION_ARCH_X86_64_ || FORKUNION_ARCH_ARM64_ || FORKUNION_ARCH_RISCV64_))
 #endif
 
-#if FU_WITH_DEMOTE_CACHE_LINES && !(FU_TARGET_X86_CLDEMOTE || FU_TARGET_ARM64_DC_CVAC)
-#error "FU_WITH_DEMOTE_CACHE_LINES names no demote this toolchain can build - CLDEMOTE on x86-64, DC CVAC on AArch64"
+#if FORKUNION_WITH_DEMOTE_CACHE_LINES && !(FORKUNION_TARGET_X86_CLDEMOTE || FORKUNION_TARGET_ARM64_DC_CVAC)
+#error \
+    "FORKUNION_WITH_DEMOTE_CACHE_LINES names no demote this toolchain can build - CLDEMOTE on x86-64, DC CVAC on AArch64"
 #endif
 #pragma endregion Compiler Intrinsics
 
@@ -614,7 +623,7 @@ using core_quality_t = int;
 
 /*  The two @c mbind inputs `<numaif.h>` supplied. Syscall ABI, so naming them needs no header - and
  *  where `<linux/mempolicy.h>` is installed, the @c static_asserts match the kernel's spelling. */
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 
 /** @c MPOL_BIND - allocate strictly from the mask. */
 inline constexpr int mpol_bind_k = 2;
@@ -637,7 +646,7 @@ inline constexpr std::size_t max_memory_domains_k = 1024;
 
 /** The node mask's width in `unsigned long` words, as the @c mbind syscall counts it. */
 inline constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
-#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#endif // FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 
 /**
  *  @brief A position in @c machine_topology's array of @b compute domains, in [0,
@@ -852,7 +861,7 @@ enum capabilities_t : unsigned int {
 
     /**
      *  @brief Own the raw OS thread handle instead of a @c std::thread - the substrate every thread
-     *      lever below stands on. Built: @c FU_WITH_OS_THREADS.
+     *      lever below stands on. Built: @c FORKUNION_WITH_OS_THREADS.
      *  @sa capability_place_threads_by_affinity_k, @c capability_place_threads_by_core_class_k
      *      and @c capability_reschedule_threads_by_class_k - the levers needing the handle.
      */
@@ -860,7 +869,7 @@ enum capabilities_t : unsigned int {
 
     /**
      *  @brief Enumerate this machine's cores, compute domains, and memory domains - the root every
-     *      placement needs. Built: @c FU_WITH_TOPOLOGY.
+     *      placement needs. Built: @c FORKUNION_WITH_TOPOLOGY.
      *  @sa machine_topology - the harvest; @c capability_place_memory_on_domain_k and
      *      @c capability_colocate_pools_on_domain_k - the placements standing on it.
      */
@@ -868,35 +877,35 @@ enum capabilities_t : unsigned int {
 
     /**
      *  @brief Bind a thread to a set of cores, choosing where it runs.
-     *      Built: @c FU_WITH_PLACE_THREADS_BY_AFFINITY.
+     *      Built: @c FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY.
      *  @sa capability_os_threads_k - the owned handle this needs.
      */
     capability_place_threads_by_affinity_k = 1 << 8,
 
     /**
      *  @brief Steer a thread onto a class of core at creation, choosing where it runs.
-     *      Built: @c FU_WITH_PLACE_THREADS_BY_CORE_CLASS.
+     *      Built: @c FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS.
      *  @sa capability_os_threads_k - the owned handle this needs.
      */
     capability_place_threads_by_core_class_k = 1 << 9,
 
     /**
      *  @brief Reclass a thread's scheduler to sleep or wake it, choosing when it runs.
-     *      Built: @c FU_WITH_RESCHEDULE_THREADS_BY_CLASS.
+     *      Built: @c FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS.
      *  @sa capability_os_threads_k - the owned handle this needs.
      */
     capability_reschedule_threads_by_class_k = 1 << 10,
 
     /**
      *  @brief Place a buffer's pages on a chosen memory domain.
-     *      Built: @c FU_WITH_PLACE_MEMORY_ON_DOMAIN.
+     *      Built: @c FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN.
      *  @sa capability_topology_k - the enumerated domains this places onto.
      */
     capability_place_memory_on_domain_k = 1 << 11,
 
     /**
      *  @brief Place larger-than-base pages on a chosen memory domain. A narrower case of memory
-     *      placement. Built: @c FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN.
+     *      placement. Built: @c FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN.
      *  @sa capability_place_memory_on_domain_k - the placement this specializes.
      */
     capability_place_huge_pages_on_domain_k = 1 << 12,
@@ -910,7 +919,7 @@ enum capabilities_t : unsigned int {
 
     /**
      *  @brief Compile the domain-aware @c colocated_pool and @c distributed_pool.
-     *      Built: @c FU_WITH_COLOCATE_POOLS_ON_DOMAIN.
+     *      Built: @c FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN.
      *  @sa capability_os_threads_k, @c capability_topology_k - both needed, not memory placement.
      */
     capability_colocate_pools_on_domain_k = 1 << 14,
@@ -920,7 +929,7 @@ enum capabilities_t : unsigned int {
      *      shared LLC and retains it there.
      *
      *  Runtime-detected on Sapphire-Rapids-class parts; the emitting functor is chosen at compile
-     *  time by @c FU_WITH_DEMOTE_CACHE_LINES, so this bit reports, it never dispatches.
+     *  time by @c FORKUNION_WITH_DEMOTE_CACHE_LINES, so this bit reports, it never dispatches.
      *
      *  @sa x86_cache_hints_t - the functor emitting it.
      */
@@ -999,7 +1008,7 @@ enum capabilities_t : unsigned int {
      *  @sa capability_name - which names single bits only, never this composite.
      */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
-                             capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
+        capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
 
 };
 
@@ -1103,12 +1112,13 @@ inline capabilities_t capability_named(char const *name) noexcept {
  *  unless you hard-code `--param hardware_destructive_interference_size=64` or disable the warning
  *  with `-Wno-interference-size`.
  *
- *  So the width is @c FU_DEFAULT_ALIGNMENT, picked from the target. Only @c alignas rests on this
- *  guess; a per-thread stride takes `destructive_interference_bytes()`, which asks the machine.
+ *  So the width is @c FORKUNION_DEFAULT_ALIGNMENT, picked from the target. Only @c alignas
+ *  rests on this guess; a per-thread stride takes `destructive_interference_bytes()`, which
+ *  asks the machine.
  */
-inline constexpr std::size_t default_alignment_k = FU_DEFAULT_ALIGNMENT;
+inline constexpr std::size_t default_alignment_k = FORKUNION_DEFAULT_ALIGNMENT;
 static_assert(default_alignment_k >= 8 && std::has_single_bit(default_alignment_k),
-              "FU_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
+              "FORKUNION_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
 
 /**
  *  @brief Bytes occupied by @p count elements of @p element_bytes each.
@@ -1164,7 +1174,7 @@ constexpr std::size_t round_up_to_pow2(std::size_t value) noexcept {
  *
  *  A counter-based generator instead of a stateful one: every draw is independent, so parallel
  *  consumers need no shared state, and a sequence is reproducible from indices alone. The same
- *  constants drive the benchmark generators in `scripts/`, ported bit-identically to Rust and Zig.
+ *  constants drive the benchmark generators in `bench/`, ported bit-identically to Rust and Zig.
  */
 constexpr std::uint64_t split_mix(std::uint64_t const counter) noexcept {
     std::uint64_t x = (counter + 1) * 0x9E37'79B9'7F4A'7C15ull;
@@ -1798,7 +1808,7 @@ inline constexpr promote_line_t promote_line_k {};
 /**
  *  @brief The do-nothing cache-hints policy - the default, and the fallback for every ISA gap.
  *  @sa preferred_cache_hints_t in `capabilities.hpp`, which picks the per-ISA emitters where
- *      @c FU_WITH_DEMOTE_CACHE_LINES and @c FU_WITH_PROMOTE_CACHE_LINES hold.
+ *      @c FORKUNION_WITH_DEMOTE_CACHE_LINES and @c FORKUNION_WITH_PROMOTE_CACHE_LINES hold.
  */
 struct standard_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;

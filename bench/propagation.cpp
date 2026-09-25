@@ -1,5 +1,5 @@
 /**
- *  @file scripts/propagation.cpp
+ *  @file bench/propagation.cpp
  *  @author Ash Vardanian
  *  @date July 14, 2026
  *  @brief Demo: Connected Components by label propagation, with ForkUnion, OpenMP, and Taskflow.
@@ -35,10 +35,10 @@
  *  - @c PROPAGATION_SCALE - each community has `2^scale` vertices - default 14.
  *  - @c PROPAGATION_COMMUNITIES - communities strung on the ring - default 64.
  *  - @c PROPAGATION_EDGE_FACTOR - edges generated per vertex, before deduplication - default 16.
- *  - @c PROPAGATION_BACKEND - backend to use - default @c forkunion_static_shared.
- *  - @c PROPAGATION_THREADS - number of threads to use - default all hardware threads.
- *  - @c PROPAGATION_SECONDS - wall-clock budget per run, reporting the sustained rate - default 10.
- *  - @c PROPAGATION_ITERATIONS - run an exact pass count instead, when set.
+ *  - @c FORKUNION_BACKEND - backend to use - default @c forkunion_static_shared.
+ *  - @c FORKUNION_THREADS - number of threads to use - default all hardware threads.
+ *  - @c FORKUNION_BUDGET_SECS - wall-clock budget per run, reporting the mean rate - default 10.
+ *  - @c FORKUNION_ITERATIONS - run an exact pass count instead, when set.
  *  - @c PROPAGATION_CHECK - also converge serially, failing unless labels and rounds agree exactly.
  *
  *  The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
@@ -58,13 +58,13 @@
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release
  *  cmake --build build_release --config Release
- *  PROPAGATION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
+ *  FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
  *  @endcode
  */
 #include <cinttypes> // `PRIu64`
 #include <cstdint>   // `std::uint32_t`
 #include <cstdio>    // `std::printf`
-#include <cstdlib>   // `std::getenv`, `EXIT_SUCCESS`
+#include <cstdlib>   // `EXIT_SUCCESS`, `EXIT_FAILURE`
 #include <cstring>   // `std::memcpy`, `std::memcmp`
 
 #include <algorithm>   // `std::sort`, `std::unique`, `std::min`
@@ -89,7 +89,10 @@
 
 #include <forkunion.hpp>
 
+#include "harness.hpp" // `env_variable`, `log_environment`
+
 namespace fu = ashvardanian::forkunion;
+using fu::bench::env_variable;
 
 /** A vertex index, dense in [0, vertices). */
 using vertex_t = std::uint32_t;
@@ -526,39 +529,16 @@ static constexpr backend_t backends_k[] = {
 
 #pragma endregion Backends
 
-/** Reads an environment variable, or @p fallback when unset - @c getenv_s on MSVC. */
-static char const *env_string(char const *name, char const *fallback) noexcept {
-#if defined(_MSC_VER)
-    static char buffer[256];
-    std::size_t required = 0;
-    return (getenv_s(&required, buffer, sizeof(buffer), name) == 0 && required > 0) ? buffer : fallback;
-#else
-    char const *value = std::getenv(name);
-    return value ? value : fallback;
-#endif
-}
-
-/** Parses a fractional environment variable, or @p fallback when unset. */
-static double env_double(char const *name, double fallback) noexcept {
-    char const *value = env_string(name, nullptr);
-    return value ? std::atof(value) : fallback;
-}
-
-/** Parses an unsigned environment variable, or @p fallback when unset. */
-static std::size_t env_usize(char const *name, std::size_t fallback) noexcept {
-    char const *value = env_string(name, nullptr);
-    return value ? static_cast<std::size_t>(std::strtoull(value, nullptr, 10)) : fallback;
-}
-
 int main() {
-    std::size_t const scale = env_usize("PROPAGATION_SCALE", 14);
-    std::size_t const communities = env_usize("PROPAGATION_COMMUNITIES", 64);
-    std::size_t const edge_factor = env_usize("PROPAGATION_EDGE_FACTOR", 16);
-    std::string_view const backend = env_string("PROPAGATION_BACKEND", "forkunion_static_shared");
-    std::size_t threads = env_usize("PROPAGATION_THREADS", 0);
-    double const budget_seconds = env_double("PROPAGATION_SECONDS", 10);   // ? The primary knob: a fixed window
-    std::size_t const iterations = env_usize("PROPAGATION_ITERATIONS", 0); // ? Overrides with an exact count when set
-    bool const check = env_string("PROPAGATION_CHECK", nullptr) != nullptr;
+    fu::bench::log_environment();
+    std::size_t const scale = env_variable("PROPAGATION_SCALE", std::size_t {14});
+    std::size_t const communities = env_variable("PROPAGATION_COMMUNITIES", std::size_t {64});
+    std::size_t const edge_factor = env_variable("PROPAGATION_EDGE_FACTOR", std::size_t {16});
+    std::string_view const backend = env_variable("FORKUNION_BACKEND", "forkunion_static_shared");
+    std::size_t threads = env_variable("FORKUNION_THREADS", std::size_t {0});
+    double const budget_seconds = env_variable("FORKUNION_BUDGET_SECS", 10.0); // ? The primary knob: a fixed window
+    std::size_t const iterations = env_variable("FORKUNION_ITERATIONS", std::size_t {0}); // ? Exact count when set
+    bool const check = env_variable("PROPAGATION_CHECK", false);
     if (threads == 0) threads = fu::allowed_cores_count();
     if ((communities << scale) > (std::size_t(1) << 32)) {
         std::fprintf(stderr, "PROPAGATION_COMMUNITIES << PROPAGATION_SCALE must fit 32-bit vertex indices\n");
@@ -646,7 +626,7 @@ int main() {
 
     // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
     // long enough to amortize scheduling noise - and reports the rate it sustained, with no
-    // per-backend pass-count guessing. `PROPAGATION_ITERATIONS` forces an exact count instead.
+    // per-backend pass-count guessing. `FORKUNION_ITERATIONS` forces an exact count instead.
     auto const started = std::chrono::steady_clock::now();
     std::size_t passes = 0;
     if (iterations > 0)

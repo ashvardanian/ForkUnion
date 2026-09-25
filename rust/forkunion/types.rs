@@ -142,8 +142,8 @@ pub fn bytes_for_elements(count: usize, element_bytes: usize) -> Result<usize> {
 
 /// Default alignment for preventing false sharing between threads.
 ///
-/// Picked from the target the way `FU_DEFAULT_ALIGNMENT` is in `types.hpp`: 256 bytes on s390x, 64
-/// on wasm, 128 elsewhere.
+/// Picked from the target the way `FORKUNION_DEFAULT_ALIGNMENT` is in `types.hpp`: 256 bytes on
+/// s390x, 64 on wasm, 128 elsewhere.
 ///
 /// On x86, most CPUs fetch 2 cache lines (128 bytes) at once with spatial prefetching enabled.
 /// This conservative padding prevents false sharing even with aggressive prefetch settings.

@@ -5,8 +5,8 @@
 # an assembler that takes `.arch_extension` for LSE and RCpc, the intrinsic where MSVC has one. The per-architecture
 # files (fu_x86_isa_probes.cmake and kin) call `fu_instruction_set_probe_()` per bit and
 # `fu_build_instruction_set_definitions_()` once to append their verdicts to the one cached `fu_compile_definitions_`
-# list of `FU_TARGET_<BIT>=0/1`. The check cache is the knob - a preset `-D fu_target_<bit>_compiles=0` skips that probe
-# and every reader follows it. `probes/README.md` has the table.
+# list of `FORKUNION_TARGET_<BIT>=0/1`. The check cache is the knob - a preset `-D fu_target_<bit>_compiles=0` skips
+# that probe and every reader follows it. `probes/README.md` has the table.
 include_guard(GLOBAL)
 include(CheckSourceCompiles)
 
@@ -28,16 +28,16 @@ function (fu_instruction_set_probe_ variable_ probe_file_)
     )
 endfunction ()
 
-# Appends one architecture's `FU_TARGET_<BIT>=0/1` verdicts to the cached list the compiled libraries and the tests
-# read.
+# Appends one architecture's `FORKUNION_TARGET_<BIT>=0/1` verdicts to the cached list the compiled libraries and the
+# tests read.
 function (fu_build_instruction_set_definitions_ architecture_name_ capability_names_)
     set(compile_definitions_ "")
     foreach (capability_ IN LISTS capability_names_)
         string(TOLOWER "${capability_}" capability_lowercase_)
         if (fu_target_${capability_lowercase_}_compiles)
-            list(APPEND compile_definitions_ "FU_TARGET_${capability_}=1")
+            list(APPEND compile_definitions_ "FORKUNION_TARGET_${capability_}=1")
         else ()
-            list(APPEND compile_definitions_ "FU_TARGET_${capability_}=0")
+            list(APPEND compile_definitions_ "FORKUNION_TARGET_${capability_}=0")
         endif ()
     endforeach ()
     list(JOIN compile_definitions_ " " summary_)

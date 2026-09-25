@@ -9,8 +9,8 @@
 #
 # The SDK ships the toolchain file naming its compilers, `-pthread` and the imported shared memory, so this one includes
 # it and adds the triple and the runtime `ctest` drives: Wasmtime with its threads proposal and its WASI threads imports
-# on, the two switches a bare `wasmtime` leaves off. `-pthread` defines `_REENTRANT`, so `FU_WITH_SHARED_MEMORY` derives
-# 1 and the pools are real.
+# on, the two switches a bare `wasmtime` leaves off. `-pthread` defines `_REENTRANT`, so `FORKUNION_WITH_SHARED_MEMORY`
+# derives 1 and the pools are real.
 
 if (NOT DEFINED ENV{WASI_SDK_PATH})
     message(FATAL_ERROR "WASI_SDK_PATH is unset; point it at an unpacked wasi-sdk release before configuring.")
@@ -28,5 +28,5 @@ string(APPEND CMAKE_CXX_FLAGS " -fno-exceptions")
 # A shared memory stops at its initial size unless given a ceiling, and every spawned thread allocates its stack there.
 string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--max-memory=2147483648")
 
-find_program(FU_WASMTIME_ wasmtime REQUIRED PATHS "$ENV{HOME}/.wasmtime/bin")
-set(CMAKE_CROSSCOMPILING_EMULATOR "${FU_WASMTIME_};run;-W;threads=y;-S;threads=y")
+find_program(FORKUNION_WASMTIME_ wasmtime REQUIRED PATHS "$ENV{HOME}/.wasmtime/bin")
+set(CMAKE_CROSSCOMPILING_EMULATOR "${FORKUNION_WASMTIME_};run;-W;threads=y;-S;threads=y")

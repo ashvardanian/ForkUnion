@@ -4,16 +4,17 @@ Model checking for the words ForkUnion's atomics touch, and the memory model eve
 Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com) for the protocol layer, [GenMC](https://github.com/MPI-SWS/genmc) for the C++ source under RC11.
 `./check.sh` runs everything and compares each verdict with the expected one.
 
-| File                      | What it is                                                                                                                                                               |
-| :------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `weak_memory.pml`         | The C++ memory model as views, for Promela: relaxed, acquire, release, `acq_rel`, both fences, release sequences.                                                        |
-| `weak_memory_litmus.pml`  | The calibration: the classic shapes, each asserting the outcome RC11 forbids. `check.sh` expects exactly RC11's verdicts.                                                |
-| `flat_pool.pml`           | `flat_pool`: the epoch clock, the countdown, what a completed join sees, the moods, a re-spawn, and a poll on a stale token; `-Dscenario=moods`, `respawn`, `polling`.   |
-| `flat_pool.cpp`           | The same words under GenMC.                                                                                                                                              |
-| `for_n_dynamic.pml`       | `for_n_dynamic`: one private cursor per thread, the coprime steal, the static prongs, the overshoot bound, and the join.                                                 |
-| `distributed_pool.pml`    | `distributed_pool`: the lockstep dispatch over colocations, the ANDed completion, the caller-first join, and `spin_mutex` under a slice; `-Dscenario=overlap`, `locked`. |
-| `standard_atomic_ref.cpp` | The portable `fetch_add_if_at_most` and `fetch_max` loops of `standard_atomic_ref` under GenMC, the real header.                                                         |
-| `genmc.hpp`               | What a client takes from GenMC: `spawn`, `join`, `verify`.                                                                                                               |
+- `weak_memory.pml` — the C++ memory model as views, for Promela: relaxed, acquire, release, `acq_rel`, both fences, release sequences.
+- `weak_memory_litmus.pml` — the calibration: the classic shapes, each asserting the outcome RC11 forbids.
+  `check.sh` expects exactly RC11's verdicts.
+- `flat_pool.pml` — `flat_pool`: the epoch clock, the countdown, what a completed join sees, the moods, a re-spawn, and a poll on a stale token.
+  Scenarios: `-Dscenario=moods`, `respawn`, `polling`.
+- `flat_pool.cpp` — the same words under GenMC.
+- `for_n_dynamic.pml` — `for_n_dynamic`: one private cursor per thread, the coprime steal, the static prongs, the overshoot bound, and the join.
+- `distributed_pool.pml` — `distributed_pool`: the lockstep dispatch over colocations, the ANDed completion, the caller-first join, and `spin_mutex` under a slice.
+  Scenarios: `-Dscenario=overlap`, `locked`.
+- `standard_atomic_ref.cpp` — the portable `fetch_add_if_at_most` and `fetch_max` loops of `standard_atomic_ref` under GenMC, the real header.
+- `genmc.hpp` — what a client takes from GenMC: `spawn`, `join`, `verify`.
 
 ## Conventions
 

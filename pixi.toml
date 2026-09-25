@@ -25,20 +25,20 @@ name = "forkunion"
 version = "3.0.3"
 
 [package.build]
-backend = {name = "pixi-build-mojo", version = "0.*"}
+backend = { name = "pixi-build-mojo", version = "0.*" }
 
 # The backend only auto-discovers a package under `<name>/` or `src/`, and this one lives under
 # `mojo/`, so it is named here.
 [package.build.config]
 compilers = ["cxx"]
-pkg = {name = "forkunion", path = "mojo/forkunion"}
+pkg = { name = "forkunion", path = "mojo/forkunion" }
 
 [tasks]
 # The binding reaches the library through `dlopen`, and `mojo build` bakes the environment's library
 # directory into the runpath, so installing here is what makes a consumer's build need no linker
 # flags at all. `FORKUNION_CXXFLAGS` is unset by default and overridden by the feature environments.
-build-native = {cmd = "c++ -O3 -std=c++20 -fPIC -shared -Iinclude c/forkunion.cpp -o $CONDA_PREFIX/lib/libforkunion.so -pthread $FORKUNION_CXXFLAGS"}
-test = {cmd = "mojo run -I mojo scripts/test.mojo", depends-on = ["build-native"]}
+build-native = { cmd = "c++ -O3 -std=c++20 -fPIC -shared -Iinclude c/forkunion.cpp -o $CONDA_PREFIX/lib/libforkunion.so -pthread $FORKUNION_CXXFLAGS" }
+test = { cmd = "mojo run -I mojo test/main.mojo", depends-on = ["build-native"] }
 
 # The demo benchmarks measure against a baseline the library itself never needs, so it is scoped
 # here rather than carried by every consumer.
@@ -51,26 +51,26 @@ max = "*"
 sysroot_linux-64 = ">=2.34"
 
 [feature.benchmarks.tasks]
-build-benchmarks = {cmd = "mojo build -I mojo scripts/nbody.mojo -o build/mojo_nbody && mojo build -I mojo scripts/propagation.mojo -o build/mojo_propagation"}
-nbody = {cmd = "mojo run -I mojo scripts/nbody.mojo", depends-on = ["build-native"]}
-propagation = {cmd = "mojo run -I mojo scripts/propagation.mojo", depends-on = ["build-native"]}
+build-benchmarks = { cmd = "mojo build -I mojo bench/nbody.mojo -o build/mojo_nbody && mojo build -I mojo bench/propagation.mojo -o build/mojo_propagation" }
+nbody = { cmd = "mojo run -I mojo bench/nbody.mojo", depends-on = ["build-native"] }
+propagation = { cmd = "mojo run -I mojo bench/propagation.mojo", depends-on = ["build-native"] }
 
 # The same five knobs `build.rs` exposes as Cargo features. Left alone, `include/forkunion/types.hpp`
 # derives them from the platform; these only ever override that.
 [feature.portable.activation.env]
-FORKUNION_CXXFLAGS = "-DFU_WITH_TOPOLOGY=0 -DFU_WITH_PLACE_THREADS_BY_AFFINITY=0 -DFU_WITH_PLACE_THREADS_BY_CORE_CLASS=0 -DFU_WITH_RESCHEDULE_THREADS_BY_CLASS=0 -DFU_WITH_PLACE_MEMORY_ON_DOMAIN=0 -DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=0"
+FORKUNION_CXXFLAGS = "-DFORKUNION_WITH_TOPOLOGY=0 -DFORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=0 -DFORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS=0 -DFORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS=0 -DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=0 -DFORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=0"
 
 [feature.topology.activation.env]
-FORKUNION_CXXFLAGS = "-DFU_WITH_TOPOLOGY=1"
+FORKUNION_CXXFLAGS = "-DFORKUNION_WITH_TOPOLOGY=1"
 
 [feature.place-memory-on-domain.activation.env]
-FORKUNION_CXXFLAGS = "-DFU_WITH_PLACE_MEMORY_ON_DOMAIN=1"
+FORKUNION_CXXFLAGS = "-DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=1"
 
 [feature.place-huge-pages-on-domain.activation.env]
-FORKUNION_CXXFLAGS = "-DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=1"
+FORKUNION_CXXFLAGS = "-DFORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=1"
 
 [feature.place-threads-by-affinity.activation.env]
-FORKUNION_CXXFLAGS = "-DFU_WITH_PLACE_THREADS_BY_AFFINITY=1"
+FORKUNION_CXXFLAGS = "-DFORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=1"
 
 # One environment per knob, so every feature is reachable and none sits unused.
 [environments]

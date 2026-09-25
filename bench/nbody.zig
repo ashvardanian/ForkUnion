@@ -17,28 +17,29 @@
 //!
 //! Environment variables:
 //! - NBODY_COUNT: number of bodies, defaulting to the thread count.
-//! - NBODY_SECONDS: wall-clock budget per run, reporting the sustained rate, defaulting to 10.
-//! - NBODY_ITERATIONS: run an exact iteration count instead, when set
-//! - NBODY_BACKEND: one of the backend names above, defaulting to forkunion_static_shared.
-//! - NBODY_THREADS: number of threads, defaulting to the CPU count.
+//! - FORKUNION_BUDGET_SECS: wall-clock budget per run, reporting the mean rate, defaulting to 10.
+//! - FORKUNION_ITERATIONS: run an exact iteration count instead, when set
+//! - FORKUNION_BACKEND: one of the backend names above, defaulting to forkunion_static_shared.
+//! - FORKUNION_THREADS: number of threads, defaulting to the CPU count.
 //!
-//! Build and run from the scripts/ directory:
+//! Build and run from the bench/ directory:
 //!
 //! ```sh
-//! cd scripts
+//! cd bench
 //! zig build -Doptimize=ReleaseFast
-//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated ./zig-out/bin/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=libxev ./zig-out/bin/forkunion_nbody
+//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
+//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated ./zig-out/bin/forkunion_nbody
+//! NBODY_COUNT=512 FORKUNION_BACKEND=libxev ./zig-out/bin/forkunion_nbody
 //! ```
 
 const std = @import("std");
 const fu = @import("forkunion");
 const xev = @import("xev");
 
-/// Reads a process environment variable, or null if unset. Borrows libc's storage - no free needed.
+/// Reads a process environment variable, or null if unset or empty; borrows libc's storage.
 fn envVar(name: [*:0]const u8) ?[]const u8 {
-    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+    const text = std.mem.span(std.c.getenv(name) orelse return null);
+    return if (text.len == 0) null else text;
 }
 
 /// Reads a string environment variable, or `fallback` if unset.
@@ -46,21 +47,22 @@ fn envString(name: [*:0]const u8, fallback: []const u8) []const u8 {
     return envVar(name) orelse fallback;
 }
 
-/// Parses an unsigned environment variable, falling back silently on absence or a bad value.
+/// Parses an unsigned environment variable, or `fallback` when unset; aborts on a bad value.
 fn envUsize(name: [*:0]const u8, fallback: usize) usize {
-    if (envVar(name)) |text| return std.fmt.parseInt(usize, text, 10) catch fallback;
-    return fallback;
+    const text = envVar(name) orelse return fallback;
+    return std.fmt.parseInt(usize, text, 10) catch abortUnparsed(name, text);
 }
 
-/// Parses a fractional environment variable, falling back silently on absence or a bad value.
+/// Parses a fractional environment variable, or `fallback` when unset; aborts on a bad value.
 fn envF64(name: [*:0]const u8, fallback: f64) f64 {
-    if (envVar(name)) |text| return std.fmt.parseFloat(f64, text) catch fallback;
-    return fallback;
+    const text = envVar(name) orelse return fallback;
+    return std.fmt.parseFloat(f64, text) catch abortUnparsed(name, text);
 }
 
-/// Whether an environment variable is present at all.
-fn envFlag(name: [*:0]const u8) bool {
-    return envVar(name) != null;
+/// Aborts naming the variable whose text does not parse, so a typo never becomes a silent default.
+fn abortUnparsed(name: [*:0]const u8, text: []const u8) noreturn {
+    std.debug.print("{s}=\"{s}\" does not parse\n", .{ name, text });
+    std.process.abort();
 }
 
 /// Reads the monotonic clock in nanoseconds, for timing the iteration loop.
@@ -489,16 +491,16 @@ pub fn main() !void {
     const topology = try fu.Topology.init();
     defer topology.deinit();
 
-    var n_threads = envUsize("NBODY_THREADS", 0);
+    var n_threads = envUsize("FORKUNION_THREADS", 0);
     if (n_threads == 0) n_threads = try topology.logicalCoresCount();
 
-    const budget_seconds = envF64("NBODY_SECONDS", 10); // The primary knob: a fixed window
-    const n_iters = envUsize("NBODY_ITERATIONS", 0); // Overrides with an exact count when set
+    const budget_seconds = envF64("FORKUNION_BUDGET_SECS", 10); // The primary knob: a fixed window
+    const n_iters = envUsize("FORKUNION_ITERATIONS", 0); // Overrides with an exact count when set
 
     var n_bodies = envUsize("NBODY_COUNT", 0);
     if (n_bodies == 0) n_bodies = n_threads;
 
-    const backend = envString("NBODY_BACKEND", "forkunion_static_shared");
+    const backend = envString("FORKUNION_BACKEND", "forkunion_static_shared");
 
     const bodies = try allocator.alloc(Body, n_bodies);
     defer allocator.free(bodies);
@@ -573,7 +575,7 @@ pub fn main() !void {
     };
     // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
     // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    // no per-backend iteration guessing. NBODY_ITERATIONS forces an exact count instead.
+    // no per-backend iteration guessing. FORKUNION_ITERATIONS forces an exact count instead.
     const budget_ns: u64 = @intFromFloat(budget_seconds * std.time.ns_per_s);
     const started = monotonicNanos();
     var passes: usize = 0;

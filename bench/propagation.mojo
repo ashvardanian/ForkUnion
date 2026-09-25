@@ -15,22 +15,22 @@ the last. Rounds-to-convergence and the final fixed point are therefore identica
 thread counts, and languages - the C++, Rust, Zig, and this port print the same component count,
 round count, and checksum.
 
-Environment variables, matching the sibling scripts:
+Environment variables, matching the sibling benchmarks:
 
 - `PROPAGATION_SCALE` - each community has 2^scale vertices, default 14.
 - `PROPAGATION_COMMUNITIES` - communities strung on the ring, default 64.
 - `PROPAGATION_EDGE_FACTOR` - edges generated per vertex, before deduplication, default 16.
-- `PROPAGATION_BACKEND` - one of the four `forkunion_{static,dynamic}_{shared,replicated}` cells, or
+- `FORKUNION_BACKEND` - one of the four `forkunion_{static,dynamic}_{shared,replicated}` cells, or
   the `max_parallelize` baseline; default `forkunion_static_shared`.
-- `PROPAGATION_THREADS` - number of threads, default the logical core count.
-- `PROPAGATION_SECONDS` - wall-clock budget per run, default 10.
-- `PROPAGATION_ITERATIONS` - run an exact pass count instead, when set.
+- `FORKUNION_THREADS` - number of threads, default the logical core count.
+- `FORKUNION_BUDGET_SECS` - wall-clock budget per run, default 10.
+- `FORKUNION_ITERATIONS` - run an exact pass count instead, when set.
 - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
 """
 
 from max.algorithm import parallelize
 
-from std.os import getenv
+from std.os import abort, getenv
 from std.sys import num_logical_cores
 from std.time import perf_counter_ns
 
@@ -62,14 +62,24 @@ def fixed(value: Float64, decimals: Int) -> String:
     return whole + "." + fraction
 
 
-def parse(name: StaticString, fallback: Int) -> Int:
+def parse_int(name: StaticString, fallback: Int) -> Int:
     var text = getenv(name)
     if text.byte_length() == 0:
         return fallback
     try:
         return Int(text)
     except:
+        abort(t"{name}=\"{text}\" does not parse")
+
+
+def parse_float(name: StaticString, fallback: Float64) -> Float64:
+    var text = getenv(name)
+    if text.byte_length() == 0:
         return fallback
+    try:
+        return Float64(text)
+    except:
+        abort(t"{name}=\"{text}\" does not parse")
 
 
 @always_inline
@@ -408,13 +418,13 @@ def converge_serially(graph: Graph, mut labels_a: List[UInt32], mut labels_b: Li
 
 
 def main() raises:
-    var scale = parse("PROPAGATION_SCALE", 14)
-    var communities = parse("PROPAGATION_COMMUNITIES", 64)
-    var edge_factor = parse("PROPAGATION_EDGE_FACTOR", 16)
-    var threads = parse("PROPAGATION_THREADS", num_logical_cores())
-    var budget = parse("PROPAGATION_SECONDS", 10) * 1_000_000_000
-    var iterations = parse("PROPAGATION_ITERATIONS", 0)
-    var backend = getenv("PROPAGATION_BACKEND")
+    var scale = parse_int("PROPAGATION_SCALE", 14)
+    var communities = parse_int("PROPAGATION_COMMUNITIES", 64)
+    var edge_factor = parse_int("PROPAGATION_EDGE_FACTOR", 16)
+    var threads = parse_int("FORKUNION_THREADS", num_logical_cores())
+    var budget = Int(parse_float("FORKUNION_BUDGET_SECS", 10) * 1e9)
+    var iterations = parse_int("FORKUNION_ITERATIONS", 0)
+    var backend = getenv("FORKUNION_BACKEND")
     if backend.byte_length() == 0:
         backend = String("forkunion_static_shared")
     var known = (
@@ -435,7 +445,8 @@ def main() raises:
     var dynamic = "dynamic" in backend
     var replicated = "replicated" in backend
     var baseline = backend == "max_parallelize"
-    var check = getenv("PROPAGATION_CHECK").byte_length() > 0
+    var check_text = getenv("PROPAGATION_CHECK")
+    var check = check_text.byte_length() > 0 and check_text != "0" and check_text != "false"
 
     var library = Library()
     var topology = Topology(library)

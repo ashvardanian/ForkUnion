@@ -1586,8 +1586,10 @@ check_abbreviations_spelled_out() {
 # restitches unpinned fragments into a staircase.
 check_split_string_literal_pinned() {
     local unpinned
-    unpinned=$(printf '%s\n' "$staged_added_text" | awk '
-        previous ~ /"[[:space:]]*$/ && previous !~ /\/\/[[:space:]]*$/ && $0 ~ /^\+[[:space:]]*"/ { print NR ": " previous }
+    unpinned=$(printf '%s\n' "$staged_file_text" | added_list="$staged_added_line_numbers_list" awk '
+        BEGIN { count = split(ENVIRON["added_list"], numbers, "\n"); for (index_ = 1; index_ <= count; ++index_) added[numbers[index_] + 0] = 1 }
+        (FNR in added) && ((FNR - 1) in added) && previous ~ /"[[:space:]]*$/ && previous !~ /\/\/[[:space:]]*$/ &&
+            $0 ~ /^[[:space:]]*"/ { print FNR - 1 ": " previous }
         { previous = $0 }' || true)
     [ -z "$unpinned" ] || reject_with_reason "$unpinned" \
         "$staged_path splits a string literal without a trailing \`//\` pin;" \
@@ -1686,11 +1688,17 @@ check_rust_macros_absent() {
         "$staged_path adds a \`macro_rules!\`;" "            write each impl out explicitly instead:"
 }
 
-# Rejects list mutation and self-referencing `set`, because a variable is written once.
+# Rejects list mutation and self-referencing `set`, because a variable is written once. A `foreach` may
+# still append to the list it builds, since CMake has no way to map a list in one `set`.
 check_cmake_variable_written_once() {
     local mutated
-    mutated=$(printf '%s\n' "$staged_added_text" | sed -E 's,#.*$,,' |
-        grep -nE '^\+[[:space:]]*(list[[:space:]]*\([[:space:]]*(APPEND|PREPEND|INSERT|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|TRANSFORM|FILTER)[[:space:]]|set[[:space:]]*\([[:space:]]*([A-Za-z0-9_]+)[[:space:]].*\$\{\3\})' || true)
+    mutated=$(printf '%s\n' "$staged_file_text" | sed -E 's,#.*$,,' |
+        added_list="$staged_added_line_numbers_list" awk '
+        BEGIN { count = split(ENVIRON["added_list"], numbers, "\n"); for (index_ = 1; index_ <= count; ++index_) added[numbers[index_] + 0] = 1 }
+        /^[[:space:]]*foreach[[:space:]]*\(/ { ++loops }
+        /^[[:space:]]*endforeach[[:space:]]*\(/ { --loops }
+        (FNR in added) && !(loops > 0 && /^[[:space:]]*list[[:space:]]*\([[:space:]]*APPEND[[:space:]]/) { print FNR ":" $0 }' |
+        grep -E '^[0-9]+:[[:space:]]*(list[[:space:]]*\([[:space:]]*(APPEND|PREPEND|INSERT|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|TRANSFORM|FILTER)[[:space:]]|set[[:space:]]*\([[:space:]]*([A-Za-z0-9_]+)[[:space:]].*\$\{\3\})' || true)
     [ -z "$mutated" ] || reject_with_reason "$mutated" \
         "$staged_path mutates a variable after defining it;" \
         "            define it once, and select per-configuration items with generator expressions:"
@@ -2139,7 +2147,7 @@ check_ceiling_division_uses_helper() {
         "            std.math.divCeil in Zig, or std.math.ceildiv in Mojo, and re-read the change against types.hpp:"
 }
 
-# Rejects a raw platform predefine outside `types.hpp`, because `types.hpp` resolves them once into the FU_*
+# Rejects a raw platform predefine outside `types.hpp`, because `types.hpp` resolves them once into the FORKUNION_*
 # vocabulary. The probes predate that vocabulary, and a genuine exception carries `// FU-ALLOW: <reason>`.
 check_platform_macros_through_vocabulary() {
     [ "$staged_path" != include/forkunion/types.hpp ] || return 0
@@ -2149,25 +2157,52 @@ check_platform_macros_through_vocabulary() {
         grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b|__WAITPKG__|__CLDEMOTE__|__CMPCCXADD__|__RAOINT__|__ARM_FEATURE_ATOMICS|__ARM_FEATURE_RCPC|__riscv_atomic|__riscv_zawrs|__riscv_zicbom|__riscv_zacas' |
         sort -u || true)
     [ -z "$raw" ] || reject_with_reason "$raw" \
-        "$staged_path asks a raw platform macro; use the FU_* vocabulary types.hpp derives," \
-        "            FU_ON_*, FU_GLIBC_PREREQ_, FU_DETECT_ARCH_* or FU_TARGET_*, or mark an exception // FU-ALLOW:"
+        "$staged_path asks a raw platform macro; use the FORKUNION_* vocabulary types.hpp derives," \
+        "            FORKUNION_OS_*, FORKUNION_ARCH_*, FORKUNION_HAS_* or FORKUNION_TARGET_*, or mark an exception // FU-ALLOW:"
 }
 
-# Rejects a capability gate nested inside another, because each bit gets one flat `#if FU_TARGET_<BIT>`
+# Rejects a capability gate nested inside another, because each bit gets one flat `#if FORKUNION_TARGET_<BIT>`
 # region, so a block's gate is the one line above it.
 check_capability_gates_flat() {
     local nested
     nested=$(printf '%s\n' "$staged_file_text" | awk '
         /^[[:space:]]*#[[:space:]]*if/ { depth++; stack[depth] = 0 }
         /^[[:space:]]*#[[:space:]]*(if|elif)/ {
-            gate = ($0 ~ /FU_TARGET_/); outer = ($0 ~ /FU_TARGET_|FU_DETECT_ARCH_/)
+            gate = ($0 ~ /FORKUNION_TARGET_/); outer = ($0 ~ /FORKUNION_TARGET_|FORKUNION_ARCH_/)
             open -= stack[depth]; if (gate && open) print NR ": " $0
             stack[depth] = outer; open += outer; next
         }
         /^[[:space:]]*#[[:space:]]*else/ { open -= stack[depth]; stack[depth] = 0; next }
         /^[[:space:]]*#[[:space:]]*endif/ { open -= stack[depth]; delete stack[depth]; depth-- }' || true)
     [ -z "$nested" ] || reject_with_reason "$nested" \
-        "$staged_path nests a capability gate inside another; one flat #if FU_TARGET_<BIT> region per bit:"
+        "$staged_path nests a capability gate inside another; one flat #if FORKUNION_TARGET_<BIT> region per bit:"
+}
+
+# Rejects a print to stdout in a test body: the harness owns stdout, and a test only reports failures to
+# stderr, so a passing run reads the same in every sibling.
+check_test_bodies_quiet() {
+    local prints
+    prints=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns |
+        grep -nE '\b(print_line|fmt::println|fmt::print|printf|puts)[[:space:]]*\(|\bstd::cout\b|\bfprintf[[:space:]]*\([[:space:]]*stdout\b' |
+        grep -vE '\([[:space:]]*stderr\b' || true)
+    [ -z "$prints" ] || reject_with_reason "$prints" \
+        "$staged_path prints to stdout from a test body; report failures to stderr and leave progress" \
+        "            to the harness:"
+}
+
+# Rejects the retired `FU_` prefix, and a `defined(...)` or `#ifdef` test of a `FORKUNION_ARCH_`, `_OS_` or `_HAS_`
+# fact, because those facts are always defined, as 0 or 1, so such a test is true on every platform.
+check_macro_names_current() {
+    local retired positive
+    retired=$(printf '%s\n' "$staged_added_text" | grep -E '(^|[^A-Za-z0-9_]|-D)FU_[A-Z0-9]' || true)
+    [ -z "$retired" ] || reject_with_reason "$retired" \
+        "$staged_path spells the retired FU_ prefix; every all-caps name starts with FORKUNION_:"
+    positive=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns | awk '
+        { line = $0; gsub(/![[:space:]]*defined[[:space:]]*\(?[[:space:]]*FORKUNION_(ARCH|OS|HAS)_/, "", line) }
+        line ~ /defined[[:space:]]*\(?[[:space:]]*FORKUNION_(ARCH|OS|HAS)_|#[[:space:]]*ifdef[[:space:]]+FORKUNION_(ARCH|OS|HAS)_/' || true)
+    [ -z "$positive" ] || reject_with_reason "$positive" \
+        "$staged_path tests a FORKUNION_ARCH_, _OS_ or _HAS_ fact with defined(), which is true everywhere;" \
+        "            they are always 0 or 1, so test them with #if:"
 }
 
 # Routes one staged file through the checks only ForkUnion has.
@@ -2177,8 +2212,16 @@ run_project_checks() {
         check_platform_macros_through_vocabulary
         check_capability_gates_flat
         check_ceiling_division_uses_helper
+        check_macro_names_current
         ;;
-    *.rs | *.zig | *.mojo) check_ceiling_division_uses_helper ;;
+    *.rs | *.zig | *.mojo)
+        check_ceiling_division_uses_helper
+        check_macro_names_current
+        ;;
+    esac
+    case "$staged_path" in
+    test/main.*) ;; # ? The harness: it owns stdout
+    test/*.cpp | test/*.cu | test/*.hpp) check_test_bodies_quiet ;;
     esac
 }
 

@@ -19,10 +19,10 @@
 //! - PROPAGATION_SCALE: each community has 2^scale vertices, defaulting to 14.
 //! - PROPAGATION_COMMUNITIES: communities strung on the ring, defaulting to 64.
 //! - PROPAGATION_EDGE_FACTOR: edges generated per vertex, before deduplication, defaulting to 16.
-//! - PROPAGATION_BACKEND: one of the backend names below, defaulting to forkunion_static_shared.
-//! - PROPAGATION_THREADS: number of threads, defaulting to the CPU count.
-//! - PROPAGATION_SECONDS: wall-clock budget per run, reporting sustained rate, defaulting to 10.
-//! - PROPAGATION_ITERATIONS: run an exact pass count instead, when set
+//! - FORKUNION_BACKEND: one of the backend names below, defaulting to forkunion_static_shared.
+//! - FORKUNION_THREADS: number of threads, defaulting to the CPU count.
+//! - FORKUNION_BUDGET_SECS: wall-clock budget per run, reporting sustained rate, defaulting to 10.
+//! - FORKUNION_ITERATIONS: run an exact pass count instead, when set
 //! - PROPAGATION_CHECK: also converge serially, and fail unless labels and rounds agree exactly
 //!
 //! The ForkUnion backends are the four cells of forkunion_{static,dynamic}_{shared,replicated}; the
@@ -33,20 +33,21 @@
 //! must see fresh, so replicating the read-only CSR, unlike N-body's replicated bodies, buys
 //! nothing here at all.
 //!
-//! Build and run from the scripts/ directory:
+//! Build and run from the bench/ directory:
 //!
 //! ```sh
-//! cd scripts
+//! cd bench
 //! zig build -Doptimize=ReleaseFast
-//! PROPAGATION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
+//! FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
 //! ```
 
 const std = @import("std");
 const fu = @import("forkunion");
 
-/// Reads a process environment variable, or null if unset. Borrows libc's storage - no free needed.
+/// Reads a process environment variable, or null if unset or empty; borrows libc's storage.
 fn envVar(name: [*:0]const u8) ?[]const u8 {
-    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+    const text = std.mem.span(std.c.getenv(name) orelse return null);
+    return if (text.len == 0) null else text;
 }
 
 /// Reads a string environment variable, or `fallback` if unset.
@@ -54,21 +55,28 @@ fn envString(name: [*:0]const u8, fallback: []const u8) []const u8 {
     return envVar(name) orelse fallback;
 }
 
-/// Parses an unsigned environment variable, falling back silently on absence or a bad value.
+/// Parses an unsigned environment variable, or `fallback` when unset; aborts on a bad value.
 fn envUsize(name: [*:0]const u8, fallback: usize) usize {
-    if (envVar(name)) |text| return std.fmt.parseInt(usize, text, 10) catch fallback;
-    return fallback;
+    const text = envVar(name) orelse return fallback;
+    return std.fmt.parseInt(usize, text, 10) catch abortUnparsed(name, text);
 }
 
-/// Parses a fractional environment variable, falling back silently on absence or a bad value.
+/// Parses a fractional environment variable, or `fallback` when unset; aborts on a bad value.
 fn envF64(name: [*:0]const u8, fallback: f64) f64 {
-    if (envVar(name)) |text| return std.fmt.parseFloat(f64, text) catch fallback;
-    return fallback;
+    const text = envVar(name) orelse return fallback;
+    return std.fmt.parseFloat(f64, text) catch abortUnparsed(name, text);
 }
 
-/// Whether an environment variable is present at all.
+/// Aborts naming the variable whose text does not parse, so a typo never becomes a silent default.
+fn abortUnparsed(name: [*:0]const u8, text: []const u8) noreturn {
+    std.debug.print("{s}=\"{s}\" does not parse\n", .{ name, text });
+    std.process.abort();
+}
+
+/// Whether an environment variable is set to anything but empty, `0` or `false`, like the C++ bench.
 fn envFlag(name: [*:0]const u8) bool {
-    return envVar(name) != null;
+    const text = envVar(name) orelse return false;
+    return !std.mem.eql(u8, text, "0") and !std.mem.eql(u8, text, "false");
 }
 
 /// Reads the monotonic clock in nanoseconds, for timing the pass loop.
@@ -453,9 +461,9 @@ pub fn main() !void {
     const scale = envUsize("PROPAGATION_SCALE", 14);
     const communities = envUsize("PROPAGATION_COMMUNITIES", 64);
     const edge_factor = envUsize("PROPAGATION_EDGE_FACTOR", 16);
-    const backend_name = envString("PROPAGATION_BACKEND", "forkunion_static_shared");
-    const budget_seconds = envF64("PROPAGATION_SECONDS", 10); // The primary knob: a fixed window
-    const n_iters = envUsize("PROPAGATION_ITERATIONS", 0); // Overrides with an exact count when set
+    const backend_name = envString("FORKUNION_BACKEND", "forkunion_static_shared");
+    const budget_seconds = envF64("FORKUNION_BUDGET_SECS", 10); // The primary knob: a fixed window
+    const n_iters = envUsize("FORKUNION_ITERATIONS", 0); // Overrides with an exact count when set
     const check = envFlag("PROPAGATION_CHECK");
 
     const backend = std.meta.stringToEnum(Backend, backend_name) orelse {
@@ -466,7 +474,7 @@ pub fn main() !void {
 
     const topology = try fu.Topology.init();
     defer topology.deinit();
-    var n_threads = envUsize("PROPAGATION_THREADS", 0);
+    var n_threads = envUsize("FORKUNION_THREADS", 0);
     if (n_threads == 0) n_threads = try topology.logicalCoresCount();
 
     // One pinned pool spawns for every backend - first to give the graph and label pages their
@@ -544,7 +552,7 @@ pub fn main() !void {
 
     // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
     // long enough to amortize scheduling noise - and reports the rate it sustained, with no
-    // per-backend pass-count guessing. PROPAGATION_ITERATIONS forces an exact count instead.
+    // per-backend pass-count guessing. FORKUNION_ITERATIONS forces an exact count instead.
     const budget_ns: u64 = @intFromFloat(budget_seconds * std.time.ns_per_s);
     const started = monotonicNanos();
     var passes: usize = 0;

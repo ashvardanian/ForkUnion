@@ -20,7 +20,7 @@ namespace forkunion {
  *  @return True if binding succeeded, false otherwise.
  */
 inline status_t linux_numa_bind(void *ptr, std::size_t size_bytes, memory_domain_id_t memory_domain_id) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
     // ! `MPOL_F_STATIC_NODES` is a @b mode flag - it belongs OR-ed into the policy, not in the
     // ! trailing `flags` argument, which only accepts `MPOL_MF_*`. Those flags are 0: this memory
     // ! is freshly mapped and unfaulted, so there is nothing to migrate, and `MPOL_MF_MOVE` would
@@ -31,7 +31,7 @@ inline status_t linux_numa_bind(void *ptr, std::size_t size_bytes, memory_domain
     fu_unused_(size_bytes);
     fu_unused_(memory_domain_id);
     return status_t::unsupported_k;
-#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#endif // FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
 /**
@@ -43,13 +43,13 @@ inline void *linux_numa_allocate(std::size_t size_bytes, std::size_t page_size_b
                                  memory_domain_id_t memory_domain_id) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 
     // One path, not two: `numa_alloc_onnode` was only ever the `mmap` plus `mbind` below, so the
     // base page is that ladder without `MAP_HUGETLB` rather than a fast path beside it.
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     if (page_size_bytes != ram_page_size()) {
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+#if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
         // Huge/explicit page sizes must be exact multiples
         assert(size_bytes % page_size_bytes == 0 && "Size must be a multiple of page size");
 
@@ -80,13 +80,13 @@ inline void *linux_numa_allocate(std::size_t size_bytes, std::size_t page_size_b
     fu_unused_(page_size_bytes);
     fu_unused_(memory_domain_id);
     return nullptr;
-#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#endif // FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
 inline void linux_numa_free(void *ptr, std::size_t size_bytes) noexcept {
     assert(ptr != nullptr && "Pointer must not be null");
     assert(size_bytes > 0 && "Size must be greater than zero");
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
     ::munmap(ptr, size_bytes); // ? What `numa_free` was, rounding the length up just as `mmap` did
 #else
     fu_unused_(ptr);
@@ -232,14 +232,14 @@ using linux_numa_allocator_t = linux_numa_allocator<>;
  */
 inline void *linux_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes,
                                       std::size_t page_size_bytes) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
     std::size_t const domains = topology.memory_domains_count();
     if (domains == 0 || stride_bytes == 0) return nullptr;
     std::size_t const total_bytes = domains * stride_bytes;
 
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     if (page_size_bytes != ram_page_size()) {
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+#if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
         if (page_size_bytes == page_size_2m_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_2MB); }
         else if (page_size_bytes == page_size_1g_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_1GB); }
         else { return nullptr; } // ! Unsupported page size
@@ -267,11 +267,11 @@ inline void *linux_symmetric_allocate(machine_topology_t const &topology, std::s
     fu_unused_(stride_bytes);
     fu_unused_(page_size_bytes);
     return nullptr;
-#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#endif // FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
 }
 
 inline void linux_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
     if (ptr) ::munmap(ptr, total_bytes);
 #else
     fu_unused_(ptr);
@@ -352,7 +352,7 @@ using linux_symmetric_allocator_t = linux_symmetric_allocator<>;
  */
 inline void freebsd_domain_restore([[maybe_unused]] void const *saved_set, [[maybe_unused]] int saved_policy,
                                    [[maybe_unused]] bool have_saved) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     if (!have_saved) return;
     ::cpuset_setdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
                        static_cast<domainset_t const *>(saved_set), saved_policy);
@@ -368,7 +368,7 @@ inline void freebsd_domain_restore([[maybe_unused]] void const *saved_set, [[may
  *  @note Anonymous pages are already zero, so writing a zero changes nothing but the residency.
  */
 inline void freebsd_first_touch([[maybe_unused]] void *ptr, [[maybe_unused]] std::size_t size_bytes) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     std::size_t const stride = static_cast<std::size_t>(ram_page_size());
     if (stride == 0) return;
     for (std::size_t offset = 0; offset < size_bytes; offset += stride) static_cast<volatile char *>(ptr)[offset] = 0;
@@ -389,7 +389,7 @@ inline void freebsd_first_touch([[maybe_unused]] void *ptr, [[maybe_unused]] std
  */
 inline status_t freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory_domain_id,
                                       [[maybe_unused]] void *saved_set, [[maybe_unused]] int *saved_policy) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     bool const have_saved = ::cpuset_getdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
                                                static_cast<domainset_t *>(saved_set), saved_policy) == 0;
     domainset_t target;
@@ -419,13 +419,13 @@ inline status_t freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory
 inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
                                      memory_domain_id_t memory_domain_id) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     if (size_bytes == 0) return nullptr;
 
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     bool huge_requested = false;
     if (page_size_bytes > static_cast<std::size_t>(ram_page_size())) {
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+#if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
         // ? Default superpage alignment; not a size-specific pool like Linux's MAP_HUGETLB
         mmap_flags |= MAP_ALIGNED_SUPER;
         huge_requested = true;
@@ -457,7 +457,7 @@ inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_si
 }
 
 inline void freebsd_domain_free(void *ptr, std::size_t size_bytes) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     if (ptr) ::munmap(ptr, size_bytes);
 #else
     fu_unused_(ptr);
@@ -547,7 +547,7 @@ using freebsd_numa_allocator_t = freebsd_numa_allocator<>;
  */
 inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes,
                                         std::size_t page_size_bytes) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     std::size_t const domains = topology.memory_domains_count();
     if (domains == 0 || stride_bytes == 0) return nullptr;
     std::size_t const total_bytes = domains * stride_bytes;
@@ -555,7 +555,7 @@ inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std:
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     bool huge_requested = false;
     if (page_size_bytes > static_cast<std::size_t>(ram_page_size())) {
-#if FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
+#if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
         mmap_flags |= MAP_ALIGNED_SUPER;
         huge_requested = true;
 #else
@@ -597,7 +597,7 @@ inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std:
 }
 
 inline void freebsd_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     if (ptr) ::munmap(ptr, total_bytes);
 #else
     fu_unused_(ptr);
@@ -673,7 +673,7 @@ using freebsd_symmetric_allocator_t = freebsd_symmetric_allocator<>;
  *  @c windows_numa_allocator with `large_pages = true`.
  */
 inline status_t windows_enable_lock_memory_privilege() noexcept {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
     HANDLE token = nullptr;
     if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
         return status_t::permission_denied_k;
@@ -705,7 +705,7 @@ inline status_t windows_enable_lock_memory_privilege() noexcept {
 inline void *windows_numa_allocate(std::size_t size_bytes, memory_domain_id_t memory_domain_id,
                                    bool large_pages = false) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
     if (size_bytes == 0) return nullptr;
     DWORD allocation_type = MEM_RESERVE | MEM_COMMIT;
     if (large_pages) {
@@ -725,7 +725,7 @@ inline void *windows_numa_allocate(std::size_t size_bytes, memory_domain_id_t me
 }
 
 inline void windows_numa_free(void *ptr) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
     if (ptr) ::VirtualFree(ptr, 0, MEM_RELEASE); // ? Size must be 0 with MEM_RELEASE
 #else
     fu_unused_(ptr);
@@ -742,7 +742,7 @@ inline void windows_numa_free(void *ptr) noexcept {
  *  two separate mapping steps.
  */
 inline void *windows_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
     std::size_t const domains = topology.memory_domains_count();
     if (domains == 0 || stride_bytes == 0) return nullptr;
     std::size_t const total_bytes = domains * stride_bytes;
@@ -769,7 +769,7 @@ inline void *windows_symmetric_allocate(machine_topology_t const &topology, std:
 }
 
 inline void windows_symmetric_free(void *ptr) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
     if (ptr) ::VirtualFree(ptr, 0, MEM_RELEASE);
 #else
     fu_unused_(ptr);
@@ -1015,11 +1015,11 @@ using portable_symmetric_allocator_t = portable_symmetric_allocator<>;
  *  @brief The NUMA-placing allocator for this platform, or @c malloc-backed where none exists.
  *  @sa Selected as @c colocated_pool::allocator_t so the pool's own state lands on its node.
  */
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 using domain_allocator_t = linux_numa_allocator_t;
-#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
+#elif FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
 using domain_allocator_t = windows_numa_allocator_t;
-#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#elif FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
 using domain_allocator_t = freebsd_numa_allocator_t;
 #else
 using domain_allocator_t = portable_aligned_allocator_t;
@@ -1029,11 +1029,11 @@ using domain_allocator_t = portable_aligned_allocator_t;
  *  @brief The symmetric mapping allocator for this platform, or heap-backed where none exists.
  *  @sa Backs @c replicated_array and @c sharded_array; one range striped across all memory domains.
  */
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 using symmetric_memory_allocator_t = linux_symmetric_allocator_t;
-#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
+#elif FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
 using symmetric_memory_allocator_t = windows_symmetric_allocator_t;
-#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#elif FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
 using symmetric_memory_allocator_t = freebsd_symmetric_allocator_t;
 #else
 using symmetric_memory_allocator_t = portable_symmetric_allocator_t;

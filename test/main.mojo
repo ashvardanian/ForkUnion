@@ -1,4 +1,4 @@
-"""The Mojo binding's tests, in the shape `scripts/test.c` and `scripts/test.cpp` already use.
+"""The Mojo binding's tests, in the shape `test/main.c` and `test/main.cpp` already use.
 
 Mojo 1.0 has no `mojo test` subcommand and no test discovery, but `std.testing.TestSuite` is a
 real runner: register each check as a parameter and it reports and filters them. The pure-logic

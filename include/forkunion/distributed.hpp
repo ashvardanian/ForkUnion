@@ -19,7 +19,7 @@
 namespace ashvardanian {
 namespace forkunion {
 
-#if FU_WITH_OS_THREADS
+#if FORKUNION_WITH_OS_THREADS
 
 /**
  *  @brief Sleeps the calling thread for @p micros microseconds.
@@ -27,12 +27,12 @@ namespace forkunion {
  *      clock is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
  */
 inline void sleep_for_micros([[maybe_unused]] std::size_t const micros) noexcept {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
     // Reached only after the pool is told to `sleep` to save power, where the docs promise latency
     // is irrelevant - so a millisecond-granular `Sleep`, rounded up, is enough, and spares us the
     // per-nap timer object a sub-millisecond wait would cost.
     ::Sleep(static_cast<DWORD>(div_ceil(micros, 1000)));
-#elif FU_ON_LINUX
+#elif FORKUNION_OS_LINUX_
     struct timespec ts {0, static_cast<long>(micros * 1000)};
     ::clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr); // ? A named clock; Darwin has only `nanosleep`
 #else
@@ -86,7 +86,7 @@ struct alignas(default_alignment_k) pinned_thread_t {
 
     /** Thread name, written by the spawner and applied by the worker to itself. */
     char name[16] {};
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 
     /**
      *  @brief Apple's absolute class for this worker's domain, or -1 when unnamed.
@@ -138,7 +138,7 @@ template <typename micro_yield_type_ = standard_yield_t, typename cache_hints_ty
 struct colocated_pool {
 
   public:
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
 
     /** Places the pool's own state on its node. */
     using allocator_t = domain_allocator_t;
@@ -388,7 +388,7 @@ struct colocated_pool {
         if (pthreads_.size() != 0) return status_t::already_spawned_k;
 
         // Allocate the thread pool of `pinned_thread_t` objects
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
         allocator_ = domain_allocator_t {domain.memory_domain_id};
 #endif
         pinned_threads_allocator_t pthread_allocator {allocator_};
@@ -420,7 +420,7 @@ struct colocated_pool {
         // Include the main thread into the list of handles
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (use_caller_thread) {
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
             // A pseudo-handle that always means "this thread"; valid because slot 0 is only ever
             // pinned from within this very call, on this very thread, and is never joined.
             pthreads_[0].handle.store(::GetCurrentThread(), std::memory_order_release);
@@ -428,7 +428,7 @@ struct colocated_pool {
             pthreads_[0].handle.store(::pthread_self(), std::memory_order_release);
 #endif
             pthreads_[0].id.store(current_thread_id(), std::memory_order_release);
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
             pthreads_[0].apple_core_quality = domain.apple_core_quality;
 #endif
         }
@@ -448,7 +448,7 @@ struct colocated_pool {
             // from inside, via `gettid`; Windows hands back both a `HANDLE` and the thread id at
             // once, so the parent can publish the id here and let the worker match on it.
             bool created = false;
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
             DWORD new_thread_id = 0;
             HANDLE const new_handle = ::CreateThread(nullptr, 0, &_win_worker_loop, this, 0, &new_thread_id);
             created = new_handle != nullptr;
@@ -458,7 +458,7 @@ struct colocated_pool {
             pthread_t new_pthread_handle;
             pthread_attr_t attributes;
             ::pthread_attr_init(&attributes);
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
             // Apple offers no pinning; a Quality-of-Service class is the whole placement story, and
             // it must be chosen before the thread exists. On a chip with efficiency cores,
             // `UTILITY` confines a thread to them; on an all-performance chip it's inert.
@@ -470,7 +470,7 @@ struct colocated_pool {
             pthreads_[i].id.store(0, std::memory_order_relaxed); // ? 0 means "not published yet"
 #endif
             pthreads_[i].core_id = -1; // ? Not pinned yet
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
             pthreads_[i].apple_core_quality = domain.apple_core_quality;
 #endif
 
@@ -478,7 +478,7 @@ struct colocated_pool {
                 mood_.store(mood_t::die_k, std::memory_order_release);
                 for (thread_index_t j = use_caller_thread; j < i; ++j) {
                     native_thread_t const started = pthreads_[j].handle.load(std::memory_order_relaxed);
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
                     // Workers see `die_k` and are exiting; reap and close each to avoid a leak.
                     ::WaitForSingleObject(started, INFINITE);
                     ::CloseHandle(started);
@@ -573,7 +573,7 @@ struct colocated_pool {
         thread_index_t const threads = pthreads_.size();
         for (thread_index_t i = use_caller_thread; i != threads; ++i) {
             native_thread_t const join_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
             ::WaitForSingleObject(join_handle, INFINITE);
             ::CloseHandle(join_handle); // ? Release the reference `CreateThread` handed us
 #else
@@ -611,8 +611,8 @@ struct colocated_pool {
         mood_.store(mood_t::chill_k, std::memory_order_release);
 
         // On Linux the thread's scheduling class can go IDLE to cut power draw:
-#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
-#if FU_ON_LINUX
+#if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
+#if FORKUNION_OS_LINUX_
         // A thread leaves `SCHED_IDLE` only under `CAP_SYS_NICE` or an `RLIMIT_NICE` admitting nice
         // 0; demote only where dispatch can restore the workers, since the nap happens either way.
         rlimit nice_limit {};
@@ -622,7 +622,7 @@ struct colocated_pool {
         for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
             std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
             if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
-#if FU_ON_FREEBSD
+#if FORKUNION_OS_FREEBSD_
             // FreeBSD rejects `SCHED_IDLE`; its idle class is reached through `rtprio` instead.
 
             // ! Elaborated `struct` tag: `<sys/rtprio.h>` also declares an `rtprio()` function that
@@ -731,7 +731,7 @@ struct colocated_pool {
         generation_t const generation = epoch_.fetch_add(1, std::memory_order_release) + 1;
 
         // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
-#if FU_WITH_RESCHEDULE_THREADS_BY_CLASS
+#if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
         if (was_chilling) {
             bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
             for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
@@ -739,7 +739,7 @@ struct colocated_pool {
                 if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
                 // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
                 // for another thread; its QoS class is fixed at creation.
-#if FU_ON_FREEBSD
+#if FORKUNION_OS_FREEBSD_
                 // Restore the timesharing class - "make runnable", not "boost to realtime".
                 struct ::rtprio rtp {RTP_PRIO_NORMAL, 0};
                 ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
@@ -896,7 +896,7 @@ struct colocated_pool {
             // `HANDLE` is not reliable identity, since one thread may own several.
             auto &numa_pthreads = pool->pthreads_;
             thread_index_t const numa_pthreads_count = pool->pthreads_.size();
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
             std::uint64_t const self_id = current_thread_id();
             for (local_thread_index = 0; local_thread_index < numa_pthreads_count; ++local_thread_index)
                 if (numa_pthreads[local_thread_index].id.load(std::memory_order_acquire) == self_id) break;
@@ -966,7 +966,7 @@ struct colocated_pool {
     }
 
     // Thread entry points: same body, different ABI. Only the one this build spawns exists.
-#if FU_ON_WINDOWS
+#if FORKUNION_OS_WINDOWS_
 
     /** Windows thread entry point; forwards to @c _worker_loop_body. */
     static DWORD WINAPI _win_worker_loop(LPVOID arg) noexcept {
@@ -982,7 +982,7 @@ struct colocated_pool {
     }
 #endif
 
-#if FU_WITH_PLACE_THREADS_BY_CORE_CLASS
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 
     /**
      *  @brief Maps a compute domain onto the only placement control Darwin offers: a QoS class.
@@ -1259,7 +1259,7 @@ struct distributed_pool {
     using colocations_t = dynamic_padded_array<colocated_pool_t, allocator_t>;
 
     /** Thread name buffer, forwarded to each sub-pool for OS thread naming. */
-    char name_[FU_POOL_NAME_CAPACITY] {};
+    char name_[FORKUNION_POOL_NAME_CAPACITY] {};
 
     /** Total threads across all compute domains, including the caller on inclusive pools. */
     thread_index_t threads_count_ {0};
@@ -1735,7 +1735,7 @@ struct distributed_pool {
      *  @note On a machine without NUMA memory the node is meaningless and the argument is dropped.
      */
     static allocator_t allocator_for_node([[maybe_unused]] memory_domain_id_t const memory_domain_id) noexcept {
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
         return allocator_t {memory_domain_id};
 #else
         return allocator_t {};
@@ -1753,7 +1753,7 @@ static_assert(is_pool<flat_pool_t> && is_pool<colocated_pool_t> && is_pool<distr
 
 #pragma endregion Distributed Pool
 
-#endif // FU_WITH_OS_THREADS
+#endif // FORKUNION_WITH_OS_THREADS
 
 #pragma region Measured Memory Distances
 

@@ -40,8 +40,8 @@
  *  `_Interlocked*` arithmetic, which stays inline only under `/arch:armv8.1`; the x86 and RISC-V
  *  references lack intrinsics for their instructions, so those targets keep @c standard_atomic_ref.
  *  The @c preferred_atomic_ref at the bottom is the newest reference this unit may run with no
- *  runtime probe, reading `FU_TARGET_<BIT>` alone - the compilation target's promise in a unit that
- *  dispatches nothing - for compile-time callers, not per CPU class.
+ *  runtime probe, reading `FORKUNION_TARGET_<BIT>` alone - the compilation target's promise in a
+ *  unit that dispatches nothing - for compile-time callers, not per CPU class.
  *
  *  The header needs the library's @c std::atomic_ref and @c std::bit_cast, so it is empty without
  *  them - a C++20 language mode over a library that still lacks them sees nothing here.
@@ -57,7 +57,7 @@
 #include "types.hpp" // `capabilities_t`, the bits a reference needs admitted, and the target macros
 
 /*  Gated on a macro `types.hpp` defines, so it follows rather than joins the third-party group. */
-#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+#if FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
 #include <intrin.h> // `__ldar64`, `__stlr64`, `__ldapr64`, `__swpal64`, `__casal64`, `_Interlocked*`
 #endif
 
@@ -341,7 +341,7 @@ struct standard_atomic_ref<value_type_ const> {
  *  held. Spelled as bytes, since binutils before 2.40 and LLVM before 16 have no mnemonic: the VEX
  *  form in map 0F38, opcode E0 plus the condition, @c W set for the 64-bit forms; the word in
  *  @c rax, the compare-and-return register in @c rcx, the addend in @c rdx. */
-#if FU_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X86_CMPCCXADD
 #pragma region x86 CMPCCXADD
 
 inline std::uint32_t x86_cmpbexadd_u32(std::uint32_t *word, std::uint32_t bound, std::uint32_t addend) noexcept {
@@ -560,14 +560,14 @@ struct x86_cmpccxadd_atomic_ref<value_type_ const> {
 
 #pragma endregion x86 CMPCCXADD
 
-#endif // FU_TARGET_X86_CMPCCXADD
+#endif // FORKUNION_TARGET_X86_CMPCCXADD
 
 /*  RAO-INT: the remote, no-return forms - weakly ordered like write-combining stores, which only
  *  SFENCE or MFENCE order and a C++ release fence never emits on x86, so only the relaxed callers
  *  take them; a release order stays on the @c lock-prefixed base. Bytes for the same reason: map
  *  0F38 opcode FC, the operation picked by the legacy prefix - none for add, 66 for and, F2 for or,
  *  F3 for xor - `REX.W` for the 64-bit forms; the word in @c rax, the operand in @c rcx. */
-#if FU_TARGET_X86_RAOINT
+#if FORKUNION_TARGET_X86_RAOINT
 #pragma region x86 RAOINT
 
 inline void x86_aadd_u32(std::uint32_t *word, std::uint32_t operand) noexcept {
@@ -772,13 +772,13 @@ struct x86_raoint_atomic_ref<value_type_ const> {
 
 #pragma endregion x86 RAOINT
 
-#endif // FU_TARGET_X86_RAOINT
+#endif // FORKUNION_TARGET_X86_RAOINT
 
-#if FU_TARGET_ARM64_LSE
+#if FORKUNION_TARGET_ARM64_LSE
 
 #pragma region Arm64 LSE
 
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
 
 /*  Loads: plain and acquire. */
 
@@ -1591,11 +1591,11 @@ inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, 
     return expected;
 }
 
-#endif // FU_DETECT_INLINE_ASM_SUPPORT_
+#endif // FORKUNION_HAS_INLINE_ASM_
 
 /*  Loads: plain and acquire. `__iso_volatile_load*` is the plain load no optimizer may fold away,
  *  spelled over the signed widths; `__ldar*` takes the unsigned ones directly. */
-#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+#if FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
 inline std::uint8_t arm64_ldr_u8(std::uint8_t const *word) noexcept {
     return static_cast<std::uint8_t>(__iso_volatile_load8(reinterpret_cast<char const volatile *>(word)));
 }
@@ -1691,7 +1691,7 @@ inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, 
 
 /*  LSE arithmetic: @c ldadd, @c ldclr, @c ldset and @c ldeor have no intrinsic of their own, so the
  *  `_Interlocked*` family carries them - one instruction under `/arch:armv8.1`, and a call into the
- *  CRT without it, which @c FU_DETECT_ARM64_ATOMIC_INTRINSICS_ has already refused. */
+ *  CRT without it, which @c FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_ has already refused. */
 
 inline std::uint32_t arm64_ldadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     long volatile *target = reinterpret_cast<long volatile *>(word);
@@ -1900,7 +1900,7 @@ inline std::int64_t arm64_ldsmin_i64(std::int64_t *word, std::int64_t operand, s
     }
 }
 
-#endif // FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+#endif // FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
 
 /**
  *  @brief `std::atomic_ref` over Armv8.1 LSE: @c ldar and @c stlr for ordered loads & stores, one
@@ -2154,13 +2154,13 @@ struct arm64_lse_atomic_ref<value_type_ const> {
 
 #pragma endregion Arm64 LSE
 
-#endif // FU_TARGET_ARM64_LSE
+#endif // FORKUNION_TARGET_ARM64_LSE
 
 /*  RCpc acquire loads: ordered against later loads and stores, not against earlier stores. */
-#if FU_TARGET_ARM64_RCPC
+#if FORKUNION_TARGET_ARM64_RCPC
 #pragma region Arm64 RCpc
 
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
 
 inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept {
     std::uint8_t value;
@@ -2178,15 +2178,15 @@ inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept {
     return value;
 }
 
-#endif // FU_DETECT_INLINE_ASM_SUPPORT_
+#endif // FORKUNION_HAS_INLINE_ASM_
 
-#if FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+#if FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
 
 inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept { return __ldapr8(word); }
 inline std::uint32_t arm64_ldapr_u32(std::uint32_t const *word) noexcept { return __ldapr32(word); }
 inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept { return __ldapr64(word); }
 
-#endif // FU_DETECT_ARM64_ATOMIC_INTRINSICS_
+#endif // FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
 
 /**
  *  @brief Armv8.3 RCpc on top of LSE: acquiring loads are @c ldapr. Sequentially-consistent loads
@@ -2350,11 +2350,11 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
 
 #pragma endregion Arm64 RCpc
 
-#endif // FU_TARGET_ARM64_RCPC
+#endif // FORKUNION_TARGET_ARM64_RCPC
 
 /*  Loads & stores carry their order as fences, per the RISC-V mapping: acquire is `fence r,rw`
  *  after the load, release `fence rw,w` before the store, sequential consistency both. */
-#if FU_TARGET_RISC5_ATOMIC
+#if FORKUNION_TARGET_RISC5_ATOMIC
 #pragma region RISC5 A
 
 inline std::uint8_t risc5_lbu(std::uint8_t const *word) noexcept {
@@ -2837,7 +2837,7 @@ struct risc5_atomic_ref<value_type_ const> {
 
 #pragma endregion RISC5 A
 
-#endif // FU_TARGET_RISC5_ATOMIC
+#endif // FORKUNION_TARGET_RISC5_ATOMIC
 
 /*  @c Zacas: compare-and-swap as one instruction; the comparand register receives what the word
  *  held. Assemblers disagree on how to name the extension inline - @c zacas, @c zacas1p0, or not at
@@ -2845,7 +2845,7 @@ struct risc5_atomic_ref<value_type_ const> {
  *  pinned: the AMO opcode, funct5 `00101`, both @c aq and @c rl set, @c a0 as the comparand, @c a1
  *  as the address, @c a2 as the desired value. A baseline @c rv64gc build then assembles them and
  *  the runtime bit decides. */
-#if FU_TARGET_RISC5_ZACAS
+#if FORKUNION_TARGET_RISC5_ZACAS
 #pragma region RISC5 Zacas
 
 inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
@@ -3023,29 +3023,30 @@ struct risc5_zacas_atomic_ref<value_type_ const> {
 
 #pragma endregion RISC5 Zacas
 
-#endif // FU_TARGET_RISC5_ZACAS
+#endif // FORKUNION_TARGET_RISC5_ZACAS
 
 /** The newest reference this translation unit may run with no runtime probe, reading each rung's
- *  `FU_TARGET_<BIT>` alone - in a unit that dispatches nothing the compilation target's promise, so
- *  the pick can never be illegal there. In a unit that dispatches at runtime - one with the probe
- *  lists or @c FU_RUNTIME_DISPATCH - the bit is what the toolchain builds and the alias resolves to
- *  the newest buildable rung, so such a unit names its reference per CPU class instead. */
-#if FU_TARGET_ARM64_RCPC
+ *  `FORKUNION_TARGET_<BIT>` alone - in a unit that dispatches nothing the compilation target's
+ *  promise, so the pick can never be illegal there. In a unit that dispatches at runtime - one
+ *  with the probe lists or @c FORKUNION_RUNTIME_DISPATCH - the bit is what the toolchain builds
+ *  and the alias resolves to the newest buildable rung, so such a unit names its reference per
+ *  CPU class instead. */
+#if FORKUNION_TARGET_ARM64_RCPC
 template <typename value_type_>
 using preferred_atomic_ref = arm64_rcpc_atomic_ref<value_type_>;
-#elif FU_TARGET_ARM64_LSE
+#elif FORKUNION_TARGET_ARM64_LSE
 template <typename value_type_>
 using preferred_atomic_ref = arm64_lse_atomic_ref<value_type_>;
-#elif FU_TARGET_X86_RAOINT
+#elif FORKUNION_TARGET_X86_RAOINT
 template <typename value_type_>
 using preferred_atomic_ref = x86_raoint_atomic_ref<value_type_>;
-#elif FU_TARGET_X86_CMPCCXADD
+#elif FORKUNION_TARGET_X86_CMPCCXADD
 template <typename value_type_>
 using preferred_atomic_ref = x86_cmpccxadd_atomic_ref<value_type_>;
-#elif FU_TARGET_RISC5_ZACAS
+#elif FORKUNION_TARGET_RISC5_ZACAS
 template <typename value_type_>
 using preferred_atomic_ref = risc5_zacas_atomic_ref<value_type_>;
-#elif FU_TARGET_RISC5_ATOMIC
+#elif FORKUNION_TARGET_RISC5_ATOMIC
 template <typename value_type_>
 using preferred_atomic_ref = risc5_atomic_ref<value_type_>;
 #else

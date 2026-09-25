@@ -23,37 +23,39 @@
  *
  *  @c PAUSE fell fourfold between the client and server cores above, which moves the crossover
  *  between @c x86_pause_t and @c x86_tpause_t by the same factor; Sapphire and Granite Rapids are
- *  unmeasured. @c CLDEMOTE is no cheaper than a store, so @c FU_WITH_DEMOTE_CACHE_LINES pays off at
- *  a phase boundary rather than per produced line. A locked @c XADD and a locked @c CMPXCHG cost
- *  the same everywhere, so a @c fetch_add cursor wins by never retrying, not by being a cheaper
- *  instruction; @c CMPccXADD on Lion Cove measures 33 cycles against 32 for the @c CMPXCHG it would
- *  replace, and removes only the retry.
+ *  unmeasured. @c CLDEMOTE is no cheaper than a store, so @c FORKUNION_WITH_DEMOTE_CACHE_LINES pays
+ *  off at a phase boundary rather than per produced line. A locked @c XADD and a locked @c CMPXCHG
+ *  cost the same everywhere, so a @c fetch_add cursor wins by never retrying, not by being a
+ *  cheaper instruction; @c CMPccXADD on Lion Cove measures 33 cycles against 32 for the @c CMPXCHG
+ *  it would replace, and removes only the retry.
  */
 #pragma once
 #include "types.hpp"
 
-#if FU_DETECT_ARCH_X86_64_
+#if FORKUNION_ARCH_X86_64_
 #include <chrono> // `std::chrono::steady_clock` for the one-shot TSC calibration
 #endif
 
 /*  Where inline assembly is unavailable, as on MSVC, intrinsics reach the same instructions. */
-#if !FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_X86_64_
+#if !FORKUNION_HAS_INLINE_ASM_ && FORKUNION_ARCH_X86_64_
 #include <intrin.h>    // `__rdtsc`, `__cpuidex`
 #include <immintrin.h> // `_mm_pause`, `_umonitor`, `_umwait`
-#elif !FU_DETECT_INLINE_ASM_SUPPORT_ && FU_DETECT_ARCH_ARM64_
+#elif !FORKUNION_HAS_INLINE_ASM_ && FORKUNION_ARCH_ARM64_
 #include <intrin.h> // `__yield`
 #endif
 
 /*  Runtime extension detection on Linux RISC-V goes through the @c riscv_hwprobe syscall, wherever
  *  this build's kernel headers define it; older headers leave every extension unclaimed. */
-#if FU_DETECT_ARCH_RISC5_ && FU_ON_LINUX && __has_include(<asm/hwprobe.h>) && \
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_OS_LINUX_ && __has_include(<asm/hwprobe.h>) && \
     __has_include(<sys/syscall.h>) && __has_include(<unistd.h>)
 #include <asm/hwprobe.h> // `riscv_hwprobe`, `RISCV_HWPROBE_KEY_IMA_EXT_0`, `RISCV_HWPROBE_EXT_*`
 #include <sys/syscall.h> // `SYS_riscv_hwprobe`
 #include <unistd.h>      // `syscall`
-#if defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_KEY_IMA_EXT_0)
-#define FU_DETECT_RISCV_HWPROBE_ 1
 #endif
+#if defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_KEY_IMA_EXT_0)
+#define FORKUNION_HAS_RISCV_HWPROBE_ 1
+#else
+#define FORKUNION_HAS_RISCV_HWPROBE_ 0
 #endif
 
 namespace ashvardanian {
@@ -70,7 +72,7 @@ inline void const *watched_address(value_type_ const *watched) noexcept {
     return watched;
 }
 
-#if FU_DETECT_ARCH_X86_64_
+#if FORKUNION_ARCH_X86_64_
 
 /**
  *  @brief All four registers of one @c CPUID invocation.
@@ -86,7 +88,7 @@ struct cpuid_registers_t {
  */
 inline cpuid_registers_t cpuid(std::uint32_t const leaf, std::uint32_t const subleaf) noexcept {
     cpuid_registers_t r;
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
     __asm__ __volatile__("cpuid" : "=a"(r.eax), "=b"(r.ebx), "=c"(r.ecx), "=d"(r.edx) : "a"(leaf), "c"(subleaf));
 #else
     int regs[4];
@@ -120,7 +122,7 @@ inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
 
     // The leaf was blank, as on many parts: measure how many TSC cycles pass over a fixed wall span.
     auto const started_at = std::chrono::steady_clock::now();
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
     std::uint32_t start_lo, start_hi, end_lo, end_hi;
     __asm__ __volatile__("rdtsc" : "=a"(start_lo), "=d"(start_hi));
     while (std::chrono::steady_clock::now() - started_at < std::chrono::milliseconds(2)) {}
@@ -149,7 +151,7 @@ inline std::uint64_t x86_tsc_cycles_per_micro() noexcept {
 
 /** Reads the time-stamp counter, via inline assembly or MSVC's @c __rdtsc. */
 inline std::uint64_t x86_now_tsc() noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
     std::uint32_t rdtsc_lo, rdtsc_hi;
     __asm__ __volatile__("rdtsc" : "=a"(rdtsc_lo), "=d"(rdtsc_hi));
     return (static_cast<std::uint64_t>(rdtsc_hi) << 32) | rdtsc_lo;
@@ -158,9 +160,9 @@ inline std::uint64_t x86_now_tsc() noexcept {
 #endif
 }
 
-#endif // FU_DETECT_ARCH_X86_64_
+#endif // FORKUNION_ARCH_X86_64_
 
-#if FU_TARGET_X86_PAUSE
+#if FORKUNION_TARGET_X86_PAUSE
 
 /** On x86, hints a spin-wait so the core neither burns issue slots nor trips memory-order
  *  speculation. */
@@ -171,16 +173,16 @@ struct x86_pause_t {
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
               typename bound_type_ = wait_capped_t>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
         __asm__ __volatile__("pause");
 #else
         _mm_pause();
 #endif
     }
 };
-#endif // FU_TARGET_X86_PAUSE
+#endif // FORKUNION_TARGET_X86_PAUSE
 
-#if FU_TARGET_X86_TPAUSE
+#if FORKUNION_TARGET_X86_TPAUSE
 
 /** @c UMWAIT sleep-depth control: bit 0 = 1 selects the shallow, fast-waking C0.1 state. */
 inline constexpr std::uint32_t x86_umwait_shallow_c01_k = 1;
@@ -193,7 +195,7 @@ inline constexpr std::uint32_t x86_umwait_deeper_c02_k = 0;
  *  assembly is available the @c UMONITOR opcode is hand-encoded so no header is pulled in; MSVC has
  *  no inline assembly and calls the @c _umonitor intrinsic from `<immintrin.h>` instead. */
 inline void x86_arm_address(void const *watched_address) noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
     // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
     __asm__ __volatile__(".byte 0xf3, 0x0f, 0xae, 0xf0" : : "a"(watched_address) : "memory");
 #else
@@ -236,7 +238,7 @@ inline bool x86_arm_monitor(value_type_ const *watched, value_type_ const observ
  *  monitored line. Inline assembly hand-encodes the opcode to avoid an include, while MSVC calls
  *  the @c _umwait intrinsic from `<immintrin.h>` with @p sleep_state and @p deadline. */
 inline void x86_umwait_until(std::uint64_t const deadline, std::uint32_t const sleep_state) noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
     // Hand-encoding UMWAIT r32 as `F2 0F AE /6`, with the control in ECX and the deadline in EDX:EAX:
     std::uint32_t const deadline_lo = static_cast<std::uint32_t>(deadline);
     std::uint32_t const deadline_hi = static_cast<std::uint32_t>(deadline >> 32);
@@ -329,9 +331,9 @@ struct x86_tpause_saturated_t {
         x86_umwait_until(~std::uint64_t {0}, x86_umwait_shallow_c01_k);
     }
 };
-#endif // FU_TARGET_X86_TPAUSE
+#endif // FORKUNION_TARGET_X86_TPAUSE
 
-#if FU_TARGET_ARM64_YIELD
+#if FORKUNION_TARGET_ARM64_YIELD
 
 /** On Arm, hints the core to release its pipeline slot to a sibling hardware thread. */
 struct arm64_yield_t {
@@ -341,18 +343,18 @@ struct arm64_yield_t {
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
               typename bound_type_ = wait_capped_t>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
         __asm__ __volatile__("yield");
 #else
         __yield();
 #endif
     }
 };
-#endif // FU_TARGET_ARM64_YIELD
+#endif // FORKUNION_TARGET_ARM64_YIELD
 
 /*  @c WFET and the exclusive-monitor @c LDAXR and @c CLREX it rides on have no MSVC intrinsic, so
  *  the timed waiter is inline-assembly only; MSVC-ARM64 keeps the @c arm64_yield_t hint above. */
-#if FU_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFET
 
 /**
  *  @brief On AArch64, a monitored wait built on the @c WFET "Wait For Event, Timed" instruction.
@@ -462,9 +464,9 @@ struct arm64_wfet_t {
     }
 };
 
-#endif // FU_TARGET_ARM64_WFET
+#endif // FORKUNION_TARGET_ARM64_WFET
 
-#if FU_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISC5_PAUSE
 
 /** On RISC-V, the @c Zihintpause spin-wait hint. */
 struct risc5_pause_t {
@@ -479,9 +481,9 @@ struct risc5_pause_t {
         __asm__ __volatile__(".4byte 0x0100000f");
     }
 };
-#endif // FU_TARGET_RISC5_PAUSE
+#endif // FORKUNION_TARGET_RISC5_PAUSE
 
-#if FU_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS
 
 /**
  *  @brief On RISC-V @c Zawrs, a monitored wait built on @c LR + `WRS.STO`.
@@ -566,33 +568,33 @@ struct risc5_wrs_t {
         }
     }
 };
-#endif // FU_TARGET_RISC5_WRS
+#endif // FORKUNION_TARGET_RISC5_WRS
 
 /**
  *  @brief The fastest waiter this translation unit may use with @b no runtime feature probe.
  *
- *  Reads each rung's `FU_TARGET_<BIT>` alone, which in a unit that dispatches nothing is the
+ *  Reads each rung's `FORKUNION_TARGET_<BIT>` alone, which in a unit that dispatches nothing is the
  *  compilation target's promise, so the pick can never be illegal there. In a unit that dispatches
- *  at runtime - one with the probe lists or @c FU_RUNTIME_DISPATCH - the bit is what the toolchain
- *  builds and the alias resolves to the newest buildable rung, so such a unit names its waiter per
- *  CPU class instead. AArch64 has no monitored rung here because no compiler publishes a macro for
- *  @c WFxT, so @c arm64_wfet_t is reached only by a caller that admits it at runtime.
+ *  at runtime - one with the probe lists or @c FORKUNION_RUNTIME_DISPATCH - the bit is what the
+ *  toolchain builds and the alias resolves to the newest buildable rung, so such a unit names its
+ *  waiter per CPU class instead. AArch64 has no monitored rung here because no compiler publishes a
+ *  macro for @c WFxT, so @c arm64_wfet_t is reached only by a caller that admits it at runtime.
  */
-#if FU_TARGET_X86_TPAUSE
+#if FORKUNION_TARGET_X86_TPAUSE
 using preferred_yield_t = x86_tpause_t;
-#elif FU_TARGET_X86_PAUSE
+#elif FORKUNION_TARGET_X86_PAUSE
 using preferred_yield_t = x86_pause_t;
-#elif FU_TARGET_ARM64_YIELD
+#elif FORKUNION_TARGET_ARM64_YIELD
 using preferred_yield_t = arm64_yield_t;
-#elif FU_TARGET_RISC5_WRS
+#elif FORKUNION_TARGET_RISC5_WRS
 using preferred_yield_t = risc5_wrs_t;
-#elif FU_TARGET_RISC5_PAUSE
+#elif FORKUNION_TARGET_RISC5_PAUSE
 using preferred_yield_t = risc5_pause_t;
 #else
 using preferred_yield_t = standard_yield_t;
 #endif
 
-#if FU_TARGET_X86_CLDEMOTE
+#if FORKUNION_TARGET_X86_CLDEMOTE
 
 /**
  *  @brief x86 cache hints: @c CLDEMOTE toward the LLC, @c PREFETCHW for write-intent promotion.
@@ -604,32 +606,32 @@ using preferred_yield_t = standard_yield_t;
 struct x86_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_x86_cldemote_k;
     inline void operator()(void const *address, demote_line_t) const noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
         __asm__ __volatile__(".byte 0x0f, 0x1c, 0x00" ::"a"(address) : "memory"); // ? `cldemote (%rax)`
 #else
         _mm_cldemote(address); // ? The same `0F 1C /0` hint; `<immintrin.h>`, VS 2019 16.2+
 #endif
     }
     inline void operator()(void const *address, promote_line_t) const noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
         __asm__ __volatile__(".byte 0x0f, 0x0d, 0x08" ::"a"(address) : "memory"); // ? `prefetchw (%rax)`
 #else
         _m_prefetchw(address); // ? `<intrin.h>`; PREFETCHW is a Windows 8.1 x64 install requirement
 #endif
     }
 };
-#endif // FU_TARGET_X86_CLDEMOTE
+#endif // FORKUNION_TARGET_X86_CLDEMOTE
 
-#if FU_TARGET_ARM64_DC_CVAC
+#if FORKUNION_TARGET_ARM64_DC_CVAC
 
 /**
  *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes.
  *  @note There is no demote on Arm - the clean is the nearest thing: the next claimer's snoop finds
  *      a clean line instead of forcing a dirty intervention, at the price of a memory write. The
  *      clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
- *      @c FU_WITH_DEMOTE_CACHE_LINES gate requires @c FU_ON_LINUX on this architecture. The
- *      persistence-targeted `DC CVAP` and `DC CVADP` are deliberately absent: UNDEFINED
- *      without @c FEAT_DPB or @c FEAT_DPB2, and they buy a NUMA hand-off nothing.
+ *      @c FORKUNION_WITH_DEMOTE_CACHE_LINES gate requires @c FORKUNION_OS_LINUX_ on this
+ *      architecture. The persistence-targeted `DC CVAP` and `DC CVADP` are deliberately absent:
+ *      UNDEFINED without @c FEAT_DPB or @c FEAT_DPB2, and they buy a NUMA hand-off nothing.
  */
 struct arm64_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_arm64_dc_cvac_k;
@@ -640,9 +642,9 @@ struct arm64_cache_hints_t {
         __asm__ __volatile__("prfm pstl1keep, [%0]" ::"r"(address) : "memory");
     }
 };
-#endif // FU_TARGET_ARM64_DC_CVAC
+#endif // FORKUNION_TARGET_ARM64_DC_CVAC
 
-#if FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
+#if FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_)
 
 /**
  *  @brief AArch64 promotion only, for kernels that keep `SCTLR_EL1.UCI` clear - Windows and the
@@ -655,16 +657,16 @@ struct arm64_prefetch_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
     inline void operator()(void const *, demote_line_t) const noexcept {}
     inline void operator()(void const *address, promote_line_t) const noexcept {
-#if FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_HAS_INLINE_ASM_
         __asm__ __volatile__("prfm pstl1keep, [%0]" ::"r"(address) : "memory");
 #else
         __prefetch2(address, 0x10); // ? `prfm pstl1keep, [x0]`; `<intrin.h>`, VS 2019 16.1+
 #endif
     }
 };
-#endif // FU_DETECT_ARCH_ARM64_ && (FU_DETECT_INLINE_ASM_SUPPORT_ || FU_DETECT_HINT_INTRINSICS_)
+#endif // FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_)
 
-#if FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_
 
 /**
  *  @brief RISC-V promotion only: `prefetch.w` is an `ORI x0, ...` hint that cannot fault, with or
@@ -681,9 +683,9 @@ struct risc5_cache_hints_t {
         __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
     }
 };
-#endif // FU_DETECT_ARCH_RISC5_ && FU_DETECT_INLINE_ASM_SUPPORT_
+#endif // FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_
 
-#if FU_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISC5_ZICBOM
 
 /**
  *  @brief RISC-V cache hints where @c hwprobe attested Zicbom: `cbo.clean` writes the dirty block
@@ -703,24 +705,24 @@ struct risc5_cbo_cache_hints_t {
         __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
     }
 };
-#endif // FU_TARGET_RISC5_ZICBOM
+#endif // FORKUNION_TARGET_RISC5_ZICBOM
 
 /*  One deterministic cache-hints policy per build, mirroring @c preferred_yield_t: the gate is the
  *  Layer-2 tri-state, never runtime silicon - everything a selected functor emits is trap-free
  *  wherever its gate holds, so no dispatch and no reporting bit ever guards an emission.  */
-#if FU_WITH_DEMOTE_CACHE_LINES && FU_TARGET_X86_CLDEMOTE
+#if FORKUNION_WITH_DEMOTE_CACHE_LINES && FORKUNION_TARGET_X86_CLDEMOTE
 
 /** Both directions: @c CLDEMOTE demotes, @c PREFETCHW promotes. */
 using preferred_cache_hints_t = x86_cache_hints_t;
-#elif FU_WITH_DEMOTE_CACHE_LINES && FU_TARGET_ARM64_DC_CVAC
+#elif FORKUNION_WITH_DEMOTE_CACHE_LINES && FORKUNION_TARGET_ARM64_DC_CVAC
 
 /** Both directions: `DC CVAC` cleans, `PRFM PSTL1KEEP` promotes. */
 using preferred_cache_hints_t = arm64_cache_hints_t;
-#elif FU_WITH_PROMOTE_CACHE_LINES && FU_DETECT_ARCH_ARM64_
+#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_ARCH_ARM64_
 
 /** Windows/BSD: the clean traps, the hint stays. */
 using preferred_cache_hints_t = arm64_prefetch_cache_hints_t;
-#elif FU_WITH_PROMOTE_CACHE_LINES && FU_DETECT_ARCH_RISC5_
+#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_ARCH_RISCV64_
 
 /** RISC-V: `cbo.clean` needs a runtime probe, so only `prefetch.w` remains. */
 using preferred_cache_hints_t = risc5_cache_hints_t;
@@ -730,7 +732,7 @@ using preferred_cache_hints_t = risc5_cache_hints_t;
 using preferred_cache_hints_t = standard_cache_hints_t;
 #endif
 
-#if FU_DETECT_ARCH_X86_64_
+#if FORKUNION_ARCH_X86_64_
 
 /**
  *  @brief The instruction-level bits this x86 offers, read from @c CPUID in leaf order: the spin
@@ -755,9 +757,9 @@ inline capabilities_t x86_cpu_capabilities() noexcept {
     return caps;
 }
 
-#elif FU_DETECT_ARCH_ARM64_
+#elif FORKUNION_ARCH_ARM64_
 
-#if FU_ON_APPLE
+#if FORKUNION_OS_APPLE_
 
 /** One boolean @c sysctl of the `hw.optional.arm.FEAT_*` family, @c false for an unknown key. */
 inline bool apple_sysctl_flag(char const *name) noexcept {
@@ -765,7 +767,7 @@ inline bool apple_sysctl_flag(char const *name) noexcept {
     std::size_t size = sizeof(value);
     return ::sysctlbyname(name, &value, &size, nullptr, 0) == 0 && value != 0;
 }
-#elif (FU_ON_LINUX || FU_ON_FREEBSD) && FU_DETECT_INLINE_ASM_SUPPORT_
+#elif (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_) && FORKUNION_HAS_INLINE_ASM_
 
 /** A four-bit field of an `ID_AA64*` register, as the kernel's @c MRS emulation shows it to EL0. */
 constexpr std::uint64_t arm64_id_field(std::uint64_t id_register, unsigned lsb) noexcept {
@@ -785,22 +787,22 @@ constexpr std::uint64_t arm64_id_field(std::uint64_t id_register, unsigned lsb) 
  */
 inline capabilities_t arm64_cpu_capabilities() noexcept {
     capabilities_t caps = capability_arm64_yield_k;
-#if FU_ON_APPLE
+#if FORKUNION_OS_APPLE_
     if (apple_sysctl_flag("hw.optional.arm.FEAT_WFxT")) caps |= capability_arm64_wfet_k;
     if (apple_sysctl_flag("hw.optional.arm.FEAT_LSE")) caps |= capability_arm64_lse_k;
     if (apple_sysctl_flag("hw.optional.arm.FEAT_LRCPC")) caps |= capability_arm64_rcpc_k;
-#elif (FU_ON_LINUX || FU_ON_FREEBSD) && FU_DETECT_INLINE_ASM_SUPPORT_
+#elif (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_) && FORKUNION_HAS_INLINE_ASM_
     std::uint64_t isar0 = 0, isar1 = 0, isar2 = 0;
     __asm__ __volatile__("mrs %0, S3_0_C0_C6_0" : "=r"(isar0));         // `ID_AA64ISAR0_EL1`
     __asm__ __volatile__("mrs %0, S3_0_C0_C6_1" : "=r"(isar1));         // `ID_AA64ISAR1_EL1`
     __asm__ __volatile__("mrs %0, S3_0_C0_C6_2" : "=r"(isar2));         // `ID_AA64ISAR2_EL1`
     if (arm64_id_field(isar2, 0) >= 2) caps |= capability_arm64_wfet_k; // `WFxT`
-#if FU_ON_LINUX
+#if FORKUNION_OS_LINUX_
     caps |= capability_arm64_dc_cvac_k; // ? `DC CVAC` is base ISA; Linux sets `SCTLR_EL1.UCI`, so EL0 may issue it
 #endif
     if (arm64_id_field(isar0, 20) >= 2) caps |= capability_arm64_lse_k;  // `Atomic`
     if (arm64_id_field(isar1, 20) >= 1) caps |= capability_arm64_rcpc_k; // `LRCPC`
-#elif FU_ON_WINDOWS
+#elif FORKUNION_OS_WINDOWS_
     // A `PF_ARM_*` name this build's SDK predates is never asked for. There is no bit for `WFxT`.
 #if defined(PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE)
     if (::IsProcessorFeaturePresent(PF_ARM_V81_ATOMIC_INSTRUCTIONS_AVAILABLE)) caps |= capability_arm64_lse_k;
@@ -812,9 +814,9 @@ inline capabilities_t arm64_cpu_capabilities() noexcept {
     return caps;
 }
 
-#elif FU_DETECT_ARCH_RISC5_
+#elif FORKUNION_ARCH_RISCV64_
 
-#if defined(FU_DETECT_RISCV_HWPROBE_)
+#if FORKUNION_HAS_RISCV_HWPROBE_
 
 /** One @c hwprobe answer for @p key, the AND across every online hart, or zero if the kernel
  *  refuses to answer. */
@@ -838,7 +840,7 @@ inline std::uint64_t risc5_hwprobe(std::int64_t key) noexcept {
  */
 inline capabilities_t risc5_cpu_capabilities() noexcept {
     capabilities_t caps = capability_risc5_pause_k | capability_risc5_atomic_k;
-#if defined(FU_DETECT_RISCV_HWPROBE_)
+#if FORKUNION_HAS_RISCV_HWPROBE_
     std::uint64_t const extensions = risc5_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0);
 #if defined(RISCV_HWPROBE_EXT_ZAWRS)
     if (extensions & RISCV_HWPROBE_EXT_ZAWRS) caps |= capability_risc5_wrs_k;
@@ -861,18 +863,18 @@ inline capabilities_t risc5_cpu_capabilities() noexcept {
  *  @sa ram_capabilities for the memory side; together they form @c runtime_capabilities.
  */
 inline capabilities_t cpu_capabilities() noexcept {
-#if FU_DETECT_ARCH_X86_64_
+#if FORKUNION_ARCH_X86_64_
     return x86_cpu_capabilities();
-#elif FU_DETECT_ARCH_ARM64_
+#elif FORKUNION_ARCH_ARM64_
     return arm64_cpu_capabilities();
-#elif FU_DETECT_ARCH_RISC5_
+#elif FORKUNION_ARCH_RISCV64_
     return risc5_cpu_capabilities();
 #else
     return capabilities_unknown_k;
 #endif
 }
 
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 
 /**
  *  @brief Binds @p size_bytes starting at @p ptr to the single memory domain @p memory_domain_id.
@@ -916,14 +918,14 @@ inline bool linux_can_place_memory_on_domain() noexcept {
 inline capabilities_t ram_capabilities() noexcept {
     capabilities_t caps = capabilities_unknown_k;
 
-#if FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_WINDOWS
+#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
     // Windows always exposes the NUMA placement API (`VirtualAllocExNuma`); a single-node box simply
     // reports one node. Large-page availability hinges on a privilege the caller may not hold, so it
     // is probed by its minimum page size rather than a directory.
     caps |= capability_place_memory_on_domain_k;
     if (::GetLargePageMinimum() != 0) caps |= capability_place_huge_pages_on_domain_k;
 
-#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_LINUX
+#elif FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
     // NUMA placement is claimed only when a real one-page `mbind` succeeds - which subsumes every
     // weaker question, including the one `numa_available` used to be asked here.
     if (linux_can_place_memory_on_domain()) caps |= capability_place_memory_on_domain_k;
@@ -954,7 +956,7 @@ inline capabilities_t ram_capabilities() noexcept {
         }
     }
 
-#elif FU_WITH_PLACE_MEMORY_ON_DOMAIN && FU_ON_FREEBSD
+#elif FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     // The domainset syscalls always ship with the kernel; `vm.ndomains` answers whether it reports
     // any memory domains to place on. Superpages ride along: `MAP_ALIGNED_SUPER` is an alignment
     // hint with a base-page fallback, so claiming it can never promise more than the kernel honours.
@@ -965,7 +967,7 @@ inline capabilities_t ram_capabilities() noexcept {
             caps |= capability_place_memory_on_domain_k | capability_place_huge_pages_on_domain_k;
     }
 
-#endif // FU_WITH_PLACE_MEMORY_ON_DOMAIN
+#endif // FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
 
     return caps;
 }
@@ -977,7 +979,7 @@ inline capabilities_t ram_capabilities() noexcept {
 inline capabilities_t runtime_capabilities() noexcept { return cpu_capabilities() | ram_capabilities(); }
 
 /**
- *  @brief Which kernel facilities this translation unit was built to use, one bit per `FU_WITH_*`.
+ *  @brief Which kernel facilities this unit was built to use, one bit per `FORKUNION_WITH_*`.
  *  @sa runtime_capabilities for what the machine underneath turned out to offer.
  *
  *  Consult it before reaching for a domain-aware API. Without
@@ -992,15 +994,17 @@ inline capabilities_t runtime_capabilities() noexcept { return cpu_capabilities(
 constexpr capabilities_t comptime_capabilities() noexcept {
     // Both arms of each `?:` are `capabilities_t`, so there is no enumerator-versus-`0` mismatch for
     // `-Wextra` to object to, and `operator|` folds them into the result.
-    return                                                                        //
-        (FU_WITH_OS_THREADS ? capability_os_threads_k : capabilities_unknown_k) | //
-        (FU_WITH_TOPOLOGY ? capability_topology_k : capabilities_unknown_k) |     //
-        (FU_WITH_PLACE_THREADS_BY_AFFINITY ? capability_place_threads_by_affinity_k : capabilities_unknown_k) |
-        (FU_WITH_PLACE_THREADS_BY_CORE_CLASS ? capability_place_threads_by_core_class_k : capabilities_unknown_k) |
-        (FU_WITH_RESCHEDULE_THREADS_BY_CLASS ? capability_reschedule_threads_by_class_k : capabilities_unknown_k) |
-        (FU_WITH_PLACE_MEMORY_ON_DOMAIN ? capability_place_memory_on_domain_k : capabilities_unknown_k) | //
-        (FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN ? capability_place_huge_pages_on_domain_k : capabilities_unknown_k) |
-        (FU_WITH_COLOCATE_POOLS_ON_DOMAIN ? capability_colocate_pools_on_domain_k : capabilities_unknown_k);
+    return                                                                               //
+        (FORKUNION_WITH_OS_THREADS ? capability_os_threads_k : capabilities_unknown_k) | //
+        (FORKUNION_WITH_TOPOLOGY ? capability_topology_k : capabilities_unknown_k) |     //
+        (FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY ? capability_place_threads_by_affinity_k : capabilities_unknown_k) |
+        (FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS ? capability_place_threads_by_core_class_k
+                                                    : capabilities_unknown_k) |
+        (FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS ? capability_reschedule_threads_by_class_k
+                                                    : capabilities_unknown_k) |
+        (FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN ? capability_place_memory_on_domain_k : capabilities_unknown_k) | //
+        (FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN ? capability_place_huge_pages_on_domain_k : capabilities_unknown_k) |
+        (FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN ? capability_colocate_pools_on_domain_k : capabilities_unknown_k);
 }
 
 } // namespace forkunion
