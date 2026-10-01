@@ -322,7 +322,7 @@ struct Topology:
         """Free huge pages of any size across every memory domain.
 
         Returns:
-            The page total, counting a 1 GiB page the same as a 2 MiB one.
+            The page total, counting a 1 GB page the same as a 2 MB one.
 
         Raises:
             `Error` if the core refuses the query, which a handle it cannot read does with `INVALID_ARGUMENT`.

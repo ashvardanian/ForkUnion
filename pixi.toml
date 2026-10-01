@@ -51,9 +51,9 @@ max = "*"
 sysroot_linux-64 = ">=2.34"
 
 [feature.benchmarks.tasks]
-build-benchmarks = { cmd = "mojo build -I mojo bench/nbody.mojo -o build/mojo_nbody && mojo build -I mojo bench/propagation.mojo -o build/mojo_propagation" }
-nbody = { cmd = "mojo run -I mojo bench/nbody.mojo", depends-on = ["build-native"] }
-propagation = { cmd = "mojo run -I mojo bench/propagation.mojo", depends-on = ["build-native"] }
+build-benchmarks = { cmd = "mojo build -I mojo -I bench bench/nbody.mojo -o build/mojo_nbody && mojo build -I mojo -I bench bench/propagation.mojo -o build/mojo_propagation" }
+nbody = { cmd = "mojo run -I mojo -I bench bench/nbody.mojo", depends-on = ["build-native"] }
+propagation = { cmd = "mojo run -I mojo -I bench bench/propagation.mojo", depends-on = ["build-native"] }
 
 # The same five knobs `build.rs` exposes as Cargo features. Left alone, `include/forkunion/types.hpp`
 # derives them from the platform; these only ever override that.

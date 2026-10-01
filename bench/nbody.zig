@@ -9,73 +9,28 @@
 //! - libxev: dynamic lock-free queue, via Mitchell Hashimoto's lock-free thread pool.
 //!
 //! On a machine with one memory domain the replicas collapse to one, and the portable allocator
-//! backs them, so the `replicated_*` backends compile and run everywhere.
+//! backs them, so the `forkunion_*_replicated` backends compile and run everywhere.
 //!
 //! Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
 //! rate it sustained: contended-atomic paths amplify any background noise, and short dynamic runs
 //! swing ~±30%, so the window sizes the iteration count to the machine instead of guessing it.
 //!
-//! Environment variables:
-//! - NBODY_COUNT: number of bodies, defaulting to the thread count.
-//! - FORKUNION_BUDGET_SECS: wall-clock budget per run, reporting the mean rate, defaulting to 10.
-//! - FORKUNION_ITERATIONS: run an exact iteration count instead, when set
-//! - FORKUNION_BACKEND: one of the backend names above, defaulting to forkunion_static_shared.
-//! - FORKUNION_THREADS: number of threads, defaulting to the CPU count.
+//! The environment variables it reads are listed in `bench/harness.zig`.
 //!
 //! Build and run from the bench/ directory:
 //!
 //! ```sh
 //! cd bench
 //! zig build -Doptimize=ReleaseFast
-//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
-//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated ./zig-out/bin/forkunion_nbody
-//! NBODY_COUNT=512 FORKUNION_BACKEND=libxev ./zig-out/bin/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated ./zig-out/bin/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=libxev ./zig-out/bin/forkunion_nbody
 //! ```
 
 const std = @import("std");
 const fu = @import("forkunion");
 const xev = @import("xev");
-
-/// Reads a process environment variable, or null if unset or empty; borrows libc's storage.
-fn envVar(name: [*:0]const u8) ?[]const u8 {
-    const text = std.mem.span(std.c.getenv(name) orelse return null);
-    return if (text.len == 0) null else text;
-}
-
-/// Reads a string environment variable, or `fallback` if unset.
-fn envString(name: [*:0]const u8, fallback: []const u8) []const u8 {
-    return envVar(name) orelse fallback;
-}
-
-/// Parses an unsigned environment variable, or `fallback` when unset; aborts on a bad value.
-fn envUsize(name: [*:0]const u8, fallback: usize) usize {
-    const text = envVar(name) orelse return fallback;
-    return std.fmt.parseInt(usize, text, 10) catch abortUnparsed(name, text);
-}
-
-/// Parses a fractional environment variable, or `fallback` when unset; aborts on a bad value.
-fn envF64(name: [*:0]const u8, fallback: f64) f64 {
-    const text = envVar(name) orelse return fallback;
-    return std.fmt.parseFloat(f64, text) catch abortUnparsed(name, text);
-}
-
-/// Aborts naming the variable whose text does not parse, so a typo never becomes a silent default.
-fn abortUnparsed(name: [*:0]const u8, text: []const u8) noreturn {
-    std.debug.print("{s}=\"{s}\" does not parse\n", .{ name, text });
-    std.process.abort();
-}
-
-/// Reads the monotonic clock in nanoseconds, for timing the iteration loop.
-fn monotonicNanos() u64 {
-    var timespec: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.MONOTONIC, &timespec);
-    return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
-}
-
-/// Writes one preformatted result line to STDOUT; diagnostics stay on STDERR via `std.debug.print`.
-fn writeStdout(text: []const u8) void {
-    _ = std.c.write(std.Io.File.stdout().handle, text.ptr, text.len);
-}
+const harness = @import("harness.zig");
 
 // Physical constants
 const G: f32 = 6.674e-11;
@@ -105,7 +60,7 @@ const Body = struct {
 /// Deliberately not `std.Random.DefaultPrng`: the standard generators differ across languages - and
 /// the C++ distributions even across standard libraries - so no two harnesses would simulate the
 /// same system. Each draw is a pure function of its counter instead, and the bodies are
-/// bit-identical across the C++, Rust, and Zig ports of this hash.
+/// bit-identical across the C++, Rust, Zig, and Mojo ports of this hash.
 inline fn splitMix(counter: u64) u64 {
     var x = (counter +% 1) *% 0x9E37_79B9_7F4A_7C15;
     x = (x ^ (x >> 30)) *% 0xBF58_476D_1CE4_E5B9;
@@ -113,9 +68,9 @@ inline fn splitMix(counter: u64) u64 {
     return x ^ (x >> 31);
 }
 
-/// One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`.
-inline fn randomUnit(counter: u64) f32 {
-    return @as(f32, @floatFromInt(splitMix(counter) >> 40)) * (1.0 / 16777216.0);
+/// Draw `counter` of stream `key` in `[0, 1)`: the top 24 bits scaled by 2^-24, exact in `f32`.
+inline fn randomUnit(key: u64, counter: u64) f32 {
+    return @as(f32, @floatFromInt(splitMix(key +% counter) >> 40)) * (1.0 / 16777216.0);
 }
 
 /// Fast reciprocal square root, Quake-style with one Newton iteration.
@@ -482,6 +437,19 @@ const backends = [_]Backend{
     .{ .name = "libxev", .run = runLibxev, .engine = .libxev },
 };
 
+/// The backend named `name`, or null when `backends` has none by that name.
+fn parseBackend(name: []const u8) ?*const Backend {
+    for (&backends) |*entry| if (std.mem.eql(u8, entry.name, name)) return entry;
+    return null;
+}
+
+/// The grammar of `FORKUNION_BACKEND`, listing `backends`.
+const backend_grammar = blk: {
+    var grammar: []const u8 = "one of ";
+    for (backends, 0..) |entry, index| grammar = grammar ++ (if (index == 0) "" else ", ") ++ entry.name;
+    break :blk grammar;
+};
+
 pub fn main() !void {
     var general_purpose_allocator = std.heap.DebugAllocator(.{}){};
     defer _ = general_purpose_allocator.deinit();
@@ -491,16 +459,11 @@ pub fn main() !void {
     const topology = try fu.Topology.init();
     defer topology.deinit();
 
-    var n_threads = envUsize("FORKUNION_THREADS", 0);
-    if (n_threads == 0) n_threads = try topology.logicalCoresCount();
-
-    const budget_seconds = envF64("FORKUNION_BUDGET_SECS", 10); // The primary knob: a fixed window
-    const n_iters = envUsize("FORKUNION_ITERATIONS", 0); // Overrides with an exact count when set
-
-    var n_bodies = envUsize("NBODY_COUNT", 0);
-    if (n_bodies == 0) n_bodies = n_threads;
-
-    const backend = envString("FORKUNION_BACKEND", "forkunion_static_shared");
+    const settings = harness.Settings.read(try topology.logicalCoresCount());
+    const selected = harness.envParsed(*const Backend, "FORKUNION_BACKEND", &backends[0], parseBackend, backend_grammar);
+    settings.print();
+    const n_threads = settings.threads;
+    const n_bodies = settings.bodies;
 
     const bodies = try allocator.alloc(Body, n_bodies);
     defer allocator.free(bodies);
@@ -509,26 +472,16 @@ pub fn main() !void {
 
     // Seven counter-based draws per body: three position coordinates, three velocity components,
     // and one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    const key = splitMix(settings.seed);
     for (bodies, 0..) |*body, i| {
         const counter = @as(u64, i) * 7;
-        body.position = .{ .x = randomUnit(counter), .y = randomUnit(counter + 1), .z = randomUnit(counter + 2) };
-        body.velocity = .{ .x = randomUnit(counter + 3), .y = randomUnit(counter + 4), .z = randomUnit(counter + 5) };
+        body.position = .{ .x = randomUnit(key, counter), .y = randomUnit(key, counter + 1), .z = randomUnit(key, counter + 2) };
+        body.velocity = .{ .x = randomUnit(key, counter + 3), .y = randomUnit(key, counter + 4), .z = randomUnit(key, counter + 5) };
         // ? Round each `f32` literal before subtracting: Zig's comptime floats stay exact, and the
         // ? folded span would otherwise differ from the C++ and Rust builds by an ULP.
         const mass_span: f32 = @as(f32, 1.0e15) - @as(f32, 1.0e10);
-        body.mass = @as(f32, 1.0e10) + randomUnit(counter + 6) * mass_span;
+        body.mass = @as(f32, 1.0e10) + randomUnit(key, counter + 6) * mass_span;
     }
-
-    const selected = blk: {
-        for (&backends) |*entry| {
-            if (std.mem.eql(u8, entry.name, backend)) break :blk entry;
-        }
-        std.debug.print("Unknown backend: {s}\n", .{backend});
-        std.debug.print("Available backends:", .{});
-        for (&backends) |*entry| std.debug.print(" {s}", .{entry.name});
-        std.debug.print("\n", .{});
-        return error.UnknownBackend;
-    };
 
     // Build only the engine resources the selected backend needs.
     var pool: ?fu.Pool = null;
@@ -575,25 +528,9 @@ pub fn main() !void {
     };
     // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
     // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    // no per-backend iteration guessing. FORKUNION_ITERATIONS forces an exact count instead.
-    const budget_ns: u64 = @intFromFloat(budget_seconds * std.time.ns_per_s);
-    const started = monotonicNanos();
-    var passes: usize = 0;
-    if (n_iters > 0) {
-        for (0..n_iters) |_| selected.run(&context);
-        passes = n_iters;
-    } else {
-        while (true) {
-            selected.run(&context);
-            passes += 1;
-            if (monotonicNanos() - started >= budget_ns) break;
-        }
-    }
-    const elapsed_ns = monotonicNanos() - started;
-    const total_seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
-    const us_per_iter = total_seconds / @as(f64, @floatFromInt(passes)) * std.time.us_per_s;
-
-    var line_buffer: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buffer, "{s}: {} bodies, {} iters, {d:.2} us/iter ({d:.2} s total)\n", .{ backend, n_bodies, passes, us_per_iter, total_seconds }) catch return;
-    writeStdout(line);
+    // no per-backend iteration guessing. One call is one step: two dispatches over `n` bodies.
+    var loop = harness.Loop.init(settings.warmup_ns, settings.time_limit_ns);
+    while (loop.next()) |_| selected.run(&context);
+    loop.rate("bodies", @floatFromInt(n_bodies));
+    loop.row(selected.name).print();
 }

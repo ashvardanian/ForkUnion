@@ -16,17 +16,11 @@ Each backend runs a fixed wall-clock window - 10 seconds by default - and report
 it sustained: contended-atomic paths amplify background noise, so the window sizes the iteration
 count to the machine instead of guessing it.
 
-Environment variables:
-
-- `NBODY_COUNT` - number of bodies, default the thread count.
-- `FORKUNION_BUDGET_SECS` - wall-clock budget per run, reporting the sustained rate, default 10.
-- `FORKUNION_ITERATIONS` - run an exact iteration count instead, when set.
-- `FORKUNION_BACKEND` - one of the backend names above, default `forkunion_static_shared`.
-- `FORKUNION_THREADS` - number of threads, default the logical core count.
+The environment variables it reads are listed in `bench/harness.mojo`.
 
 ```sh
-NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared pixi run nbody
-NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated pixi run nbody
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared pixi run nbody
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated pixi run nbody
 ```
 """
 
@@ -34,9 +28,6 @@ from max.algorithm import parallelize
 
 from std.math import floor
 from std.memory import bitcast
-from std.os import abort, getenv
-from std.sys import exit, stderr
-from std.time import perf_counter_ns
 
 from forkunion import (
     ComputeDomain,
@@ -48,6 +39,8 @@ from forkunion import (
     ReplicatedArray,
     Topology,
 )
+
+from harness import Loop, Settings, exit_unparsed, print_row, print_settings
 
 comptime G = Float32(6.674e-11)
 comptime DT = Float32(0.01)
@@ -63,49 +56,14 @@ schedulers rather than compiler flag sets.
 """
 
 
-def fixed(value: Float64, decimals: Int) -> String:
-    """Renders a non-negative value with exactly `decimals` places, since t-strings take no spec."""
-    var scale = 1
-    for _ in range(decimals):
-        scale *= 10
-    var scaled = Int(value * Float64(scale) + 0.5)
-    var whole = String(scaled // scale)
-    var fraction = String(scaled % scale)
-    while fraction.byte_length() < decimals:
-        fraction = String("0") + fraction
-    return whole + "." + fraction
-
-
-def parse_int(name: StaticString, fallback: Int) -> Int:
-    var text = getenv(name)
-    if text.byte_length() == 0:
-        return fallback
-    try:
-        var value = Int(text)
-        if value >= 0:
-            return value
-    except:
-        pass
-    abort(t"{name}=\"{text}\" does not parse")
-
-
-def parse_float(name: StaticString, fallback: Float64) -> Float64:
-    var text = getenv(name)
-    if text.byte_length() == 0:
-        return fallback
-    try:
-        return Float64(text)
-    except:
-        abort(t"{name}=\"{text}\" does not parse")
-
-
 @always_inline
 def split_mix(counter: UInt64) -> UInt64:
     """The SplitMix64 avalanche behind every random draw - a pure function of the counter.
 
     Deliberately not a standard generator: those differ across languages, so no two harnesses would
     simulate the same system. Each draw is a pure function of its counter instead, and the bodies
-    come out bit-identical across every port of this hash.
+    come out bit-identical across every port of this hash. A run's stream starts at
+    `split_mix(seed)`.
     """
     var x = (counter + 1) * 0x9E37_79B9_7F4A_7C15
     x = (x ^ (x >> 30)) * 0xBF58_476D_1CE4_E5B9
@@ -114,9 +72,9 @@ def split_mix(counter: UInt64) -> UInt64:
 
 
 @always_inline
-def random_unit(counter: UInt64) -> Float32:
-    """One draw in `[0, 1)`: the top 24 bits scaled by 2^-24, both steps exact in `Float32`."""
-    return Float32(Int(split_mix(counter) >> 40)) * (Float32(1.0) / Float32(16777216.0))
+def random_unit(key: UInt64, counter: UInt64) -> Float32:
+    """Draw `counter` of stream `key` in `[0, 1)`: the top 24 bits scaled by 2^-24, exact in `Float32`."""
+    return Float32(Int(split_mix(key + counter) >> 40)) * (Float32(1.0) / Float32(16777216.0))
 
 
 @always_inline
@@ -265,37 +223,37 @@ def for_n_scheduled[
         pool.for_n[work](count, bodies)
 
 
+comptime BACKEND_GRAMMAR = (
+    "one of forkunion_static_shared, forkunion_dynamic_shared, forkunion_static_replicated,"
+    " forkunion_dynamic_replicated, max_parallelize"
+)
+
+
+def parse_backend(name: String) -> Optional[String]:
+    """The backend named `name`, or nothing when this binary has none by that name."""
+    if (
+        name == "forkunion_static_shared"
+        or name == "forkunion_dynamic_shared"
+        or name == "forkunion_static_replicated"
+        or name == "forkunion_dynamic_replicated"
+        or name == "max_parallelize"
+    ):
+        return name
+    return None
+
+
 def main() raises:
     var library = Library()
     var topology = Topology(library)
 
-    var threads = parse_int("FORKUNION_THREADS", 0)
-    if threads == 0:
-        threads = topology.logical_cores_count()
-    var budget_seconds = parse_float("FORKUNION_BUDGET_SECS", 10)
-    var iterations = parse_int("FORKUNION_ITERATIONS", 0)
-    var count = parse_int("NBODY_COUNT", 0)
-    if count == 0:
-        count = threads
-    var backend = getenv("FORKUNION_BACKEND")
-    if backend.byte_length() == 0:
-        backend = String("forkunion_static_shared")
+    var settings = Settings(topology.logical_cores_count())
+    if not parse_backend(settings.backend):
+        exit_unparsed("FORKUNION_BACKEND", settings.backend, BACKEND_GRAMMAR)
+    print_settings(settings)
+    var threads = settings.threads
+    var count = settings.bodies
+    var backend = settings.backend
 
-    var known = (
-        backend == "forkunion_static_shared"
-        or backend == "forkunion_dynamic_shared"
-        or backend == "forkunion_static_replicated"
-        or backend == "forkunion_dynamic_replicated"
-        or backend == "max_parallelize"
-    )
-    if not known:
-        print(t"Unsupported backend: '{backend}'", file=stderr)
-        print("  forkunion_static_shared", file=stderr)
-        print("  forkunion_dynamic_shared", file=stderr)
-        print("  forkunion_static_replicated", file=stderr)
-        print("  forkunion_dynamic_replicated", file=stderr)
-        print("  max_parallelize", file=stderr)
-        exit(1)
     var dynamic = "dynamic" in backend
     var replicated = "replicated" in backend
     var baseline = backend == "max_parallelize"
@@ -314,15 +272,16 @@ def main() raises:
     # Seven counter-based draws per body: three position coordinates, three velocity components, and
     # one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
     var mass_span = Float32(1.0e15) - Float32(1.0e10)
+    var key = split_mix(UInt64(settings.seed))
     for index in range(count):
         var counter = UInt64(index) * 7
-        position_x[index] = random_unit(counter)
-        position_y[index] = random_unit(counter + 1)
-        position_z[index] = random_unit(counter + 2)
-        velocity_x[index] = random_unit(counter + 3)
-        velocity_y[index] = random_unit(counter + 4)
-        velocity_z[index] = random_unit(counter + 5)
-        mass[index] = Float32(1.0e10) + random_unit(counter + 6) * mass_span
+        position_x[index] = random_unit(key, counter)
+        position_y[index] = random_unit(key, counter + 1)
+        position_z[index] = random_unit(key, counter + 2)
+        velocity_x[index] = random_unit(key, counter + 3)
+        velocity_y[index] = random_unit(key, counter + 4)
+        velocity_z[index] = random_unit(key, counter + 5)
+        mass[index] = Float32(1.0e10) + random_unit(key, counter + 6) * mass_span
 
     # The replicated cells copy the positions and masses into every memory domain once per step; on
     # a single-domain machine that collapses to one replica, so the cell still runs.
@@ -356,8 +315,6 @@ def main() raises:
 
     var pool = Pool(topology, threads=threads, name="nbody")
 
-    # A fixed time budget beats a fixed iteration count: the window is long enough to amortize
-    # scheduling noise, and reports the rate sustained. `FORKUNION_ITERATIONS` sets an exact count.
     # `parallelize` takes a capturing closure, which is exactly what ForkUnion cannot accept; the
     # baseline therefore reads the same bodies through the same flat pointers, with no scratch.
     @parameter
@@ -384,25 +341,14 @@ def main() raises:
             for_n_scheduled[force_prong](pool, dynamic, count, bodies)
             for_n_scheduled[apply_prong](pool, dynamic, count, bodies)
 
-    var budget = Int(budget_seconds * 1e9)
-    var started = perf_counter_ns()
-    var passes = 0
-    if iterations > 0:
-        for _ in range(iterations):
-            one_pass()
-        passes = iterations
-    else:
-        while True:
-            one_pass()
-            passes += 1
-            if Int(perf_counter_ns() - started) >= budget:
-                break
-    var total_seconds = Float64(Int(perf_counter_ns() - started)) / 1e9
-    var micros_per_iteration = total_seconds / Float64(passes) * 1e6
-
-    var pace = fixed(micros_per_iteration, 2)
-    var total = fixed(total_seconds, 2)
-    print(t"{backend}: {count} bodies, {passes} iters, {pace} us/iter ({total} s total)")
+    # A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
+    # window - long enough to amortize scheduling noise - and reports the rate it sustained, with
+    # no per-backend iteration guessing. One call is one step: two dispatches over `count` bodies.
+    var loop = Loop(settings.warmup_ns, settings.time_limit_ns)
+    while loop.next():
+        one_pass()
+    loop.rate("bodies", Float64(count))
+    print_row(loop.row(backend))
 
     # `bodies` holds raw pointers into the ten lists, and Mojo releases a value after its last named
     # use - which would otherwise be the construction above, long before the last read.

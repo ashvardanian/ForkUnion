@@ -639,7 +639,7 @@ Both Intel and AMD handle this similarly.
 It makes [Arm and Power much more suitable for lock-free programming](https://arangodb.com/2021/02/cpp-memory-model-migrating-from-x86-to-arm/) and concurrent data structures, but some observations hold for both platforms.
 Most importantly, "Compare and Swap" (CAS) is a costly operation and should be avoided whenever possible.
 
-On x86, for example, the `LOCK ADD` [can easily take 50 CPU cycles](https://travisdowns.github.io/blog/2020/07/06/concurrency-costs), being 50x slower than a regular `ADD` instruction, but still easily 5-10x faster than a `LOCK CMPXCHG` instruction.
+On x86, for example, the `LOCK ADD` [can easily take 50 CPU cycles](https://travisdowns.github.io/blog/2020/07/06/concurrency-costs), being 50× slower than a regular `ADD` instruction, but still easily 5-10× faster than a `LOCK CMPXCHG` instruction.
 Once contention rises, the gap naturally widens and is further amplified by the increased "failure" rate of the CAS operation, particularly when the value being compared has already changed.
 That's why, for the "dynamic" mode, we resort to using an additional atomic variable as opposed to more typical CAS-based implementations.
 
@@ -941,24 +941,24 @@ Implementations live in `bench/nbody.{cpp,rs,zig,mojo}` and `bench/propagation.{
 Microseconds per iteration — µs ↓, lower is better — at `N=512` bodies on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
 This is where fork-join runtimes genuinely differ; ➕ marks C++, 🦀 marks Rust.
 
-| Machine                    |  ➕ ForkUnion |  🦀 ForkUnion |  ➕ OpenMP |   🦀 Rayon | ➕ Taskflow |
-| :------------------------- | -----------: | -----------: | --------: | --------: | ---------: |
-| 18× Apple M5 Pro, macOS    |  __24 / 26__ |      28 / 32 | 115 / 137 | 222 / 339 |    83 / 94 |
-| 24× Intel RPL, Windows     |    148 / 143 | __112 / 91__ | 360 / 627 | 151 / 151 | 812 / 1026 |
-| 128× Intel SPR, Linux      |      54 / 86 |  __40 / 67__ | 115 / 226 | 483 / 739 |  666 / 694 |
-| 192× AWS Graviton 5, Linux | 47 / __136__ | __42__ / 137 | 266 / 216 | 490 / 580 |  602 / 639 |
+| Machine                    | ➕ ForkUnion | 🦀 ForkUnion | ➕ OpenMP |  🦀 Rayon | ➕ Taskflow |
+| :------------------------- | -----------: | -----------: | --------: | --------: | ----------: |
+| 18× Apple M5 Pro, macOS    |  __24 / 26__ |      28 / 32 | 115 / 137 | 222 / 339 |     83 / 94 |
+| 24× Intel RPL, Windows     |    148 / 143 | __112 / 91__ | 360 / 627 | 151 / 151 |  812 / 1026 |
+| 128× Intel SPR, Linux      |      54 / 86 |  __40 / 67__ | 115 / 226 | 483 / 739 |   666 / 694 |
+| 192× AWS Graviton 5, Linux | 47 / __136__ | __42__ / 137 | 266 / 216 | 490 / 580 |   602 / 639 |
 
 ### Connected Components — Fork-Join Frequency
 
 Billions of traversed edges per second — GTEPS ↑, higher is better — on a ~27M-edge "necklace" of R-MAT communities, on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
 Every pass converges in exactly 84 rounds - 84 fork-join dispatches - bit-identical in every cell and language; ➕ marks C++, 🦀 marks Rust.
 
-| Machine                    |     ➕ ForkUnion |      🦀 ForkUnion |       ➕ OpenMP |     🦀 Rayon | ➕ Taskflow |
-| :------------------------- | --------------: | ---------------: | -------------: | ----------: | ---------: |
-| 18× Apple M5 Pro, macOS    | __24.7 / 20.5__ |      19.4 / 20.2 |    23.0 / 18.3 | 23.8 / 14.6 | 21.4 / 1.3 |
-| 24× Intel RPL, Windows     |  10.0 / __7.2__ |        5.2 / 5.5 | __11.4__ / 0.1 |   9.4 / 5.2 |  6.6 / 0.7 |
-| 128× Intel SPR, Linux      |     46.5 / 20.9 |  __65.2 / 31.4__ |     28.2 / 0.4 |   8.5 / 6.5 | 25.1 / 0.5 |
-| 192× AWS Graviton 5, Linux |    192.6 / 77.6 | __258.7 / 87.3__ |     53.9 / 0.4 |   8.4 / 6.2 | 53.0 / 0.4 |
+| Machine                    |    ➕ ForkUnion |     🦀 ForkUnion |      ➕ OpenMP |    🦀 Rayon | ➕ Taskflow |
+| :------------------------- | --------------: | ---------------: | -------------: | ----------: | ----------: |
+| 18× Apple M5 Pro, macOS    | __24.7 / 20.5__ |      19.4 / 20.2 |    23.0 / 18.3 | 23.8 / 14.6 |  21.4 / 1.3 |
+| 24× Intel RPL, Windows     |  10.0 / __7.2__ |        5.2 / 5.5 | __11.4__ / 0.1 |   9.4 / 5.2 |   6.6 / 0.7 |
+| 128× Intel SPR, Linux      |     46.5 / 20.9 |  __65.2 / 31.4__ |     28.2 / 0.4 |   8.5 / 6.5 |  25.1 / 0.5 |
+| 192× AWS Graviton 5, Linux |    192.6 / 77.6 | __258.7 / 87.3__ |     53.9 / 0.4 |   8.4 / 6.2 |  53.0 / 0.4 |
 
 What the spread means - all on the 128× SPR, same binaries, same graph:
 
@@ -967,8 +967,8 @@ What the spread means - all on the 128× SPR, same binaries, same graph:
 - __The two ForkUnion columns are the same pool underneath__: the scheduler, the graph, and the labels are bit-identical, so the gap between them - Rust ahead on SPR, behind on the M5 Pro - is compiler codegen of the compute loops, not the claims.
 - __Which of those two columns leads is a toolchain detail__: the compilers vectorize the identical kernel slightly differently - on the 24× i9, LLVM widens the fast-inverse-square-root to 256-bit lanes where MinGW-GCC keeps its integer lanes at 128-bit, so Rust pulls ahead - and Rust can, in rare cases, reach more of a host's instruction set through runtime dispatch.
 
-> ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, one warmup pass, and the same one-vertex dynamic grain in every runtime.
-> The finer per-benchmark protocol - scheduling equivalents, page-placement controls, and what each knob defaults to - lives in the `bench/nbody.*` and `bench/propagation.*` headers.
+> ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, a 1-second warm-up, and the same one-vertex dynamic grain in every runtime.
+> The finer per-benchmark protocol - scheduling equivalents and page-placement controls - lives in the `bench/nbody.*` and `bench/propagation.*` headers, and every setting with its default is in the table below.
 
 You can rerun these benchmarks with the following commands:
 
@@ -977,13 +977,29 @@ cmake -B build_release -D CMAKE_BUILD_TYPE=Release
 cmake --build build_release --config Release
 # Rust examples: plain `cargo build` grants neither flag, so parity needs both set explicitly
 RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
-# N-body: microseconds per dispatch, sustained over a fixed window (FORKUNION_BUDGET_SECS, default 10 s)
-NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
-NBODY_COUNT=512 FORKUNION_BACKEND=taskflow_dynamic build_release/forkunion_nbody
-# Connected components: traversal throughput on a necklace graph; PROPAGATION_COMMUNITIES controls the rounds
+# N-body: microseconds per dispatch, sustained over a fixed window (FORKUNION_TIME_LIMIT, default 10s)
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=taskflow_dynamic build_release/forkunion_nbody
+# Connected components: traversal throughput on a necklace graph; FORKUNION_PROPAGATION_COMMUNITIES controls the rounds
 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
 FORKUNION_BACKEND=rayon_dynamic target/release/forkunion_propagation
 ```
+
+Every port reads the same environment variables once at start, and a value that does not parse prints one line and exits with status 1.
+Leaving a variable unset or empty keeps its default.
+
+| Variable                            | Default                   | Meaning                           |
+| :---------------------------------- | :------------------------ | :-------------------------------- |
+| `FORKUNION_SEED`                    | `42`                      | Seed of every draw, or `random`   |
+| `FORKUNION_WARMUP`                  | `1s`                      | Untimed run before timing         |
+| `FORKUNION_TIME_LIMIT`              | `10s`                     | Timed window, like `500ms`        |
+| `FORKUNION_THREADS`                 | all cores                 | Threads; `0` also means all cores |
+| `FORKUNION_BACKEND`                 | `forkunion_static_shared` | Backend, per benchmark header     |
+| `FORKUNION_NBODY_COUNT`             | the thread count          | Bodies to simulate                |
+| `FORKUNION_PROPAGATION_SCALE`       | `14`                      | `2^scale` vertices per community  |
+| `FORKUNION_PROPAGATION_COMMUNITIES` | `64`                      | Communities strung on the ring    |
+| `FORKUNION_PROPAGATION_EDGE_FACTOR` | `16`                      | Raw edges per vertex              |
+| `FORKUNION_PROPAGATION_CHECK`       | `false`                   | Also converge serially to check   |
 
 ## Safety & Logic
 
@@ -1133,11 +1149,11 @@ zig build -Dportable=true                  # STL thread pool only
 # Run benchmarks from the `bench` directory
 cd bench
 zig build -Doptimize=ReleaseFast
-NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_nbody
 FORKUNION_BACKEND=forkunion_static_shared ./zig-out/bin/forkunion_propagation
 ```
 
-Check the `bench/nbody.zig` and `bench/propagation.zig` headers for additional benchmarking options.
+They read the same environment variables as the C++ and Rust benchmarks, through `bench/harness.zig`.
 
 ---
 
@@ -1153,9 +1169,9 @@ The benchmarks sit in their own environment because their baseline needs `max`, 
 Both take the same environment variables as the other ports, the four `forkunion_{static,dynamic}_{shared,replicated}` cells, and a `max_parallelize` baseline:
 
 ```bash
-NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated pixi run -e benchmarks nbody
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated pixi run -e benchmarks nbody
 FORKUNION_BACKEND=max_parallelize pixi run -e benchmarks propagation
-PROPAGATION_CHECK=1 pixi run -e benchmarks propagation   # converge serially too, and fail on any disagreement
+FORKUNION_PROPAGATION_CHECK=1 pixi run -e benchmarks propagation   # converge serially too, and fail on any disagreement
 ```
 
 The suite's own per-test durations are not wall clock — a pool's workers busy-wait, and the runner's clock counts that — so time the process rather than trusting them.
@@ -1184,4 +1200,5 @@ A machine-readable [`CITATION.cff`](CITATION.cff) is provided at the repository 
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See `LICENSE` for details.
+Licensed under the Apache License, Version 2.0.
+See `LICENSE` for details.

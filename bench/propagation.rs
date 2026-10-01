@@ -14,25 +14,14 @@
 //! of the last. Rounds-to-convergence, every intermediate label, and the final fixed point are
 //! therefore identical across schedules, backends, thread counts, and languages.
 //!
-//! To control the script, several environment variables are used:
-//!
-//! - `PROPAGATION_SCALE` - each community has `2^scale` vertices - default 14.
-//! - `PROPAGATION_COMMUNITIES` - communities strung on the ring - default 64.
-//! - `PROPAGATION_EDGE_FACTOR` - edges generated per vertex, before deduplication - default 16.
-//! - `FORKUNION_BACKEND` - backend to use - default `forkunion_static_shared`.
-//! - `FORKUNION_THREADS` - number of threads to use - default all hardware threads.
-//! - `FORKUNION_BUDGET_SECS` - wall-clock budget per run, reporting the mean rate - default 10.
-//! - `FORKUNION_ITERATIONS` - run an exact pass count instead, when set.
-//! - `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
-//!
-//! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
-//! the baselines are `rayon_static` and `rayon_dynamic`, at the same one-vertex dynamic grain -
-//! `with_max_len(1)` in Rayon, `for_n_dynamic` here. Cells run bare, with no pinning environment;
-//! the residual spread on SMT machines is preemption - one delayed hyperthread stalls every barrier
-//! of a pass - which the fixed window amortizes. The `_replicated` backends are a deliberate
-//! non-win on this workload: the hot traffic is the shared label array every round must see fresh,
-//! so replicating the read-only CSR pays nothing here, unlike N-body's replicated bodies. Build and
-//! run it:
+//! The environment variables it reads are listed in `bench/harness.rs`. The ForkUnion backends are
+//! the four cells of `forkunion_{static,dynamic}_{shared,replicated}`; the baselines are
+//! `rayon_static` and `rayon_dynamic`, at the same one-vertex dynamic grain - `with_max_len(1)` in
+//! Rayon, `for_n_dynamic` here. Cells run bare, with no pinning environment; the residual spread on
+//! SMT machines is preemption - one delayed hyperthread stalls every barrier of a pass - which the
+//! fixed window amortizes. The `_replicated` backends are a deliberate non-win on this workload:
+//! the hot traffic is the shared label array every round must see fresh, so replicating the
+//! read-only CSR pays nothing here, unlike N-body's replicated bodies. Build and run it:
 //!
 //! ```sh
 //! RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
@@ -41,14 +30,16 @@
 //!
 //! File: bench/propagation.rs
 //! Author: Ash Vardanian
-use std::env;
 use std::error::Error;
-use std::time::Instant;
 
-use forkunion as fu;
-use fu::SyncMutPtr;
 use rayon::prelude::*;
 use rayon::{ThreadPool as RayonPool, ThreadPoolBuilder};
+
+use forkunion as fu;
+use forkunion::SyncMutPtr;
+
+mod harness;
+use harness::{env_parsed, Loop, Settings};
 
 /// A component name: the smallest vertex index reachable so far.
 type Label = u32;
@@ -94,8 +85,8 @@ const SENTINEL_EDGE: (u32, u32) = (u32::MAX, u32::MAX);
 ///
 /// A counter-based generator instead of a stateful one: each draw is a pure function of its
 /// counter, so iterations are order-free, the fill parallelizes without sharding generator state,
-/// and the graph is bit-identical at any thread count - and across the C++, Rust, and Zig ports of
-/// this hash.
+/// and the graph is bit-identical at any thread count - and across the C++, Rust, Zig, and Mojo
+/// ports of this hash.
 #[inline]
 fn split_mix(counter: u64) -> u64 {
     let mut x = counter.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -106,14 +97,14 @@ fn split_mix(counter: u64) -> u64 {
 
 /// One quadrant choice in `[0, 100)` - same draw and counter scheme as every sibling benchmark.
 #[inline]
-fn random_percent(counter: u64) -> u32 {
-    (split_mix(counter) % 100) as u32
+fn random_percent(key: u64, counter: u64) -> u32 {
+    (split_mix(key.wrapping_add(counter)) % 100) as u32
 }
 
 /// One bridge endpoint in `[0, bound)`, from the same avalanche.
 #[inline]
-fn random_index(counter: u64, bound: u32) -> u32 {
-    (split_mix(counter) % bound as u64) as u32
+fn random_index(key: u64, counter: u64, bound: u32) -> u32 {
+    (split_mix(key.wrapping_add(counter)) % bound as u64) as u32
 }
 
 /// Generates the necklace: `communities` independent R-MAT graphs of `2^scale` vertices, joined in
@@ -122,7 +113,7 @@ fn random_index(counter: u64, bound: u32) -> u32 {
 /// Community `c` owns global edge indices `[c * raw_local, (c + 1) * raw_local)` and the vertex
 /// range `[c << scale, (c + 1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters
 /// as the single-graph generators, and bridge draws take a counter range above all edge draws.
-fn generate_necklace(scale: usize, communities: usize, edge_factor: usize) -> CsrHost {
+fn generate_necklace(key: u64, scale: usize, communities: usize, edge_factor: usize) -> CsrHost {
     let community_vertices = 1usize << scale;
     let vertices = communities * community_vertices;
     let raw_local = community_vertices * edge_factor;
@@ -136,7 +127,7 @@ fn generate_necklace(scale: usize, communities: usize, edge_factor: usize) -> Cs
         let mut row = 0u32;
         let mut column = 0u32;
         for bit in (0..scale).rev() {
-            let r = random_percent((e * 64 + bit) as u64); // a=57 b=19 c=19 d=5, integer and portable
+            let r = random_percent(key, (e * 64 + bit) as u64); // a=57 b=19 c=19 d=5, integer and portable
             let step = 1u32 << bit;
             if r < 57 {
                 continue; // Stay in the dense quadrant
@@ -161,8 +152,9 @@ fn generate_necklace(scale: usize, communities: usize, edge_factor: usize) -> Cs
     let hub_core = community_vertices.min(64) as u32;
     let bridge_base = raw_edges as u64 * 64;
     for j in 0..bridges {
-        let u = ((j << scale) as u32) + random_index(bridge_base + 2 * j as u64, hub_core);
-        let v = ((((j + 1) % communities) << scale) as u32) + random_index(bridge_base + 2 * j as u64 + 1, hub_core);
+        let u = ((j << scale) as u32) + random_index(key, bridge_base + 2 * j as u64, hub_core);
+        let v =
+            ((((j + 1) % communities) << scale) as u32) + random_index(key, bridge_base + 2 * j as u64 + 1, hub_core);
         bridge_slots[j * 2] = (u, v);
         bridge_slots[j * 2 + 1] = (v, u);
     }
@@ -214,7 +206,7 @@ fn min_label_of(graph: &CsrView, old_labels: &[Label], v: u32) -> Label {
 }
 
 /// Converges serially from `labels[v] = v`, returning the rounds taken - the reference for
-/// `PROPAGATION_CHECK`.
+/// `FORKUNION_PROPAGATION_CHECK`.
 fn converge_serially(graph: &CsrView, labels_a: &mut [Label], labels_b: &mut [Label]) -> usize {
     let vertices = graph.vertices() as usize;
     for (v, label) in labels_a.iter_mut().enumerate() {
@@ -564,41 +556,34 @@ const BACKENDS: &[Backend] = &[
     },
 ];
 
-/// Reads an environment variable as `T`, or `fallback` when it is unset or empty; aborts naming the
-/// variable when the text does not parse, so a typo never becomes a silent default.
-fn env_variable<T: std::str::FromStr>(name: &str, fallback: T) -> T {
-    match env::var(name) {
-        Ok(text) if !text.is_empty() => text.parse().unwrap_or_else(|_| {
-            eprintln!("{name}=\"{text}\" does not parse");
-            std::process::abort()
-        }),
-        _ => fallback,
-    }
+/// The backend named `name`, or `None` when `BACKENDS` has none by that name.
+fn parse_backend(name: &str) -> Option<&'static Backend> {
+    BACKENDS.iter().find(|backend| backend.name == name)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let scale = env_variable("PROPAGATION_SCALE", 14_usize);
-    let communities = env_variable("PROPAGATION_COMMUNITIES", 64_usize);
-    let edge_factor = env_variable("PROPAGATION_EDGE_FACTOR", 16_usize);
-    let backend = env_variable("FORKUNION_BACKEND", String::from("forkunion_static_shared"));
-    let mut threads = env_variable("FORKUNION_THREADS", 0_usize);
-    let budget_seconds = env_variable("FORKUNION_BUDGET_SECS", 10.0_f64); // ? The primary knob: a fixed window
-    let iterations = env_variable("FORKUNION_ITERATIONS", 0_usize); // ? Overrides with an exact count when set
-    let check = env::var("PROPAGATION_CHECK").is_ok_and(|text| !text.is_empty() && text != "0" && text != "false");
-    if threads == 0 {
-        threads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+    let probed = fu::Topology::new().expect("Failed to detect hardware topology");
+    let settings = Settings::read(probed.logical_cores_count()?);
+    let backend_names: Vec<&str> = BACKENDS.iter().map(|backend| backend.name).collect();
+    let expected = format!("one of {}", backend_names.join(", "));
+    let selected = env_parsed("FORKUNION_BACKEND", &BACKENDS[0], parse_backend, &expected);
+    settings.print();
+    let (scale, communities, threads) = (settings.scale, settings.communities, settings.threads);
+    if scale > 32 || communities > (1usize << 32) >> scale {
+        eprintln!("FORKUNION_PROPAGATION_COMMUNITIES << FORKUNION_PROPAGATION_SCALE must fit 32-bit vertex indices");
+        std::process::exit(1)
     }
-    assert!(
-        (communities << scale) <= (1usize << 32),
-        "PROPAGATION_COMMUNITIES << PROPAGATION_SCALE must fit 32-bit vertex indices"
-    );
 
-    let mut host = generate_necklace(scale, communities, edge_factor);
+    let mut host = generate_necklace(
+        split_mix(settings.seed as u64),
+        scale,
+        communities,
+        settings.edge_factor,
+    );
     let vertices = host.row_offsets.len() - 1;
 
     // One pinned pool spawns for every backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; Rayon drops it below.
-    let probed = fu::Topology::new().expect("Failed to detect hardware topology");
     let mut touch_pool = fu::ThreadPool::spawn(&probed, threads)?;
     let mut labels_a = vec![0 as Label; vertices];
     let mut labels_b = vec![0 as Label; vertices];
@@ -614,19 +599,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         graph.edges(),
         communities
     );
-
-    let selected = match BACKENDS.iter().find(|b| b.name == backend) {
-        Some(b) => b,
-        None => {
-            eprintln!("Unsupported backend: '{backend}'");
-            eprint!("Available backends:");
-            for b in BACKENDS {
-                eprint!(" {}", b.name);
-            }
-            eprintln!();
-            return Err("unsupported backend".into());
-        }
-    };
 
     let mut fu_pool = None;
     let mut rayon_pool = None;
@@ -669,28 +641,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         rounds: 0,
     };
 
-    // One untimed warmup pass: page-faults and cache warming would otherwise bias the first timed
-    // pass, and by a different amount for each backend.
-    (selected.run)(&mut context);
-
     // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
     // long enough to amortize scheduling noise - and reports the rate it sustained, with no
-    // per-backend pass-count guessing. `FORKUNION_ITERATIONS` forces an exact count instead.
-    let started = Instant::now();
-    let mut passes = 0usize;
-    if iterations > 0 {
-        for _ in 0..iterations {
-            (selected.run)(&mut context);
-            passes += 1;
-        }
-    } else {
-        while {
-            (selected.run)(&mut context);
-            passes += 1;
-            started.elapsed().as_secs_f64() < budget_seconds
-        } {}
+    // per-backend pass-count guessing. The warm-up absorbs page faults and cache warming, which
+    // would otherwise bias the first timed pass, and by a different amount for each backend.
+    let mut timed = Loop::new(settings.warmup, settings.time_limit);
+    for _ in &mut timed {
+        (selected.run)(&mut context);
     }
-    let seconds = started.elapsed().as_secs_f64() / passes as f64;
     let rounds = context.rounds;
 
     // The fixed point sits in both buffers - the terminal round changed nothing - so read either.
@@ -700,14 +658,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         components += (label == v as Label) as u64;
         checksum = checksum.wrapping_add(label as u64);
     }
-    // MTEPS - millions of directed edges scanned per second; `rounds * edges` is the exact scan
-    // count, identical in every cell by the double-buffered determinism.
-    let mteps = rounds as f64 * graph.edges() as f64 / seconds / 1e6;
-    println!(
-        "{backend}: {components} components, {rounds} rounds, checksum {checksum}, {seconds:.2} s/pass, {mteps:.1} MTEPS"
-    );
+    // Directed edges scanned per call; `rounds * edges` is the exact scan count, identical in every
+    // cell by the double-buffered determinism, so the "edges" rate is the MTEPS figure.
+    timed.rate("edges", rounds as f64 * graph.edges() as f64);
+    timed.counter("rounds", rounds as f64);
+    timed.row(selected.name).print();
+    println!("{components} components, {rounds} rounds, checksum {checksum}");
 
-    if check {
+    if settings.check {
         let mut serial_a = vec![0 as Label; vertices];
         let mut serial_b = vec![0 as Label; vertices];
         let serial_rounds = converge_serially(&graph, &mut serial_a, &mut serial_b);

@@ -29,4 +29,4 @@ string(APPEND CMAKE_CXX_FLAGS " -fno-exceptions")
 string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--max-memory=2147483648")
 
 find_program(FORKUNION_WASMTIME_ wasmtime REQUIRED PATHS "$ENV{HOME}/.wasmtime/bin")
-set(CMAKE_CROSSCOMPILING_EMULATOR "${FORKUNION_WASMTIME_};run;-W;threads=y;-S;threads=y")
+set(CMAKE_CROSSCOMPILING_EMULATOR "${FORKUNION_WASMTIME_};run;-W;threads=y;-S;threads=y,inherit-env=y")

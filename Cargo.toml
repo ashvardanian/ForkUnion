@@ -23,6 +23,7 @@ include = [
     "/rust/**",
     "/include/**",
     "/c/**",
+    "/bench/harness.rs",
     "/bench/nbody.rs",
     "/bench/propagation.rs",
 ]

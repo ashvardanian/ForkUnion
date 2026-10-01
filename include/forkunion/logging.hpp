@@ -75,12 +75,12 @@ struct logging_colors_t {
     char const *bold_gray() const noexcept { return use_colors_ ? "\033[1;90m" : ""; }
 };
 
-/** Formats memory volume in @p bytes with appropriate units and precision, like @b "1.5 GiB". */
+/** Formats memory volume in @p bytes with appropriate units and precision, like @b "1.5 GB". */
 struct log_memory_volume_t {
 
     /**
      *  @brief Prints @p bytes into @p buffer in binary units, switching at every 1024-fold step.
-     *  @param[in] bytes Volume to format, rendered with one decimal place from a KiB upwards.
+     *  @param[in] bytes Volume to format, rendered with one decimal place from a KB upwards.
      *  @param[out] buffer Destination for the NUL-terminated string.
      *  @param[in] buffer_size Capacity of @p buffer in bytes, including the terminator.
      *  @param[in] colors Palette tinting the number and its unit.
@@ -189,7 +189,7 @@ struct log_numa_topology_t {
      *  @param[in] topology The harvested topology: sockets, domains, cores, and page sizes printed.
      *  @param[in] colors Whether to emit ANSI colour codes, and which.
      *  @param[in] output Destination stream, defaulting to @c stdout.
-     *  @note An empty topology prints "No NUMA nodes detected"; only page sizes above 4 KiB print.
+     *  @note An empty topology prints "No NUMA nodes detected"; only page sizes above 4 KB print.
      *  @note Each row assembles in a 1024-byte line buffer, so an unusually wide row is truncated.
      */
     template <std::size_t max_page_sizes_, typename allocator_type_>

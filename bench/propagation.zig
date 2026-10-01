@@ -13,17 +13,9 @@
 //! writes only its own slot in the next - no atomics, no races, and every round is a pure function
 //! of the last. Rounds-to-convergence, every intermediate label, and the final fixed point are
 //! therefore identical across schedules, backends, thread counts, and languages - the C++, Rust,
-//! and this Zig port all print the same component count, round count, and checksum.
+//! Mojo, and this Zig port all print the same component count, round count, and checksum.
 //!
-//! Environment variables:
-//! - PROPAGATION_SCALE: each community has 2^scale vertices, defaulting to 14.
-//! - PROPAGATION_COMMUNITIES: communities strung on the ring, defaulting to 64.
-//! - PROPAGATION_EDGE_FACTOR: edges generated per vertex, before deduplication, defaulting to 16.
-//! - FORKUNION_BACKEND: one of the backend names below, defaulting to forkunion_static_shared.
-//! - FORKUNION_THREADS: number of threads, defaulting to the CPU count.
-//! - FORKUNION_BUDGET_SECS: wall-clock budget per run, reporting sustained rate, defaulting to 10.
-//! - FORKUNION_ITERATIONS: run an exact pass count instead, when set
-//! - PROPAGATION_CHECK: also converge serially, and fail unless labels and rounds agree exactly
+//! The environment variables it reads are listed in `bench/harness.zig`.
 //!
 //! The ForkUnion backends are the four cells of forkunion_{static,dynamic}_{shared,replicated}; the
 //! baseline is std_io_group, the standard library's own fork-join answer. Cells run bare, with no
@@ -43,59 +35,14 @@
 
 const std = @import("std");
 const fu = @import("forkunion");
-
-/// Reads a process environment variable, or null if unset or empty; borrows libc's storage.
-fn envVar(name: [*:0]const u8) ?[]const u8 {
-    const text = std.mem.span(std.c.getenv(name) orelse return null);
-    return if (text.len == 0) null else text;
-}
-
-/// Reads a string environment variable, or `fallback` if unset.
-fn envString(name: [*:0]const u8, fallback: []const u8) []const u8 {
-    return envVar(name) orelse fallback;
-}
-
-/// Parses an unsigned environment variable, or `fallback` when unset; aborts on a bad value.
-fn envUsize(name: [*:0]const u8, fallback: usize) usize {
-    const text = envVar(name) orelse return fallback;
-    return std.fmt.parseInt(usize, text, 10) catch abortUnparsed(name, text);
-}
-
-/// Parses a fractional environment variable, or `fallback` when unset; aborts on a bad value.
-fn envF64(name: [*:0]const u8, fallback: f64) f64 {
-    const text = envVar(name) orelse return fallback;
-    return std.fmt.parseFloat(f64, text) catch abortUnparsed(name, text);
-}
-
-/// Aborts naming the variable whose text does not parse, so a typo never becomes a silent default.
-fn abortUnparsed(name: [*:0]const u8, text: []const u8) noreturn {
-    std.debug.print("{s}=\"{s}\" does not parse\n", .{ name, text });
-    std.process.abort();
-}
-
-/// Whether an environment variable is set to anything but empty, `0` or `false`, like the C++ bench.
-fn envFlag(name: [*:0]const u8) bool {
-    const text = envVar(name) orelse return false;
-    return !std.mem.eql(u8, text, "0") and !std.mem.eql(u8, text, "false");
-}
-
-/// Reads the monotonic clock in nanoseconds, for timing the pass loop.
-fn monotonicNanos() u64 {
-    var timespec: std.posix.timespec = undefined;
-    _ = std.posix.system.clock_gettime(.MONOTONIC, &timespec);
-    return @as(u64, @intCast(timespec.sec)) * std.time.ns_per_s + @as(u64, @intCast(timespec.nsec));
-}
-
-/// Writes one preformatted result line to STDOUT; diagnostics stay on STDERR via `std.debug.print`.
-fn writeStdout(text: []const u8) void {
-    _ = std.c.write(std.Io.File.stdout().handle, text.ptr, text.len);
-}
+const harness = @import("harness.zig");
 
 // Graph generation
 //
 // A counter-based SplitMix64 instead of a stateful generator: each draw is a pure function of its
 // counter, so iterations are order-free, the fill parallelizes without sharding generator state,
-// and the graph is bit-identical at any thread count - and across the C++, Rust, and Zig ports.
+// and the graph is bit-identical at any thread count - and across the C++, Rust, Zig, and Mojo
+// ports.
 
 /// A component name: the smallest vertex index reachable so far.
 const Label = u32;
@@ -126,13 +73,13 @@ inline fn splitMix(counter: u64) u64 {
 }
 
 /// One quadrant choice in `[0, 100)` - same draw and counter scheme as every sibling benchmark.
-inline fn randomPercent(counter: u64) u32 {
-    return @intCast(splitMix(counter) % 100);
+inline fn randomPercent(key: u64, counter: u64) u32 {
+    return @intCast(splitMix(key +% counter) % 100);
 }
 
 /// One bridge endpoint in `[0, bound)`, from the same avalanche.
-inline fn randomIndex(counter: u64, bound: u32) u32 {
-    return @intCast(splitMix(counter) % bound);
+inline fn randomIndex(key: u64, counter: u64, bound: u32) u32 {
+    return @intCast(splitMix(key +% counter) % bound);
 }
 
 /// A read-only CSR as two slices - the interface every kernel takes.
@@ -158,6 +105,7 @@ const CsrHost = struct {
 /// Everything the parallel R-MAT fill reads or writes; one entry per raw edge.
 const FillContext = struct {
     slots: [*]Edge,
+    key: u64,
     scale: usize,
     raw_local: usize,
 };
@@ -171,7 +119,7 @@ fn fillEdge(context: *const FillContext, task: usize, at: fu.ThreadInDomain) voi
     var bit: usize = context.scale;
     while (bit > 0) {
         bit -= 1;
-        const r = randomPercent(@as(u64, @intCast(e)) * 64 + @as(u64, @intCast(bit))); // a=57 b=19 c=19 d=5
+        const r = randomPercent(context.key, @as(u64, @intCast(e)) * 64 + @as(u64, @intCast(bit))); // a=57 b=19 c=19 d=5
         const step = @as(u32, 1) << @intCast(bit);
         if (r < 57) continue; // Stay in the dense quadrant
         if (r < 76) {
@@ -196,7 +144,7 @@ fn fillEdge(context: *const FillContext, task: usize, at: fu.ThreadInDomain) voi
 /// Community `c` owns global edge indices `[c * raw_local, (c + 1) * raw_local)` and the vertex
 /// range `[c << scale, (c + 1) << scale)`; the quadrant walk uses the same `e * 64 + bit` counters
 /// as the single-graph generators, and bridge draws take a counter range above all edge draws.
-fn generateNecklace(pool: fu.Pool, scale: usize, communities: usize, edge_factor: usize) !CsrHost {
+fn generateNecklace(pool: fu.Pool, key: u64, scale: usize, communities: usize, edge_factor: usize) !CsrHost {
     const allocator = std.heap.page_allocator;
     const community_vertices = @as(usize, 1) << @intCast(scale);
     const vertices = communities * community_vertices;
@@ -208,7 +156,7 @@ fn generateNecklace(pool: fu.Pool, scale: usize, communities: usize, edge_factor
     var edges = try allocator.alloc(Edge, raw_edges * 2 + bridges * 2);
     defer allocator.free(edges);
     @memset(edges, sentinel_edge);
-    const fill = FillContext{ .slots = edges.ptr, .scale = scale, .raw_local = raw_local };
+    const fill = FillContext{ .slots = edges.ptr, .key = key, .scale = scale, .raw_local = raw_local };
     try pool.forN(raw_edges, &fill, fillEdge);
 
     // Bridges: endpoints in each community's first 64 vertices - R-MAT's quadrant bias piles the
@@ -216,9 +164,9 @@ fn generateNecklace(pool: fu.Pool, scale: usize, communities: usize, edge_factor
     const hub_core: u32 = @intCast(@min(community_vertices, 64));
     const bridge_base = @as(u64, @intCast(raw_edges)) * 64;
     for (0..bridges) |j| {
-        const u = (@as(u32, @intCast(j << @intCast(scale)))) + randomIndex(bridge_base + 2 * @as(u64, @intCast(j)), hub_core);
+        const u = (@as(u32, @intCast(j << @intCast(scale)))) + randomIndex(key, bridge_base + 2 * @as(u64, @intCast(j)), hub_core);
         const v = (@as(u32, @intCast(((j + 1) % communities) << @intCast(scale)))) +
-            randomIndex(bridge_base + 2 * @as(u64, @intCast(j)) + 1, hub_core);
+            randomIndex(key, bridge_base + 2 * @as(u64, @intCast(j)) + 1, hub_core);
         edges[raw_edges * 2 + j * 2] = .{ .row = u, .column = v };
         edges[raw_edges * 2 + j * 2 + 1] = .{ .row = v, .column = u };
     }
@@ -456,26 +404,32 @@ const Backend = enum {
     std_io_group,
 };
 
+/// The backend named `name`, or null when `Backend` has none by that name.
+fn parseBackend(name: []const u8) ?Backend {
+    return std.meta.stringToEnum(Backend, name);
+}
+
+/// The grammar of `FORKUNION_BACKEND`, listing `Backend`.
+const backend_grammar = blk: {
+    var grammar: []const u8 = "one of ";
+    for (@typeInfo(Backend).@"enum".fields, 0..) |field, index| grammar = grammar ++ (if (index == 0) "" else ", ") ++ field.name;
+    break :blk grammar;
+};
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    const scale = envUsize("PROPAGATION_SCALE", 14);
-    const communities = envUsize("PROPAGATION_COMMUNITIES", 64);
-    const edge_factor = envUsize("PROPAGATION_EDGE_FACTOR", 16);
-    const backend_name = envString("FORKUNION_BACKEND", "forkunion_static_shared");
-    const budget_seconds = envF64("FORKUNION_BUDGET_SECS", 10); // The primary knob: a fixed window
-    const n_iters = envUsize("FORKUNION_ITERATIONS", 0); // Overrides with an exact count when set
-    const check = envFlag("PROPAGATION_CHECK");
-
-    const backend = std.meta.stringToEnum(Backend, backend_name) orelse {
-        std.debug.print("Unsupported backend: '{s}'\n", .{backend_name});
-        inline for (@typeInfo(Backend).@"enum".fields) |field| std.debug.print("  {s}\n", .{field.name});
-        return error.UnsupportedBackend;
-    };
-
     const topology = try fu.Topology.init();
     defer topology.deinit();
-    var n_threads = envUsize("FORKUNION_THREADS", 0);
-    if (n_threads == 0) n_threads = try topology.logicalCoresCount();
+    const settings = harness.Settings.read(try topology.logicalCoresCount());
+    const backend = harness.envParsed(Backend, "FORKUNION_BACKEND", .forkunion_static_shared, parseBackend, backend_grammar);
+    settings.print();
+    const scale = settings.scale;
+    const communities = settings.communities;
+    const n_threads = settings.threads;
+    if (scale > 32 or communities > (@as(u64, 1) << 32) >> @intCast(scale)) {
+        std.debug.print("FORKUNION_PROPAGATION_COMMUNITIES << FORKUNION_PROPAGATION_SCALE must fit 32-bit vertex indices\n", .{});
+        std.process.exit(1);
+    }
 
     // One pinned pool spawns for every backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; std_io_group ignores it.
@@ -488,7 +442,7 @@ pub fn main() !void {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var host = try generateNecklace(pool, scale, communities, edge_factor);
+    var host = try generateNecklace(pool, splitMix(settings.seed), scale, communities, settings.edge_factor);
     const vertices: usize = @as(usize, host.row_offsets.len - 1);
     var labels_a = try allocator.alloc(Label, vertices);
     var labels_b = try allocator.alloc(Label, vertices);
@@ -504,7 +458,7 @@ pub fn main() !void {
     const header = std.fmt.bufPrint(&line_buffer, "vertices {}, directed edges {}, communities {}\n", .{
         vertices, graph.column_indices.len, communities,
     }) catch return;
-    writeStdout(header);
+    harness.writeStdout(header);
 
     // Per-node CSR replicas for the `_replicated` cells; only the immutable CSR replicates - the
     // label buffers stay shared by nature, since every round must see every neighbour's last label.
@@ -546,27 +500,14 @@ pub fn main() !void {
     const ro_ptr: ?*fu.ReplicatedArray(u64) = if (replicas_offsets) |*r| r else null;
     const rc_ptr: ?*fu.ReplicatedArray(u32) = if (replicas_columns) |*r| r else null;
 
-    // One untimed warmup pass: page-faults and cache warming would otherwise bias the first timed
-    // pass, and by a different amount for each backend.
-    var rounds = try runOnce(backend, pool, allocator, io, local_memory, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
-
     // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
     // long enough to amortize scheduling noise - and reports the rate it sustained, with no
-    // per-backend pass-count guessing. FORKUNION_ITERATIONS forces an exact count instead.
-    const budget_ns: u64 = @intFromFloat(budget_seconds * std.time.ns_per_s);
-    const started = monotonicNanos();
-    var passes: usize = 0;
-    if (n_iters > 0) {
-        for (0..n_iters) |_| rounds = try runOnce(backend, pool, allocator, io, local_memory, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
-        passes = n_iters;
-    } else {
-        while (true) {
-            rounds = try runOnce(backend, pool, allocator, io, local_memory, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
-            passes += 1;
-            if (monotonicNanos() - started >= budget_ns) break;
-        }
-    }
-    const seconds = @as(f64, @floatFromInt(monotonicNanos() - started)) / std.time.ns_per_s / @as(f64, @floatFromInt(passes));
+    // per-backend pass-count guessing. The warm-up absorbs page faults and cache warming, which
+    // would otherwise bias the first timed pass, and by a different amount for each backend.
+    var rounds: usize = 0;
+    var loop = harness.Loop.init(settings.warmup_ns, settings.time_limit_ns);
+    while (loop.next()) |_|
+        rounds = try runOnce(backend, pool, allocator, io, local_memory, graph, labels_a, labels_b, counters, ro_ptr, rc_ptr, n_threads);
 
     // The fixed point sits in both buffers - the terminal round changed nothing - so read either.
     var components: u64 = 0;
@@ -575,15 +516,16 @@ pub fn main() !void {
         components += @intFromBool(label == @as(Label, @intCast(v)));
         checksum +%= label;
     }
-    // MTEPS - millions of directed edges scanned per second; `rounds * edges` is the exact scan
-    // count, identical in every cell by the double-buffered determinism.
-    const mteps = @as(f64, @floatFromInt(rounds)) * @as(f64, @floatFromInt(graph.column_indices.len)) / seconds / 1e6;
-    const line = std.fmt.bufPrint(&line_buffer, "{s}: {} components, {} rounds, checksum {}, {d:.2} s/pass, {d:.1} MTEPS\n", .{
-        backend_name, components, rounds, checksum, seconds, mteps,
-    }) catch return;
-    writeStdout(line);
+    // Directed edges scanned per call; `rounds * edges` is the exact scan count, identical in every
+    // cell by the double-buffered determinism, so the "edges" rate is the MTEPS figure.
+    const edges: f64 = @floatFromInt(graph.column_indices.len);
+    loop.rate("edges", @as(f64, @floatFromInt(rounds)) * edges);
+    loop.counter("rounds", @floatFromInt(rounds));
+    loop.row(settings.backend).print();
+    const line = std.fmt.bufPrint(&line_buffer, "{} components, {} rounds, checksum {}\n", .{ components, rounds, checksum }) catch return;
+    harness.writeStdout(line);
 
-    if (check) {
+    if (settings.check) {
         const serial_a = try allocator.alloc(Label, vertices);
         defer allocator.free(serial_a);
         const serial_b = try allocator.alloc(Label, vertices);
@@ -591,8 +533,8 @@ pub fn main() !void {
         const serial_rounds = convergeSerially(graph, serial_a, serial_b);
         if (serial_rounds != rounds or !std.mem.eql(Label, serial_a, labels_a)) {
             std.debug.print("MISMATCH: serial converged in {} rounds\n", .{serial_rounds});
-            return error.SerialMismatch;
+            std.process.exit(1);
         }
-        writeStdout("check: matches the serial labels and rounds\n");
+        harness.writeStdout("check: matches the serial labels and rounds\n");
     }
 }

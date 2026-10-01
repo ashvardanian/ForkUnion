@@ -4,23 +4,15 @@
  *  @date May 23, 2025
  *  @brief Demo app: N-Body simulation with ForkUnion and OpenMP.
  *
- *  To control the script, several environment variables are used:
- *
- *  - @c NBODY_COUNT - number of bodies in the simulation, defaulting to the number of threads.
- *  - @c FORKUNION_BUDGET_SECS - wall-clock budget per run, reporting the mean rate - default 10.
- *  - @c FORKUNION_ITERATIONS - run an exact iteration count instead, when set.
- *  - @c FORKUNION_BACKEND - backend to use for the simulation, defaulting to
- *    @c forkunion_static_shared.
- *  - @c FORKUNION_THREADS - number of threads to use, defaulting to the hardware thread count.
- *
- *  The backends include: `forkunion_{static,dynamic}_{shared,replicated}`,
- *  `openmp_{static,dynamic}`, and `taskflow_{static,dynamic}`.
+ *  The environment variables it reads are listed in `bench/harness.hpp`. The backends include:
+ *  `forkunion_{static,dynamic}_{shared,replicated}`, `openmp_{static,dynamic}`, and
+ *  `taskflow_{static,dynamic}`.
  *  To compile and run on all cores in Linux:
  *
  *  @code{.sh}
  *  cmake -B build_release -D CMAKE_BUILD_TYPE=Release
  *  cmake --build build_release --config Release
- *  NBODY_COUNT=128 FORKUNION_THREADS=$(nproc) build_release/forkunion_nbody
+ *  FORKUNION_NBODY_COUNT=128 FORKUNION_THREADS=$(nproc) build_release/forkunion_nbody
  *  @endcode
  *
  *  Each backend runs a fixed wall-clock window - 10 seconds by default - and reports the dispatch
@@ -32,10 +24,10 @@
  *  To benchmark each backend:
  *
  *  @code{.sh}
- *  NBODY_COUNT=512 FORKUNION_BACKEND=openmp_static build_release/forkunion_nbody
- *  NBODY_COUNT=512 FORKUNION_BACKEND=openmp_dynamic build_release/forkunion_nbody
- *  NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
- *  NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_dynamic_shared build_release/forkunion_nbody
+ *  FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=openmp_static build_release/forkunion_nbody
+ *  FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=openmp_dynamic build_release/forkunion_nbody
+ *  FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+ *  FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_dynamic_shared build_release/forkunion_nbody
  *  @endcode
  *
  *  On macOS, you may need to install OpenMP support via Homebrew:
@@ -48,14 +40,13 @@
  *    -D CMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \
  *    -D CMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib"
  *  cmake --build build_release --config Release
- *  NBODY_COUNT=512 FORKUNION_THREADS=$(sysctl -n hw.logicalcpu) \
+ *  FORKUNION_NBODY_COUNT=512 FORKUNION_THREADS=$(sysctl -n hw.logicalcpu) \
  *    FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
  *  @endcode
  */
 #include <cmath>   // `std::floor`
 #include <cstring> // `std::memcpy`
 
-#include <chrono>   // `std::chrono::steady_clock`
 #include <optional> // `std::optional` - the executor, spawned only when chosen
 
 /*  Clang generally defines @c _OPENMP when OpenMP, but compiling it is tricky and the header may
@@ -73,10 +64,9 @@
 
 #include <forkunion.hpp>
 
-#include "harness.hpp" // `env_variable`, `log_environment`
+#include "harness.hpp" // `settings_t`, `loop_t`, `fu`
 
-namespace fu = ashvardanian::forkunion;
-using fu::bench::env_variable;
+namespace ashvardanian::forkunion::bench {
 
 #pragma region Shared Logic
 
@@ -167,9 +157,9 @@ inline void apply_force(body_t &bi, vector3_t const &f) noexcept {
     bi.position.z -= std::floor(bi.position.z);
 }
 
-/** One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in @c f32. */
-static inline float random_unit(std::uint64_t const counter) noexcept {
-    return static_cast<float>(fu::split_mix(counter) >> 40) * (1.0f / 16777216.0f);
+/** Draw @p counter of stream @p key in `[0, 1)`: the top 24 bits over 2^24, exact in @c f32. */
+static inline float random_unit(std::uint64_t const key, std::uint64_t const counter) noexcept {
+    return static_cast<float>(fu::split_mix(key + counter) >> 40) * (1.0f / 16777216.0f);
 }
 
 #pragma endregion Shared Logic
@@ -252,15 +242,15 @@ struct nbody_context_t {
 };
 
 /** Pre-split across threads vs work-stolen. */
-enum class schedule_k : unsigned int { static_k, dynamic_k };
+enum class schedule_t : unsigned int { static_k, dynamic_k };
 
 /** One shared body array vs one position replica per memory domain. */
-enum class placement_k : unsigned int { shared_k, replicated_k };
+enum class placement_t : unsigned int { shared_k, replicated_k };
 
 /** Runs @p body over `[0, n)`, statically pre-split or work-stolen per compile-time schedule. */
-template <schedule_k schedule_, typename body_type_>
+template <schedule_t schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
-    if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
+    if constexpr (schedule_ == schedule_t::static_k) pool.for_n(n, body);
     else pool.for_n_dynamic(n, body);
 }
 
@@ -271,19 +261,19 @@ static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_
  *  win is the read side: replicate the positions once per step, then keep the quadratic loop
  *  node-local. The four ForkUnion backends are the four instantiations of this one body.
  */
-template <schedule_k schedule_, placement_k placement_>
+template <schedule_t schedule_, placement_t placement_>
 static void run(nbody_context_t &c) noexcept {
 
     std::size_t const n = c.bodies.size();
     std::span<body_t> const bodies = c.bodies;
     std::span<vector3_t> const forces = c.forces;
 
-    if constexpr (placement_ == placement_k::replicated_k) refresh_replicas(c.topology, *c.pool, c.replicas, bodies);
+    if constexpr (placement_ == placement_t::replicated_k) refresh_replicas(c.topology, *c.pool, c.replicas, bodies);
 
     // Force pass: all-to-all, reading the shared array or the thread's node-local replica.
     auto calc = [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
         vector3_t f {0.0, 0.0, 0.0};
-        if constexpr (placement_ == placement_k::replicated_k) {
+        if constexpr (placement_ == placement_t::replicated_k) {
             auto const local = c.replicas.on_memory_domain(
                 c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(at.compute_domain)));
             body_t const body_i = local[task];
@@ -378,13 +368,13 @@ struct backend_t {
     engine_t engine;
 };
 
-using sc = schedule_k;
-using pl = placement_k;
 static constexpr backend_t backends_k[] = {
-    {"forkunion_static_shared", &run<sc::static_k, pl::shared_k>, engine_t::forkunion_k},
-    {"forkunion_dynamic_shared", &run<sc::dynamic_k, pl::shared_k>, engine_t::forkunion_k},
-    {"forkunion_static_replicated", &run<sc::static_k, pl::replicated_k>, engine_t::forkunion_replicated_k},
-    {"forkunion_dynamic_replicated", &run<sc::dynamic_k, pl::replicated_k>, engine_t::forkunion_replicated_k},
+    {"forkunion_static_shared", &run<schedule_t::static_k, placement_t::shared_k>, engine_t::forkunion_k},
+    {"forkunion_dynamic_shared", &run<schedule_t::dynamic_k, placement_t::shared_k>, engine_t::forkunion_k},
+    {"forkunion_static_replicated", &run<schedule_t::static_k, placement_t::replicated_k>,
+     engine_t::forkunion_replicated_k},
+    {"forkunion_dynamic_replicated", &run<schedule_t::dynamic_k, placement_t::replicated_k>,
+     engine_t::forkunion_replicated_k},
 #if defined(_OPENMP)
     {"openmp_static", run_openmp_static, engine_t::openmp_k},
     {"openmp_dynamic", run_openmp_dynamic, engine_t::openmp_k},
@@ -393,17 +383,26 @@ static constexpr backend_t backends_k[] = {
     {"taskflow_dynamic", run_taskflow_dynamic, engine_t::taskflow_k},
 };
 
+/** The grammar of @c FORKUNION_BACKEND, listing @c backends_k. */
+static constexpr char backend_grammar_k[] = "one of forkunion_static_shared, forkunion_dynamic_shared, "  //
+                                            "forkunion_static_replicated, forkunion_dynamic_replicated, " //
+#if defined(_OPENMP)
+                                            "openmp_static, openmp_dynamic, " //
+#endif
+                                            "taskflow_static, taskflow_dynamic";
+
+/** The backend named @p name, or nothing when @c backends_k has none by that name. */
+std::optional<backend_t> parse_backend(std::string_view name) noexcept {
+    for (backend_t const &entry : backends_k)
+        if (entry.name == name) return entry;
+    return std::nullopt;
+}
+
 #pragma endregion Backends
 
-int main() {
-    fu::bench::log_environment();
-    std::size_t n = env_variable("NBODY_COUNT", std::size_t {0});
-    double const budget_seconds = env_variable("FORKUNION_BUDGET_SECS", 10.0); // ? The primary knob: a fixed window
-    std::size_t const iterations = env_variable("FORKUNION_ITERATIONS", std::size_t {0}); // ? Exact count when set
-    std::string_view const backend = env_variable("FORKUNION_BACKEND", "forkunion_static_shared");
-    std::size_t threads = env_variable("FORKUNION_THREADS", std::size_t {0});
-    if (threads == 0) threads = fu::allowed_cores_count();
-    if (n == 0) n = threads;
+/** Simulates @c settings.bodies bodies on @c settings.backend, and prints the timed row. */
+int bench_nbody(settings_t const &settings, backend_t const &backend) {
+    std::size_t const n = settings.bodies, threads = settings.threads;
 
     // Prepare bodies and forces - 2 memory allocations
     fu::dynamic_array<body_t> bodies;
@@ -415,35 +414,24 @@ int main() {
 
     // Seven counter-based draws per body: three position coordinates, three velocity components,
     // and one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    std::uint64_t const key = fu::split_mix(settings.seed);
     for (std::size_t i = 0; i < n; ++i) {
         std::uint64_t const counter = static_cast<std::uint64_t>(i) * 7;
-        bodies[i].position.x = random_unit(counter + 0);
-        bodies[i].position.y = random_unit(counter + 1);
-        bodies[i].position.z = random_unit(counter + 2);
-        bodies[i].velocity.x = random_unit(counter + 3);
-        bodies[i].velocity.y = random_unit(counter + 4);
-        bodies[i].velocity.z = random_unit(counter + 5);
-        bodies[i].mass = 1e10f + random_unit(counter + 6) * (1e15f - 1e10f);
+        bodies[i].position.x = random_unit(key, counter + 0);
+        bodies[i].position.y = random_unit(key, counter + 1);
+        bodies[i].position.z = random_unit(key, counter + 2);
+        bodies[i].velocity.x = random_unit(key, counter + 3);
+        bodies[i].velocity.y = random_unit(key, counter + 4);
+        bodies[i].velocity.z = random_unit(key, counter + 5);
+        bodies[i].mass = 1e10f + random_unit(key, counter + 6) * (1e15f - 1e10f);
     }
 
     std::span<body_t> const bodies_view {bodies.data(), n};
     std::span<vector3_t> const forces_view {forces.data(), n};
 
-    backend_t const *selected = nullptr;
-    for (backend_t const &entry : backends_k)
-        if (entry.name == backend) selected = &entry;
-    if (!selected) {
-        std::fprintf(stderr, "Unsupported backend: %.*s\n", static_cast<int>(backend.size()), backend.data());
-        std::fprintf(stderr, "Available backends:");
-        for (backend_t const &entry : backends_k)
-            std::fprintf(stderr, " %.*s", static_cast<int>(entry.name.size()), entry.name.data());
-        std::fprintf(stderr, "\n");
-        return EXIT_FAILURE;
-    }
-
     // One pool serves every ForkUnion backend; the topology harvest and replicas only where needed.
     bool const needs_pool =
-        selected->engine == engine_t::forkunion_k || selected->engine == engine_t::forkunion_replicated_k;
+        backend.engine == engine_t::forkunion_k || backend.engine == engine_t::forkunion_replicated_k;
     fu::machine_topology_t topology;
     fu::replicated_array<body_t> replicas;
     std::optional<distributed_pool_t> pool; // ? Spawned for the ForkUnion backends
@@ -458,13 +446,12 @@ int main() {
             std::fprintf(stderr, "Failed to spawn the thread pool\n");
             return EXIT_FAILURE;
         }
-        if (selected->engine == engine_t::forkunion_replicated_k &&
-            failed(replicas.resize_uninitialized(topology, n))) {
+        if (backend.engine == engine_t::forkunion_replicated_k && failed(replicas.resize_uninitialized(topology, n))) {
             std::fprintf(stderr, "Failed to allocate per-domain body replicas\n");
             return EXIT_FAILURE;
         }
     }
-    if (selected->engine == engine_t::taskflow_k) taskflow.emplace(threads);
+    if (backend.engine == engine_t::taskflow_k) taskflow.emplace(threads);
 #if defined(_OPENMP)
     omp_set_num_threads(static_cast<int>(threads));
 #endif
@@ -474,19 +461,22 @@ int main() {
     if (taskflow) context.taskflow = &*taskflow;
     // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
     // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    // no per-backend iteration guessing. `FORKUNION_ITERATIONS` forces an exact count instead.
-    auto const started = std::chrono::steady_clock::now();
-    std::size_t passes = 0;
-    if (iterations > 0)
-        for (; passes < iterations; ++passes) selected->run(context);
-    else do {
-            selected->run(context), ++passes;
-        } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
-    double const total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    double const microseconds_per_iteration = total_seconds / static_cast<double>(passes) * 1e6;
-    // Per-iteration latency is the comparable unit - one `for_each` dispatch over `n` bodies. The
-    // total wall time follows for reference, since a fast dispatch rounds to zero in seconds.
-    std::printf("%.*s: %zu bodies, %zu iters, %.2f us/iter (%.2f s total)\n", static_cast<int>(backend.size()),
-                backend.data(), n, passes, microseconds_per_iteration, total_seconds);
+    // no per-backend iteration guessing. One call is one step: two dispatches over `n` bodies.
+    loop_t loop(settings.warmup, settings.time_limit);
+    for ([[maybe_unused]] std::size_t call : loop) backend.run(context);
+    loop.rate("bodies", static_cast<double>(n));
+    print(loop.row(backend.name));
     return EXIT_SUCCESS;
+}
+
+} // namespace ashvardanian::forkunion::bench
+
+using namespace ashvardanian::forkunion::bench;
+
+int main() {
+    settings_t const settings = read_settings();
+    backend_t const backend = env_parsed("FORKUNION_BACKEND", backends_k[0], parse_backend, backend_grammar_k);
+    print(probe_machine());
+    print(settings);
+    return bench_nbody(settings, backend);
 }

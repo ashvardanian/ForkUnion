@@ -51,3 +51,7 @@ zig-pkg/
 # Pixi environments, created in the repository root by `pixi run`
 .pixi/
 .magic/
+
+# Python and macOS
+__pycache__/
+.DS_Store

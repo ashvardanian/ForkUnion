@@ -1840,7 +1840,7 @@ inline void run_on_worker_(pool_type_ &pool, std::size_t const thread, work_type
  *
  *  Deliberately @b not scaled by cache size: the Sattolo cycle revisits no slot within a lap, so no
  *  cache can shortcut the walk - while every extra page costs TLB reach and risks billing each hop
- *  for a memory-bound page walk. 128 MiB fits three revisit-free million-hop stretches.
+ *  for a memory-bound page walk. 128 MB fits three revisit-free million-hop stretches.
  */
 inline std::size_t chase_list_bytes_(memory_domain_t const &target) noexcept {
     std::size_t bytes = std::size_t(128) << 20;
@@ -1864,7 +1864,7 @@ inline std::uint64_t stream_words_(std::uint64_t const *words, std::size_t const
 
 /** Bytes a stream needs to dwarf every cache the harvest can name - its repeats re-read the same
  *  buffer, and a cache-resident buffer would report the cache's bandwidth - and to run long past
- *  the fork-join overhead: at least 8 MiB per worker reading it. */
+ *  the fork-join overhead: at least 8 MB per worker reading it. */
 inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_domain_t const &target,
                                  std::size_t const widest_domain_threads) noexcept {
     std::uint64_t largest_cache = 0;

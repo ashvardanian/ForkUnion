@@ -30,19 +30,9 @@
  *  therefore identical across schedules, backends, thread counts, and languages - so the MTEPS
  *  denominator rounds × edges is the same number in every cell of a comparison table.
  *
- *  To control the script, several environment variables are used:
- *
- *  - @c PROPAGATION_SCALE - each community has `2^scale` vertices - default 14.
- *  - @c PROPAGATION_COMMUNITIES - communities strung on the ring - default 64.
- *  - @c PROPAGATION_EDGE_FACTOR - edges generated per vertex, before deduplication - default 16.
- *  - @c FORKUNION_BACKEND - backend to use - default @c forkunion_static_shared.
- *  - @c FORKUNION_THREADS - number of threads to use - default all hardware threads.
- *  - @c FORKUNION_BUDGET_SECS - wall-clock budget per run, reporting the mean rate - default 10.
- *  - @c FORKUNION_ITERATIONS - run an exact pass count instead, when set.
- *  - @c PROPAGATION_CHECK - also converge serially, failing unless labels and rounds agree exactly.
- *
- *  The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`;
- *  the baselines are `{openmp,taskflow}_{static,dynamic}`.
+ *  The environment variables it reads are listed in `bench/harness.hpp`. The ForkUnion backends are
+ *  the four cells of `forkunion_{static,dynamic}_{shared,replicated}`; the baselines are
+ *  `{openmp,taskflow}_{static,dynamic}`.
  *
  *  @section propagation_protocol Benchmarking Protocol
  *
@@ -68,7 +58,6 @@
 #include <cstring>   // `std::memcpy`, `std::memcmp`
 
 #include <algorithm>   // `std::sort`, `std::unique`, `std::min`
-#include <chrono>      // `std::chrono::steady_clock`
 #include <optional>    // `std::optional` - the executor, spawned only when chosen
 #include <string_view> // `std::string_view`
 
@@ -89,10 +78,9 @@
 
 #include <forkunion.hpp>
 
-#include "harness.hpp" // `env_variable`, `log_environment`
+#include "harness.hpp" // `settings_t`, `loop_t`, `fu`
 
-namespace fu = ashvardanian::forkunion;
-using fu::bench::env_variable;
+namespace ashvardanian::forkunion::bench {
 
 /** A vertex index, dense in [0, vertices). */
 using vertex_t = std::uint32_t;
@@ -134,13 +122,14 @@ struct edge_t {
 static constexpr edge_t sentinel_edge_k {~vertex_t(0), ~vertex_t(0)};
 
 /** One quadrant choice in `[0, 100)` - same draw and counter scheme as every sibling benchmark. */
-static inline unsigned random_percent(std::uint64_t const counter) noexcept {
-    return static_cast<unsigned>(fu::split_mix(counter) % 100);
+static inline unsigned random_percent(std::uint64_t const key, std::uint64_t const counter) noexcept {
+    return static_cast<unsigned>(fu::split_mix(key + counter) % 100);
 }
 
 /** One bridge endpoint in `[0, bound)`, from the same avalanche. */
-static inline vertex_t random_index(std::uint64_t const counter, vertex_t const bound) noexcept {
-    return static_cast<vertex_t>(fu::split_mix(counter) % bound);
+static inline vertex_t random_index(std::uint64_t const key, std::uint64_t const counter,
+                                    vertex_t const bound) noexcept {
+    return static_cast<vertex_t>(fu::split_mix(key + counter) % bound);
 }
 
 /**
@@ -153,8 +142,8 @@ static inline vertex_t random_index(std::uint64_t const counter, vertex_t const 
  *  as the single-graph generators, so community 0 with `communities == 1` reproduces those graphs
  *  exactly. Bridge draws live in their own counter range above all edge draws, so nothing collides.
  */
-static bool generate_necklace(std::size_t const scale, std::size_t const communities, std::size_t const edge_factor,
-                              csr_host_t &graph) noexcept {
+static bool generate_necklace(std::uint64_t const key, std::size_t const scale, std::size_t const communities,
+                              std::size_t const edge_factor, csr_host_t &graph) noexcept {
     std::size_t const community_vertices = std::size_t(1) << scale;
     vertex_t const vertices = static_cast<vertex_t>(communities * community_vertices);
     std::size_t const raw_local = community_vertices * edge_factor;
@@ -175,7 +164,8 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
         for (std::size_t e = 0; e < raw_edges; ++e) {
             vertex_t row = 0, column = 0;
             for (int bit = static_cast<int>(scale) - 1; bit >= 0; --bit) {
-                unsigned const r = random_percent(e * 64 + static_cast<std::size_t>(bit)); // ? `a=57 b=19 c=19 d=5`
+                unsigned const r =
+                    random_percent(key, e * 64 + static_cast<std::size_t>(bit)); // ? `a=57 b=19 c=19 d=5`
                 vertex_t const step = 1u << bit;
                 if (r < 57) continue; // ? Stay in the dense quadrant
                 else if (r < 76) column |= step;
@@ -193,9 +183,9 @@ static bool generate_necklace(std::size_t const scale, std::size_t const communi
         vertex_t const hub_core = static_cast<vertex_t>(std::min<std::size_t>(community_vertices, 64));
         std::uint64_t const bridge_base = static_cast<std::uint64_t>(raw_edges) * 64;
         for (std::size_t j = 0; j < bridges; ++j) {
-            vertex_t const u = static_cast<vertex_t>((j << scale) + random_index(bridge_base + 2 * j, hub_core));
+            vertex_t const u = static_cast<vertex_t>((j << scale) + random_index(key, bridge_base + 2 * j, hub_core));
             vertex_t const v = static_cast<vertex_t>((((j + 1) % communities) << scale) +
-                                                     random_index(bridge_base + 2 * j + 1, hub_core));
+                                                     random_index(key, bridge_base + 2 * j + 1, hub_core));
             edges[raw_edges * 2 + j * 2] = {u, v};
             edges[raw_edges * 2 + j * 2 + 1] = {v, u};
         }
@@ -241,7 +231,7 @@ static inline label_t min_label_of(csr_view_t const &graph, label_t const *old_l
 }
 
 /** Converges serially from `labels[v] = v`, returning the rounds taken - the reference for
- *  @c PROPAGATION_CHECK. */
+ *  @c FORKUNION_PROPAGATION_CHECK. */
 static std::size_t converge_serially(csr_view_t const &graph, label_t *labels_a, label_t *labels_b) noexcept {
     vertex_t const vertices = graph.vertices();
     for (vertex_t v = 0; v < vertices; ++v) labels_a[v] = v;
@@ -264,7 +254,7 @@ static std::size_t converge_serially(csr_view_t const &graph, label_t *labels_a,
 #pragma region Backends
 
 /** Per-thread change tally, spaced so two threads never share a cache line. */
-struct alignas(fu::default_alignment_k) counter_t {
+struct alignas(fu::default_alignment_k) tally_t {
     std::uint64_t value {0};
 };
 
@@ -340,7 +330,7 @@ struct run_context_t {
     fu::machine_topology_t const &topology;
 
     /** Per-thread change tallies, zeroed each round. */
-    std::span<counter_t> counters;
+    std::span<tally_t> counters;
 
     /** The labels a round reads, seeded with each vertex's own index. */
     std::span<label_t> labels_a;
@@ -362,23 +352,23 @@ struct run_context_t {
 };
 
 /** Pre-split across threads vs work-stolen. */
-enum class schedule_k : unsigned int { static_k, dynamic_k };
+enum class schedule_t : unsigned int { static_k, dynamic_k };
 
 /** One shared CSR vs one read-only CSR replica per memory domain. */
-enum class placement_k : unsigned int { shared_k, replicated_k };
+enum class placement_t : unsigned int { shared_k, replicated_k };
 
 /** Runs @p body over `[0, n)`, statically pre-split or work-stolen per compile-time schedule. */
-template <schedule_k schedule_, typename body_type_>
+template <schedule_t schedule_, typename body_type_>
 static void for_n_scheduled(distributed_pool_t &pool, std::size_t const n, body_type_ body) noexcept {
-    if constexpr (schedule_ == schedule_k::static_k) pool.for_n(n, body);
+    if constexpr (schedule_ == schedule_t::static_k) pool.for_n(n, body);
     else pool.for_n_dynamic(n, body);
 }
 
 /** Zeroes the per-thread tallies and sums them - the tiny serial bookends of every round. */
-static void zero_counters(std::span<counter_t> counters) noexcept {
+static void zero_counters(std::span<tally_t> counters) noexcept {
     for (std::size_t t = 0; t < counters.size(); ++t) counters[t].value = 0;
 }
-static std::uint64_t sum_counters(std::span<counter_t> counters) noexcept {
+static std::uint64_t sum_counters(std::span<tally_t> counters) noexcept {
     std::uint64_t total = 0;
     for (std::size_t t = 0; t < counters.size(); ++t) total += counters[t].value;
     return total;
@@ -391,10 +381,10 @@ static std::uint64_t sum_counters(std::span<counter_t> counters) noexcept {
  *  schedule and where each thread reads its CSR from. Every round is one fork-join dispatch, so the
  *  pool's dispatch-and-join cost is paid @c rounds times per pass, the axis under test.
  */
-template <schedule_k schedule_, placement_k placement_>
+template <schedule_t schedule_, placement_t placement_>
 static void run(run_context_t &c) noexcept {
     auto graph_at = [&](std::size_t compute_domain) noexcept -> csr_view_t {
-        if constexpr (placement_ == placement_k::replicated_k)
+        if constexpr (placement_ == placement_t::replicated_k)
             return c.replicas.on_memory_domain(
                 c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain)));
         else return c.graph;
@@ -463,7 +453,7 @@ static void run_openmp_dynamic(run_context_t &c) noexcept { run_openmp<true>(c);
 template <typename partitioner_>
 static void run_taskflow(run_context_t &c, partitioner_ partitioner) noexcept {
     csr_view_t const graph = c.graph;
-    std::span<counter_t> const counters = c.counters;
+    std::span<tally_t> const counters = c.counters;
     tf::Executor &executor = *c.taskflow;
     vertex_t const vertices = graph.vertices();
     label_t *old_labels = c.labels_a.data(), *new_labels = c.labels_b.data();
@@ -512,13 +502,13 @@ struct backend_t {
     engine_t engine;
 };
 
-using sc = schedule_k;
-using pl = placement_k;
 static constexpr backend_t backends_k[] = {
-    {"forkunion_static_shared", &run<sc::static_k, pl::shared_k>, engine_t::forkunion_k},
-    {"forkunion_dynamic_shared", &run<sc::dynamic_k, pl::shared_k>, engine_t::forkunion_k},
-    {"forkunion_static_replicated", &run<sc::static_k, pl::replicated_k>, engine_t::forkunion_replicated_k},
-    {"forkunion_dynamic_replicated", &run<sc::dynamic_k, pl::replicated_k>, engine_t::forkunion_replicated_k},
+    {"forkunion_static_shared", &run<schedule_t::static_k, placement_t::shared_k>, engine_t::forkunion_k},
+    {"forkunion_dynamic_shared", &run<schedule_t::dynamic_k, placement_t::shared_k>, engine_t::forkunion_k},
+    {"forkunion_static_replicated", &run<schedule_t::static_k, placement_t::replicated_k>,
+     engine_t::forkunion_replicated_k},
+    {"forkunion_dynamic_replicated", &run<schedule_t::dynamic_k, placement_t::replicated_k>,
+     engine_t::forkunion_replicated_k},
 #if defined(_OPENMP)
     {"openmp_static", run_openmp_static, engine_t::openmp_k},
     {"openmp_dynamic", run_openmp_dynamic, engine_t::openmp_k},
@@ -527,26 +517,35 @@ static constexpr backend_t backends_k[] = {
     {"taskflow_dynamic", run_taskflow_dynamic, engine_t::taskflow_k},
 };
 
+/** The grammar of @c FORKUNION_BACKEND, listing @c backends_k. */
+static constexpr char backend_grammar_k[] = "one of forkunion_static_shared, forkunion_dynamic_shared, "  //
+                                            "forkunion_static_replicated, forkunion_dynamic_replicated, " //
+#if defined(_OPENMP)
+                                            "openmp_static, openmp_dynamic, " //
+#endif
+                                            "taskflow_static, taskflow_dynamic";
+
+/** The backend named @p name, or nothing when @c backends_k has none by that name. */
+std::optional<backend_t> parse_backend(std::string_view name) noexcept {
+    for (backend_t const &entry : backends_k)
+        if (entry.name == name) return entry;
+    return std::nullopt;
+}
+
 #pragma endregion Backends
 
-int main() {
-    fu::bench::log_environment();
-    std::size_t const scale = env_variable("PROPAGATION_SCALE", std::size_t {14});
-    std::size_t const communities = env_variable("PROPAGATION_COMMUNITIES", std::size_t {64});
-    std::size_t const edge_factor = env_variable("PROPAGATION_EDGE_FACTOR", std::size_t {16});
-    std::string_view const backend = env_variable("FORKUNION_BACKEND", "forkunion_static_shared");
-    std::size_t threads = env_variable("FORKUNION_THREADS", std::size_t {0});
-    double const budget_seconds = env_variable("FORKUNION_BUDGET_SECS", 10.0); // ? The primary knob: a fixed window
-    std::size_t const iterations = env_variable("FORKUNION_ITERATIONS", std::size_t {0}); // ? Exact count when set
-    bool const check = env_variable("PROPAGATION_CHECK", false);
-    if (threads == 0) threads = fu::allowed_cores_count();
-    if ((communities << scale) > (std::size_t(1) << 32)) {
-        std::fprintf(stderr, "PROPAGATION_COMMUNITIES << PROPAGATION_SCALE must fit 32-bit vertex indices\n");
+/** Converges the necklace on @c settings.backend for the timed window, and prints its row. */
+int bench_propagation(settings_t const &settings, backend_t const &backend) {
+    std::size_t const scale = settings.scale, communities = settings.communities, threads = settings.threads;
+    if (scale > 32 || communities > ((std::uint64_t(1) << 32) >> scale)) {
+        std::fprintf(
+            stderr,
+            "FORKUNION_PROPAGATION_COMMUNITIES << FORKUNION_PROPAGATION_SCALE must fit 32-bit vertex indices\n");
         return EXIT_FAILURE;
     }
 
     csr_host_t host;
-    if (!generate_necklace(scale, communities, edge_factor, host)) {
+    if (!generate_necklace(fu::split_mix(settings.seed), scale, communities, settings.edge_factor, host)) {
         std::fprintf(stderr, "Failed to allocate the graph\n");
         return EXIT_FAILURE;
     }
@@ -554,22 +553,10 @@ int main() {
     vertex_t const vertices = graph.vertices();
     std::printf("vertices %u, directed edges %" PRIu64 ", communities %zu\n", vertices, graph.edges(), communities);
 
-    backend_t const *selected = nullptr;
-    for (backend_t const &entry : backends_k)
-        if (entry.name == backend) selected = &entry;
-    if (!selected) {
-        std::fprintf(stderr, "Unsupported backend: %.*s\n", static_cast<int>(backend.size()), backend.data());
-        std::fprintf(stderr, "Available backends:");
-        for (backend_t const &entry : backends_k)
-            std::fprintf(stderr, " %.*s", static_cast<int>(entry.name.size()), entry.name.data());
-        std::fprintf(stderr, "\n");
-        return EXIT_FAILURE;
-    }
-
     // One pinned pool spawns for every backend - first to give the graph and label pages their
     // deterministic first touch, then to serve the ForkUnion backends; the others drop it below.
     bool const needs_pool =
-        selected->engine == engine_t::forkunion_k || selected->engine == engine_t::forkunion_replicated_k;
+        backend.engine == engine_t::forkunion_k || backend.engine == engine_t::forkunion_replicated_k;
     fu::machine_topology_t topology;
     replicated_csr_t replicas;
     std::optional<distributed_pool_t> pool;
@@ -584,7 +571,7 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    fu::dynamic_array<counter_t> counters;
+    fu::dynamic_array<tally_t> counters;
     fu::dynamic_array<label_t> labels_a, labels_b;
     if (failed(counters.resize(threads)) || failed(labels_a.resize(vertices)) || failed(labels_b.resize(vertices))) {
         std::fprintf(stderr, "Failed to allocate the labels\n");
@@ -600,12 +587,12 @@ int main() {
     }
     csr_view_t const placed_graph = host.view(); // ! Retouch reallocates; earlier views are stale
 
-    if (needs_pool && selected->engine == engine_t::forkunion_replicated_k && !replicas.try_build(host, topology)) {
+    if (needs_pool && backend.engine == engine_t::forkunion_replicated_k && !replicas.try_build(host, topology)) {
         std::fprintf(stderr, "Failed to replicate the graph across memory domains\n");
         return EXIT_FAILURE;
     }
     if (!needs_pool) pool.reset(); // ? Frees the cores before OpenMP or Taskflow spawn their own workers
-    if (selected->engine == engine_t::taskflow_k) taskflow.emplace(threads);
+    if (backend.engine == engine_t::taskflow_k) taskflow.emplace(threads);
 #if defined(_OPENMP)
     omp_set_num_threads(static_cast<int>(threads));
 #endif
@@ -620,22 +607,12 @@ int main() {
     if (pool) context.pool = &*pool;
     if (taskflow) context.taskflow = &*taskflow;
 
-    // One untimed warmup pass: page-faults and cache warming would otherwise bias the first timed
-    // pass, and by a different amount for each backend.
-    selected->run(context);
-
     // A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
     // long enough to amortize scheduling noise - and reports the rate it sustained, with no
-    // per-backend pass-count guessing. `FORKUNION_ITERATIONS` forces an exact count instead.
-    auto const started = std::chrono::steady_clock::now();
-    std::size_t passes = 0;
-    if (iterations > 0)
-        for (; passes < iterations; ++passes) selected->run(context);
-    else do {
-            selected->run(context), ++passes;
-        } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < budget_seconds);
-    double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() //
-                           / static_cast<double>(passes);
+    // per-backend pass-count guessing. The warm-up absorbs page faults and cache warming, which
+    // would otherwise bias the first timed pass, and by a different amount for each backend.
+    loop_t loop(settings.warmup, settings.time_limit);
+    for ([[maybe_unused]] std::size_t call : loop) backend.run(context);
 
     // The fixed point sits in both buffers - the terminal round changed nothing - so read either.
     std::uint64_t components = 0, checksum = 0;
@@ -643,14 +620,15 @@ int main() {
         components += labels_a[v] == v;
         checksum += labels_a[v];
     }
-    // MTEPS - millions of directed edges scanned per second; `rounds * edges` is the exact scan
-    // count, identical in every cell by the double-buffered determinism.
-    double const mteps = static_cast<double>(context.rounds) * static_cast<double>(graph.edges()) / seconds / 1e6;
-    std::printf("%.*s: %zu components, %zu rounds, checksum %zu, %.2f s/pass, %.1f MTEPS\n",
-                static_cast<int>(backend.size()), backend.data(), static_cast<std::size_t>(components), context.rounds,
-                static_cast<std::size_t>(checksum), seconds, mteps);
+    // Directed edges scanned per call; `rounds * edges` is the exact scan count, identical in every
+    // cell by the double-buffered determinism, so the "edges" rate is the MTEPS figure.
+    loop.rate("edges", static_cast<double>(context.rounds) * static_cast<double>(graph.edges()));
+    loop.counter("rounds", static_cast<double>(context.rounds));
+    print(loop.row(backend.name));
+    std::printf("%zu components, %zu rounds, checksum %zu\n", static_cast<std::size_t>(components), context.rounds,
+                static_cast<std::size_t>(checksum));
 
-    if (check) {
+    if (settings.check) {
         fu::dynamic_array<label_t> serial_a, serial_b;
         if (failed(serial_a.resize(vertices)) || failed(serial_b.resize(vertices))) {
             std::fprintf(stderr, "Failed to allocate the reference labels\n");
@@ -665,4 +643,16 @@ int main() {
         std::printf("check: matches the serial labels and rounds\n");
     }
     return EXIT_SUCCESS;
+}
+
+} // namespace ashvardanian::forkunion::bench
+
+using namespace ashvardanian::forkunion::bench;
+
+int main() {
+    settings_t const settings = read_settings();
+    backend_t const backend = env_parsed("FORKUNION_BACKEND", backends_k[0], parse_backend, backend_grammar_k);
+    print(probe_machine());
+    print(settings);
+    return bench_propagation(settings, backend);
 }

@@ -15,24 +15,13 @@ the last. Rounds-to-convergence and the final fixed point are therefore identica
 thread counts, and languages - the C++, Rust, Zig, and this port print the same component count,
 round count, and checksum.
 
-Environment variables, matching the sibling benchmarks:
-
-- `PROPAGATION_SCALE` - each community has 2^scale vertices, default 14.
-- `PROPAGATION_COMMUNITIES` - communities strung on the ring, default 64.
-- `PROPAGATION_EDGE_FACTOR` - edges generated per vertex, before deduplication, default 16.
-- `FORKUNION_BACKEND` - one of the four `forkunion_{static,dynamic}_{shared,replicated}` cells, or
-  the `max_parallelize` baseline; default `forkunion_static_shared`.
-- `FORKUNION_THREADS` - number of threads, default the logical core count.
-- `FORKUNION_BUDGET_SECS` - wall-clock budget per run, default 10.
-- `FORKUNION_ITERATIONS` - run an exact pass count instead, when set.
-- `PROPAGATION_CHECK` - also converge serially, and fail unless labels and rounds agree exactly.
+The environment variables it reads are listed in `bench/harness.mojo`. The backends are the four
+`forkunion_{static,dynamic}_{shared,replicated}` cells and the `max_parallelize` baseline.
 """
 
 from max.algorithm import parallelize
 
-from std.os import abort, getenv
 from std.sys import exit, stderr
-from std.time import perf_counter_ns
 
 from forkunion import (
     CacheAligned,
@@ -45,44 +34,10 @@ from forkunion import (
     Topology,
 )
 
+from harness import Loop, Settings, exit_unparsed, print_row, print_settings
+
 comptime SENTINEL = UInt32(0xFFFF_FFFF)
 """Sorts past every valid edge; marks a dropped self-loop, trimmed with the duplicates."""
-
-
-def fixed(value: Float64, decimals: Int) -> String:
-    """Renders a non-negative value with exactly `decimals` places, since t-strings take no spec."""
-    var scale = 1
-    for _ in range(decimals):
-        scale *= 10
-    var scaled = Int(value * Float64(scale) + 0.5)
-    var whole = String(scaled // scale)
-    var fraction = String(scaled % scale)
-    while fraction.byte_length() < decimals:
-        fraction = String("0") + fraction
-    return whole + "." + fraction
-
-
-def parse_int(name: StaticString, fallback: Int) -> Int:
-    var text = getenv(name)
-    if text.byte_length() == 0:
-        return fallback
-    try:
-        var value = Int(text)
-        if value >= 0:
-            return value
-    except:
-        pass
-    abort(t"{name}=\"{text}\" does not parse")
-
-
-def parse_float(name: StaticString, fallback: Float64) -> Float64:
-    var text = getenv(name)
-    if text.byte_length() == 0:
-        return fallback
-    try:
-        return Float64(text)
-    except:
-        abort(t"{name}=\"{text}\" does not parse")
 
 
 @always_inline
@@ -95,15 +50,15 @@ def split_mix(counter: UInt64) -> UInt64:
 
 
 @always_inline
-def random_percent(counter: UInt64) -> UInt32:
+def random_percent(key: UInt64, counter: UInt64) -> UInt32:
     """One quadrant choice in `[0, 100)` - the same draw scheme as every sibling benchmark."""
-    return UInt32(Int(split_mix(counter) % 100))
+    return UInt32(Int(split_mix(key + counter) % 100))
 
 
 @always_inline
-def random_index(counter: UInt64, bound: UInt32) -> UInt32:
+def random_index(key: UInt64, counter: UInt64, bound: UInt32) -> UInt32:
     """One bridge endpoint in `[0, bound)`, from the same avalanche."""
-    return UInt32(Int(split_mix(counter) % UInt64(Int(bound))))
+    return UInt32(Int(split_mix(key + counter) % UInt64(Int(bound))))
 
 
 @fieldwise_init
@@ -112,6 +67,7 @@ struct FillScratch(ImplicitlyCopyable, TrivialRegisterPassable):
 
     var rows: Pointer[UInt32, MutUntrackedOrigin]
     var columns: Pointer[UInt32, MutUntrackedOrigin]
+    var key: UInt64
     var scale: Int
     var raw_local: Int
 
@@ -125,7 +81,7 @@ def fill_edge(task: Int, at: ThreadInDomain, mut scratch: FillScratch):
     while bit > 0:
         bit -= 1
         # a=57 b=19 c=19 d=5, the same quadrant weights the sibling generators use.
-        var draw = random_percent(UInt64(edge) * 64 + UInt64(bit))
+        var draw = random_percent(scratch.key, UInt64(edge) * 64 + UInt64(bit))
         var step = UInt32(1) << UInt32(bit)
         if draw < 57:
             continue
@@ -218,6 +174,7 @@ def label_vertex_replicated(task: Int, at: ThreadInDomain, mut round: Round):
 
 def generate_necklace(
     mut pool: Pool,
+    key: UInt64,
     scale: Int,
     communities: Int,
     edge_factor: Int,
@@ -242,6 +199,7 @@ def generate_necklace(
     var scratch = FillScratch(
         rows.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         columns.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
+        key,
         scale,
         raw_local,
     )
@@ -252,9 +210,9 @@ def generate_necklace(
     var hub_core = UInt32(min(community_vertices, 64))
     var bridge_base = UInt64(raw_edges) * 64
     for bridge in range(bridges):
-        var left = UInt32(bridge << scale) + random_index(bridge_base + 2 * UInt64(bridge), hub_core)
+        var left = UInt32(bridge << scale) + random_index(key, bridge_base + 2 * UInt64(bridge), hub_core)
         var right = UInt32(((bridge + 1) % communities) << scale) + random_index(
-            bridge_base + 2 * UInt64(bridge) + 1, hub_core
+            key, bridge_base + 2 * UInt64(bridge) + 1, hub_core
         )
         rows[raw_edges * 2 + bridge * 2] = left
         columns[raw_edges * 2 + bridge * 2] = right
@@ -418,49 +376,53 @@ def converge_serially(graph: Graph, mut labels_a: List[UInt32], mut labels_b: Li
     return rounds
 
 
+comptime BACKEND_GRAMMAR = (
+    "one of forkunion_static_shared, forkunion_dynamic_shared, forkunion_static_replicated,"
+    " forkunion_dynamic_replicated, max_parallelize"
+)
+
+
+def parse_backend(name: String) -> Optional[String]:
+    """The backend named `name`, or nothing when this binary has none by that name."""
+    if (
+        name == "forkunion_static_shared"
+        or name == "forkunion_dynamic_shared"
+        or name == "forkunion_static_replicated"
+        or name == "forkunion_dynamic_replicated"
+        or name == "max_parallelize"
+    ):
+        return name
+    return None
+
+
 def main() raises:
-    var scale = parse_int("PROPAGATION_SCALE", 14)
-    var communities = parse_int("PROPAGATION_COMMUNITIES", 64)
-    var edge_factor = parse_int("PROPAGATION_EDGE_FACTOR", 16)
-    var threads = parse_int("FORKUNION_THREADS", 0)
-    var budget = Int(parse_float("FORKUNION_BUDGET_SECS", 10) * 1e9)
-    var iterations = parse_int("FORKUNION_ITERATIONS", 0)
-    var backend = getenv("FORKUNION_BACKEND")
-    if backend.byte_length() == 0:
-        backend = String("forkunion_static_shared")
-    var known = (
-        backend == "forkunion_static_shared"
-        or backend == "forkunion_dynamic_shared"
-        or backend == "forkunion_static_replicated"
-        or backend == "forkunion_dynamic_replicated"
-        or backend == "max_parallelize"
-    )
-    if not known:
-        print(t"Unsupported backend: '{backend}'", file=stderr)
-        print("  forkunion_static_shared", file=stderr)
-        print("  forkunion_dynamic_shared", file=stderr)
-        print("  forkunion_static_replicated", file=stderr)
-        print("  forkunion_dynamic_replicated", file=stderr)
-        print("  max_parallelize", file=stderr)
-        exit(1)
+    var library = Library()
+    var topology = Topology(library)
+    var settings = Settings(topology.logical_cores_count())
+    if not parse_backend(settings.backend):
+        exit_unparsed("FORKUNION_BACKEND", settings.backend, BACKEND_GRAMMAR)
+    print_settings(settings)
+    var scale = settings.scale
+    var communities = settings.communities
+    var threads = settings.threads
+    var backend = settings.backend
     var dynamic = "dynamic" in backend
     var replicated = "replicated" in backend
     var baseline = backend == "max_parallelize"
-    var check_text = getenv("PROPAGATION_CHECK")
-    var check = check_text.byte_length() > 0 and check_text != "0" and check_text != "false"
-    if (communities << scale) > (1 << 32):
-        print("PROPAGATION_COMMUNITIES << PROPAGATION_SCALE must fit 32-bit vertex indices", file=stderr)
+    if scale > 32 or communities > (1 << 32) >> scale:
+        print(
+            "FORKUNION_PROPAGATION_COMMUNITIES << FORKUNION_PROPAGATION_SCALE must fit 32-bit vertex indices",
+            file=stderr,
+        )
         exit(1)
 
-    var library = Library()
-    var topology = Topology(library)
-    if threads == 0:
-        threads = topology.logical_cores_count()
     var pool = Pool(topology, threads=threads, name="propagation")
 
     var row_offsets = List[UInt64]()
     var column_indices = List[UInt32]()
-    var built = generate_necklace(pool, scale, communities, edge_factor, row_offsets, column_indices)
+    var built = generate_necklace(
+        pool, split_mix(UInt64(settings.seed)), scale, communities, settings.edge_factor, row_offsets, column_indices
+    )
     var vertices = built[0]
     var directed_edges = built[1]
     var graph = Graph(
@@ -524,22 +486,14 @@ def main() raises:
             )
         return converge_on_pool[label_vertex](pool, template, vertices, labels_a, labels_b, counters, dynamic)
 
-    # One untimed warmup pass: page-faults and cache warming would otherwise bias the first timed
-    # pass, and by a different amount for each backend.
-    var rounds = one_pass()
-    var passes = 0
-    var started = perf_counter_ns()
-    if iterations > 0:
-        for _ in range(iterations):
-            rounds = one_pass()
-        passes = iterations
-    else:
-        while True:
-            rounds = one_pass()
-            passes += 1
-            if Int(perf_counter_ns() - started) >= budget:
-                break
-    var seconds = Float64(Int(perf_counter_ns() - started)) / 1e9 / Float64(passes)
+    # A fixed time budget beats a fixed pass count: every backend runs the same wall-clock window -
+    # long enough to amortize scheduling noise - and reports the rate it sustained, with no
+    # per-backend pass-count guessing. The warm-up absorbs page faults and cache warming, which
+    # would otherwise bias the first timed pass, and by a different amount for each backend.
+    var rounds = 0
+    var loop = Loop(settings.warmup_ns, settings.time_limit_ns)
+    while loop.next():
+        rounds = one_pass()
 
     # The fixed point sits in both buffers - the terminal round changed nothing - so read either.
     var components = 0
@@ -549,22 +503,24 @@ def main() raises:
             components += 1
         checksum += UInt64(Int(labels_a[vertex]))
 
-    # MTEPS - millions of directed edges scanned per second; `rounds * edges` is the exact scan
-    # count, identical in every cell by the double-buffered determinism.
-    var mteps = Float64(rounds) * Float64(directed_edges) / seconds / 1e6
-    var pace = fixed(seconds, 2)
-    var rate = fixed(mteps, 1)
-    print(t"{backend}: {components} components, {rounds} rounds, checksum {checksum}, {pace} s/pass, {rate} MTEPS")
+    # Directed edges scanned per call; `rounds * edges` is the exact scan count, identical in every
+    # cell by the double-buffered determinism, so the "edges" rate is the MTEPS figure.
+    loop.rate("edges", Float64(rounds) * Float64(directed_edges))
+    loop.counter("rounds", Float64(rounds))
+    print_row(loop.row(backend))
+    print(t"{components} components, {rounds} rounds, checksum {checksum}")
 
-    if check:
+    if settings.check:
         var serial_a = List[UInt32](length=vertices, fill=0)
         var serial_b = List[UInt32](length=vertices, fill=0)
         var serial_rounds = converge_serially(graph, serial_a, serial_b)
         if serial_rounds != rounds:
-            raise Error(t"MISMATCH: serial converged in {serial_rounds} rounds")
+            print(t"MISMATCH: serial converged in {serial_rounds} rounds", file=stderr)
+            exit(1)
         for vertex in range(vertices):
             if serial_a[vertex] != labels_a[vertex]:
-                raise Error(t"MISMATCH: serial labels differ at vertex {vertex}")
+                print(t"MISMATCH: serial labels differ at vertex {vertex}", file=stderr)
+                exit(1)
         print("check: matches the serial labels and rounds")
 
     # `graph` holds raw pointers into these two, and Mojo releases a value after its last named use

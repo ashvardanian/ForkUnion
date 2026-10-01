@@ -133,7 +133,7 @@
           "value": "detect_leaks=0:atexit=1:strict_init_order=1:strict_string_checks=1"
         },
         {
-          "name": "NBODY_COUNT",
+          "name": "FORKUNION_NBODY_COUNT",
           "value": "128"
         },
         {
@@ -141,12 +141,12 @@
           "value": "17"
         },
         {
-          "name": "FORKUNION_ITERATIONS",
-          "value": "1000000"
+          "name": "FORKUNION_TIME_LIMIT",
+          "value": "1s"
         },
         {
           "name": "FORKUNION_BACKEND",
-          "value": "forkunion_dynamic"
+          "value": "forkunion_dynamic_shared"
         }
       ],
       "stopAtEntry": false,

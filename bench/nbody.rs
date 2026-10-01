@@ -1,18 +1,11 @@
 //! Demo app: N-Body simulation with ForkUnion, Rayon, and Tokio.
 //!
-//! To control the script, several environment variables are used:
-//!
-//! - `NBODY_COUNT` - number of bodies in the simulation - default the thread count.
-//! - `FORKUNION_BUDGET_SECS` - wall-clock budget per run, reporting the mean rate - default 10.
-//! - `FORKUNION_ITERATIONS` - run an exact iteration count instead, when set.
-//! - `FORKUNION_BACKEND` - backend to use for the simulation - default `forkunion_static_shared`.
-//! - `FORKUNION_THREADS` - threads to use for the simulation - default the hardware thread count.
-//!
-//! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`,
-//! plus Rust-only `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the
-//! parallel-iterator adapters; the baselines are `rayon_static`, `rayon_dynamic`, and `tokio`. The
-//! `_replicated` backends replicate the body positions into each memory domain's local storage - on
-//! a machine with one domain the replicas collapse to one, so they run everywhere. Build and run:
+//! The environment variables it reads are listed in `bench/harness.rs`. The ForkUnion backends are
+//! the four cells of `forkunion_{static,dynamic}_{shared,replicated}`, plus Rust-only
+//! `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the parallel-iterator
+//! adapters; the baselines are `rayon_static`, `rayon_dynamic`, and `tokio`. The `_replicated`
+//! backends replicate the body positions into each memory domain's local storage - on a machine
+//! with one domain the replicas collapse to one, so they run everywhere. Build and run:
 //!
 //! ```sh
 //! cargo run --release --features benchmarks --bin forkunion_nbody
@@ -30,23 +23,25 @@
 //! RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
 //!
 //! # Benchmark each backend
-//! NBODY_COUNT=512 FORKUNION_BACKEND=rayon_static target/release/forkunion_nbody
-//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared target/release/forkunion_nbody
-//! NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
-//! NBODY_COUNT=512 FORKUNION_BACKEND=tokio target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=rayon_static target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=tokio target/release/forkunion_nbody
 //! ```
 //!
 //! File: bench/nbody.rs
 //! Author: Ash Vardanian
-use std::env;
 use std::error::Error;
-use std::time::Instant;
 
-use forkunion as fu;
-use fu::ParallelIteratorExt;
 use rayon::{prelude::*, ThreadPool as RayonPool, ThreadPoolBuilder};
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::task::JoinSet;
+
+use forkunion as fu;
+use forkunion::ParallelIteratorExt;
+
+mod harness;
+use harness::{env_parsed, Loop, Settings};
 
 /// Physical constants.
 const G_CONST: f32 = 6.674e-11;
@@ -82,7 +77,7 @@ struct Body {
 /// Deliberately not `StdRng`: the standard generators differ across languages - and the C++
 /// distributions even across standard libraries - so no two harnesses would simulate the same
 /// system. Each draw is a pure function of its counter instead, and the bodies are bit-identical
-/// across the C++, Rust, and Zig ports of this hash.
+/// across the C++, Rust, Zig, and Mojo ports of this hash.
 #[inline]
 fn split_mix(counter: u64) -> u64 {
     let mut x = counter.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -91,10 +86,10 @@ fn split_mix(counter: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`.
+/// Draw `counter` of stream `key` in `[0, 1)`: the top 24 bits scaled by 2^-24, exact in `f32`.
 #[inline]
-fn random_unit(counter: u64) -> f32 {
-    (split_mix(counter) >> 40) as f32 * (1.0 / 16777216.0)
+fn random_unit(key: u64, counter: u64) -> f32 {
+    (split_mix(key.wrapping_add(counter)) >> 40) as f32 * (1.0 / 16777216.0)
 }
 
 /// Fast reciprocal square-root, one Newton step of the classic Quake hack.
@@ -173,24 +168,6 @@ fn apply_force(b: &mut Body, f: &Vector3) {
     b.position.x -= b.position.x.floor();
     b.position.y -= b.position.y.floor();
     b.position.z -= b.position.z.floor();
-}
-
-/// Return the number of logical CPUs visible to this process.
-#[inline]
-fn hardware_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-}
-
-/// Reads an environment variable as `T`, or `fallback` when it is unset or empty; aborts naming the
-/// variable when the text does not parse, so a typo never becomes a silent default.
-fn env_variable<T: std::str::FromStr>(name: &str, fallback: T) -> T {
-    match env::var(name) {
-        Ok(text) if !text.is_empty() => text.parse().unwrap_or_else(|_| {
-            eprintln!("{name}=\"{text}\" does not parse");
-            std::process::abort()
-        }),
-        _ => fallback,
-    }
 }
 
 /// Everything a backend reads or writes for one simulation step; the harness owns the lifetimes and
@@ -616,17 +593,19 @@ const BACKENDS: &[Backend] = &[
     },
 ];
 
+/// The backend named `name`, or `None` when `BACKENDS` has none by that name.
+fn parse_backend(name: &str) -> Option<&'static Backend> {
+    BACKENDS.iter().find(|backend| backend.name == name)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    // Every knob this script understands, read once, up front.
-    let count = env_variable("NBODY_COUNT", 0_usize);
-    let budget_seconds = env_variable("FORKUNION_BUDGET_SECS", 10.0_f64); // ? The primary knob: a fixed window
-    let iterations = env_variable("FORKUNION_ITERATIONS", 0_usize); // ? Overrides with an exact count when set
-    let backend = env_variable("FORKUNION_BACKEND", String::from("forkunion_static_shared"));
-    let mut threads = env_variable("FORKUNION_THREADS", 0_usize);
-    if threads == 0 {
-        threads = hardware_threads();
-    }
-    let bodies_n = if count == 0 { threads } else { count };
+    let probed = fu::Topology::new().expect("Failed to detect hardware topology");
+    let settings = Settings::read(probed.logical_cores_count()?);
+    let backend_names: Vec<&str> = BACKENDS.iter().map(|backend| backend.name).collect();
+    let expected = format!("one of {}", backend_names.join(", "));
+    let selected = env_parsed("FORKUNION_BACKEND", &BACKENDS[0], parse_backend, &expected);
+    settings.print();
+    let (bodies_n, threads) = (settings.bodies, settings.threads);
 
     // Allocate and initialize bodies.
     let mut bodies = vec![
@@ -641,36 +620,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Seven counter-based draws per body: three position coordinates, three velocity components,
     // and one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    let key = split_mix(settings.seed as u64);
     bodies.iter_mut().enumerate().for_each(|(i, b)| {
         let counter = i as u64 * 7;
         b.position = Vector3 {
-            x: random_unit(counter),
-            y: random_unit(counter + 1),
-            z: random_unit(counter + 2),
+            x: random_unit(key, counter),
+            y: random_unit(key, counter + 1),
+            z: random_unit(key, counter + 2),
         };
         b.velocity = Vector3 {
-            x: random_unit(counter + 3),
-            y: random_unit(counter + 4),
-            z: random_unit(counter + 5),
+            x: random_unit(key, counter + 3),
+            y: random_unit(key, counter + 4),
+            z: random_unit(key, counter + 5),
         };
-        b.mass = 1.0e10 + random_unit(counter + 6) * (1.0e15 - 1.0e10);
+        b.mass = 1.0e10 + random_unit(key, counter + 6) * (1.0e15 - 1.0e10);
     });
 
-    let selected = match BACKENDS.iter().find(|b| b.name == backend) {
-        Some(entry) => entry,
-        None => {
-            eprintln!("Unsupported backend: '{backend}'");
-            eprint!("Available backends:");
-            for entry in BACKENDS {
-                eprint!(" {}", entry.name);
-            }
-            eprintln!();
-            return Err(format!("Unsupported backend: '{backend}'").into());
-        }
-    };
-
-    // Build only the engine resources the selected backend needs; only the ForkUnion engines probe
-    // the topology, so the Rayon and Tokio backends never touch it.
+    // Build only the engine resources the selected backend needs.
     let mut topology = None;
     let mut fu_pool = None;
     let mut replicas = None;
@@ -678,7 +644,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tokio_runtime = None;
     match selected.engine {
         Engine::ForkUnion | Engine::ForkUnionReplicated => {
-            let probed = fu::Topology::new().expect("Failed to detect hardware topology");
             fu_pool = Some(
                 fu::ThreadPool::spawn(&probed, threads)
                     .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}")),
@@ -717,24 +682,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
     // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    // no per-backend iteration guessing. `FORKUNION_ITERATIONS` forces an exact count instead.
-    let started = Instant::now();
-    let mut passes = 0usize;
-    if iterations > 0 {
-        for _ in 0..iterations {
-            (selected.run)(&mut context);
-            passes += 1;
-        }
-    } else {
-        while {
-            (selected.run)(&mut context);
-            passes += 1;
-            started.elapsed().as_secs_f64() < budget_seconds
-        } {}
+    // no per-backend iteration guessing. One call is one step: two dispatches over `n` bodies.
+    let mut timed = Loop::new(settings.warmup, settings.time_limit);
+    for _ in &mut timed {
+        (selected.run)(&mut context);
     }
-    let total_seconds = started.elapsed().as_secs_f64();
-    let us_per_iter = total_seconds / passes as f64 * 1e6;
-    // Per-iteration latency is the comparable unit - one `for_each` dispatch over the bodies.
-    println!("{backend}: {bodies_n} bodies, {passes} iters, {us_per_iter:.2} us/iter ({total_seconds:.2} s total)");
+    timed.rate("bodies", bodies_n as f64);
+    timed.row(selected.name).print();
     Ok(())
 }

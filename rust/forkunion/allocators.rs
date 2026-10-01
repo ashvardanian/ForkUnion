@@ -5,12 +5,13 @@
 //! File: rust/forkunion/allocators.rs
 //! Author: Ash Vardanian
 
-use crate::parallel::{ParallelSlice, ParallelSliceMut};
-use crate::topology::{MemoryDomain, MemoryDomainId, Topology};
-use crate::types::{bytes_for_elements, Error, Result, Status, SyncMutPtr, DEFAULT_ALIGNMENT};
 use core::ffi::{c_int, c_void};
 use core::ptr::NonNull;
 use core::slice;
+
+use crate::parallel::{ParallelSlice, ParallelSliceMut};
+use crate::topology::{MemoryDomain, MemoryDomainId, Topology};
+use crate::types::{bytes_for_elements, Error, Result, Status, SyncMutPtr, DEFAULT_ALIGNMENT};
 
 // C FFI declarations
 extern "C" {
@@ -1320,11 +1321,10 @@ unsafe impl<T: Sync> Sync for ShardedArray<T> {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use crate::*;
-
     use std::vec::Vec;
+
+    use super::*;
+    use crate::*;
 
     /// Each replica is an independent length-`n` buffer, so a domain-dependent fill must read back
     /// exactly on its own domain - any aliasing between replicas would corrupt the pattern.

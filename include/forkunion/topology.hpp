@@ -512,10 +512,10 @@ inline std::size_t volume_ram() noexcept {
     return 0;
 #elif FORKUNION_OS_APPLE_
     // On macOS, use sysctl
-    int mib[2] = {CTL_HW, HW_MEMSIZE};
+    int mb[2] = {CTL_HW, HW_MEMSIZE};
     std::uint64_t memory_bytes = 0;
     std::size_t size = sizeof(memory_bytes);
-    if (::sysctl(mib, 2, &memory_bytes, &size, nullptr, 0) == 0) return static_cast<std::size_t>(memory_bytes);
+    if (::sysctl(mb, 2, &memory_bytes, &size, nullptr, 0) == 0) return static_cast<std::size_t>(memory_bytes);
     return 0;
 #elif FORKUNION_OS_WINDOWS_
     // On Windows, use GlobalMemoryStatusEx

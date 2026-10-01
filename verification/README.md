@@ -41,14 +41,14 @@ USearch's models include `weak_memory.pml` by the same name through a forwarding
 Every model passes its own thread index to `load`, `store`, `read_modify_write`, `read_modify_write_if`, `compare_exchange`, `add_no_return`, `fence_acquire` and `fence_release`, and `-Dmemory=` picks the memory model at `spin -a` time:
 
 - `-Dmemory=sequential`: one copy of every location, every access one step.
-The protocol layer, and where logic bugs are found first.
+  The protocol layer, and where logic bugs are found first.
 - `-Dmemory=views`, the default: every location is a history of writes, every thread carries a view over the histories, a release write stamps the writer's view onto the write and an acquire read merges it.
-This is the view semantics of Kaiser, Dang, Dreyer, Lahav and Vafeiadis without promises, which is RC11's release-acquire-relaxed fragment: load buffering is forbidden, as in RC11.
+  This is the view semantics of Kaiser, Dang, Dreyer, Lahav and Vafeiadis without promises, which is RC11's release-acquire-relaxed fragment: load buffering is forbidden, as in RC11.
 - `-Dmemory=far`: the views, plus a relaxed no-return add is posted rather than performed.
-It lands at some later step in the `far_cache` process, and until then no release by the posting thread carries it; a same-address access by the poster lands it first.
-This is RAO-INT as Intel documents it: `AADD` and kin are "implemented using the weakly-ordered memory consistency model of write combining (WC) memory type", and "a fencing operation implemented with LFENCE, SFENCE, or MFENCE instruction should be used in conjunction with AADD if a stronger ordering is required".
-Nothing else is promised to order them, and a C++ release fence compiles to no instruction on x86, so a relaxed no-return add followed by a release fence or a release store is posted in the model exactly as it is in silicon.
-The ForkUnion reference maps only relaxed no-return operations onto them, and a release order on the same call is a lock-prefixed instruction, which is how the index sites that need the order now spell it.
+  It lands at some later step in the `far_cache` process, and until then no release by the posting thread carries it; a same-address access by the poster lands it first.
+  This is RAO-INT as Intel documents it: `AADD` and kin are "implemented using the weakly-ordered memory consistency model of write combining (WC) memory type", and "a fencing operation implemented with LFENCE, SFENCE, or MFENCE instruction should be used in conjunction with AADD if a stronger ordering is required".
+  Nothing else is promised to order them, and a C++ release fence compiles to no instruction on x86, so a relaxed no-return add followed by a release fence or a release store is posted in the model exactly as it is in silicon.
+  The ForkUnion reference maps only relaxed no-return operations onto them, and a release order on the same call is a lock-prefixed instruction, which is how the index sites that need the order now spell it.
 
 The calibration in `weak_memory_litmus.pml` pins the model to RC11 on message passing with and without releases and fences, release sequences continued by a read-modify-write and broken by a store, coherence, load buffering, and the far shape: a relaxed no-return add before a release store, carried in C++ and posted under far memory.
 
@@ -65,7 +65,7 @@ Three things stand as they are, and the models say why.
 The release on each cursor in `invoke_for_n_dynamic::reset_slices_` is redundant, since the dispatch's release on the epoch carries every cursor and end to every worker; `-Dpublish_relaxed` passes to show it, and the release stays.
 The workers re-check the mood only under a capped wait, which bounds a `sleep` or a `terminate` notice to one timeout; `-Dwithout_wait_cap` is the uncapped monitor, and a stuck worker.
 The epoch's width aliases at the debug widths, as the header prices: `-Depoch_modulus=2` under `-Dscenario=polling` makes a stale token name the live generation, and the stale join contributes a slice that is not its own.
-A `broadcast_join` kept alive across a `terminate` and a `spawn` would alias after one re-spawn rather than after 2^bits epochs, since `terminate` resets the epoch; it asserts every dispatch joined, so nothing outlives it by contract.
+A `broadcast_join` kept alive across a `terminate` and a `spawn` would alias after one re-spawn rather than after `2^bits` epochs, since `terminate` resets the epoch; it asserts every dispatch joined, so nothing outlives it by contract.
 
 ## Running
 

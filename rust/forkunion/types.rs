@@ -670,13 +670,12 @@ impl IndexedSplit {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use crate::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-
     use std::vec::Vec;
+
+    use super::*;
+    use crate::*;
 
     #[cfg_attr(miri, ignore)]
     #[test]

@@ -6,11 +6,12 @@
 //! File: rust/forkunion/scheduling.rs
 //! Author: Ash Vardanian
 
+use core::ffi::{c_char, c_int, c_void};
+use core::marker::PhantomData;
+
 use crate::parallel::{ParallelIterator, ParallelSchedule};
 use crate::topology::{CallerExclusivity, Capabilities, ComputeDomain, MemoryDomain, Topology};
 use crate::types::{Error, Result, Status, SyncMutPtr, TasksRange, ThreadInDomain};
-use core::ffi::{c_char, c_int, c_void};
-use core::marker::PhantomData;
 
 extern "C" {
     fn fu_pool_new(name: *const c_char, allowed: u32, pool_out: *mut *mut c_void) -> c_int;
@@ -1336,13 +1337,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::vec::Vec;
+
     use super::*;
     use crate::topology::tests::hw_threads;
     use crate::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    use std::vec::Vec;
 
     #[cfg_attr(miri, ignore)]
     #[test]

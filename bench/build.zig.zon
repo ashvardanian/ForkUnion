@@ -18,6 +18,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "harness.zig",
         "nbody.zig",
         "propagation.zig",
     },

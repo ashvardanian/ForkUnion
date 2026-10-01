@@ -5,8 +5,9 @@
 //! File: rust/forkunion/topology.rs
 //! Author: Ash Vardanian
 
-use crate::types::{Error, Result, Status};
 use core::ffi::{c_char, c_int, c_void};
+
+use crate::types::{Error, Result, Status};
 
 extern "C" {
     fn fu_version_major() -> c_int;

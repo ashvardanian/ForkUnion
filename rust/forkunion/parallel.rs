@@ -5,12 +5,13 @@
 //! File: rust/forkunion/parallel.rs
 //! Author: Ash Vardanian
 
+use core::cell::UnsafeCell;
+use core::marker::PhantomData;
+
 use crate::allocators::{DomainAllocator, PinnedVec};
 use crate::scheduling::{fold_with_scratch, ThreadPool};
 use crate::topology::{MemoryDomain, Topology};
 use crate::types::{CacheAligned, Result, SyncMutPtr, TasksRange, ThreadInDomain};
-use core::cell::UnsafeCell;
-use core::marker::PhantomData;
 
 /// Sync wrapper for single-write cells used in early-exit operations.
 ///
@@ -1188,13 +1189,14 @@ pub mod prelude {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::topology::tests::hw_threads;
-    use crate::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::vec;
     use std::vec::Vec;
+
+    use super::*;
+    use crate::topology::tests::hw_threads;
+    use crate::*;
 
     #[cfg_attr(miri, ignore)]
     #[test]

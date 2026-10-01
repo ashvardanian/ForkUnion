@@ -441,7 +441,7 @@ test "NUMA allocation" {
     const topo = try Topology.init();
     defer topo.deinit();
     const first_domain = MemoryDomain.at(0);
-    // The capability guard above already said this machine places pages on a domain, so a 1 KiB
+    // The capability guard above already said this machine places pages on a domain, so a 1 KB
     // request failing is a defect - skipping here would bury it.
     const allocation = allocateAtLeast(try topo.memoryDomainIdAtIndex(first_domain), 1024) orelse
         return Error.BadAlloc;
