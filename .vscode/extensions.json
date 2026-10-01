@@ -1,0 +1,22 @@
+{
+  "recommendations": [
+    "charliermarsh.ruff",
+    "cheshirekow.cmake-format",
+    "dprint.dprint",
+    "dsvictor94.promela",
+    "llvm-vs-code-extensions.vscode-clangd",
+    "modular-mojotools.vscode-mojo",
+    "ms-python.python",
+    "ms-vscode.cmake-tools",
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml",
+    "yzhang.markdown-all-in-one",
+    "ziglang.vscode-zig"
+  ],
+  "unwantedRecommendations": [
+    "ms-python.black-formatter",
+    "ms-vscode.cpptools",
+    "ms-vscode.cpptools-extension-pack",
+    "xaver.clang-format"
+  ]
+}

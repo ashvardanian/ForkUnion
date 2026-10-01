@@ -1,18 +1,11 @@
 //! Demo app: N-Body simulation with ForkUnion, Rayon, and Tokio.
 //!
-//! To control the script, several environment variables are used:
-//!
-//! - `NBODY_COUNT` - number of bodies in the simulation (default: number of threads).
-//! - `NBODY_SECONDS` - wall-clock budget per run, reporting the sustained rate - default 10.
-//! - `NBODY_ITERATIONS` - run an exact iteration count instead, when set.
-//! - `NBODY_BACKEND` - backend to use for the simulation (default: `forkunion_static_shared`).
-//! - `NBODY_THREADS` - number of threads to use for the simulation (default: number of hardware threads).
-//!
-//! The ForkUnion backends are the four cells of `forkunion_{static,dynamic}_{shared,replicated}`, plus
-//! Rust-only `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the
-//! parallel-iterator adapters; the baselines are `rayon_static`, `rayon_dynamic`, and `tokio`. The
-//! `_replicated` backends replicate the body positions into each memory domain's local storage - on a
-//! machine with one domain the replicas collapse to one, so they run everywhere. To compile and run:
+//! The environment variables it reads are listed in `bench/harness.rs`. The ForkUnion backends are
+//! the four cells of `forkunion_{static,dynamic}_{shared,replicated}`, plus Rust-only
+//! `forkunion_iter_{static,dynamic}_shared` that drive the same sweep through the parallel-iterator
+//! adapters; the baselines are `rayon_static`, `rayon_dynamic`, and `tokio`. The `_replicated`
+//! backends replicate the body positions into each memory domain's local storage - on a machine
+//! with one domain the replicas collapse to one, so they run everywhere. Build and run:
 //!
 //! ```sh
 //! cargo run --release --features benchmarks --bin forkunion_nbody
@@ -30,20 +23,25 @@
 //! RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
 //!
 //! # Benchmark each backend
-//! NBODY_COUNT=512 NBODY_BACKEND=rayon_static target/release/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_shared target/release/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
-//! NBODY_COUNT=512 NBODY_BACKEND=tokio target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=rayon_static target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_replicated target/release/forkunion_nbody
+//! FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=tokio target/release/forkunion_nbody
 //! ```
-use std::env;
+//!
+//! File: bench/nbody.rs
+//! Author: Ash Vardanian
 use std::error::Error;
-use std::time::Instant;
 
-use forkunion as fu;
-use fu::ParallelIteratorExt;
 use rayon::{prelude::*, ThreadPool as RayonPool, ThreadPoolBuilder};
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::task::JoinSet;
+
+use forkunion as fu;
+use forkunion::ParallelIteratorExt;
+
+mod harness;
+use harness::{env_parsed, Loop, Settings};
 
 /// Physical constants.
 const G_CONST: f32 = 6.674e-11;
@@ -79,7 +77,7 @@ struct Body {
 /// Deliberately not `StdRng`: the standard generators differ across languages - and the C++
 /// distributions even across standard libraries - so no two harnesses would simulate the same
 /// system. Each draw is a pure function of its counter instead, and the bodies are bit-identical
-/// across the C++, Rust, and Zig ports of this hash.
+/// across the C++, Rust, Zig, and Mojo ports of this hash.
 #[inline]
 fn split_mix(counter: u64) -> u64 {
     let mut x = counter.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -88,13 +86,13 @@ fn split_mix(counter: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// One draw in `[0, 1)`: the top 24 bits scaled by 2^-24 - both steps exact in `f32`.
+/// Draw `counter` of stream `key` in `[0, 1)`: the top 24 bits scaled by 2^-24, exact in `f32`.
 #[inline]
-fn random_unit(counter: u64) -> f32 {
-    (split_mix(counter) >> 40) as f32 * (1.0 / 16777216.0)
+fn random_unit(key: u64, counter: u64) -> f32 {
+    (split_mix(key.wrapping_add(counter)) >> 40) as f32 * (1.0 / 16777216.0)
 }
 
-/// Fast reciprocal square-root (one Newton step of the classic Quake hack).
+/// Fast reciprocal square-root, one Newton step of the classic Quake hack.
 #[inline]
 fn fast_rsqrt(x: f32) -> f32 {
     let i = 0x5f37_59dfu32.wrapping_sub(x.to_bits() >> 1);
@@ -165,47 +163,11 @@ fn apply_force(b: &mut Body, f: &Vector3) {
     b.position.x += b.velocity.x * DT_CONST;
     b.position.y += b.velocity.y * DT_CONST;
     b.position.z += b.velocity.z * DT_CONST;
-    // ? Wrap into the unit box to keep every distance - and so every force - inside the normal
-    // ? `f32` range forever: no overflows into NaN, and no denormals for x86 to stall on.
+    // ? Wraps into the unit box to keep every distance - and every force - inside the normal `f32`
+    // ? range forever: no overflows into NaN, and no denormals for x86 to stall on.
     b.position.x -= b.position.x.floor();
     b.position.y -= b.position.y.floor();
     b.position.z -= b.position.z.floor();
-}
-
-/// Return the number of logical CPUs visible to this process.
-#[inline]
-fn hardware_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-}
-
-/// Parses a fractional environment variable, or `fallback` when unset or unparseable.
-fn env_f64(name: &str, fallback: f64) -> f64 {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
-}
-
-/// Parses an unsigned environment variable, or `fallback` when unset or unparseable.
-fn env_usize(name: &str, fallback: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
-}
-
-/// Reads an environment variable as a string, or `fallback` when unset.
-fn env_string(name: &str, fallback: &str) -> String {
-    env::var(name).unwrap_or_else(|_| fallback.into())
-}
-
-/// Whether an environment variable is present at all - part of the shared env-helper trio, kept for
-/// parity with the other demos even though this one reads no boolean knobs.
-#[allow(dead_code)]
-fn env_flag(name: &str) -> bool {
-    env::var(name).is_ok()
 }
 
 /// Everything a backend reads or writes for one simulation step; the harness owns the lifetimes and
@@ -220,7 +182,7 @@ struct Ctx<'a> {
     tokio: Option<&'a TokioRuntime>,
 }
 
-// Compile-time axes as marker types - stable Rust cannot take a custom enum as a const-generic param.
+// Compile-time axes as marker types - stable Rust forbids a custom enum as a const-generic param.
 // nbody is all-to-all, so there is no decomposition axis - only schedule and placement.
 trait Schedule {
     const STATIC_SCHEDULE: bool;
@@ -246,54 +208,50 @@ impl Placement for Replicated {
 }
 
 /// The same all-to-all sweep, driven through the Rayon-style parallel-iterator adapters.
-fn iteration_fu_iter_static(
-    pool: &mut fu::ThreadPool,
-    bodies: &mut [Body],
-    forces: &mut [Vector3],
-) {
+fn iteration_fu_iter_static(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
     let n = bodies.len();
     {
         let bodies_ref = &*bodies;
         fu::IntoParallelIterator::into_par_iter(&mut forces[..])
             .with_pool(pool)
-            .for_each_with_prong(|force, prong| {
-                let bi = &bodies_ref[prong.task_index];
+            .for_each(|force, task, _at| {
+                let bi = &bodies_ref[task];
                 *force = net_force(bi, &bodies_ref[..n]);
-            });
+            })
+            .expect("force sweep");
     }
     {
         let forces_ref = &*forces;
         fu::IntoParallelIterator::into_par_iter(&mut bodies[..])
             .with_pool(pool)
-            .for_each_with_prong(|body, prong| {
-                apply_force(body, &forces_ref[prong.task_index]);
-            });
+            .for_each(|body, task, _at| {
+                apply_force(body, &forces_ref[task]);
+            })
+            .expect("apply sweep");
     }
 }
 
 /// The parallel-iterator sweep, work-stolen instead of split statically.
-fn iteration_fu_iter_dynamic(
-    pool: &mut fu::ThreadPool,
-    bodies: &mut [Body],
-    forces: &mut [Vector3],
-) {
+fn iteration_fu_iter_dynamic(pool: &mut fu::ThreadPool, bodies: &mut [Body], forces: &mut [Vector3]) {
     let n = bodies.len();
     {
         let bodies_ref = &*bodies;
         fu::IntoParallelIterator::into_par_iter(&mut forces[..])
             .with_schedule(pool, fu::DynamicScheduler)
-            .for_each_with_prong(|force, prong| {
-                let bi = &bodies_ref[prong.task_index];
+            .for_each(|force, task, _at| {
+                let bi = &bodies_ref[task];
                 *force = net_force(bi, &bodies_ref[..n]);
-            });
+            })
+            .expect("force sweep");
     }
     {
         let forces_ref = &*forces;
         fu::IntoParallelIterator::into_par_iter(&mut bodies[..])
             .with_schedule(pool, fu::DynamicScheduler)
-            .for_each_with_prong(|body, prong| {
-                apply_force(body, &forces_ref[prong.task_index]);
-            });
+            .for_each(|body, task, _at| {
+                apply_force(body, &forces_ref[task]);
+            })
+            .expect("apply sweep");
     }
 }
 
@@ -309,33 +267,39 @@ fn refresh_replicas(
     let n = bodies.len();
     let source = fu::SyncConstPtr::new(bodies.as_ptr());
     pool.scope(|scope| {
+        let view = scope.view();
         scope.broadcast(|thread_index, compute_domain_index| {
-            let memory_domain = topology.local_memory_of(fu::ComputeDomain(compute_domain_index));
+            let memory_domain = topology
+                .local_memory_of(fu::ComputeDomain(compute_domain_index))
+                .expect("in-range domain");
 
-            // Rank this thread among every thread on its memory domain, and count them, so the node's
-            // whole team splits [0, n) without overlap even when several compute domains share the node.
+            // Rank this thread among every thread on its memory domain, and count them, so the
+            // node's whole team splits [0, n) without overlap even when several compute domains
+            // share the node.
             let mut threads_on_memory_domain = 0usize;
             let mut local_index_on_memory_domain = 0usize;
-            for other in 0..scope.compute_domains_count() {
-                if topology.local_memory_of(fu::ComputeDomain(other)) != memory_domain {
+            for other in 0..view.compute_domains_count() {
+                if topology
+                    .local_memory_of(fu::ComputeDomain(other))
+                    .expect("in-range domain")
+                    != memory_domain
+                {
                     continue;
                 }
                 if other < compute_domain_index {
-                    local_index_on_memory_domain += scope.threads_count_in(other);
+                    local_index_on_memory_domain += view.threads_count_in(other);
                 }
-                threads_on_memory_domain += scope.threads_count_in(other);
+                threads_on_memory_domain += view.threads_count_in(other);
             }
-            local_index_on_memory_domain +=
-                scope.locate_thread_in(thread_index, compute_domain_index);
+            local_index_on_memory_domain += view.locate_thread_in(thread_index, compute_domain_index);
 
-            let range = fu::IndexedSplit::new(n, threads_on_memory_domain)
-                .get(local_index_on_memory_domain);
+            let range = fu::IndexedSplit::new(n, threads_on_memory_domain).get(local_index_on_memory_domain);
             if range.is_empty() {
                 return;
             }
-            // SAFETY: within a memory domain the split hands each thread a disjoint, in-bounds range,
-            // and each node writes only its own replica, so no two threads alias. `bodies` is read
-            // only, and both it and `replicas` outlive the join.
+            // SAFETY: within a memory domain the split hands each thread a disjoint, in-bounds
+            // range, and each node writes only its own replica, so no two threads alias. `bodies`
+            // is read only, and both it and `replicas` outlive the join.
             let replica = replicas.replica_ptr(memory_domain);
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -348,9 +312,10 @@ fn refresh_replicas(
     });
 }
 
-/// The read-only inputs one simulation step hands to every task, small and `Copy` so it moves into a
-/// task closure for free. The pointers stand in for the `bodies` and `forces` slices, and - only when the
-/// placement is replicated - `topology` and `replicas` bridge a compute domain to its node-local copy.
+/// The read-only inputs one simulation step hands to every task, small and `Copy` so it moves into
+/// a task closure for free. The pointers stand in for the `bodies` and `forces` slices, and - only
+/// when the placement is replicated - `topology` and `replicas` bridge a compute domain to its
+/// node-local copy.
 #[derive(Copy, Clone)]
 struct WorkCtx<'a> {
     bodies_ptr: fu::SyncConstPtr<Body>,
@@ -368,50 +333,53 @@ fn bodies_at<'a, P: Placement>(work: WorkCtx<'a>, compute_domain: usize) -> &'a 
         let memory_domain = work
             .topology
             .expect("topology")
-            .local_memory_of(fu::ComputeDomain(compute_domain));
+            .local_memory_of(fu::ComputeDomain(compute_domain))
+            .expect("in-range domain");
         work.replicas.expect("replicas").replica_ptr(memory_domain) as *const Body
     } else {
         work.bodies_ptr.as_ptr()
     };
-    // SAFETY: both the canonical array and every replica hold `n` initialized bodies, read-only for the
-    // duration of the force pass, which joins before the apply pass or the next refresh mutates them.
+    // SAFETY: both the canonical array and every replica hold `n` initialized bodies, read-only for
+    // the duration of the force pass, which joins before the apply pass or the next refresh mutates
+    // them once more.
     unsafe { core::slice::from_raw_parts(base, work.n) }
 }
 
 /// The all-to-all force on the body owning this task, summed over the array it reads.
 #[inline]
-fn force_kernel<P: Placement>(work: WorkCtx, prong: fu::Prong) -> Vector3 {
-    let local = bodies_at::<P>(work, prong.compute_domain_index);
-    let bi = &local[prong.task_index];
+fn force_kernel<P: Placement>(work: WorkCtx, task: usize, at: fu::ThreadInDomain) -> Vector3 {
+    let local = bodies_at::<P>(work, at.compute_domain);
+    let bi = &local[task];
     net_force(bi, local)
 }
 
 /// Integrates one canonical body by the force computed for it - identical for both placements.
 #[inline]
-fn apply_kernel(work: WorkCtx, body: &mut Body, prong: fu::Prong) {
-    // SAFETY: `forces` holds `n` initialized elements, read-only while the apply pass mutates `bodies`.
-    let force = unsafe { work.forces_ptr.get(prong.task_index) };
+fn apply_kernel(work: WorkCtx, body: &mut Body, task: usize, _at: fu::ThreadInDomain) {
+    // SAFETY: `forces` holds `n` initialized elements, read-only while the apply pass mutates
+    // `bodies`.
+    let force = unsafe { work.forces_ptr.get(task) };
     apply_force(body, force);
 }
 
 /// Sweeps a mutating pass over `data`, split statically or work-stolen per the schedule axis.
 #[inline]
-fn for_each<S: Schedule, T: Send + Sync, F: Fn(&mut T, fu::Prong) + Sync + Send>(
+fn for_each<S: Schedule, T: Send + Sync, F: Fn(&mut T, usize, fu::ThreadInDomain) + Sync + Send>(
     pool: &mut fu::ThreadPool,
     data: &mut [T],
     body: F,
 ) {
     if S::STATIC_SCHEDULE {
-        fu::for_each_prong_mut(pool, data, body);
+        fu::for_each_task_mut(pool, data, body);
     } else {
-        fu::for_each_prong_mut_dynamic(pool, data, body);
+        fu::for_each_task_mut_dynamic(pool, data, body);
     }
 }
 
-/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion backends
-/// are its instantiations. The all-to-all sweep cannot be sharded - every body reads every other - so the
-/// only locality to win is the read side: replicate the positions once per step, then keep the quadratic
-/// loop node-local.
+/// One simulation step, specialized over the schedule and placement axes; the four ForkUnion
+/// backends are its instantiations. The all-to-all sweep cannot be sharded - every body reads every
+/// other - so the only locality to win is the read side: replicate the positions once per step,
+/// then keep the quadratic loop node-local.
 fn iteration_forkunion<S: Schedule, P: Placement>(
     topology: &fu::Topology,
     pool: &mut fu::ThreadPool,
@@ -433,13 +401,13 @@ fn iteration_forkunion<S: Schedule, P: Placement>(
     };
 
     // Force pass: all-to-all, reading the shared array or each thread's node-local replica.
-    for_each::<S, _, _>(pool, forces, move |force, prong| {
-        *force = force_kernel::<P>(work, prong);
+    for_each::<S, _, _>(pool, forces, move |force, task, at| {
+        *force = force_kernel::<P>(work, task, at);
     });
 
     // Apply pass: integrate each canonical body by its force - identical for both placements.
-    for_each::<S, _, _>(pool, bodies, move |body, prong| {
-        apply_kernel(work, body, prong);
+    for_each::<S, _, _>(pool, bodies, move |body, task, at| {
+        apply_kernel(work, body, task, at);
     });
 }
 
@@ -499,11 +467,7 @@ fn iteration_rayon_dynamic(pool: &RayonPool, bodies: &mut [Body], forces: &mut [
 }
 
 /// One `spawn_blocking` task per body over a shared read-only snapshot, joined into `forces`.
-async fn iteration_tokio_blocking(
-    set: &mut JoinSet<(usize, Vector3)>,
-    bodies: &mut [Body],
-    forces: &mut [Vector3],
-) {
+async fn iteration_tokio_blocking(set: &mut JoinSet<(usize, Vector3)>, bodies: &mut [Body], forces: &mut [Vector3]) {
     debug_assert!(set.is_empty());
     let n = bodies.len();
     let bodies_ptr = fu::SyncConstPtr::new(bodies.as_ptr());
@@ -629,17 +593,19 @@ const BACKENDS: &[Backend] = &[
     },
 ];
 
+/// The backend named `name`, or `None` when `BACKENDS` has none by that name.
+fn parse_backend(name: &str) -> Option<&'static Backend> {
+    BACKENDS.iter().find(|backend| backend.name == name)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    // Every knob this script understands, read once, up front.
-    let count = env_usize("NBODY_COUNT", 0);
-    let budget_seconds = env_f64("NBODY_SECONDS", 10.0); // ? The primary knob: a fixed window
-    let iterations = env_usize("NBODY_ITERATIONS", 0); // ? Overrides with an exact count when set
-    let backend = env_string("NBODY_BACKEND", "forkunion_static_shared");
-    let mut threads = env_usize("NBODY_THREADS", 0);
-    if threads == 0 {
-        threads = hardware_threads();
-    }
-    let bodies_n = if count == 0 { threads } else { count };
+    let probed = fu::Topology::new().expect("Failed to detect hardware topology");
+    let settings = Settings::read(probed.logical_cores_count()?);
+    let backend_names: Vec<&str> = BACKENDS.iter().map(|backend| backend.name).collect();
+    let expected = format!("one of {}", backend_names.join(", "));
+    let selected = env_parsed("FORKUNION_BACKEND", &BACKENDS[0], parse_backend, &expected);
+    settings.print();
+    let (bodies_n, threads) = (settings.bodies, settings.threads);
 
     // Allocate and initialize bodies.
     let mut bodies = vec![
@@ -652,38 +618,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     ];
     let mut forces = vec![Vector3::default(); bodies_n];
 
-    // Seven counter-based draws per body: three position coordinates, three velocity components, and
-    // one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    // Seven counter-based draws per body: three position coordinates, three velocity components,
+    // and one mass in [1e10, 1e15) - so every language starts from bit-identical bodies.
+    let key = split_mix(settings.seed as u64);
     bodies.iter_mut().enumerate().for_each(|(i, b)| {
         let counter = i as u64 * 7;
         b.position = Vector3 {
-            x: random_unit(counter),
-            y: random_unit(counter + 1),
-            z: random_unit(counter + 2),
+            x: random_unit(key, counter),
+            y: random_unit(key, counter + 1),
+            z: random_unit(key, counter + 2),
         };
         b.velocity = Vector3 {
-            x: random_unit(counter + 3),
-            y: random_unit(counter + 4),
-            z: random_unit(counter + 5),
+            x: random_unit(key, counter + 3),
+            y: random_unit(key, counter + 4),
+            z: random_unit(key, counter + 5),
         };
-        b.mass = 1.0e10 + random_unit(counter + 6) * (1.0e15 - 1.0e10);
+        b.mass = 1.0e10 + random_unit(key, counter + 6) * (1.0e15 - 1.0e10);
     });
 
-    let selected = match BACKENDS.iter().find(|b| b.name == backend) {
-        Some(entry) => entry,
-        None => {
-            eprintln!("Unsupported backend: '{backend}'");
-            eprint!("Available backends:");
-            for entry in BACKENDS {
-                eprint!(" {}", entry.name);
-            }
-            eprintln!();
-            return Err(format!("Unsupported backend: '{backend}'").into());
-        }
-    };
-
-    // Build only the engine resources the selected backend needs; only the ForkUnion engines probe
-    // the topology, so the Rayon and Tokio backends never touch it.
+    // Build only the engine resources the selected backend needs.
     let mut topology = None;
     let mut fu_pool = None;
     let mut replicas = None;
@@ -691,14 +644,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tokio_runtime = None;
     match selected.engine {
         Engine::ForkUnion | Engine::ForkUnionReplicated => {
-            let probed = fu::Topology::new().expect("Failed to detect hardware topology");
             fu_pool = Some(
-                fu::ThreadPool::try_spawn(&probed, threads)
+                fu::ThreadPool::spawn(&probed, threads)
                     .unwrap_or_else(|e| panic!("Failed to start Fork-Union pool: {e}")),
             );
             if selected.engine == Engine::ForkUnionReplicated {
                 replicas = Some(
-                    fu::ReplicatedArray::<Body>::try_new(&probed, bodies_n)
+                    fu::ReplicatedArray::<Body>::new_in(&probed, bodies_n)
                         .expect("Failed to allocate per-domain body replicas"),
                 );
             }
@@ -730,24 +682,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
     // window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    // no per-backend iteration guessing. `NBODY_ITERATIONS` forces an exact count instead.
-    let started = Instant::now();
-    let mut passes = 0usize;
-    if iterations > 0 {
-        for _ in 0..iterations {
-            (selected.run)(&mut context);
-            passes += 1;
-        }
-    } else {
-        while {
-            (selected.run)(&mut context);
-            passes += 1;
-            started.elapsed().as_secs_f64() < budget_seconds
-        } {}
+    // no per-backend iteration guessing. One call is one step: two dispatches over `n` bodies.
+    let mut timed = Loop::new(settings.warmup, settings.time_limit);
+    for _ in &mut timed {
+        (selected.run)(&mut context);
     }
-    let total_seconds = started.elapsed().as_secs_f64();
-    let us_per_iter = total_seconds / passes as f64 * 1e6;
-    // Per-iteration latency is the comparable unit - one `for_each` dispatch over the bodies.
-    println!("{backend}: {bodies_n} bodies, {passes} iters, {us_per_iter:.2} us/iter ({total_seconds:.2} s total)");
+    timed.rate("bodies", bodies_n as f64);
+    timed.row(selected.name).print();
     Ok(())
 }

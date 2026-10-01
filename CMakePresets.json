@@ -1,0 +1,264 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "description": "Ninja, a build tree named after the preset, and a compilation database. No compiler is pinned: CC/CXX pick it, or inherit `gcc`/`clang`.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build_${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "FORKUNION_BUILD_TEST": "ON",
+        "FORKUNION_BUILD_BENCH": "ON",
+        "FORKUNION_WERROR": "ON"
+      }
+    },
+    { "name": "gcc", "hidden": true, "cacheVariables": { "CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++" } },
+    {
+      "name": "clang",
+      "hidden": true,
+      "cacheVariables": { "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++" }
+    },
+    {
+      "name": "darwin",
+      "hidden": true,
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+    },
+    {
+      "name": "windows",
+      "hidden": true,
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "cross",
+      "hidden": true,
+      "description": "Correctness only: emulators cannot run the throughput suite in time, and the benchmarks stay host-only.",
+      "cacheVariables": { "FORKUNION_TEST_SKIP_STRESS": "ON", "FORKUNION_BUILD_BENCH": "OFF" }
+    },
+
+    { "name": "debug", "inherits": "base", "displayName": "Debug", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "asan",
+      "inherits": "base",
+      "displayName": "AddressSanitizer + UndefinedBehaviorSanitizer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FORKUNION_BUILD_BENCH": "OFF",
+        "FORKUNION_WITH_TOPOLOGY": "OFF",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -g",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "displayName": "ThreadSanitizer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FORKUNION_BUILD_BENCH": "OFF",
+        "FORKUNION_WITH_TOPOLOGY": "OFF",
+        "CMAKE_C_FLAGS": "-fsanitize=thread -g",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+      }
+    },
+    {
+      "name": "msvc_x64",
+      "inherits": ["base", "windows"],
+      "displayName": "MSVC x64, Visual Studio generator",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64"
+    },
+    {
+      "name": "msvc_arm64",
+      "inherits": ["base", "windows"],
+      "displayName": "MSVC Arm64, Visual Studio generator",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "ARM64"
+    },
+    {
+      "name": "dockcross",
+      "inherits": ["release", "cross"],
+      "displayName": "Whatever target the dockcross image's toolchain names",
+      "description": "Static, so the binaries QEMU runs need no shared libatomic or libstdc++ from the target.",
+      "toolchainFile": "$env{CMAKE_TOOLCHAIN_FILE}",
+      "cacheVariables": { "CMAKE_EXE_LINKER_FLAGS": "-static" }
+    },
+    {
+      "name": "android",
+      "inherits": ["release", "cross"],
+      "displayName": "Whichever ABI the dockcross Android image's toolchain names, compile only",
+      "toolchainFile": "$env{CMAKE_TOOLCHAIN_FILE}"
+    },
+    {
+      "name": "wasm32_emscripten",
+      "inherits": ["release", "cross"],
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
+      "cacheVariables": { "CMAKE_CROSSCOMPILING_EMULATOR": "node" }
+    },
+    {
+      "name": "wasm64_emscripten",
+      "inherits": ["release", "cross"],
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm64-emscripten.cmake",
+      "cacheVariables": { "CMAKE_CROSSCOMPILING_EMULATOR": "node" }
+    },
+    {
+      "name": "wasm32_wasi_threads",
+      "inherits": ["release", "cross"],
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi-threads.cmake"
+    },
+    {
+      "name": "ios",
+      "inherits": ["release", "darwin"],
+      "displayName": "iOS device, compile only",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphoneos",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "17.0"
+      }
+    },
+    {
+      "name": "ios_simulator",
+      "inherits": ["release", "darwin"],
+      "displayName": "iOS Simulator",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "17.0"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "asan", "configurePreset": "asan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
+    { "name": "tsan", "configurePreset": "tsan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
+    { "name": "msvc_x64", "configurePreset": "msvc_x64", "configuration": "RelWithDebInfo" },
+    { "name": "msvc_arm64", "configurePreset": "msvc_arm64", "configuration": "RelWithDebInfo" },
+    { "name": "dockcross", "configurePreset": "dockcross", "targets": ["forkunion_test_cpp20", "forkunion_test_c11"] },
+    { "name": "android", "configurePreset": "android", "targets": ["forkunion_test_cpp20", "forkunion_test_c11"] },
+    {
+      "name": "wasm32_emscripten",
+      "configurePreset": "wasm32_emscripten",
+      "targets": ["forkunion_test_cpp20", "forkunion_test_c11"]
+    },
+    {
+      "name": "wasm64_emscripten",
+      "configurePreset": "wasm64_emscripten",
+      "targets": ["forkunion_test_cpp20", "forkunion_test_c11"]
+    },
+    {
+      "name": "wasm32_wasi_threads",
+      "configurePreset": "wasm32_wasi_threads",
+      "targets": ["forkunion_test_cpp20", "forkunion_test_c11"]
+    },
+    { "name": "ios", "configurePreset": "ios", "targets": ["forkunion_test_cpp20", "forkunion_static"] },
+    {
+      "name": "ios_simulator",
+      "configurePreset": "ios_simulator",
+      "targets": ["forkunion_test_cpp20", "forkunion_static"]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "name": "^forkunion_test_" } }
+    },
+    { "name": "debug", "inherits": "base", "configurePreset": "debug" },
+    { "name": "release", "inherits": "base", "configurePreset": "release" },
+    {
+      "name": "asan",
+      "inherits": "base",
+      "configurePreset": "asan",
+      "filter": { "include": { "name": "^forkunion_test_cpp" } }
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "configurePreset": "tsan",
+      "filter": { "include": { "name": "^forkunion_test_cpp" } },
+      "environment": { "TSAN_OPTIONS": "halt_on_error=1" }
+    },
+    { "name": "msvc_x64", "inherits": "base", "configurePreset": "msvc_x64", "configuration": "RelWithDebInfo" },
+    { "name": "msvc_arm64", "inherits": "base", "configurePreset": "msvc_arm64", "configuration": "RelWithDebInfo" },
+    {
+      "name": "dockcross",
+      "inherits": "base",
+      "configurePreset": "dockcross",
+      "filter": { "include": { "name": "^forkunion_test_(cpp20|c11)$" } }
+    },
+    {
+      "name": "wasm32_emscripten",
+      "inherits": "base",
+      "configurePreset": "wasm32_emscripten",
+      "filter": { "include": { "name": "^forkunion_test_c11$" } }
+    },
+    {
+      "name": "wasm64_emscripten",
+      "inherits": "base",
+      "configurePreset": "wasm64_emscripten",
+      "filter": { "include": { "name": "^forkunion_test_(cpp20|c11)$" } }
+    },
+    {
+      "name": "wasm32_wasi_threads",
+      "inherits": "base",
+      "configurePreset": "wasm32_wasi_threads",
+      "filter": { "include": { "name": "^forkunion_test_(cpp20|c11)$" } }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "debug",
+      "steps": [
+        { "type": "configure", "name": "debug" },
+        { "type": "build", "name": "debug" },
+        { "type": "test", "name": "debug" }
+      ]
+    },
+    {
+      "name": "release",
+      "steps": [
+        { "type": "configure", "name": "release" },
+        { "type": "build", "name": "release" },
+        { "type": "test", "name": "release" }
+      ]
+    },
+    {
+      "name": "asan",
+      "steps": [
+        { "type": "configure", "name": "asan" },
+        { "type": "build", "name": "asan" },
+        { "type": "test", "name": "asan" }
+      ]
+    },
+    {
+      "name": "tsan",
+      "steps": [
+        { "type": "configure", "name": "tsan" },
+        { "type": "build", "name": "tsan" },
+        { "type": "test", "name": "tsan" }
+      ]
+    },
+    {
+      "name": "wasm32_wasi_threads",
+      "steps": [
+        { "type": "configure", "name": "wasm32_wasi_threads" },
+        { "type": "build", "name": "wasm32_wasi_threads" },
+        { "type": "test", "name": "wasm32_wasi_threads" }
+      ]
+    }
+  ]
+}

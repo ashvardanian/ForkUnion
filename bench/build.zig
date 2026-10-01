@@ -9,8 +9,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // The module carries the compiled artifact, so importing it is the whole integration.
     const forkunion_module = forkunion_dep.module("forkunion");
-    const forkunion_artifact = forkunion_dep.artifact("forkunion");
 
     // N-body benchmark executable
     const nbody = b.addExecutable(.{
@@ -22,10 +22,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    nbody.root_module.link_libc = true;
-    nbody.root_module.link_libcpp = true;
-    nbody.root_module.linkLibrary(forkunion_artifact);
-    if (target.result.os.tag == .linux) nbody.root_module.linkSystemLibrary("pthread", .{});
     nbody.root_module.addImport("forkunion", forkunion_module);
 
     // Add benchmark dependencies
@@ -57,10 +53,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    propagation.root_module.link_libc = true;
-    propagation.root_module.link_libcpp = true;
-    propagation.root_module.linkLibrary(forkunion_artifact);
-    if (target.result.os.tag == .linux) propagation.root_module.linkSystemLibrary("pthread", .{});
     propagation.root_module.addImport("forkunion", forkunion_module);
 
     b.installArtifact(propagation);

@@ -2,8 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    // Matches `minimum_zig_version` in `build.zig.zon`; 0.15 still builds this script, but it cannot
-    // link against the macOS 26 SDK, so CI validates 0.16 only and the floor follows it.
+    // Matches `minimum_zig_version` in `build.zig.zon`; 0.15 still builds this script, but it
+    // cannot link against the macOS 26 SDK, so CI validates 0.16 only and the floor follows it.
     if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
         @panic("ForkUnion requires Zig 0.16.0 or later. Please upgrade your Zig toolchain.");
     }
@@ -14,16 +14,16 @@ pub fn build(b: *std.Build) void {
     // Which kernel facilities the C++ core may use.
     //
     // The derivation rules live in `include/forkunion/types.hpp`, not here. Left alone, each option
-    // is `null` and we pass no `-DFU_WITH_*` at all, so the header decides from the platform.
-    // `-Dplace-memory-on-domain=true` and friends only override that; an override the platform
-    // cannot honour stops at an `#error`, not at link time.
+    // is `null` and we pass no `-DFORKUNION_WITH_*` at all, so the header decides from the
+    // platform. `-Dplace-memory-on-domain=true` and friends only override that; an override the
+    // platform cannot honour stops at an `#error`, not at link time.
     const with_topology = b.option(bool, "topology", "Enumerate compute and memory domains");
     const with_place_memory_on_domain = b.option(bool, "place-memory-on-domain", "Place pages on a chosen memory domain");
     const with_place_huge_pages_on_domain = b.option(bool, "place-huge-pages-on-domain", "Request pages larger than the base page");
     const with_place_threads_by_affinity = b.option(bool, "place-threads-by-affinity", "Bind worker threads to cores");
     const portable = b.option(bool, "portable", "Force every optional capability off") orelse false;
 
-    // Compile the C++ library from c/forkunion.cpp (like Rust's build.rs does)
+    // Compile the C++ library from c/forkunion.cpp, the way Rust's build.rs does.
     const lib = b.addLibrary(.{
         .name = "forkunion",
         .linkage = .static,
@@ -39,9 +39,9 @@ pub fn build(b: *std.Build) void {
     cpp_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-exceptions", "-fno-rtti" }) catch @panic("OOM");
 
     const optional_capabilities = [_][]const u8{
-        "FU_WITH_TOPOLOGY",                    "FU_WITH_PLACE_THREADS_BY_AFFINITY",
-        "FU_WITH_PLACE_THREADS_BY_CORE_CLASS", "FU_WITH_RESCHEDULE_THREADS_BY_CLASS",
-        "FU_WITH_PLACE_MEMORY_ON_DOMAIN",      "FU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
+        "FORKUNION_WITH_TOPOLOGY",                    "FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY",
+        "FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS", "FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS",
+        "FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN",      "FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
     };
 
     const numa_memory = with_place_memory_on_domain;
@@ -51,10 +51,10 @@ pub fn build(b: *std.Build) void {
         for (optional_capabilities) |capability|
             cpp_flags.append(b.allocator, b.fmt("-D{s}=0", .{capability})) catch @panic("OOM");
     } else {
-        if (with_topology) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_TOPOLOGY={d}", .{@intFromBool(on)})) catch @panic("OOM");
-        if (numa_memory) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_PLACE_MEMORY_ON_DOMAIN={d}", .{@intFromBool(on)})) catch @panic("OOM");
-        if (with_place_huge_pages_on_domain) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_PLACE_HUGE_PAGES_ON_DOMAIN={d}", .{@intFromBool(on)})) catch @panic("OOM");
-        if (with_place_threads_by_affinity) |on| cpp_flags.append(b.allocator, b.fmt("-DFU_WITH_PLACE_THREADS_BY_AFFINITY={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (with_topology) |on| cpp_flags.append(b.allocator, b.fmt("-DFORKUNION_WITH_TOPOLOGY={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (numa_memory) |on| cpp_flags.append(b.allocator, b.fmt("-DFORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (with_place_huge_pages_on_domain) |on| cpp_flags.append(b.allocator, b.fmt("-DFORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN={d}", .{@intFromBool(on)})) catch @panic("OOM");
+        if (with_place_threads_by_affinity) |on| cpp_flags.append(b.allocator, b.fmt("-DFORKUNION_WITH_PLACE_THREADS_BY_AFFINITY={d}", .{@intFromBool(on)})) catch @panic("OOM");
     }
 
     lib.root_module.addCSourceFile(.{
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     // Create forkunion module for use as a dependency. It binds the C ABI with `extern fn`, so it
-    // carries the artifact itself - a dependent that imports it should not have to relink it by hand.
+    // carries the artifact itself - a dependent that imports it need not relink it by hand.
     const module = b.addModule("forkunion", .{
         .root_source_file = b.path("zig/forkunion.zig"),
         .target = target,
