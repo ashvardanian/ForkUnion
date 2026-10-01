@@ -1,19 +1,43 @@
 {
+  "[c]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
+  },
   "[json]": {
-    "editor.defaultFormatter": "dprint.dprint"
+    "editor.defaultFormatter": "dprint.dprint",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
   "[jsonc]": {
-    "editor.defaultFormatter": "dprint.dprint"
+    "editor.defaultFormatter": "dprint.dprint",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
+  },
+  "[markdown]": {
+    "editor.defaultFormatter": "yzhang.markdown-all-in-one",
+    "editor.formatOnSave": false,
+    "editor.rulers": [120]
+  },
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
   "[yaml]": {
-    "editor.defaultFormatter": "dprint.dprint"
+    "editor.defaultFormatter": "dprint.dprint",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
-  "[yml]": {
-    "editor.detectIndentation": false,
-    "editor.insertSpaces": true,
-    "editor.tabSize": 2,
-    "prettier.tabWidth": 2
-  },
+  "clangd.arguments": [
+    "--background-index",
+    "--header-insertion=never"
+  ],
   "cSpell.words": [
     "anyopaque",
     "anytype",
@@ -69,6 +93,7 @@
     "WFET"
   ],
   "files.associations": {
+    "*.cmake.in": "cmake",
     "__bit_reference": "cpp",
     "__config": "cpp",
     "__debug": "cpp",
@@ -82,7 +107,6 @@
     "__split_buffer": "cpp",
     "__threading_support": "cpp",
     "__verbose_abort": "cpp",
-    "*.cmake.in": "cmake",
     "algorithm": "cpp",
     "array": "cpp",
     "atomic": "cpp",
@@ -152,6 +176,5 @@
     "utility": "cpp",
     "variant": "cpp",
     "vector": "cpp"
-  },
-  "prettier.tabWidth": 4
+  }
 }

@@ -55,3 +55,11 @@ zig-pkg/
 # Python and macOS
 __pycache__/
 .DS_Store
+
+# Editors, assistants, language servers and tool caches
+.claude/
+/compile_commands.json
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
