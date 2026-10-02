@@ -44,3 +44,6 @@ target/
 zig-out/
 zig-cache/
 zig-pkg/
+
+# macOS Finder metadata
+.DS_Store

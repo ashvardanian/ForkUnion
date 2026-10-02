@@ -1455,6 +1455,18 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
+    fn for_n_dynamic_on_single_inclusive_thread() {
+        let topology = Topology::new().unwrap();
+        let mut pool = spawn(&topology, 1);
+        let visited = AtomicUsize::new(0);
+        for_n_dynamic(&mut pool, 8, |_prong| {
+            visited.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(visited.load(Ordering::Relaxed), 8);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
     fn for_each_mut() {
         let topology = Topology::new().unwrap();
         const ELEMENTS: usize = 1000;

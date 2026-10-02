@@ -259,10 +259,6 @@ class flat_pool {
         if (threads_count_ != 0) return false; // ! Already initialized
 
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
-        if (threads == 1 && use_caller_thread) {
-            threads_count_ = 1;
-            return true; // ! The current thread will always be used, and allocates nothing
-        }
 
         // Allocate the thread pool: one padded cell per thread, holding its worker and its cursor.
         // This is the pool's only allocation, and `for_n_dynamic` performs none of its own. Striding
@@ -348,10 +344,6 @@ class flat_pool {
 
         caller_exclusivity_t const exclusivity = caller_exclusivity();
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
-        if (threads_count_ == 1 && use_caller_thread) {
-            threads_count_ = 0;
-            return; // ? No worker threads to join, and nothing was allocated
-        }
         assert(threads_to_sync_.load(std::memory_order_seq_cst) == 0); // ! No tasks must be running
         assert((epoch_.load(std::memory_order_seq_cst) & 1u) == 0);    // ! Last dispatch must be joined
 
