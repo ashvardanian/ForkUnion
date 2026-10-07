@@ -185,7 +185,8 @@ struct colocated_pool {
     static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
                   "Yield must be callable as `yield(watched_atomic, observed_value, thread_index)`");
     static_assert(is_cache_hints_functor<cache_hints_t>::value,
-                  "Cache hints must be callable as `hints(address, demote_line_k)` and `(address, promote_line_k)`");
+                  "Cache hints must be callable as `hints(address, demote_line_k)`, `(address, promote_line_k)` " //
+                  "and `(address, prefetch_line_k)`");
 
   private:
     /** Traits of the allocator placing the pool's own state. */

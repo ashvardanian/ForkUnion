@@ -466,9 +466,10 @@
  *  mnemonic, or nothing more where MSVC reaches the instruction through an intrinsic. A unit
  *  without them derives the bits a compile-time default can pick from what the compilation target
  *  promises through the compiler's macro for the extension, since @c preferred_yield_t runs its
- *  pick unchecked. The trap-free hints - PAUSE, YIELD, Zihintpause, CLDEMOTE in reserved-NOP space,
- *  DC CVAC - stay on the architecture; WFET and Zicbom, which no default ever picks and a caller
- *  admits at runtime, stay on the toolchain's verdict, WFET having no compiler macro at all.
+ *  pick unchecked. The trap-free hints - PAUSE, YIELD, PRFM, Zihintpause, the Zicbop prefetches,
+ *  CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and Zicbom, which no
+ *  default ever picks and a caller admits at runtime, stay on the toolchain's verdict, WFET having
+ *  no compiler macro at all.
  *
  *  The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches the two through intrinsics whose
  *  arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A extension's mnemonics need the
@@ -511,6 +512,10 @@
 #if !defined(FORKUNION_TARGET_ARM64_DC_CVAC)
 #define FORKUNION_TARGET_ARM64_DC_CVAC (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
+#if !defined(FORKUNION_TARGET_ARM64_PRFM)
+#define FORKUNION_TARGET_ARM64_PRFM \
+    (FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_))
+#endif
 #if !defined(FORKUNION_TARGET_ARM64_LSE)
 #if FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_) && \
     (FORKUNION_RUNTIME_DISPATCH || defined(__ARM_FEATURE_ATOMICS))
@@ -539,6 +544,9 @@
 #endif
 #if !defined(FORKUNION_TARGET_RISC5_ZICBOM)
 #define FORKUNION_TARGET_RISC5_ZICBOM (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
+#endif
+#if !defined(FORKUNION_TARGET_RISC5_ZICBOP)
+#define FORKUNION_TARGET_RISC5_ZICBOP (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
 #if !defined(FORKUNION_TARGET_RISC5_ATOMIC)
 #if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && defined(__riscv_atomic)
@@ -592,9 +600,8 @@
  *  them: x86 @c PREFETCHW, AArch64 `PRFM PSTL1KEEP`, RISC-V `prefetch.w`.
  */
 #if !defined(FORKUNION_WITH_PROMOTE_CACHE_LINES)
-#define FORKUNION_WITH_PROMOTE_CACHE_LINES                            \
-    ((FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_) && \
-     (FORKUNION_ARCH_X86_64_ || FORKUNION_ARCH_ARM64_ || FORKUNION_ARCH_RISCV64_))
+#define FORKUNION_WITH_PROMOTE_CACHE_LINES \
+    (FORKUNION_TARGET_X86_CLDEMOTE || FORKUNION_TARGET_ARM64_PRFM || FORKUNION_TARGET_RISC5_ZICBOP)
 #endif
 
 #if FORKUNION_WITH_DEMOTE_CACHE_LINES && !(FORKUNION_TARGET_X86_CLDEMOTE || FORKUNION_TARGET_ARM64_DC_CVAC)
@@ -1003,6 +1010,20 @@ enum capabilities_t : unsigned int {
     capability_risc5_atomic_k = 1 << 23,
 
     /**
+     *  @brief The AArch64 @c PRFM prefetch hints, base ISA that can never fault, so the detector
+     *      reports them on every AArch64 core.
+     *  @sa arm64_prefetch_cache_hints_t - the hints emitting it.
+     */
+    capability_arm64_prfm_k = 1 << 24,
+
+    /**
+     *  @brief The @c Zicbop prefetches, @c prefetch.r and @c prefetch.w, encoded as @c ORI hints
+     *      every hart accepts, so the detector reports them on every RISC-V core.
+     *  @sa risc5_cache_hints_t - the hints emitting it.
+     */
+    capability_risc5_zicbop_k = 1 << 25,
+
+    /**
      *  @brief Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
      *      offers in one intersection with `runtime_capabilities()`.
      *  @sa capability_name - which names single bits only, never this composite.
@@ -1062,6 +1083,8 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_arm64_rcpc_k: return "arm64_rcpc";
     case capability_risc5_zacas_k: return "risc5_zacas";
     case capability_risc5_atomic_k: return "risc5_atomic";
+    case capability_arm64_prfm_k: return "arm64_prfm";
+    case capability_risc5_zicbop_k: return "risc5_zicbop";
     case capability_os_threads_k: return "os_threads";
     case capability_topology_k: return "topology";
     case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";
@@ -1806,7 +1829,7 @@ struct demote_line_t {};
 /** Tag for pulling a line toward this core with write intent, ahead of an atomic claim. */
 struct promote_line_t {};
 
-/** Tag for pulling a line toward this core with read intent, ahead of a load. */
+/** Tag for pulling a line into this core's L2 with read intent, a few loads ahead of its use. */
 struct prefetch_line_t {};
 
 /** Canonical @c demote_line_t value, mirroring the @c wait_capped_k tag convention. */
@@ -1831,16 +1854,17 @@ struct standard_cache_hints_t {
 };
 
 /**
- *  @brief Whether @p hints_type_ is a valid cache-hints policy: callable with both line tags.
+ *  @brief Whether @p hints_type_ is a valid cache-hints policy: callable with every line tag.
  *
- *  Every policy takes the address of the line being handed away or claimed, plus a tag choosing the
- *  direction. A policy for an ISA with no matching instruction implements the overload as a no-op,
- *  so callers never branch - the emptiness compiles away.
+ *  Every policy takes the address of the line being handed away, claimed or read next, plus a tag
+ *  choosing the direction. A policy for an ISA with no matching instruction implements the overload
+ *  as a no-op, so callers never branch - the emptiness compiles away.
  */
 template <typename hints_type_>
 struct is_cache_hints_functor {
     static constexpr bool value = std::is_nothrow_invocable_v<hints_type_ &, void const *, demote_line_t> &&
-                                  std::is_nothrow_invocable_v<hints_type_ &, void const *, promote_line_t>;
+                                  std::is_nothrow_invocable_v<hints_type_ &, void const *, promote_line_t> &&
+                                  std::is_nothrow_invocable_v<hints_type_ &, void const *, prefetch_line_t>;
 };
 
 /**

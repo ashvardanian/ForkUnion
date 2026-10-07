@@ -598,7 +598,7 @@ using preferred_yield_t = standard_yield_t;
 
 /**
  *  @brief x86 cache hints: @c CLDEMOTE toward the LLC, @c PREFETCHW for write-intent promotion,
- *      @c PREFETCHT0 for read-intent prefetching.
+ *      @c PREFETCHT1 for read-intent prefetching into L2.
  *  @note Both live in hint or reserved-NOP space, so neither can fault on any x86-64 part; whether
  *      @c CLDEMOTE actually bites is reported by @c capability_x86_cldemote_k - detected, never
  *      dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
@@ -622,9 +622,9 @@ struct x86_cache_hints_t {
     }
     inline void operator()(void const *address, prefetch_line_t) const noexcept {
 #if FORKUNION_HAS_INLINE_ASM_
-        __asm__ __volatile__("prefetcht0 (%0)" ::"r"(address) : "memory");
+        __asm__ __volatile__("prefetcht1 (%0)" ::"r"(address) : "memory");
 #else
-        _mm_prefetch(static_cast<char const *>(address), _MM_HINT_T0); // ? `prefetcht0 [rcx]`; `<intrin.h>`
+        _mm_prefetch(static_cast<char const *>(address), _MM_HINT_T1); // ? `prefetcht1 [rcx]`; `<intrin.h>`
 #endif
     }
 };
@@ -633,7 +633,8 @@ struct x86_cache_hints_t {
 #if FORKUNION_TARGET_ARM64_DC_CVAC
 
 /**
- *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes.
+ *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes,
+ *      `PRFM PLDL2KEEP` prefetches into L2.
  *  @note There is no demote on Arm - the clean is the nearest thing: the next claimer's snoop finds
  *      a clean line instead of forcing a dirty intervention, at the price of a memory write. The
  *      clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
@@ -650,19 +651,19 @@ struct arm64_cache_hints_t {
         __asm__ __volatile__("prfm pstl1keep, [%0]" ::"r"(address) : "memory");
     }
     inline void operator()(void const *address, prefetch_line_t) const noexcept {
-        __asm__ __volatile__("prfm pldl1keep, [%0]" ::"r"(address) : "memory");
+        __asm__ __volatile__("prfm pldl2keep, [%0]" ::"r"(address) : "memory");
     }
 };
 #endif // FORKUNION_TARGET_ARM64_DC_CVAC
 
-#if FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_)
+#if FORKUNION_TARGET_ARM64_PRFM
 
 /**
- *  @brief AArch64 promotion only, for kernels that keep `SCTLR_EL1.UCI` clear - Windows and the
- *      BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
- *  @note Mirrors @c risc5_cache_hints_t's shape: the promote is a @c PRFM hint that cannot fault
- *      anywhere. MSVC reaches it through `__prefetch2(address, 0x10)`, whose prfop immediate
- *      `0b10000` spells PST-L1-KEEP - the same encoding the asm arm emits.
+ *  @brief AArch64 promotion and prefetching only, for kernels that keep `SCTLR_EL1.UCI` clear -
+ *      Windows and the BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
+ *  @note Mirrors @c risc5_cache_hints_t's shape: both are @c PRFM hints that cannot fault anywhere.
+ *      MSVC reaches them through @c __prefetch2, whose prfop immediates `0b10000` and `0b00010`
+ *      spell PST-L1-KEEP and PLD-L2-KEEP - the same encodings the asm arm emits.
  */
 struct arm64_prefetch_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
@@ -676,19 +677,19 @@ struct arm64_prefetch_cache_hints_t {
     }
     inline void operator()(void const *address, prefetch_line_t) const noexcept {
 #if FORKUNION_HAS_INLINE_ASM_
-        __asm__ __volatile__("prfm pldl1keep, [%0]" ::"r"(address) : "memory");
+        __asm__ __volatile__("prfm pldl2keep, [%0]" ::"r"(address) : "memory");
 #else
-        __prefetch2(address, 0x00); // ? `prfm pldl1keep, [x0]`; `<intrin.h>`, VS 2019 16.1+
+        __prefetch2(address, 0x02); // ? `prfm pldl2keep, [x0]`; `<intrin.h>`, VS 2019 16.1+
 #endif
     }
 };
-#endif // FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_)
+#endif // FORKUNION_TARGET_ARM64_PRFM
 
-#if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_
+#if FORKUNION_TARGET_RISC5_ZICBOP
 
 /**
- *  @brief RISC-V promotion only: `prefetch.w` is an `ORI x0, ...` hint that cannot fault, with or
- *      without Zicbop silicon.
+ *  @brief RISC-V promotion and prefetching only: `prefetch.w` and `prefetch.r` are `ORI x0, ...`
+ *      hints that cannot fault, with or without Zicbop silicon.
  *  @note The `cbo.clean` demote is deliberately a no-op here: it raises illegal-instruction unless
  *      the kernel set `senvcfg.CBCFE`, which only @c hwprobe can attest at runtime - so it belongs
  *      to a runtime-dispatch tier behind @c capability_risc5_zicbom_k, never a compile-time policy.
@@ -705,7 +706,7 @@ struct risc5_cache_hints_t {
         __asm__ __volatile__(".4byte 0x00156013" ::"r"(address_register) : "memory"); // ? `prefetch.r 0(a0)`
     }
 };
-#endif // FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_
+#endif // FORKUNION_TARGET_RISC5_ZICBOP
 
 #if FORKUNION_TARGET_RISC5_ZICBOM
 
@@ -744,13 +745,13 @@ using preferred_cache_hints_t = x86_cache_hints_t;
 
 /** Both directions: `DC CVAC` cleans, `PRFM PSTL1KEEP` promotes. */
 using preferred_cache_hints_t = arm64_cache_hints_t;
-#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_ARCH_ARM64_
+#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_TARGET_ARM64_PRFM
 
 /** Windows/BSD: the clean traps, the hint stays. */
 using preferred_cache_hints_t = arm64_prefetch_cache_hints_t;
-#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_ARCH_RISCV64_
+#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_TARGET_RISC5_ZICBOP
 
-/** RISC-V: `cbo.clean` needs a runtime probe, so only `prefetch.w` remains. */
+/** RISC-V: `cbo.clean` needs a runtime probe, so only the Zicbop prefetches remain. */
 using preferred_cache_hints_t = risc5_cache_hints_t;
 #else
 
@@ -812,7 +813,7 @@ constexpr std::uint64_t arm64_id_field(std::uint64_t id_register, unsigned lsb) 
  *  without any `-march` bump, unlike the registers' names.
  */
 inline capabilities_t arm64_cpu_capabilities() noexcept {
-    capabilities_t caps = capability_arm64_yield_k;
+    capabilities_t caps = capability_arm64_yield_k | capability_arm64_prfm_k;
 #if FORKUNION_OS_APPLE_
     if (apple_sysctl_flag("hw.optional.arm.FEAT_WFxT")) caps |= capability_arm64_wfet_k;
     if (apple_sysctl_flag("hw.optional.arm.FEAT_LSE")) caps |= capability_arm64_lse_k;
@@ -865,7 +866,7 @@ inline std::uint64_t risc5_hwprobe(std::int64_t key) noexcept {
  *      the compiler was promised, not what this machine runs, so it sets nothing here.
  */
 inline capabilities_t risc5_cpu_capabilities() noexcept {
-    capabilities_t caps = capability_risc5_pause_k | capability_risc5_atomic_k;
+    capabilities_t caps = capability_risc5_pause_k | capability_risc5_zicbop_k | capability_risc5_atomic_k;
 #if FORKUNION_HAS_RISCV_HWPROBE_
     std::uint64_t const extensions = risc5_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0);
 #if defined(RISCV_HWPROBE_EXT_ZAWRS)

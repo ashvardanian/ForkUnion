@@ -78,10 +78,10 @@ struct pool_variants_t {
 #if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
         fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
 
@@ -112,11 +112,11 @@ struct pool_variants_t {
         fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
         fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
         fu::colocated_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
 #endif
@@ -216,11 +216,11 @@ static auto select_pool([[maybe_unused]] fu::capabilities_t const bits, action_t
     if (selects<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
 #endif
-#if FORKUNION_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
     if (selects<fu::risc5_wrs_t, fu::risc5_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cache_hints_t>::type> {});
 #endif
-#if FORKUNION_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
     if (selects<fu::risc5_pause_t, fu::risc5_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_pause_t, fu::risc5_cache_hints_t>::type> {});
 #endif
@@ -411,6 +411,8 @@ fu_assert_same_bit_(fu_capability_arm64_lse_k, capability_arm64_lse_k);
 fu_assert_same_bit_(fu_capability_arm64_rcpc_k, capability_arm64_rcpc_k);
 fu_assert_same_bit_(fu_capability_risc5_zacas_k, capability_risc5_zacas_k);
 fu_assert_same_bit_(fu_capability_risc5_atomic_k, capability_risc5_atomic_k);
+fu_assert_same_bit_(fu_capability_arm64_prfm_k, capability_arm64_prfm_k);
+fu_assert_same_bit_(fu_capability_risc5_zicbop_k, capability_risc5_zicbop_k);
 fu_assert_same_bit_(fu_capability_any_yield_k, capability_any_yield_k);
 fu_assert_same_bit_(fu_capability_os_threads_k, capability_os_threads_k);
 fu_assert_same_bit_(fu_capability_topology_k, capability_topology_k);

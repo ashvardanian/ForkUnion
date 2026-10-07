@@ -412,6 +412,14 @@ typedef enum fu_capabilities_t {
      *  extends it with @c amocas. */
     fu_capability_risc5_atomic_k = 1 << 23,
 
+    /** The AArch64 @c PRFM prefetch hints, base ISA that can never fault, so they are reported on
+     *  every AArch64 core. */
+    fu_capability_arm64_prfm_k = 1 << 24,
+
+    /** The @c Zicbop prefetches, @c prefetch.r and @c prefetch.w, encoded as @c ORI hints every
+     *  hart accepts, so they are reported on every RISC-V core. */
+    fu_capability_risc5_zicbop_k = 1 << 25,
+
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers
      *  in one intersection with @c fu_runtime_capabilities. */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
