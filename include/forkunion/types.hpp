@@ -1806,11 +1806,17 @@ struct demote_line_t {};
 /** Tag for pulling a line toward this core with write intent, ahead of an atomic claim. */
 struct promote_line_t {};
 
+/** Tag for pulling a line toward this core with read intent, ahead of a load. */
+struct prefetch_line_t {};
+
 /** Canonical @c demote_line_t value, mirroring the @c wait_capped_k tag convention. */
 inline constexpr demote_line_t demote_line_k {};
 
 /** Canonical @c promote_line_t value, mirroring the @c wait_uncapped_k tag convention. */
 inline constexpr promote_line_t promote_line_k {};
+
+/** Canonical @c prefetch_line_t value, beside @c demote_line_k and @c promote_line_k. */
+inline constexpr prefetch_line_t prefetch_line_k {};
 
 /**
  *  @brief The do-nothing cache-hints policy - the default, and the fallback for every ISA gap.
@@ -1821,6 +1827,7 @@ struct standard_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
     inline void operator()(void const *, demote_line_t) const noexcept {}
     inline void operator()(void const *, promote_line_t) const noexcept {}
+    inline void operator()(void const *, prefetch_line_t) const noexcept {}
 };
 
 /**

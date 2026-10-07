@@ -597,7 +597,8 @@ using preferred_yield_t = standard_yield_t;
 #if FORKUNION_TARGET_X86_CLDEMOTE
 
 /**
- *  @brief x86 cache hints: @c CLDEMOTE toward the LLC, @c PREFETCHW for write-intent promotion.
+ *  @brief x86 cache hints: @c CLDEMOTE toward the LLC, @c PREFETCHW for write-intent promotion,
+ *      @c PREFETCHT0 for read-intent prefetching.
  *  @note Both live in hint or reserved-NOP space, so neither can fault on any x86-64 part; whether
  *      @c CLDEMOTE actually bites is reported by @c capability_x86_cldemote_k - detected, never
  *      dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
@@ -617,6 +618,13 @@ struct x86_cache_hints_t {
         __asm__ __volatile__(".byte 0x0f, 0x0d, 0x08" ::"a"(address) : "memory"); // ? `prefetchw (%rax)`
 #else
         _m_prefetchw(address); // ? `<intrin.h>`; PREFETCHW is a Windows 8.1 x64 install requirement
+#endif
+    }
+    inline void operator()(void const *address, prefetch_line_t) const noexcept {
+#if FORKUNION_HAS_INLINE_ASM_
+        __asm__ __volatile__("prefetcht0 (%0)" ::"r"(address) : "memory");
+#else
+        _mm_prefetch(static_cast<char const *>(address), _MM_HINT_T0); // ? `prefetcht0 [rcx]`; `<intrin.h>`
 #endif
     }
 };
@@ -641,6 +649,9 @@ struct arm64_cache_hints_t {
     inline void operator()(void const *address, promote_line_t) const noexcept {
         __asm__ __volatile__("prfm pstl1keep, [%0]" ::"r"(address) : "memory");
     }
+    inline void operator()(void const *address, prefetch_line_t) const noexcept {
+        __asm__ __volatile__("prfm pldl1keep, [%0]" ::"r"(address) : "memory");
+    }
 };
 #endif // FORKUNION_TARGET_ARM64_DC_CVAC
 
@@ -663,6 +674,13 @@ struct arm64_prefetch_cache_hints_t {
         __prefetch2(address, 0x10); // ? `prfm pstl1keep, [x0]`; `<intrin.h>`, VS 2019 16.1+
 #endif
     }
+    inline void operator()(void const *address, prefetch_line_t) const noexcept {
+#if FORKUNION_HAS_INLINE_ASM_
+        __asm__ __volatile__("prfm pldl1keep, [%0]" ::"r"(address) : "memory");
+#else
+        __prefetch2(address, 0x00); // ? `prfm pldl1keep, [x0]`; `<intrin.h>`, VS 2019 16.1+
+#endif
+    }
 };
 #endif // FORKUNION_ARCH_ARM64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_)
 
@@ -681,6 +699,10 @@ struct risc5_cache_hints_t {
     inline void operator()(void const *address, promote_line_t) const noexcept {
         register void const *address_register __asm__("a0") = address;
         __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
+    }
+    inline void operator()(void const *address, prefetch_line_t) const noexcept {
+        register void const *address_register __asm__("a0") = address;
+        __asm__ __volatile__(".4byte 0x00156013" ::"r"(address_register) : "memory"); // ? `prefetch.r 0(a0)`
     }
 };
 #endif // FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_
@@ -703,6 +725,10 @@ struct risc5_cbo_cache_hints_t {
     inline void operator()(void const *address, promote_line_t) const noexcept {
         register void const *address_register __asm__("a0") = address;
         __asm__ __volatile__(".4byte 0x00356013" ::"r"(address_register) : "memory"); // ? `prefetch.w 0(a0)`
+    }
+    inline void operator()(void const *address, prefetch_line_t) const noexcept {
+        register void const *address_register __asm__("a0") = address;
+        __asm__ __volatile__(".4byte 0x00156013" ::"r"(address_register) : "memory"); // ? `prefetch.r 0(a0)`
     }
 };
 #endif // FORKUNION_TARGET_RISC5_ZICBOM
