@@ -59,7 +59,7 @@ foreach (STD IN LISTS CXX_STANDARDS)
     set_target_properties_for_forkunion_test(${TGT})
 
     # `check_atomic_ref` admits each reference through `runtime_capabilities()`, so the tests take every buildable rung.
-    target_compile_definitions(${TGT} PRIVATE ${fu_compile_definitions_})
+    target_link_libraries(${TGT} PRIVATE forkunion::cpu_capabilities_compiled)
 
     # main.cpp uses no GNU extensions, so -pedantic-errors rejects a C++23 language feature that slips into the C++20
     # build - the conformance check, on the comprehensive source, not a separate lean TU. Only the C++ tests: the C

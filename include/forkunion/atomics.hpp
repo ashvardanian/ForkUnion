@@ -40,8 +40,8 @@
  *  `_Interlocked*` arithmetic, which stays inline only under `/arch:armv8.1`; the x86 and RISC-V
  *  references lack intrinsics for their instructions, so those targets keep @c standard_atomic_ref.
  *  The @c preferred_atomic_ref at the bottom is the newest reference this unit may run with no
- *  runtime probe, reading `FORKUNION_TARGET_<BIT>` alone - the compilation target's promise in a
- *  unit that dispatches nothing - for compile-time callers, not per CPU class.
+ *  runtime probe, reading `FORKUNION_TARGET_<CAPABILITY>` alone - the compilation target's promise
+ *  in a unit that dispatches nothing - for compile-time callers, not per CPU class.
  *
  *  The header needs the library's @c std::atomic_ref and @c std::bit_cast, so it is empty without
  *  them - a C++20 language mode over a library that still lacks them sees nothing here.
@@ -3059,11 +3059,11 @@ struct risc5_zacas_atomic_ref<value_type_ const> {
 #endif // FORKUNION_TARGET_RISC5_ZACAS
 
 /** The newest reference this translation unit may run with no runtime probe, reading each rung's
- *  `FORKUNION_TARGET_<BIT>` alone - in a unit that dispatches nothing the compilation target's
- *  promise, so the pick can never be illegal there. In a unit that dispatches at runtime - one
- *  with the probe lists or @c FORKUNION_RUNTIME_DISPATCH - the bit is what the toolchain builds
- *  and the alias resolves to the newest buildable rung, so such a unit names its reference per
- *  CPU class instead. */
+ *  `FORKUNION_TARGET_<CAPABILITY>` alone - in a unit that dispatches nothing the compilation
+ *  target's promise, so the pick can never be illegal there. In a unit that dispatches at runtime -
+ *  one with the probe verdicts or @c FORKUNION_RUNTIME_DISPATCH - the bit is what the toolchain
+ *  builds and the alias resolves to the newest buildable rung, so such a unit names its reference
+ *  per CPU class instead. */
 #if FORKUNION_TARGET_ARM64_RCPC
 template <typename value_type_>
 using preferred_atomic_ref = arm64_rcpc_atomic_ref<value_type_>;

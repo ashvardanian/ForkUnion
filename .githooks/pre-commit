@@ -2369,7 +2369,7 @@ check_platform_macros_through_vocabulary() {
         "            FORKUNION_OS_*, FORKUNION_ARCH_*, FORKUNION_HAS_* or FORKUNION_TARGET_*, or mark an exception // FU-ALLOW:"
 }
 
-# Rejects a capability gate nested inside another, because each bit gets one flat `#if FORKUNION_TARGET_<BIT>`
+# Rejects a capability gate nested inside another, because each bit gets one flat `#if FORKUNION_TARGET_<CAPABILITY>`
 # region, so a block's gate is the one line above it.
 check_capability_gates_flat() {
     local nested
@@ -2383,7 +2383,7 @@ check_capability_gates_flat() {
         /^[[:space:]]*#[[:space:]]*else/ { open -= stack[depth]; stack[depth] = 0; next }
         /^[[:space:]]*#[[:space:]]*endif/ { open -= stack[depth]; delete stack[depth]; depth-- }' || true)
     [ -z "$nested" ] || reject_with_reason "$nested" \
-        "$staged_path nests a capability gate inside another; one flat #if FORKUNION_TARGET_<BIT> region per bit:"
+        "$staged_path nests a capability gate inside another; one flat #if FORKUNION_TARGET_<CAPABILITY> region per bit:"
 }
 
 # Rejects a print to stdout in a test body: the harness owns stdout, and a test only reports failures to

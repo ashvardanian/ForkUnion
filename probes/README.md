@@ -1,7 +1,7 @@
 # Toolchain probes
 
 One probe per instruction-level capability bit of `capabilities_t`, each emitting exactly what the header emits for that bit: a mnemonic, a raw encoding, or the intrinsic MSVC reaches it through.
-The `cmake/fu_<arch>_isa_probes.cmake` files compile them at configure time into one `fu_compile_definitions_` list of `FORKUNION_TARGET_<BIT>=0/1`, handed privately to the compiled libraries and the tests, never to `forkunion::header`.
+Each row of `cmake/fu_isa_probe.cmake` compiles one at configure time into the cached `fu_target_<capability>_compiles` and defines `FORKUNION_TARGET_<CAPABILITY>=0/1` on `forkunion::cpu_capabilities_compiled`, which the compiled libraries and the tests link privately, never `forkunion::header`.
 A consumer's own unit derives each bit in `types.hpp` - what the toolchain builds when it sets `FORKUNION_RUNTIME_DISPATCH`, what the compilation target promises otherwise.
 
 The verdict answers one question: can this toolchain build this bit's path.

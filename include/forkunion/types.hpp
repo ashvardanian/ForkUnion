@@ -459,9 +459,9 @@
 #endif
 
 /**
- *  @brief Whether this translation unit may use the bit's path - `FORKUNION_TARGET_<BIT>`.
+ *  @brief Whether this translation unit may use the bit's path - `FORKUNION_TARGET_<CAPABILITY>`.
  *
- *  A unit with the build's probe lists or @c FORKUNION_RUNTIME_DISPATCH takes the toolchain's
+ *  A unit with the build's probe verdicts or @c FORKUNION_RUNTIME_DISPATCH takes the toolchain's
  *  verdict, can it build the path: the architecture, plus inline assembly for a raw encoding or a
  *  mnemonic, or nothing more where MSVC reaches the instruction through an intrinsic. A unit
  *  without them derives the bits a compile-time default can pick from what the compilation target
@@ -556,8 +556,8 @@
 #endif
 
 /*  RCpc extends LSE, RAO-INT extends CMPCCXADD and Zacas extends the A extension, so a rung without
- *  its parent is demoted: every `#if FORKUNION_TARGET_<BIT>` region is then complete on its own and
- *  never repeats the parent's bit. */
+ *  its parent is demoted: every `#if FORKUNION_TARGET_<CAPABILITY>` region is then complete on its
+ *  own and never repeats the parent's bit. */
 #if !FORKUNION_TARGET_ARM64_LSE
 #undef FORKUNION_TARGET_ARM64_RCPC
 #define FORKUNION_TARGET_ARM64_RCPC 0

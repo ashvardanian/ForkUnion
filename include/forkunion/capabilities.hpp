@@ -573,12 +573,12 @@ struct risc5_wrs_t {
 /**
  *  @brief The fastest waiter this translation unit may use with @b no runtime feature probe.
  *
- *  Reads each rung's `FORKUNION_TARGET_<BIT>` alone, which in a unit that dispatches nothing is the
- *  compilation target's promise, so the pick can never be illegal there. In a unit that dispatches
- *  at runtime - one with the probe lists or @c FORKUNION_RUNTIME_DISPATCH - the bit is what the
- *  toolchain builds and the alias resolves to the newest buildable rung, so such a unit names its
- *  waiter per CPU class instead. AArch64 has no monitored rung here because no compiler publishes a
- *  macro for @c WFxT, so @c arm64_wfet_t is reached only by a caller that admits it at runtime.
+ *  Reads each rung's `FORKUNION_TARGET_<CAPABILITY>` alone, which in a unit that dispatches nothing
+ *  is the compilation target's promise, so the pick can never be illegal there. In a unit that
+ *  dispatches at runtime - one with the probe verdicts or @c FORKUNION_RUNTIME_DISPATCH - the bit
+ *  is what the toolchain builds and the alias resolves to the newest buildable rung, so such a unit
+ *  names its waiter per CPU class instead. AArch64 has no monitored rung here because no compiler
+ *  publishes a macro for @c WFxT, so only a caller admitting it at runtime reaches @c arm64_wfet_t.
  */
 #if FORKUNION_TARGET_X86_TPAUSE
 using preferred_yield_t = x86_tpause_t;

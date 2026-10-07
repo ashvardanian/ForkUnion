@@ -89,12 +89,10 @@ target_include_directories(
 # none, so it would be a no-op that reads like a cap.
 target_compile_features(forkunion_header INTERFACE cxx_std_20)
 
-# One compile probe per capability bit under `probes/`, `FORKUNION_TARGET_<BIT>=0/1`: the verdicts reach the units that
-# admit rungs at runtime, never `forkunion_header`, whose consumers read the compilation target's promise in
-# `types.hpp`.
-include(cmake/fu_x86_isa_probes.cmake)
-include(cmake/fu_arm64_isa_probes.cmake)
-include(cmake/fu_risc5_isa_probes.cmake)
+# One compile probe per capability under `probes/`, defining `FORKUNION_TARGET_<CAPABILITY>` as the toolchain compiles
+# it through `forkunion::cpu_capabilities_compiled`, never through `forkunion_header`, whose consumers read the
+# compilation target's promise in `types.hpp`.
+include(cmake/fu_isa_probe.cmake)
 
 # Strictest possible compilation flags with fatal warnings
 if (FORKUNION_WERROR)
@@ -167,9 +165,10 @@ add_library(forkunion_static STATIC c/forkunion.cpp)
 # What a consumer picks between, spelled as what they get:
 #
 # forkunion::header - the C++ core alone. Capabilities are baked in by the `FORKUNION_WITH_*` macros, and each
-# `FORKUNION_TARGET_<BIT>` reads what the compilation target promises, so `preferred_yield_t` is as capable as the
-# target the consumer compiled for. forkunion::static - the C ABI, dispatching on `fu_runtime_capabilities()`, linked
-# into the consumer's binary. forkunion::shared - the same C ABI, one copy per process rather than one per consumer.
+# `FORKUNION_TARGET_<CAPABILITY>` reads what the compilation target promises, so `preferred_yield_t` is as capable as
+# the target the consumer compiled for. forkunion::static - the C ABI, dispatching on `fu_runtime_capabilities()`,
+# linked into the consumer's binary. forkunion::shared - the same C ABI, one copy per process rather than one per
+# consumer.
 #
 # The `static`/`shared` split is linkage, not dispatch: both run the same runtime-dispatched TU above, and a process
 # that links two static copies gets two pools and two topologies. `EXPORT_NAME` carries these spellings into the
@@ -206,8 +205,8 @@ target_link_libraries(forkunion_shared PUBLIC forkunion_header)
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
 
 # Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `c/forkunion.cpp`.
-target_compile_definitions(forkunion_shared PRIVATE ${fu_compile_definitions_})
-target_compile_definitions(forkunion_static PRIVATE ${fu_compile_definitions_})
+target_link_libraries(forkunion_shared PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>)
+target_link_libraries(forkunion_static PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>)
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)

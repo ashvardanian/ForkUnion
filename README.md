@@ -225,15 +225,15 @@ Every all-caps name starts with the full project name, `FORKUNION_`.
 A trailing `_` marks a name as internal: it may change in any release, and nothing outside this repository may define or test it.
 A name without it is a public contract, either a switch you may set or a value you may read.
 
-| Family                   | Form                         | Example                      |
-| :----------------------- | :--------------------------- | :--------------------------- |
-| ISA capability bit       | `FORKUNION_TARGET_<BIT>`     | `FORKUNION_TARGET_X86_PAUSE` |
-| Dispatch mode            | `FORKUNION_RUNTIME_DISPATCH` |                              |
-| Optional feature         | `FORKUNION_WITH_<FEATURE>`   | `FORKUNION_WITH_TOPOLOGY`    |
-| Permission for a liberty | `FORKUNION_ALLOW_<LIBERTY>`  | `FORKUNION_ALLOW_UNSAFE`     |
-| Architecture fact        | `FORKUNION_ARCH_<ARCH>_`     | `FORKUNION_ARCH_X86_64_`     |
-| Operating-system fact    | `FORKUNION_OS_<OS>_`         | `FORKUNION_OS_LINUX_`        |
-| Toolchain fact           | `FORKUNION_HAS_<FEATURE>_`   | `FORKUNION_HAS_INLINE_ASM_`  |
+| Family                   | Form                            | Example                      |
+| :----------------------- | :------------------------------ | :--------------------------- |
+| ISA capability bit       | `FORKUNION_TARGET_<CAPABILITY>` | `FORKUNION_TARGET_X86_PAUSE` |
+| Dispatch mode            | `FORKUNION_RUNTIME_DISPATCH`    |                              |
+| Optional feature         | `FORKUNION_WITH_<FEATURE>`      | `FORKUNION_WITH_TOPOLOGY`    |
+| Permission for a liberty | `FORKUNION_ALLOW_<LIBERTY>`     | `FORKUNION_ALLOW_UNSAFE`     |
+| Architecture fact        | `FORKUNION_ARCH_<ARCH>_`        | `FORKUNION_ARCH_X86_64_`     |
+| Operating-system fact    | `FORKUNION_OS_<OS>_`            | `FORKUNION_OS_LINUX_`        |
+| Toolchain fact           | `FORKUNION_HAS_<FEATURE>_`      | `FORKUNION_HAS_INLINE_ASM_`  |
 
 Architectures are spelled `X86_64`, `X86_32`, `ARM64`, `RISCV64`, `PPC64`, `S390X` and `WASM`.
 Every name in these families is always defined, as 0 or 1, and tested with `#if`, never with `defined(...)`.
