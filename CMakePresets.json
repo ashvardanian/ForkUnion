@@ -5,7 +5,7 @@
     {
       "name": "base",
       "hidden": true,
-      "description": "Ninja, a build tree named after the preset, and a compilation database. No compiler is pinned: CC/CXX pick it, or inherit `gcc`/`clang`.",
+      "description": "Ninja, a flat build_<preset> directory, and a compilation database. Select the compiler through a preset, CC/CXX, or CMakeUserPresets.json.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
@@ -37,7 +37,6 @@
       "description": "Correctness only: emulators cannot run the throughput suite in time, and the benchmarks stay host-only.",
       "cacheVariables": { "FORKUNION_TEST_SKIP_STRESS": "ON", "FORKUNION_BUILD_BENCH": "OFF" }
     },
-
     { "name": "debug", "inherits": "base", "displayName": "Debug", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
     {
       "name": "release",
@@ -72,16 +71,22 @@
       }
     },
     {
-      "name": "msvc_x64",
+      "name": "msvc2026_x64",
       "inherits": ["base", "windows"],
-      "displayName": "MSVC x64, Visual Studio generator",
+      "displayName": "Windows x64 - Visual Studio 2026",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64"
     },
     {
-      "name": "msvc_arm64",
+      "name": "msvc2022_x64",
+      "inherits": "msvc2026_x64",
+      "displayName": "Windows x64 - Visual Studio 2022",
+      "generator": "Visual Studio 17 2022"
+    },
+    {
+      "name": "msvc2022_arm64",
       "inherits": ["base", "windows"],
-      "displayName": "MSVC Arm64, Visual Studio generator",
+      "displayName": "Windows ARM64 - Visual Studio 2022",
       "generator": "Visual Studio 17 2022",
       "architecture": "ARM64"
     },
@@ -144,8 +149,9 @@
     { "name": "release", "configurePreset": "release" },
     { "name": "asan", "configurePreset": "asan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
     { "name": "tsan", "configurePreset": "tsan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
-    { "name": "msvc_x64", "configurePreset": "msvc_x64", "configuration": "RelWithDebInfo" },
-    { "name": "msvc_arm64", "configurePreset": "msvc_arm64", "configuration": "RelWithDebInfo" },
+    { "name": "msvc2026_x64", "configurePreset": "msvc2026_x64", "configuration": "RelWithDebInfo" },
+    { "name": "msvc2022_x64", "configurePreset": "msvc2022_x64", "configuration": "RelWithDebInfo" },
+    { "name": "msvc2022_arm64", "configurePreset": "msvc2022_arm64", "configuration": "RelWithDebInfo" },
     { "name": "dockcross", "configurePreset": "dockcross", "targets": ["forkunion_test_cpp20", "forkunion_test_c11"] },
     { "name": "android", "configurePreset": "android", "targets": ["forkunion_test_cpp20", "forkunion_test_c11"] },
     {
@@ -192,8 +198,24 @@
       "filter": { "include": { "name": "^forkunion_test_cpp" } },
       "environment": { "TSAN_OPTIONS": "halt_on_error=1" }
     },
-    { "name": "msvc_x64", "inherits": "base", "configurePreset": "msvc_x64", "configuration": "RelWithDebInfo" },
-    { "name": "msvc_arm64", "inherits": "base", "configurePreset": "msvc_arm64", "configuration": "RelWithDebInfo" },
+    {
+      "name": "msvc2026_x64",
+      "inherits": "base",
+      "configurePreset": "msvc2026_x64",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "msvc2022_x64",
+      "inherits": "base",
+      "configurePreset": "msvc2022_x64",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "msvc2022_arm64",
+      "inherits": "base",
+      "configurePreset": "msvc2022_arm64",
+      "configuration": "RelWithDebInfo"
+    },
     {
       "name": "dockcross",
       "inherits": "base",

@@ -888,7 +888,7 @@ static void test_for_n() noexcept {
     auto pool = maker.construct();
     expect(fu::succeeded(pool.spawn(maker.scope())));
 
-    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
+    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;
@@ -901,7 +901,7 @@ static void test_for_n() noexcept {
 
     // Make sure repeated calls to `for_n` work
     counter = 0;
-    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
+    pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         // ? Relax the memory order - result order doesn't matter, we'll sort 'em later
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
         visited[count_populated].task = task;

@@ -449,12 +449,12 @@ jobs:
       # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
       - name: Build C/C++
         run: |
-          cmake --preset msvc_x64
-          cmake --build --preset msvc_x64
+          cmake --preset msvc2026_x64
+          cmake --build --preset msvc2026_x64
       - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_msvc_x64
+        run: Get-ChildItem -Recurse .\build_msvc2026_x64
       - name: Test C++
-        run: ctest --preset msvc_x64
+        run: ctest --preset msvc2026_x64
 
       # Guard the Windows port's headline capability: with topology/NUMA forced ON, a regression that
       # silently drops Windows out of FORKUNION_WITH_TOPOLOGY fails to compile here instead of quietly
@@ -462,7 +462,7 @@ jobs:
       - name: Test C++ with topology forced ON
         run: |
           $ErrorActionPreference = "Stop"
-          cmake --preset msvc_x64 -B build_topo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON
+          cmake --preset msvc2026_x64 -B build_topo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON
           cmake --build build_topo --config RelWithDebInfo
           ctest --test-dir build_topo -C RelWithDebInfo -R '^forkunion_test_cpp20$' --output-on-failure
 
@@ -471,8 +471,8 @@ jobs:
       - name: Build C++ for ARM64
         run: |
           $ErrorActionPreference = "Stop"
-          cmake --preset msvc_arm64
-          cmake --build --preset msvc_arm64
+          cmake --preset msvc2022_arm64
+          cmake --build --preset msvc2022_arm64
 
       # `/arch:armv8.1` defines `__ARM_FEATURE_ATOMICS`, the macro that admits the MSVC spelling of
       # `arm64_lse_atomic_ref` and `arm64_rcpc_atomic_ref`. Without this leg that path never compiles.
@@ -481,8 +481,8 @@ jobs:
           CXXFLAGS: /arch:armv8.1
         run: |
           $ErrorActionPreference = "Stop"
-          cmake --preset msvc_arm64 -B build_msvc_arm64_lse
-          cmake --build build_msvc_arm64_lse --config RelWithDebInfo
+          cmake --preset msvc2022_arm64 -B build_msvc2022_arm64_lse
+          cmake --build build_msvc2022_arm64_lse --config RelWithDebInfo
 
       - name: Set up Rust
         run: |
@@ -522,12 +522,12 @@ jobs:
         env:
           CXXFLAGS: ${{ matrix.cxxflags }}
         run: |
-          cmake --preset msvc_arm64
-          cmake --build --preset msvc_arm64
+          cmake --preset msvc2022_arm64
+          cmake --build --preset msvc2022_arm64
       - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_msvc_arm64
+        run: Get-ChildItem -Recurse .\build_msvc2022_arm64
       - name: Test C++
-        run: ctest --preset msvc_arm64
+        run: ctest --preset msvc2022_arm64
 
   test_windows_msvc_matrix:
     name: Test on Windows with MSVC ${{ matrix.toolset }} in ${{ matrix.config }}
@@ -547,12 +547,12 @@ jobs:
       # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
       - name: Build C/C++ with MSVC ${{ matrix.toolset }} in ${{ matrix.config }}
         run: |
-          cmake --preset msvc_x64 -T ${{ matrix.toolset }}
-          cmake --build --preset msvc_x64 --config ${{ matrix.config }}
+          cmake --preset msvc2026_x64 -T ${{ matrix.toolset }}
+          cmake --build --preset msvc2026_x64 --config ${{ matrix.config }}
       - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_msvc_x64
+        run: Get-ChildItem -Recurse .\build_msvc2026_x64
       - name: Test C++
-        run: ctest --preset msvc_x64 -C ${{ matrix.config }}
+        run: ctest --preset msvc2026_x64 -C ${{ matrix.config }}
 
   # Each row is a prebuilt `dockcross` image carrying the toolchain, qemu, and a CMake toolchain file;
   # `ctest` runs the binaries through its `CMAKE_CROSSCOMPILING_EMULATOR`. s390x is the big-endian guard.

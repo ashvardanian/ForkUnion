@@ -308,8 +308,8 @@ class flat_pool {
         if (threads_count_ != 0) return status_t::already_spawned_k;
 
         // ! Without OS threads the caller is the only thread
-        if (!FORKUNION_WITH_OS_THREADS && (threads > 1 || exclusivity == caller_exclusive_k))
-            return status_t::unsupported_k;
+        if constexpr (!FORKUNION_WITH_OS_THREADS)
+            if (threads > 1 || exclusivity == caller_exclusive_k) return status_t::unsupported_k;
 
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
 

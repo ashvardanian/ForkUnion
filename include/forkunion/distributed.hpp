@@ -2214,9 +2214,9 @@ class measured_fabric {
 
         // Unpinned threads place pages randomly; only a distributed pool walks several domains.
         if (pool.threads_count() == 0) return status_t::config_mismatch_k;
-        if (pool_type_::kind_k != pool_kind_t::distributed_k &&
-            (topology.compute_domains_count() != 1 || topology.memory_domains_count() != 1))
-            return status_t::config_mismatch_k;
+        if constexpr (pool_type_::kind_k != pool_kind_t::distributed_k)
+            if (topology.compute_domains_count() != 1 || topology.memory_domains_count() != 1)
+                return status_t::config_mismatch_k;
 
         // Snapshot the coordinate system, so the topology can be freed once this call returns.
         std::size_t const compute_domains = topology.compute_domains_count();

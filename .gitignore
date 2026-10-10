@@ -63,3 +63,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Windows compiler, build-runner, and local validation artifacts
+/.vs/
+*.exp
+*.pdb
+*.ilk
+/.tmp/
+/tmp/
+/.venv*/

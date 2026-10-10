@@ -10,6 +10,12 @@ endif ()
 if (POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW) # MSVC runtime library flags are selected by an abstraction
 endif ()
+if (POLICY CMP0141)
+    cmake_policy(SET CMP0141 NEW) # Debug information is selected by an abstraction
+    if (NOT DEFINED CMAKE_MSVC_DEBUG_INFORMATION_FORMAT)
+        set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
+    endif ()
+endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
 # execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
