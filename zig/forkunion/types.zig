@@ -27,6 +27,7 @@ pub const Status = enum(c_int) {
     topology_unavailable = -9,
     permission_denied = -10,
     unsupported = -11,
+    contended = -14,
     _,
 
     /// Static, English description; mirrors `fu_status_to_string`.
@@ -51,6 +52,7 @@ pub const Error = error{
     TopologyUnavailable,
     PermissionDenied,
     Unsupported,
+    Contended,
 };
 
 /// Lifts a raw `fu_status_t` into the error set; `success` is the only non-error.
@@ -67,6 +69,7 @@ pub fn check(raw: c_int) Error!void {
         .topology_unavailable => Error.TopologyUnavailable,
         .permission_denied => Error.PermissionDenied,
         .unsupported => Error.Unsupported,
+        .contended => Error.Contended,
         else => Error.Unknown,
     };
 }

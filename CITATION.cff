@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path for C, C++, Rust, Zig, and Mojo"
+title: "ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS loops, or false-sharing on the hot path for C, C++, Rust, Zig, and Mojo"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
@@ -13,12 +13,12 @@ identifiers:
     description: "v3.0.2 — version DOI"
 abstract: >-
   ForkUnion is a NUMA-aware fork-join thread-pool for systems languages, built for the tightest
-  parallel-for loops rather than task queues. Its dispatch hot path makes no heap allocations, no
-  system calls, and no compare-and-swap operations, and shares no cache line between workers, so
-  fork-join latency stays flat as cores and sockets multiply. Idle workers park on a hardware address
-  monitor where the processor offers one, waking the instant a peer writes the watched cache line,
-  while per-domain memory placement and private per-worker cursors keep synchronization off the
-  interconnect.
+  parallel-for loops rather than task queues. Its dispatch hot path makes no heap allocations and no
+  system calls, admits each dispatch with one compare-and-swap that never retries, and shares no
+  cache line between workers, so fork-join latency stays flat as cores and sockets multiply. Idle
+  workers park on a hardware address monitor where the processor offers one, waking the instant a
+  peer writes the watched cache line, while per-domain memory placement and private per-worker
+  cursors keep synchronization off the interconnect.
 keywords:
   - numa
   - parallel

@@ -171,10 +171,10 @@ static bool test_per_compute_domain_pool(fu_capabilities_t mask) {
 /**
  *  @brief Two unsafe dispatches, each polled and joined by its token, on either caller exclusivity.
  *
- *  Generation tokens are always odd, and on an exclusive pool @c fu_pool_is_complete must turn true
- *  without the caller contributing work. Joining the first token again while the second dispatch is
- *  in flight must leave that dispatch alone: an inclusive pool runs the caller's slice only inside
- *  the join, so a stale join that dropped the held callback would leave slot 0 unvisited.
+ *  On an exclusive pool @c fu_pool_is_complete must turn true without the caller contributing work.
+ *  Joining the first token again while the second dispatch is in flight must leave that dispatch
+ *  alone: an inclusive pool runs the caller's slice only inside the join, so a stale join that
+ *  dropped the held callback would leave slot 0 unvisited.
  */
 static bool test_generation_polling(fu_capabilities_t mask) {
     fu_caller_exclusivity_t const exclusivities[] = {preferred_exclusivity(), fu_caller_inclusive_k};
@@ -192,8 +192,7 @@ static bool test_generation_polling(fu_capabilities_t mask) {
         fu_generation_t first = 0;
         for (size_t dispatch = 0; dispatch != 2 && result; ++dispatch) {
             fu_generation_t generation = 0;
-            result = fu_pool_unsafe_for_threads(pool, for_threads_callback, &context, &generation) == fu_success_k &&
-                     (generation & 1u) == 1;
+            result = fu_pool_unsafe_for_threads(pool, for_threads_callback, &context, &generation) == fu_success_k;
             if (!result) break;
             if (dispatch == 0) first = generation;
             else fu_pool_unsafe_join(pool, first); // ? Stale by now, so it must be a no-op
@@ -478,6 +477,76 @@ static bool test_sleep_wake(fu_capabilities_t mask) {
     }
 
     free(visited);
+    fu_pool_delete(pool);
+    return result;
+}
+
+/** Tasks each dispatch on the shared pool runs. */
+static const size_t contended_tasks_k = 100;
+
+/** Context for the refusal test: the shared pool, and what its dispatchers saw. */
+struct contended_context_t {
+    fu_pool_t pool;
+    size_t threads_count;
+    atomic_size_t admitted;
+    atomic_size_t refused;
+    atomic_size_t holders;
+    atomic_size_t overlaps;
+    atomic_size_t tasks;
+};
+
+/** Counts one task on the shared pool, and any task of another dispatch running beside it. */
+static void count_contended_task(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
+    struct contended_context_t *context = (struct contended_context_t *)context_punned;
+    // One dispatch runs at most one task per thread at a time, so more holders mean two overlap
+    if (atomic_fetch_add(&context->holders, 1) >= context->threads_count) atomic_fetch_add(&context->overlaps, 1);
+    atomic_fetch_add(&context->tasks, 1);
+    atomic_fetch_sub(&context->holders, 1);
+}
+
+/** Dispatches on the shared pool from inside a dispatch on it, both ways, counting the refusals. */
+static void dispatch_from_inside(void *context_punned, size_t thread, size_t compute_domain) {
+    struct contended_context_t *context = (struct contended_context_t *)context_punned;
+    fu_generation_t generation = 1;
+    if (fu_pool_for_n(context->pool, contended_tasks_k, count_contended_task, context) == fu_contended_k &&
+        fu_pool_unsafe_for_threads(context->pool, dispatch_from_inside, context, &generation) == fu_contended_k &&
+        generation == 0)
+        atomic_fetch_add(&context->refused, 1);
+}
+
+/** Dispatches on the shared pool from another pool's thread, counting admissions and refusals. */
+static void dispatch_beside(void *context_punned, size_t round, size_t thread, size_t compute_domain) {
+    struct contended_context_t *context = (struct contended_context_t *)context_punned;
+    fu_status_t const status = fu_pool_for_n(context->pool, contended_tasks_k, count_contended_task, context);
+    if (status == fu_success_k) atomic_fetch_add(&context->admitted, 1);
+    else if (status == fu_contended_k) atomic_fetch_add(&context->refused, 1);
+}
+
+/**
+ *  @brief A pool refuses a dispatch while it runs another, and runs every dispatch it admits.
+ *
+ *  A dispatch from inside the pool's own fork would wait on itself, so every thread of it must be
+ *  answered @c fu_contended_k at once, by the blocking and the split calls alike, running nothing.
+ *  The threads of a second pool then dispatch on the first concurrently: no task of one admitted
+ *  dispatch may meet another's, and each admitted dispatch must run all of its tasks.
+ */
+static bool test_pool_refusal(fu_capabilities_t mask) {
+    fu_pool_t pool = spawn_default_pool("test_refusal", mask, fu_caller_inclusive_k);
+    if (!pool) return false;
+
+    struct contended_context_t context = {.pool = pool};
+    bool result = fu_pool_threads_count(pool, &context.threads_count) == fu_success_k &&
+                  fu_pool_for_threads(pool, dispatch_from_inside, &context) == fu_success_k &&
+                  atomic_load(&context.refused) == context.threads_count && atomic_load(&context.tasks) == 0;
+
+    size_t const rounds = 64;
+    atomic_store(&context.refused, 0);
+    fu_pool_t dispatchers = spawn_default_pool("test_dispatchers", mask, preferred_exclusivity());
+    result = result && dispatchers && fu_pool_for_n(dispatchers, rounds, dispatch_beside, &context) == fu_success_k &&
+             atomic_load(&context.admitted) + atomic_load(&context.refused) == rounds &&
+             atomic_load(&context.admitted) != 0 && atomic_load(&context.overlaps) == 0 &&
+             atomic_load(&context.tasks) == atomic_load(&context.admitted) * contended_tasks_k;
+    fu_pool_delete(dispatchers);
     fu_pool_delete(pool);
     return result;
 }
@@ -823,6 +892,7 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
         {"`for_n_dynamic` dynamic scheduling", test_for_n_dynamic},
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads},
         {"`sleep` and wake exactly-once", test_sleep_wake},
+        {"`fu_contended_k` refusals", test_pool_refusal},
         {"topology counts and core partition", test_topology_counts},
         {"topology memory-domain bounds", test_topology_memory_bounds},
         {"`fu_pool_capabilities` narrowing", test_pool_capabilities_narrowing},

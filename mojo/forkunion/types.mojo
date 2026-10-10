@@ -85,6 +85,8 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
     """Nothing to `dlopen`, or what loaded is a different major version."""
     comptime SYMBOL_MISSING = Self(-13)
     """The library loaded but does not export a symbol the binding needs."""
+    comptime CONTENDED = Self(-14)
+    """The pool is running another dispatch: another caller's, or the one this call runs inside."""
 
     def write_to(self, mut writer: Some[Writer]):
         """Spells the failure out in prose, so a code this build does not name still reads.
@@ -116,6 +118,8 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
             writer.write("a privileged operation was declined")
         elif self == Self.UNSUPPORTED:
             writer.write("this build has no such facility")
+        elif self == Self.CONTENDED:
+            writer.write("the pool is running another dispatch")
         else:
             writer.write("the core reported no reason")
 

@@ -401,7 +401,7 @@ pub const Pool = struct {
     }
 
     /// Executes callback on all threads without blocking; unsafe.
-    /// Returns an always-odd generation token to pass to `isComplete` or `unsafeJoin`.
+    /// Returns a generation token to pass to `isComplete` or `unsafeJoin`.
     ///
     /// - If context is `void`: `fn (usize, ComputeDomain) void`
     /// - Otherwise: `fn (@TypeOf(context), usize, ComputeDomain) void`
@@ -652,6 +652,35 @@ test "for_threads execution" {
     for (0..4) |i| try std.testing.expect(visited[i].load(.acquire));
 }
 
+test "for_threads refuses a dispatch from inside the pool" {
+    const topo = try Topology.init();
+    defer topo.deinit();
+    const pool = try Pool.init(topo, .{ .threads = 4 });
+    defer pool.deinit();
+
+    // A dispatch from the pool's own callback would wait on itself, so every thread is refused
+    const Nested = struct {
+        pool: Pool,
+        refused: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
+        fn worker(nested: *@This(), thread_index: usize, compute_domain: ComputeDomain) void {
+            _ = thread_index;
+            _ = compute_domain;
+            nested.pool.forThreads({}, skip) catch |failure| {
+                if (failure == error.Contended) _ = nested.refused.fetchAdd(1, .monotonic);
+            };
+        }
+
+        fn skip(thread_index: usize, compute_domain: ComputeDomain) void {
+            _ = thread_index;
+            _ = compute_domain;
+        }
+    };
+    var nested = Nested{ .pool = pool };
+    try pool.forThreads(&nested, Nested.worker);
+    try std.testing.expectEqual(4, nested.refused.load(.acquire));
+}
+
 test "for_n static scheduling" {
     const topo = try Topology.init();
     defer topo.deinit();
@@ -771,7 +800,6 @@ test "unsafe_for_threads and join" {
         }
     }.worker);
 
-    try std.testing.expect(generation & 1 == 1);
     pool.unsafeJoin(generation);
     try std.testing.expect(try pool.isComplete(generation));
     try std.testing.expectEqual(4, counter.load(.acquire));
@@ -792,8 +820,6 @@ test "generation polling on exclusive pool" {
             _ = tally.fetchAdd(1, .monotonic);
         }
     }.worker);
-
-    try std.testing.expect(generation & 1 == 1);
 
     // What an exclusive pool is for: the caller owes no slice, so the generation completes without
     // it and can be polled first. On an inclusive pool this loop would never finish.

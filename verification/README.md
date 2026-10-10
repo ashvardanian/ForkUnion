@@ -6,8 +6,9 @@ Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com)
 
 - `weak_memory.pml` is the C++ memory model as views, for Promela: relaxed, acquire, release, `acq_rel`, both fences, release sequences, and the far model's posted adds.
 - `weak_memory_litmus/` is its calibration, one classic shape per file, each asserting the outcome RC11 forbids and expecting exactly RC11's verdicts.
+- `monitor_wait.pml` is a wait that can miss its wake-up: a waiter arms, re-checks the word, and blocks until a writer's `wake`, so a lost notify reads as `stuck`.
 - `check.sh` is the runner, and `genmc.hpp` the threads and the assertion a client takes from GenMC.
-- `flat_pool/`, `for_n_dynamic.pml`, `distributed_pool/` and `standard_atomic_ref.cpp` check the pools and the portable atomics, each file opening with what it checks.
+- `flat_pool/`, `colocated_pool.pml`, `distributed_pool/`, `for_n_dynamic.pml`, `spin_mutex.pml` and `standard_atomic_ref.cpp` check the pools and the portable atomics, each file opening with what it checks.
 
 ## Conventions
 
@@ -38,6 +39,7 @@ The preprocessor names words, values and constants, gives each knob its default 
 Write such a guard as a bare `if`: statement merging folds the constant guard into its neighbour, while an `atomic` around it makes a step of its own.
 An inline may declare its own locals, so a role is often one line, unless that adds states: each declaration is a step of its own, and inside a loop it resets on every pass, so where a scenario's states grow the role declares them and passes them in.
 An inline's local never shares a name with its caller's.
+A wait on a word another thread moves goes through `monitor_wait.pml`, never a guard on the newest value, which cannot miss a wake-up: the waiter loads the word and calls `wait_on` until it moves, a monitor-style writer calls `wake` after every write to the word, and a futex-style writer only where the code notifies, so a dropped notify or a missing re-check comes out `stuck`.
 
 A knob is a choice the code under test makes, named for the mechanism and defaulting to the code: `watermark_order=order_relaxed`, `back_link_fence=false`, `commits=2`, `waiting=parking`.
 An order knob ends in `_order`; a boolean names the step the code takes.
@@ -82,13 +84,20 @@ The pool's three atomics are sound, and the models prove the behaviours composed
 Each finding is the `@verify` line that replays it, where the full counterexample is written out.
 
 - A dispatch waking a chilled pool restores the workers' scheduling class to `SCHED_OTHER`, the class they started on, since `SCHED_FIFO | SCHED_RR` is `SCHED_BATCH` on Linux.
-- The same wake-up exchanges the mood strongly, since a spurious failure of a weak one leaves a colocated worker in its startup wait forever: [`flat_pool/moods.pml`](flat_pool/moods.pml).
+- The same wake-up exchanges the mood strongly, since a spurious failure of a weak one leaves a colocated worker in its startup wait forever: [`colocated_pool.pml`](colocated_pool.pml).
 - `terminate` is documented as callable only with no task running and the last dispatch joined, which it asserts.
+- A dispatch claims the pool by exchanging the contributor countdown from zero with an acquire, writes its fork only after the claim, and waits out the previous generation's completion step, or a refused caller tears the running fork, or a token comes out even: [`flat_pool/contenders.pml`](flat_pool/contenders.pml).
+- `distributed_pool` claims every colocation before it publishes on any, or a colocation that refuses leaves the others running half a dispatch: [`distributed_pool/contenders.pml`](distributed_pool/contenders.pml).
+- The pool rewinds the shared slice cursors of a `for_n_dynamic` only once its claim admitted the dispatch, or a refused nested call rewinds them under the running one, which runs some tasks twice: [`for_n_dynamic.pml`](for_n_dynamic.pml).
+- Every monitored wait re-checks its word after arming, or a worker sleeps through the dispatch or the completion that already came: [`flat_pool/plain.pml`](flat_pool/plain.pml), [`colocated_pool.pml`](colocated_pool.pml).
 - The C shim's `fu_pool_unsafe_join` clears its callback slot only for the generation it published, or a stale join empties the live one's slot under a running worker: [`flat_pool/stale_join.pml`](flat_pool/stale_join.pml).
-- The countdown's decrements acquire as well as release, or the last contributor reads a stale result, under RC11 and under IMM: [`flat_pool/`](flat_pool/).
+- The epoch's dispatch release, the workers' pickup acquire, the last contributor's completion release and the join's acquire each carry the fork and its results, and the countdown's decrements acquire as well as release, or the last contributor reads a stale result, under RC11 and under IMM: [`flat_pool/`](flat_pool/).
+- `spin_mutex`'s `lock` and `lock_if_free` acquire and its `unlock` releases, or the next holder reads the last one's writes stale: [`spin_mutex.pml`](spin_mutex.pml).
+- The loops behind `fetch_add_if_at_most` and `fetch_max` acquire even when they refuse, or a refused caller reads the winner's data stale, under RC11 and under IMM: [`standard_atomic_ref.cpp`](standard_atomic_ref.cpp).
 - The workers re-check the mood under a capped wait, which bounds a `sleep` or a `terminate` notice to one timeout: [`flat_pool/moods.pml`](flat_pool/moods.pml).
 - The epoch's width aliases at the debug widths, as the header prices: at a modulus of 2 a stale token names the live generation: [`flat_pool/polling.pml`](flat_pool/polling.pml).
-- The release on each cursor in `invoke_for_n_dynamic::reset_slices_` is redundant, since the dispatch's release on the epoch carries every cursor and end to every worker, and the release stays: [`for_n_dynamic.pml`](for_n_dynamic.pml).
+- `invoke_for_n_dynamic::rewind` writes the cursors relaxed, since the dispatch's release on the epoch carries every cursor and end to every worker: [`for_n_dynamic.pml`](for_n_dynamic.pml).
+- Both epoch steps are plain release stores: the claim leaves the dispatcher the epoch's only writer until its contributors count down, and the next claimer waits for the last contributor's even epoch before it writes: [`flat_pool/`](flat_pool/), [`distributed_pool/`](distributed_pool/).
 - `unsafe_join` runs the caller's slice on its own colocation before it waits for any other, or the join and a worker waiting on the caller's slice wait on each other forever: [`distributed_pool/overlap.pml`](distributed_pool/overlap.pml).
 
 A `broadcast_join` kept alive across a `terminate` and a `spawn` would alias after one re-spawn rather than after `2^bits` epochs, since `terminate` resets the epoch; it asserts every dispatch joined, so nothing outlives it by contract.

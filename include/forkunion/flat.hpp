@@ -17,7 +17,7 @@ namespace forkunion {
  *
  *  This thread-pool @b can't:
  *  - dynamically @b resize: all threads must be stopped and re-initialized to grow/shrink.
- *  - @b re-enter: it can't be used recursively and will deadlock if you try to do so.
+ *  - @b re-enter: a dispatch from inside its own fork, or beside another caller's, is refused.
  *  - @b copy/move: the threads depend on the address of the parent structure.
  *  - handle @b exceptions: you must `try-catch` them yourself and return @c void.
  *  - @b stop early: assuming the user can do it better, knowing the task granularity.
@@ -76,30 +76,33 @@ namespace forkunion {
  *  @section pool_concurrency_model Concurrency Model
  *
  *  Three roles interact with a pool:
- *  - the @b dispatcher - exactly one external thread operating the pool at a time: it dispatches,
- *    polls, joins, and terminates; this is contractual and not enforced;
+ *  - the @b dispatcher - the one thread whose dispatch the pool admitted: it dispatches, polls, and
+ *    joins, while any other dispatch, nested or concurrent, is refused with the zero token; that
+ *    @c spawn and @c terminate overlap no dispatch is contractual and not enforced;
  *  - the @b contributors - threads executing one slice each per generation: all workers, plus the
  *    calling thread itself on @c caller_inclusive_k pools, whose slice runs inside @c unsafe_join;
  *  - the @b pollers - any threads calling @c is_complete, which is a read-only probe.
  *
- *  All synchronization is built from three cache-line-aligned atomics and plain loads, stores, and
- *  fetch-add/sub increments - no compare-and-swap chains and no mutexes on the hot path:
- *  - @c epoch_ - the generation clock: @b odd while a fork is in flight, @b even when idle;
- *    incremented once by the dispatcher on dispatch and once by the last contributor on completion,
- *    so every generation advances it by exactly two;
+ *  All synchronization is built from three cache-line-aligned atomics and no mutexes: one
+ *  compare-and-swap per dispatch, one @c fetch_sub per contributor, and plain loads and stores:
+ *  - @c epoch_ - the generation clock: @b odd while a fork is in flight, @b even when idle; stepped
+ *    once by the dispatcher on dispatch and once by the last contributor on completion, so every
+ *    generation advances it by exactly two, each step a store by the clock's only writer;
  *  - @c threads_to_sync_ - the countdown identifying the @b last contributor - the only thread
- *    allowed to make the completion increment;
+ *    allowed to make the completion step; zero exactly when no contributor runs, so a dispatch
+ *    claims the pool by exchanging it from zero;
  *  - @c mood_ - the lifecycle switch between spinning, sleeping, and exiting workers.
  *
  *  Four synchronization edges keep the non-atomic fork state safe:
- *  1. @b publish: the dispatcher writes the fork state, resets the countdown, and releases the
- *     dispatch increment; contributors acquire it and see both;
- *  2. @b completion @b chain: every contributor decrements the countdown with @c acq_rel, chaining
+ *  1. @b claim: the dispatcher exchanges the countdown from zero with an acquire, so the fork state
+ *     it writes next follows every read of the previous one, then waits out the previous completion
+ *     step, so a dispatch never races it and generation tokens are always odd;
+ *  2. @b publish: the dispatcher releases the dispatch step; contributors acquire it and see the
+ *     fork state and the countdown;
+ *  3. @b completion @b chain: every contributor decrements the countdown with @c acq_rel, chaining
  *     each contributor's writes into the last one;
- *  3. @b completion @b edge: the last contributor releases the completion increment, so any
- *     acquire-load observing it sees @b all contributors' results - @c is_complete included;
- *  4. @b join: the dispatcher blocks until the completion increment, so a new dispatch can never
- *     race with the previous completion, and generation tokens are always odd.
+ *  4. @b completion @b edge: the last contributor releases the completion step, so any
+ *     acquire-load observing it sees @b all contributors' results - @c is_complete included.
  *
  *  On @c caller_inclusive_k pools the calling thread owes a slice that only runs inside
  *  @c unsafe_join, so @c is_complete stays @c false until then: the poll-then-join pattern is
@@ -148,7 +151,7 @@ class flat_pool {
      */
     using epoch_index_t = index_t;
 
-    /** Token returned from @c unsafe_for_threads; always odd. */
+    /** Token returned from @c unsafe_for_threads; always odd, or zero for a refused dispatch. */
     using generation_t = epoch_index_t;
 
     /** Core index, or thread ID, in [0, threads_count). */
@@ -326,7 +329,7 @@ class flat_pool {
         if (status_t const grew = cells.resize(threads); failed(grew)) return grew;
 
         // Before we start the threads, make sure we set some of the shared state variables that
-        // will be used in the `_worker_loop` function.
+        // will be used in the `worker_loop_` function.
         workers_ = std::move(cells);
         threads_count_ = threads;
         exclusivity_ = exclusivity;
@@ -344,14 +347,14 @@ class flat_pool {
             thread_index_t const i_with_caller = i + use_caller_thread;
 #if FORKUNION_ALLOW_UNSAFE
             try {
-                workers_[i_with_caller].worker = std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+                workers_[i_with_caller].worker = std::thread([this, i_with_caller] { worker_loop_(i_with_caller); });
                 return true;
             }
             catch (...) {
                 return false;
             }
 #else
-            workers_[i_with_caller].worker = std::thread([this, i_with_caller] { _worker_loop(i_with_caller); });
+            workers_[i_with_caller].worker = std::thread([this, i_with_caller] { worker_loop_(i_with_caller); });
             return true;
 #endif
         };
@@ -417,7 +420,7 @@ class flat_pool {
         // runs `~thread` on quiescent objects rather than calling `std::terminate`.
         threads_count_ = 0;
         workers_ = {};
-        _reset_fork();
+        reset_fork_();
         mood_.store(mood_t::grind_k, std::memory_order_relaxed);
         epoch_.store(0, std::memory_order_relaxed);
     }
@@ -496,7 +499,8 @@ class flat_pool {
     /**
      *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
      *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
-     *  @return A @c generation_t token identifying this dispatch.
+     *  @return A @c generation_t token identifying this dispatch, or the zero token when the pool
+     *      refused it: another dispatch runs, another caller's or the one this call runs inside.
      *  @sa Use in conjunction with @c unsafe_join.
      */
     template <is_thread_callback<index_t> fork_type_>
@@ -505,29 +509,39 @@ class flat_pool {
         thread_index_t const threads = threads_count();
         assert(threads != 0 && "Thread pool not initialized");
 
-        // Only one dispatch can be in flight, and it must be fully joined - the caller's slice
-        // included - before the next one starts.
-        assert(threads_to_sync_.load(std::memory_order_acquire) == 0 &&
-               "The broadcast function can't be called concurrently or recursively");
-        assert((epoch_.load(std::memory_order_relaxed) & 1u) == 0 && "Previous dispatch not joined");
-
-        // Configure "fork" details
-        fork_state_ = std::addressof(fork);
-        fork_trampoline_ = &_call_as_lambda<fork_type_>;
-
+        // The countdown is zero exactly when no contributor runs, so claiming it from zero admits
+        // one dispatch, and its acquire carries the last generation's odd epoch to the wait below.
         // Every contributor gets counted: all worker threads, plus the calling thread itself on
         // `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
-        threads_to_sync_.store(threads, std::memory_order_relaxed);
+        thread_index_t idle = 0;
+        if (!threads_to_sync_.compare_exchange_strong(idle, threads, std::memory_order_acquire,
+                                                      std::memory_order_relaxed))
+            return 0;
+        if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind(); // ? The cursors are ours only from here
+
+        // Configure "fork" details: every contributor of the last generation counted down already
+        fork_state_ = std::addressof(fork);
+        fork_trampoline_ = &call_as_lambda_<fork_type_>;
+
+        // The last contributor counts down to zero just before it steps the epoch to even
+        micro_yield_t micro_yield;
+        epoch_index_t previous_epoch;
+        while ((previous_epoch = epoch_.load(std::memory_order_acquire)) & 1u)
+            micro_yield(epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
 
         // We are most likely already "grinding", but in the unlikely case we are not, let's wake up
         // from the "chilling" state with relaxed semantics. Assuming the sleeping logic for the
         // workers also checks the epoch counter, no synchronization is needed and no immediate
-        // wake-up is required.
+        // wake-up is required. Read first, so a grinding pool takes no locked step.
         mood_t may_be_chilling = mood_t::chill_k;
-        mood_.compare_exchange_strong(        //
-            may_be_chilling, mood_t::grind_k, //
-            std::memory_order_relaxed, std::memory_order_relaxed);
-        return static_cast<generation_t>(epoch_.fetch_add(1, std::memory_order_release) + 1);
+        if (mood_.load(std::memory_order_relaxed) == mood_t::chill_k)
+            mood_.compare_exchange_strong(may_be_chilling, mood_t::grind_k, std::memory_order_relaxed,
+                                          std::memory_order_relaxed);
+
+        // The claim leaves this caller the epoch's only writer until its contributors count down
+        generation_t const generation = static_cast<generation_t>(previous_epoch + 1);
+        epoch_.store(generation, std::memory_order_release);
+        return generation;
     }
 
     /**
@@ -559,11 +573,12 @@ class flat_pool {
             thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
             assert(before_decrement > 0 && "The contributor count must include the caller");
 
-            // The last contributor to finish increments the epoch, signaling completion
-            if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
+            // The last contributor steps the epoch, as its only writer, to signal completion
+            if (before_decrement == 1)
+                epoch_.store(static_cast<epoch_index_t>(generation + 1), std::memory_order_release);
         }
 
-        // Wait for the last contributor's completion increment: only `epoch_` moves here, so a
+        // Wait for the last contributor's completion step: only `epoch_` moves here, so a
         // monitored waiter arms the right line, and the completing store's release wakes it.
         micro_yield_t micro_yield;
         while (epoch_.load(std::memory_order_acquire) == generation)
@@ -620,7 +635,7 @@ class flat_pool {
 
   private:
     /** Clears the fork state and trampoline between dispatches. */
-    void _reset_fork() noexcept {
+    void reset_fork_() noexcept {
         fork_state_ = nullptr;
         fork_trampoline_ = nullptr;
     }
@@ -631,7 +646,7 @@ class flat_pool {
      *  @param[in] thread_index The thread whose slice of the broadcast this call runs.
      */
     template <typename fork_type_>
-    static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, thread_index_t thread_index) noexcept {
+    static void call_as_lambda_(punned_fork_context_t punned_lambda_pointer, thread_index_t thread_index) noexcept {
         fork_type_ &lambda_object = *static_cast<fork_type_ *>(punned_lambda_pointer);
         lambda_object(thread_in_domain_t {thread_index, 0});
     }
@@ -640,7 +655,7 @@ class flat_pool {
      *  @brief The worker thread loop that is called by each of `this->workers_`.
      *  @param[in] thread_index The index of the thread that is executing this function.
      */
-    void _worker_loop(thread_index_t const thread_index) noexcept {
+    void worker_loop_(thread_index_t const thread_index) noexcept {
         caller_exclusivity_t const exclusivity = caller_exclusivity();
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (use_caller_thread) assert(thread_index != 0 && "The zero index is for the main thread, not worker!");
@@ -671,12 +686,14 @@ class flat_pool {
 
                 // ! The decrement must come after the task is executed. The `acq_rel` ordering
                 // ! chains every contributor's writes into the last one, so the completion
-                // ! increment below publishes all of them at once.
+                // ! step below publishes all of them at once.
                 thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
                 assert(before_decrement > 0 && "We can't be here if there are no worker threads");
 
-                // The last contributor to finish increments the epoch again, signaling completion
-                if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
+                // The last contributor to finish steps the epoch, signaling completion, as its only
+                // writer: the next claimer waits for this even epoch before it writes one
+                if (before_decrement == 1)
+                    epoch_.store(static_cast<epoch_index_t>(new_epoch + 1), std::memory_order_release);
             }
             last_epoch = new_epoch;
         }

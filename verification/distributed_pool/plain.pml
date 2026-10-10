@@ -21,7 +21,6 @@
 #define thread_count 4
 #define location_count 7
 #define history_depth 4
-#define tally_under_lock false
 #define remote_lags false
 #include "protocol.pml"
 

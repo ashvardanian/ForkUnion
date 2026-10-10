@@ -143,11 +143,11 @@ extern "C" {
 ///
 /// # Generation Tokens
 ///
-/// Every dispatch is identified by an always-odd `usize` generation token. The safe `for_threads`
-/// API wraps it inside a [`BroadcastJoin`] guard: on `Exclusive` pools the work starts at
-/// construction and can be polled with `is_complete`; on `Inclusive` pools it runs at
-/// `join`/`Drop`, where the calling thread contributes its own slice. Raw token-level access is
-/// available through the `unsafe_for_threads`/`unsafe_join` pair.
+/// Every dispatch is identified by a `usize` generation token. The safe `for_threads` API wraps it
+/// inside a [`BroadcastJoin`] guard: the workers start at construction, `join`/`Drop` waits for
+/// them, and on `Inclusive` pools first runs the calling thread's own slice, so only `Exclusive`
+/// pools can be polled with `is_complete` before it. Raw token-level access is available through
+/// the `unsafe_for_threads`/`unsafe_join` pair.
 pub struct ThreadPool {
     inner: *mut c_void,
 }
@@ -476,11 +476,8 @@ impl ThreadPool {
 
     /// Executes a function on each thread of the pool, returning a [`BroadcastJoin`] guard.
     ///
-    /// The guard's lifecycle is keyed on the pool's exclusivity:
-    /// - `CallerExclusivity::Exclusive`: the work is dispatched immediately at construction; the
-    ///   caller can overlap its own work, poll `is_complete`, then `join` or drop to wait.
-    /// - `CallerExclusivity::Inclusive`: the dispatch is deferred to `join` or to dropping the
-    ///   guard, where the calling thread contributes its own slice - a deferred blocking call.
+    /// The workers start right away, and `join`, or dropping the guard, waits for them; on
+    /// `CallerExclusivity::Inclusive` pools it first runs the calling thread's own slice.
     ///
     /// # Arguments
     ///
@@ -891,12 +888,10 @@ impl Drop for Fabric {
 
 /// A synchronization guard that waits for all threads to finish the broadcasted closure.
 ///
-/// The lifecycle is keyed on the pool's exclusivity:
-/// - On `CallerExclusivity::Exclusive` pools the closure is dispatched at __construction__:
-///   the workers start immediately, the caller can overlap its own work, poll
-///   `is_complete`, and `join`, or `Drop`, waits for completion.
-/// - On `CallerExclusivity::Inclusive` pools the dispatch is deferred to __join__ (or
-///   `Drop`), where the calling thread contributes its own slice of the work.
+/// The closure is dispatched at __construction__, so the workers start immediately and the caller
+/// can overlap its own work. `join`, or `Drop`, waits for completion, and on
+/// `CallerExclusivity::Inclusive` pools first runs the calling thread's own slice, so only
+/// `CallerExclusivity::Exclusive` pools may poll `is_complete` before it.
 ///
 /// The closure is borrowed rather than owned, so its address stays stable while worker threads hold
 /// a pointer to it, and the guard itself remains freely movable.
@@ -905,24 +900,8 @@ where
     F: Fn(usize, usize) + Sync,
 {
     pool: &'pool mut ThreadPool,
-    function: &'fork F,
-    state: BroadcastState,
-}
-
-/// Where a broadcast stands in its dispatch-then-join lifecycle; tokens are always odd.
-enum BroadcastState {
-    Pending,
-    Dispatched(usize),
-    Joined(usize),
-}
-
-impl BroadcastState {
-    fn generation(&self) -> Option<usize> {
-        match *self {
-            Self::Pending => None,
-            Self::Dispatched(generation) | Self::Joined(generation) => Some(generation),
-        }
-    }
+    function: PhantomData<&'fork F>,
+    generation: usize,
 }
 
 impl<'pool, 'fork, F> BroadcastJoin<'pool, 'fork, F>
@@ -931,24 +910,6 @@ where
 {
     /// Create a new BroadcastJoin, for internal use by ThreadPool
     pub(crate) fn new(pool: &'pool mut ThreadPool, function: &'fork F) -> Self {
-        let mut operation = Self {
-            pool,
-            function,
-            state: BroadcastState::Pending,
-        };
-        // ? A pool that cannot answer is not exclusive, so the dispatch simply defers to `join`.
-        if operation.pool.caller_exclusivity() == Ok(CallerExclusivity::Exclusive) {
-            operation.dispatch();
-        }
-        operation
-    }
-
-    /// Dispatches if it has not already, and yields the generation token either way.
-    fn dispatch(&mut self) -> usize {
-        if let Some(generation) = self.state.generation() {
-            return generation;
-        }
-
         extern "C" fn trampoline<F>(context: *mut c_void, thread_index: usize, compute_domain_index: usize)
         where
             F: Fn(usize, usize) + Sync,
@@ -959,47 +920,38 @@ where
 
         let mut generation = 0usize;
         unsafe {
-            let context = self.function as *const F as *mut c_void;
-            // ? The guard's own construction already proved the pool spawned.
-            let _ = fu_pool_unsafe_for_threads(self.pool.inner, trampoline::<F>, context, &mut generation);
+            let context = function as *const F as *mut c_void;
+            // ? The `&mut` borrow admits no other dispatch here, so the core never refuses this one
+            let _ = fu_pool_unsafe_for_threads(pool.inner, trampoline::<F>, context, &mut generation);
         }
-        self.state = BroadcastState::Dispatched(generation);
-        generation
+        Self {
+            pool,
+            function: PhantomData,
+            generation,
+        }
     }
 
-    /// The generation token of this broadcast; always odd once dispatched.
-    pub fn generation(&self) -> Option<usize> {
-        self.state.generation()
+    /// The generation token of this broadcast.
+    pub fn generation(&self) -> usize {
+        self.generation
     }
 
-    /// True once the dispatched generation has fully completed on all threads.
+    /// True once the generation has fully completed on all threads.
     ///
     /// A `true` result also guarantees visibility of every contributor's writes. On `Inclusive`
     /// pools this can only turn `true` once `join` contributes the calling thread's slice, so the
     /// poll-then-join pattern is reserved for `Exclusive` pools.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        match self.state {
-            BroadcastState::Pending => false,
-            BroadcastState::Dispatched(generation) => {
-                let mut complete: c_int = 0;
-                unsafe { fu_pool_is_complete(self.pool.inner, generation, &mut complete) };
-                complete != 0
-            }
-            BroadcastState::Joined(_) => true,
-        }
+        let mut complete: c_int = 0;
+        unsafe { fu_pool_is_complete(self.pool.inner, self.generation, &mut complete) };
+        complete != 0
     }
 
-    /// Wait for all threads to complete their work.
-    /// On `Inclusive` pools this dispatches the work first and contributes the caller's slice.
-    /// Idempotent - subsequent calls are no-ops.
+    /// Waits for every thread, running the caller's own slice first on `Inclusive` pools.
+    /// Idempotent: the core returns at once for a generation already joined.
     pub fn join(&mut self) {
-        let generation = self.dispatch();
-        if matches!(self.state, BroadcastState::Joined(_)) {
-            return;
-        }
-        unsafe { fu_pool_unsafe_join(self.pool.inner, generation) };
-        self.state = BroadcastState::Joined(generation);
+        unsafe { fu_pool_unsafe_join(self.pool.inner, self.generation) };
     }
 }
 
@@ -1695,7 +1647,6 @@ mod tests {
             pool.unsafe_for_threads(trampoline, &counter as *const AtomicUsize as *mut c_void)
                 .unwrap()
         };
-        assert_eq!(generation & 1, 1, "Generation tokens are always odd");
 
         // Join blocks on the workers; query completion only after.
         unsafe { pool.unsafe_join(generation) };

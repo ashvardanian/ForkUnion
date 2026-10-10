@@ -1,7 +1,7 @@
 """Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
 
 ForkUnion is a minimalistic thread pool for fork-join parallelism, avoiding dynamic memory
-allocations, exceptions, system calls, and heavy compare-and-swap instructions on the hot path.
+allocations, exceptions, system calls, and compare-and-swap loops on the hot path.
 Unlike `max.algorithm.parallelize`, which takes every hardware thread, the pool's width is an
 argument, which is what makes it usable on a machine you are sharing.
 

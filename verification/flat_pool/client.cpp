@@ -47,7 +47,7 @@ void contribute(std::size_t thread_index, std::size_t generation) noexcept {
     results[thread_index] = generation;
     std::size_t const before_decrement = threads_to_sync.fetch_sub(1, knobs_.decrement_order);
     verify(before_decrement > 0);
-    if (before_decrement == 1) epoch.fetch_add(1, std::memory_order_release);
+    if (before_decrement == 1) epoch.store(generation + 1, std::memory_order_release); // ? The only writer now
 }
 
 /** A worker: waits for the dispatch with acquire, then contributes the slice named by @p slot. */
@@ -68,11 +68,16 @@ int dispatch_and_join() noexcept {
     thread_t const workers[2] = {spawn(work<knobs_>, const_cast<std::size_t *>(&slots[1])),
                                  spawn(work<knobs_>, const_cast<std::size_t *>(&slots[2]))};
 
-    // The fork, the countdown reset, the release step of the epoch: `flat_pool::unsafe_for_threads`
-    verify(threads_to_sync.load(std::memory_order_acquire) == 0);
+    // The claim from zero, the fork, the wait for an even epoch, the release store of the next:
+    // `flat_pool::unsafe_for_threads`
+    std::size_t idle = 0;
+    verify(threads_to_sync.compare_exchange_strong(idle, contributors_k, std::memory_order_acquire,
+                                                   std::memory_order_relaxed));
     fork_state = 1;
-    threads_to_sync.store(contributors_k, std::memory_order_relaxed);
-    std::size_t const generation = epoch.fetch_add(1, std::memory_order_release) + 1;
+    std::size_t previous_epoch;
+    while ((previous_epoch = epoch.load(std::memory_order_acquire)) & 1u) {}
+    std::size_t const generation = previous_epoch + 1;
+    epoch.store(generation, std::memory_order_release);
 
     // The caller's slice, then the wait for the completion step: `flat_pool::unsafe_join`
     if (epoch.load(std::memory_order_acquire) == generation) contribute<knobs_>(0, generation);

@@ -5,7 +5,7 @@
 __ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, Zig, and Mojo — built for the tightest `#pragma omp parallel for`-style loops, not task queues. 🍴
 It already powers NUMA-sharded vector search with [USearch](https://github.com/unum-cloud/USearch), LLM KV-cache and attention kernels with [NumKong](https://github.com/ashvardanian/NumKong), and unbalanced bioinformatics workloads — thousands of combinatorial tasks per core — with [StringZilla](https://github.com/ashvardanian/StringZilla).
 
-On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks-and-mutexes), __zero__ [CAS operations](#atomics-and-cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
+On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks-and-mutexes), __zero__ [CAS loops](#atomics-and-cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
 So dispatch latency stays flat into the hundreds of cores, precisely where task-queue runtimes like Rayon collapse and even OpenMP begins to slip.
 It is also unique in parking idle workers on a __hardware address monitor__ — x86 `UMONITOR`/`UMWAIT`, Arm `WFET`, RISC-V `Zawrs` — so a worker light-sleeps on the exact cache-line it is waiting for and the silicon wakes it the instant another core writes there, with no hot spinning and no kernel futex.
 That bet compounds as sockets multiply: Intel Xeon Platinum and NVIDIA Vera pack up to 8 sockets per node, where shared CAS thrashes the interconnect and private `fetch_add` cursors keep synchronization off it.
@@ -23,6 +23,7 @@ It also compiles to __WebAssembly__, where the pools are real in the two shapes 
 
 __`ForkUnion`__ is dead-simple to use!
 There is no nested parallelism, exception handling, or "future promises"; they are banned.
+A pool runs one dispatch at a time and refuses any other with the `contended` status, including one from inside its own callbacks.
 The thread pool itself has a few core operations:
 
 - `spawn` to initialize worker threads, and
@@ -42,10 +43,10 @@ For additional flow control and tuning, following helpers are available:
 - `unsafe_join` - to block until the completion of a broadcasted generation,
 - `is_complete` - to poll a generation token for completion without blocking.
 
-Every dispatch is identified by an always-odd `generation` token.
+Every dispatch is identified by a `generation` token.
 On `caller_exclusive_k` pools you can dispatch, overlap your own work, poll `is_complete`, and join - the classic poll-then-join pattern.
 On `caller_inclusive_k` pools the calling thread owes one slice of the work, which only runs inside `unsafe_join`, so completion can't be reached by polling alone.
-The same rule shapes the RAII guard returned by `for_threads` and the `for_n` family: on exclusive pools the work starts at the guard's construction, while on inclusive pools it runs at `join` or destruction.
+The same rule shapes the RAII guard returned by `for_threads` and the `for_n` family: the workers start at the guard's construction on every pool, and on inclusive pools the caller's own slice runs at `join` or destruction.
 
 On Linux, in C++, given the maturity and flexibility of the HPC ecosystem, it provides [NUMA extensions](#non-uniform-memory-access-numa).
 That includes the `colocated_pool` analog of the `flat_pool` and the `linux_numa_allocator` for allocating memory in a specific memory domain.
@@ -642,6 +643,19 @@ Most importantly, "Compare and Swap" (CAS) is a costly operation and should be a
 On x86, for example, the `LOCK ADD` [can easily take 50 CPU cycles](https://travisdowns.github.io/blog/2020/07/06/concurrency-costs), being 50× slower than a regular `ADD` instruction, but still easily 5-10× faster than a `LOCK CMPXCHG` instruction.
 Once contention rises, the gap naturally widens and is further amplified by the increased "failure" rate of the CAS operation, particularly when the value being compared has already changed.
 That's why, for the "dynamic" mode, we resort to using an additional atomic variable as opposed to more typical CAS-based implementations.
+A dispatch does take one compare-and-swap, to claim the pool, and never retries it: a claim that loses is refused rather than repeated.
+
+### Atomic References
+
+`forkunion/atomics.hpp` replaces `std::atomic_ref` with references that spell each operation as the one instruction a CPU has for it, picked by capability bit at runtime rather than by the translation unit's `-march`.
+Besides the standard operations, every reference offers the verbs the standard lacks:
+
+- `fetch_add_if_at_most` and `fetch_sub_if_at_least`: one `cmpccxadd` on x86, a compare-exchange loop elsewhere;
+- `fetch_max` and `fetch_min`: one `ldsmax`, `ldumax` or `amomax` on Arm and RISC-V;
+- no-return `add`, `sub`, `set_bits`, `clear_bits` and `flip_bits`: `stadd` and kin on Arm, `amoadd` into `x0` on RISC-V, and RAO-INT `aadd` and kin for relaxed orders on x86 parts that implement it.
+
+On an M5 Pro the Arm references run 5x faster than a baseline build's exclusive loops uncontended, and 3-4x faster with 18 threads on one word.
+A no-return add may complete away from the core, so a relaxed one carries nothing to a later release: publish through it with `release`, as the `far` memory model in [`verification/`](verification/) checks.
 
 ### Alignment & False Sharing
 
@@ -795,7 +809,7 @@ search_result_t search(std::span<float, dimensions> query) {
 
 In a dream world, we would call `distributed_pool.for_n`, but there is no clean way to make the scheduling processes aware of the data distribution in an arbitrary application, so that's left to the user.
 The `for_slices` helper pairs each run with a `fu::thread_in_domain_t`, so a callback picks the right shard of data from its compute domain while scheduling stays inside the distributed pool.
-For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns an always-odd generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
+For more flexibility around building higher-level low-latency systems, there are unsafe APIs expecting you to manually "join" the broadcasted calls: `unsafe_for_threads` returns a generation token, `is_complete` polls it without blocking, and `unsafe_join` blocks until that generation completes.
 
 The manual two-vector sharding above is what the __symmetric allocators__ automate: `symmetric_memory_allocator_t` - `fu_allocate_symmetric` in C - maps one virtual range striped a slice per memory domain, and Rust, Zig, and Mojo wrap it as `ShardedArray<T>`, one shard per domain, and `ReplicatedArray<T>`, a full copy per domain for read-mostly data.
 To place and coordinate pools by hand, `spawn_on` - `fu_pool_spawn_on` in C - pins a pool to a single compute domain, while `locate_thread_in` and `threads_count_in` map a global thread index to its domain and count the workers living there.
@@ -1189,7 +1203,7 @@ If ForkUnion helps your research or product, please cite it:
 ```bibtex
 @software{Vardanian_ForkUnion,
   author = {Vardanian, Ash},
-  title = {{ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS, or false-sharing on the hot path for C, C++, Rust, Zig, and Mojo}},
+  title = {{ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS loops, or false-sharing on the hot path for C, C++, Rust, Zig, and Mojo}},
   doi = {10.5281/zenodo.21472185},
   url = {https://github.com/ashvardanian/ForkUnion},
   license = {Apache-2.0}

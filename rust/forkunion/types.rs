@@ -40,6 +40,8 @@ pub enum Status {
     PermissionDenied = -10,
     /// This build or this machine has no such facility.
     Unsupported = -11,
+    /// The pool is running another dispatch: another caller's, or the one this call runs inside.
+    Contended = -14,
     /// A status this binding has no name for.
     Unrecognized = i32::MIN,
 }
@@ -59,6 +61,7 @@ impl Status {
             -9 => Self::TopologyUnavailable,
             -10 => Self::PermissionDenied,
             -11 => Self::Unsupported,
+            -14 => Self::Contended,
             _ => Self::Unrecognized,
         }
     }
@@ -77,6 +80,7 @@ impl Status {
             Self::TopologyUnavailable => "the machine could not be described",
             Self::PermissionDenied => "a privileged operation was declined",
             Self::Unsupported => "this build has no such facility",
+            Self::Contended => "the pool is running another dispatch",
             Self::Unrecognized => "an unrecognized status",
         }
     }
@@ -692,17 +696,8 @@ mod tests {
             counter_ref.fetch_add(1, Ordering::Relaxed);
         };
         let mut operation = pool.for_threads(&broadcast_function);
-        assert!(
-            operation.generation().is_some(),
-            "Exclusive pools dispatch at construction"
-        );
-        assert_eq!(
-            operation.generation().unwrap() & 1,
-            1,
-            "Generation tokens are always odd"
-        );
+        while !operation.is_complete() {} // ? Wait without joining
 
-        // Join blocks on the workers; the completion query is only meaningful after it.
         operation.join();
         assert!(operation.is_complete(), "join must leave the operation complete");
         assert_eq!(counter.load(Ordering::Relaxed), 4);
@@ -712,8 +707,8 @@ mod tests {
     #[test]
     fn guard_lifecycle_inclusive() {
         let topology = Topology::new().unwrap();
-        // On inclusive pools the dispatch is deferred to `join`, where the calling thread
-        // contributes its own slice.
+        // On inclusive pools the workers start at construction too, and the calling thread
+        // contributes its own slice at `join`.
         let mut pool = spawn(&topology, 4);
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_ref = Arc::clone(&counter);
@@ -722,12 +717,8 @@ mod tests {
             counter_ref.fetch_add(1, Ordering::Relaxed);
         };
         let mut operation = pool.for_threads(&broadcast_function);
-        assert!(
-            operation.generation().is_none(),
-            "Inclusive pools defer dispatch to join"
-        );
-        assert!(!operation.is_complete());
-        assert_eq!(counter.load(Ordering::Relaxed), 0, "No work must start before join");
+        while counter.load(Ordering::Relaxed) != 3 {} // ? Every worker, no join
+        assert!(!operation.is_complete(), "The caller's own slice waits for join");
 
         operation.join();
         assert!(operation.is_complete());

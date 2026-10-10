@@ -828,7 +828,7 @@ struct compute_domain_t {
 
     /**
      *  @brief Apple's absolute class for these cores, from `hw.perflevelN.name`; -1 when unnamed.
-     *  @sa colocated_pool's @c _qos_for_domain, for why the relative rank above cannot replace it.
+     *  @sa colocated_pool's @c qos_for_domain_, for why the relative rank above cannot replace it.
      *
      *  Spawn-path plumbing, not a second caller-facing rank: like @c first_core_id, it is the raw
      *  material the platform's placement call consumes - an affinity mask there, a QoS class here.

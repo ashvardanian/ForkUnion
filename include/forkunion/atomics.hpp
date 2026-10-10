@@ -15,11 +15,12 @@
  *  - @c x86_cmpccxadd_atomic_ref: the conditional adds as one @c cmpccxadd; every other operation
  *    is the @c lock-prefixed instruction the compiler emits anyway.
  *  - @c x86_raoint_atomic_ref: the relaxed no-return forms as RAO-INT @c aadd, @c aand, @c aor,
- *    executed at the shared cache rather than pulling the line.
+ *    which Intel specifies to execute at the shared cache rather than pull the line.
  *
  *  @c arm64_lse_atomic_ref swaps in Armv8.1 @c swp, @c cas, @c ldadd, @c ldclr, @c ldset, @c ldeor,
- *  @c ldsmax & kin - one instruction per read-modify-write, the no-return `st*` forms posted
- *  without a round trip; @c ldar and @c stlr for ordered loads & stores. Measured on an M5 Pro
+ *  @c ldsmax & kin - one instruction per read-modify-write, and the no-return `st*` forms, which a
+ *  core may perform near like @c ldadd or far at the interconnect, as its design and firmware pick;
+ *  @c ldar and @c stlr for ordered loads & stores. Measured on an M5 Pro, where @c stadd runs near,
  *  against the exclusive loops of a baseline build: 5x uncontended, 3-4x with 18 threads on a word.
  *
  *  - @c arm64_rcpc_atomic_ref: the above with Armv8.3 @c ldapr for acquiring loads - RCpc, which
@@ -629,9 +630,9 @@ inline void x86_axor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
 }
 
 /**
- *  @brief The above plus RAO-INT for the relaxed no-return forms: @c aadd, @c aand, @c aor, @c axor
- *      execute at the shared cache. Anything ordered keeps the @c lock-prefixed instruction,
- *      already a full fence. `CPUID.(7,1):EAX[3]` says so at runtime.
+ *  @brief The above plus RAO-INT for the relaxed no-return forms, specified to execute at the
+ *      shared cache: @c aadd, @c aand, @c aor, @c axor. An ordered one keeps the @c lock-prefixed
+ *      instruction, already a full fence. `CPUID.(7,1):EAX[3]` says so at runtime.
  *  @sa capability_x86_raoint_k - the bit admitting it, on top of @c capability_x86_cmpccxadd_k.
  */
 template <typename value_type_>

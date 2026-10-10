@@ -1047,7 +1047,7 @@ check_include_groups() {
                 else rank = 4
                 if (quoted && rank != 5 && rank != 6) {
                     directory = file; sub(/[^\/]*$/, "", directory); found = ""
-                    # `dir/../` collapses, so a model one directory down finds the forwarder beside its parent
+                    # `dir/../` collapses, so a model one directory down finds a header beside its parent
                     beside = directory header
                     while (sub(/[^\/.][^\/]*\/\.\.\//, "", beside)) {}
                     search = "git ls-files \":(glob)**/" header "\""

@@ -435,7 +435,6 @@ def test_generation_polling_on_an_exclusive_pool() raises:
     var log = List[Int64](length=4, fill=0)
     var visits = _visits_over(log)
     with pool.unsafe_for_threads[_record_thread](visits) as dispatch:
-        assert_true(dispatch.generation % 2 == 1, "a real generation token is odd")
         while not dispatch.is_complete():
             pass
     for index in range(4):

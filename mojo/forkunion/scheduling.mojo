@@ -484,8 +484,8 @@ struct Pool:
     ]:
         """Dispatches on every worker without blocking, returning a guard that joins on exit.
 
-        Use it as a context manager. On an exclusive pool the work starts here and the generation
-        can be polled; on an inclusive pool the caller owes a slice, so the work runs at the join.
+        Use it as a context manager. The workers start here; on an inclusive pool the caller owes
+        its own slice, which runs at the join, so only an exclusive pool can be polled before it.
 
         Parameters:
             Scratch: The scratch type, inferred from the argument.

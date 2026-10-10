@@ -738,6 +738,9 @@ enum class [[nodiscard]] status_t : int {
 
     /** Binding-only: the loaded core is missing a symbol. Never returned here. */
     symbol_missing_k = fu_symbol_missing_k,
+
+    /** The pool is running another dispatch: another caller's, or the one this call runs inside. */
+    contended_k = fu_contended_k,
 };
 
 /** Whether @p status reports success. */
@@ -767,6 +770,7 @@ constexpr char const *status_to_string(status_t status) noexcept {
     case status_t::unsupported_k: return "this build has no such facility";
     case status_t::library_missing_k: return "the core is not on the loader path";
     case status_t::symbol_missing_k: return "the loaded core is missing a symbol";
+    case status_t::contended_k: return "the pool is running another dispatch";
     }
     return "an unrecognized status";
 }
@@ -2286,8 +2290,21 @@ class invoke_for_n_dynamic {
 
   public:
     invoke_for_n_dynamic(pool_type_ &pool, index_type_ n, index_type_ threads, fork_type_ &&fork) noexcept
-        : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n), threads_(threads) {
-        reset_slices_();
+        : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n), threads_(threads) {}
+
+    /** Rewinds each thread's cursor to its slice, once this dispatch holds the pool. */
+    void rewind() noexcept {
+        typename pool_type_::cache_hints_t cache_hints;
+        index_type_ const n_dynamic = dynamic_count();
+        indexed_split<index_type_> const split(n_dynamic, threads_);
+        for (index_type_ thread = 0; thread < threads_; ++thread) {
+            tasks_range<index_type_> const range = split[thread];
+            dynamic_claim<index_type_> &claim = pool_.unsafe_dynamic_claim_ref(thread);
+            claim.end = static_cast<index_type_>(range.first + range.count);
+            // ? Relaxed, since the dispatch's release on the epoch carries it
+            claim.next.store(range.first, std::memory_order_relaxed);
+            cache_hints(&claim, demote_line_k); // ? Publish away, so each owner's first claim skips this core
+        }
     }
 
     void operator()(index_type_ const thread) noexcept {
@@ -2306,40 +2323,40 @@ class invoke_for_n_dynamic {
         for (auto victim = victims.begin(); victim != std::default_sentinel; ++victim)
             drain_claim(pool_, *victim, at, fork_);
     }
-
-  private:
-    /** Publishes one contiguous slice per thread. Runs on the caller, before the broadcast. */
-    void reset_slices_() noexcept {
-        typename pool_type_::cache_hints_t cache_hints;
-        index_type_ const n_dynamic = dynamic_count();
-        indexed_split<index_type_> const split(n_dynamic, threads_);
-        for (index_type_ thread = 0; thread < threads_; ++thread) {
-            tasks_range<index_type_> const range = split[thread];
-            dynamic_claim<index_type_> &claim = pool_.unsafe_dynamic_claim_ref(thread);
-            claim.end = static_cast<index_type_>(range.first + range.count);
-            claim.next.store(range.first, std::memory_order_release);
-            cache_hints(&claim, demote_line_k); // ? Publish away, so each owner's first claim skips this core
-        }
-    }
 };
+
+/**
+ *  @brief Whether @p fork_type_ is one of our @c for_n_dynamic invokers, whose cursors the pool
+ *      rewinds right after admitting the dispatch.
+ *
+ *  The cursors live in the pool, shared by every dispatch, so a refused one must not touch them.
+ *  Matched by type rather than by a member name, so no user fork is ever asked to rewind.
+ */
+template <typename fork_type_>
+inline constexpr bool is_dynamic_invoker = false;
+
+template <typename pool_type_, typename fork_type_, typename index_type_>
+inline constexpr bool is_dynamic_invoker<invoke_for_n_dynamic<pool_type_, fork_type_, index_type_>> = true;
 
 /**
  *  @brief A synchronization point that waits for all threads to finish the last fork.
  *  @note You don't have to explicitly call any of the APIs, it's like @c std::jthread ;)
  *
- *  The lifecycle is keyed on the pool's exclusivity:
- *  - On @c caller_exclusive_k pools the fork is dispatched at @b construction: the workers start
- *    immediately, the caller may overlap its own work, poll @c is_complete, and the @c join call,
- *    or the destructor, waits for completion.
- *  - On @c caller_inclusive_k pools the dispatch is deferred to @b join, or the destructor, where
- *    the calling thread contributes its own slice - a deferred blocking call.
+ *  The fork is dispatched at @b construction, so the workers start immediately and the caller may
+ *  overlap its own work. The @c join call, or the destructor, waits for completion, and on
+ *  @c caller_inclusive_k pools first runs the calling thread's own slice, so only
+ *  @c caller_exclusive_k pools may poll @c is_complete before it.
+ *
+ *  The pool admits one dispatch at a time, so it refuses this one while another runs: another
+ *  caller's, or the one whose fork this broadcast is created in. A refused broadcast runs nothing,
+ *  joins nothing, keeps @c generation at zero, and is never retried, not even by the destructor.
  *
  *  You don't have to explicitly handle the return value and wait on it.
  *  According to the C++ standard, the destructor of the @c broadcast_join will be called in the end
  *  of the @c for_threads-calling expression.
  *
- *  The object is immovable: on caller-exclusive pools the pool holds a pointer to the @c fork_
- *  member for the lifetime of the broadcast, so the object must never relocate.
+ *  The object is immovable: the pool holds a pointer to the @c fork_ member for the lifetime of the
+ *  broadcast, so the object must never relocate.
  *  Guaranteed C++17 copy elision still allows returning it by value from @c for_threads.
  */
 template <typename pool_type_, typename fork_type_>
@@ -2356,26 +2373,24 @@ struct broadcast_join {
     /** The wrapped fork; held to extend the lifetime of the lambda object. */
     fork_t fork_;
 
-    /** Generation token of this broadcast; real tokens are odd, zero means "not yet dispatched". */
-    generation_t generation_ {0};
+    /** Generation token of this broadcast: odd once dispatched, zero once refused. */
+    generation_t generation_;
 
   public:
-    broadcast_join(pool_t &pool_ref, fork_t &&f) noexcept : pool_ref_(pool_ref), fork_(std::forward<fork_t>(f)) {
-        if (pool_ref_.caller_exclusivity() == caller_exclusive_k) generation_ = pool_ref_.unsafe_for_threads(fork_);
-    }
+    broadcast_join(pool_t &pool_ref, fork_t &&f) noexcept
+        : pool_ref_(pool_ref), fork_(std::forward<fork_t>(f)), generation_(pool_ref_.unsafe_for_threads(fork_)) {}
 
-    /** The wrapped fork; on caller-exclusive pools only read it after @c join. */
+    /** The wrapped fork; only read it after @c join. */
     fork_t &fork_ref() noexcept { return fork_; }
 
-    /** The generation token of this broadcast; always odd once dispatched, zero before. */
+    /** The generation token of this broadcast; odd once dispatched, zero once refused. */
     generation_t generation() const noexcept { return generation_; }
 
     /** Non-blocking check; can only turn @c true before @c join on caller-exclusive pools. */
     bool is_complete() const noexcept { return generation_ != 0 && pool_ref_.is_complete(generation_); }
 
     void join() noexcept {
-        if (generation_ == 0) generation_ = pool_ref_.unsafe_for_threads(fork_);
-        pool_ref_.unsafe_join(generation_); // ? Idempotent for already-joined generations
+        if (generation_ != 0) pool_ref_.unsafe_join(generation_); // ? Idempotent for already-joined generations
     }
 
     ~broadcast_join() noexcept { join(); }

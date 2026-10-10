@@ -497,9 +497,7 @@ static void test_generation_polling() noexcept {
 
     // Drive one pool through the raw token API and the other through the RAII guard
     auto generation_a = pool_a.unsafe_for_threads(work_a);
-    auto broadcast_b = pool_b.for_threads(work_b); // ? Dispatches at construction: exclusive pool
-    expect((generation_a & 1u) != 0);              // ? Tokens are always odd
-    expect((broadcast_b.generation() & 1u) != 0);
+    auto broadcast_b = pool_b.for_threads(work_b); // ? Dispatches at construction
 
     // Poll both pools until complete
     bool a_done = false, b_done = false;
@@ -515,7 +513,7 @@ static void test_generation_polling() noexcept {
     for (std::size_t i = 0; i < pool_b.threads_count(); ++i) expect(visited_b[i]);
 }
 
-/** Verifies guard timing: dispatch at construction on exclusive pools, at join on inclusive. */
+/** Verifies guard timing: dispatch at construction, and the inclusive caller's slice at join. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_guard_lifecycle() noexcept {
 
@@ -529,14 +527,12 @@ static void test_guard_lifecycle() noexcept {
         std::atomic<std::size_t> visited_count {0};
         auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
         auto broadcast = pool.for_threads(count_visits);
-        expect(broadcast.generation() != 0);        // ? Must be dispatched at construction
-        expect((broadcast.generation() & 1u) != 0); // ? Tokens are always odd
-        while (!broadcast.is_complete()) {}         // ? Wait without joining
+        while (!broadcast.is_complete()) {} // ? Wait without joining
         expect_eq(visited_count.load(std::memory_order_relaxed), pool.threads_count());
         broadcast.join();
     }
 
-    // On inclusive pools no work may start before `join`:
+    // On inclusive pools the workers start at construction too, and the caller's slice at `join`:
     {
         auto pool = maker.construct();
         expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_inclusive_k)));
@@ -544,9 +540,8 @@ static void test_guard_lifecycle() noexcept {
         std::atomic<std::size_t> visited_count {0};
         auto count_visits = [&](std::size_t) noexcept { visited_count.fetch_add(1, std::memory_order_relaxed); };
         auto broadcast = pool.for_threads(count_visits);
-        expect(broadcast.generation() == 0); // ? Must be deferred to join
+        while (visited_count.load(std::memory_order_relaxed) != pool.threads_count() - 1) {} // ? Every worker, no join
         expect(!broadcast.is_complete());
-        expect(visited_count.load(std::memory_order_relaxed) == 0);
         broadcast.join();
         expect(broadcast.is_complete());
         expect_eq(visited_count.load(std::memory_order_relaxed), pool.threads_count());
@@ -583,7 +578,6 @@ static void test_generation_inclusive() noexcept {
     };
 
     auto generation = pool.unsafe_for_threads(mark_visited);
-    expect((generation & 1u) != 0);        // ? Tokens are always odd
     expect(!pool.is_complete(generation)); // ? Impossible before the caller's slice
     pool.unsafe_join(generation);          // ? Runs the caller's slice, then waits
     expect(pool.is_complete(generation));
@@ -600,7 +594,6 @@ static void test_generation_single_thread() noexcept {
     auto mark_visited = [&](std::size_t) noexcept { visited.store(true, std::memory_order_relaxed); };
 
     auto generation = pool.unsafe_for_threads(mark_visited);
-    expect((generation & 1u) != 0);
     expect(!pool.is_complete(generation)); // ? Nothing can complete before the caller's slice
     pool.unsafe_join(generation);          // ? The caller both runs and signals completion
     expect(pool.is_complete(generation));
@@ -616,7 +609,6 @@ static void test_generation_single_thread_exclusive() noexcept {
     auto mark_visited = [&](std::size_t) noexcept { visited.store(true, std::memory_order_relaxed); };
 
     auto generation = pool.unsafe_for_threads(mark_visited);
-    expect((generation & 1u) != 0);
     while (!pool.is_complete(generation)) {} // ? The lone worker finishes alone
     pool.unsafe_join(generation);
     expect(visited.load(std::memory_order_relaxed));
@@ -641,7 +633,6 @@ static void test_generation_stress() noexcept {
     constexpr std::size_t iterations_k = 10000;
     for (std::size_t iteration = 0; iteration < iterations_k; ++iteration) {
         auto generation = pool.unsafe_for_threads(count_up);
-        expect((generation & 1u) != 0); // ? The old dispatch/completion race made these even
         (void)polled_pool.is_complete(polled_generation);
         pool.unsafe_join(generation);
         expect(pool.is_complete(generation));
@@ -1000,6 +991,43 @@ static void test_for_n_dynamic_stealing() noexcept {
     fu::indexed_split<std::size_t> const split(dynamic_tasks, threads);
     std::size_t const own_slice = split[0].count;
     expect(thread_0_runs.load() < own_slice); // ! Nobody stole, so this test proves nothing
+}
+
+/**
+ *  @brief A @c for_n_dynamic the pool refuses leaves the running dispatch's cursors alone.
+ *
+ *  The cursors live in the pool, so a refused call that rewound them would hand the running
+ *  dispatch's tasks out again. Both refusals are checked: a call nested in a task of the running
+ *  dispatch, and a second call while the caller still holds the first unjoined.
+ */
+template <typename make_pool_type_ = make_pool_t>
+static void test_for_n_dynamic_refusals() noexcept {
+
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_inclusive_k)));
+
+    constexpr std::size_t tasks_k = 1024;
+    std::vector<std::atomic<unsigned>> executions(tasks_k);
+    for (auto &e : executions) e.store(0, std::memory_order_relaxed);
+    auto run_once = [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
+        executions[task].fetch_add(1, std::memory_order_relaxed);
+    };
+
+    std::atomic<std::size_t> admitted {0};
+    pool.for_n_dynamic(tasks_k, [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
+        run_once(task, at);
+        if (pool.for_n_dynamic(1, run_once).generation() != 0) admitted.fetch_add(1, std::memory_order_relaxed);
+    });
+    expect_eq(admitted.load(), 0u);                                                // ! Admitted inside itself
+    for (std::size_t i = 0; i < tasks_k; ++i) expect_eq(executions[i].load(), 1u); // ! A refusal rewound
+
+    for (auto &e : executions) e.store(0, std::memory_order_relaxed);
+    {
+        auto held = pool.for_n_dynamic(tasks_k, run_once);
+        expect(pool.for_n_dynamic(tasks_k, run_once).generation() == 0); // ! Admitted beside a held dispatch
+    }
+    for (std::size_t i = 0; i < tasks_k; ++i) expect_eq(executions[i].load(), 1u); // ! A refusal rewound
 }
 
 /**
@@ -1609,6 +1637,7 @@ int main(void) {
         {"`for_slices` slice scheduling", test_for_slices},                      //
         {"`for_n_dynamic` dynamic scheduling", test_for_n_dynamic},              //
         {"`for_n_dynamic` stalled thread stolen from", test_for_n_dynamic_stealing},
+        {"`for_n_dynamic` refusals leave the cursors", test_for_n_dynamic_refusals},
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads},      //
         {"`generation` stale token stays complete", test_stale_generation_completes}, //
         {"`sleep` and wake exactly-once", test_sleep_wake},                           //
@@ -1634,6 +1663,7 @@ int main(void) {
         {"UMA `for_slices` slice scheduling", test_for_slices<make_colocated_pool_t>},
         {"UMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_colocated_pool_t>},
         {"UMA `for_n_dynamic` stalled thread stolen from", test_for_n_dynamic_stealing<make_colocated_pool_t>},
+        {"UMA `for_n_dynamic` refusals leave the cursors", test_for_n_dynamic_refusals<make_colocated_pool_t>},
         {"UMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_colocated_pool_t>},
         {"UMA `generation` stale token stays complete", test_stale_generation_completes<make_colocated_pool_t>},
         {"UMA `sleep` and wake exactly-once", test_sleep_wake<make_colocated_pool_t>},
@@ -1657,6 +1687,7 @@ int main(void) {
         {"NUMA `for_slices` slice scheduling", test_for_slices<make_distributed_pool_t>},
         {"NUMA `for_n_dynamic` dynamic scheduling", test_for_n_dynamic<make_distributed_pool_t>},
         {"NUMA `for_n_dynamic` stalled thread stolen from", test_for_n_dynamic_stealing<make_distributed_pool_t>},
+        {"NUMA `for_n_dynamic` refusals leave the cursors", test_for_n_dynamic_refusals<make_distributed_pool_t>},
         {"NUMA `for_n_dynamic` exhaustive multi-domain",
          test_distributed_for_n_dynamic_exhaustive<make_distributed_pool_t>},
         {"NUMA `for_n_dynamic` oversubscribed threads", test_oversubscribed_threads<make_distributed_pool_t>},

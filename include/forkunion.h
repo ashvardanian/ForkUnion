@@ -166,6 +166,9 @@ typedef enum fu_status_t {
 
     /** Binding-only: the loaded core is missing a symbol. Never returned here. */
     fu_symbol_missing_k = -13,
+
+    /** The pool is running another dispatch: another caller's, or the one this call runs inside. */
+    fu_contended_k = -14,
 } fu_status_t;
 
 /**
@@ -1041,6 +1044,8 @@ fu_status_t fu_fabric_memory_levels_count(fu_fabric_t, size_t *levels_out);
  *  @param[in] pool Pool handle, must not be NULL and initialized.
  *  @param[in] callback Runs once per worker, must not be NULL.
  *  @param[in] context Shared context passed to every call, may be NULL.
+ *  @return @c fu_success_k once every call returned, @c fu_not_spawned_k for a pool with no
+ *      workers, or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *  @note Returns only after every worker completes; no extra synchronization is needed.
  *
  *  The callback receives @p context, its @c thread index in [0, threads_count), and the
@@ -1050,7 +1055,7 @@ fu_status_t fu_fabric_memory_levels_count(fu_fabric_t, size_t *levels_out);
  *  void hello(void *ctx, size_t thread, size_t compute_domain) {
  *      printf("Hello from thread %zu on compute_domain %zu\n", thread, compute_domain);
  *  }
- *  if (fu_pool_for_threads(pool, hello, NULL) != fu_success_k) return; // ! The pool was never spawned
+ *  if (fu_pool_for_threads(pool, hello, NULL) != fu_success_k) return; // ! Never spawned, or busy
  *  @endcode
  *
  *  @sa fu_pool_unsafe_for_threads for the non-blocking form.
@@ -1063,6 +1068,8 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
  *  @param[in] n Total tasks, may be 0 - a no-op.
  *  @param[in] callback Runs once per slice, must not be NULL if @p n > 0.
  *  @param[in] context Shared context, may be NULL.
+ *  @return @c fu_success_k once every slice ran, @c fu_not_spawned_k for a pool with no workers,
+ *      or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *
  *  One contiguous range per worker - ideal for @b vectorized or per-slice-setup work where
  *  sequential access matters, since each worker touches its data in order and only sets up once.
@@ -1074,7 +1081,7 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
  *      float *data = (float *)array;
  *      for (size_t i = first; i != first + count; ++i) data[i] = sqrtf(data[i]); // One sequential sweep
  *  }
- *  if (fu_pool_for_slices(pool, length, normalize, values) != fu_success_k) return; // ! Never spawned
+ *  if (fu_pool_for_slices(pool, length, normalize, values) != fu_success_k) return; // ! Never spawned, or busy
  *  @endcode
  *
  *  @sa fu_pool_for_n for per-index dispatch.
@@ -1087,6 +1094,8 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback
  *  @param[in] n Task count, may be 0 - a no-op.
  *  @param[in] callback Runs once per task, must not be NULL if @p n > 0.
  *  @param[in] context Shared context, may be NULL.
+ *  @return @c fu_success_k once every task ran, @c fu_not_spawned_k for a pool with no workers,
+ *      or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *
  *  Tasks split into equal @b contiguous chunks per worker, keeping coordination near zero - the
  *  right choice when tasks cost about the same, so a static split stays balanced. The callback
@@ -1097,7 +1106,7 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback
  *      int *data = (int *)array;
  *      data[i] = data[i] * 2; // Uniform O(1) work per index
  *  }
- *  if (fu_pool_for_n(pool, length, double_each, array) != fu_success_k) return; // ! Never spawned
+ *  if (fu_pool_for_n(pool, length, double_each, array) != fu_success_k) return; // ! Never spawned, or busy
  *  @endcode
  *
  *  @sa fu_pool_for_n_dynamic for uneven workloads, @c fu_pool_for_slices for range callbacks.
@@ -1110,6 +1119,8 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_l
  *  @param[in] n Task count, may be 0 - a no-op.
  *  @param[in] callback Runs once per task, must not be NULL if @p n > 0.
  *  @param[in] context Shared context, may be NULL.
+ *  @return @c fu_success_k once every task ran, @c fu_not_spawned_k for a pool with no workers,
+ *      or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *
  *  Each worker starts with one task, then claims more from a shared cursor as it finishes, so fast
  *  workers absorb the slack and one slow task never stalls the rest - the right choice when task
@@ -1120,7 +1131,7 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_l
  *  void variable_work(void *ctx, size_t task, size_t thread, size_t compute_domain) {
  *      complex_computation(task); // May take 1us or 1ms
  *  }
- *  if (fu_pool_for_n_dynamic(pool, count, variable_work, ctx) != fu_success_k) return; // ! Never spawned
+ *  if (fu_pool_for_n_dynamic(pool, count, variable_work, ctx) != fu_success_k) return; // ! Never spawned, or busy
  *  @endcode
  *
  *  @sa fu_pool_for_n for balanced workloads.
@@ -1132,7 +1143,7 @@ fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callba
 #pragma region Flexible API
 
 /**
- *  @brief Token identifying one dispatch on one pool; always an @b odd number.
+ *  @brief Token identifying one dispatch on one pool; an @b odd number, or zero once refused.
  *
  *  Every generation advances the pool's internal epoch by exactly two: once at dispatch and once
  *  when the last contributor finishes. Odd epochs are in-flight, even are idle.
@@ -1144,7 +1155,8 @@ typedef size_t fu_generation_t;
  *  @param[in] pool Pool handle, must not be NULL and initialized.
  *  @param[in] callback Runs on each thread, must not be NULL.
  *  @param[in] context Shared context, must stay valid until the join, may be NULL.
- *  @return A generation token to pass to @c fu_pool_unsafe_join.
+ *  @return @c fu_success_k with a token for @c fu_pool_unsafe_join, or @c fu_contended_k with
+ *      the zero token while the pool runs another dispatch, and then nothing ran.
  *  @note Returns immediately. Call no other pool operation until you join this generation.
  *
  *  On @b inclusive pools the caller's own slice runs inside @c fu_pool_unsafe_join, so the pool

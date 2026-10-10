@@ -238,7 +238,7 @@ struct colocated_pool {
 
     /**
      *  @brief The caller's affinity as it was before this pool narrowed it.
-     *  @sa _reset_affinity.
+     *  @sa reset_affinity_.
      */
     core_mask_t caller_affinity_;
 
@@ -400,7 +400,7 @@ struct colocated_pool {
         std::size_t const max_possible_cores = possible_cores();
 
         // Before we start the threads, make sure we set some of the shared state variables that
-        // will be used in the `_posix_worker_loop` function.
+        // will be used in the `posix_worker_loop_` function.
         pthreads_ = std::move(pthreads);
         first_thread_ = first_thread;
         compute_domain_index_ = compute_domain_index;
@@ -451,7 +451,7 @@ struct colocated_pool {
             bool created = false;
 #if FORKUNION_OS_WINDOWS_
             DWORD new_thread_id = 0;
-            HANDLE const new_handle = ::CreateThread(nullptr, 0, &_win_worker_loop, this, 0, &new_thread_id);
+            HANDLE const new_handle = ::CreateThread(nullptr, 0, &win_worker_loop_, this, 0, &new_thread_id);
             created = new_handle != nullptr;
             pthreads_[i].handle.store(new_handle, std::memory_order_relaxed);
             pthreads_[i].id.store(static_cast<std::uint64_t>(new_thread_id), std::memory_order_relaxed);
@@ -463,9 +463,9 @@ struct colocated_pool {
             // Apple offers no pinning; a Quality-of-Service class is the whole placement story, and
             // it must be chosen before the thread exists. On a chip with efficiency cores,
             // `UTILITY` confines a thread to them; on an all-performance chip it's inert.
-            ::pthread_attr_set_qos_class_np(&attributes, _qos_for_domain(domain, compute_levels), 0);
+            ::pthread_attr_set_qos_class_np(&attributes, qos_for_domain_(domain, compute_levels), 0);
 #endif
-            created = ::pthread_create(&new_pthread_handle, &attributes, &_posix_worker_loop, this) == 0;
+            created = ::pthread_create(&new_pthread_handle, &attributes, &posix_worker_loop_, this) == 0;
             ::pthread_attr_destroy(&attributes);
             pthreads_[i].handle.store(new_pthread_handle, std::memory_order_relaxed);
             pthreads_[i].id.store(0, std::memory_order_relaxed); // ? 0 means "not published yet"
@@ -588,8 +588,8 @@ struct colocated_pool {
         pthreads_ = {};
 
         // Unpin the caller thread if it was part of this pool and was pinned to the NUMA node.
-        if (use_caller_thread) _reset_affinity();
-        _reset_fork();
+        if (use_caller_thread) reset_affinity_();
+        reset_fork_();
 
         mood_.store(mood_t::grind_k, std::memory_order_relaxed);
         epoch_.store(0, std::memory_order_relaxed);
@@ -697,65 +697,16 @@ struct colocated_pool {
     /**
      *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
      *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
-     *  @return A @c generation_t token identifying this dispatch.
+     *  @return A @c generation_t token identifying this dispatch, or the zero token when the pool
+     *      refused it: another dispatch runs, another caller's or the one this call runs inside.
      *  @sa Use in conjunction with @c unsafe_join.
      */
     template <is_thread_callback<index_t> fork_type_>
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
-
-        thread_index_t const threads = threads_count();
-        assert(threads != 0 && "Thread pool not initialized");
-
-        // Only one dispatch can be in flight, and it must be fully joined - the caller's slice
-        // included - before the next one starts.
-        assert(threads_to_sync_.load(std::memory_order_acquire) == 0 &&
-               "The broadcast function can't be called concurrently or recursively");
-        assert((epoch_.load(std::memory_order_relaxed) & 1u) == 0 && "Previous dispatch not joined");
-
-        // Configure "fork" details
-        fork_state_ = std::addressof(fork);
-        fork_trampoline_ = &_call_as_lambda<fork_type_>;
-
-        // Every contributor gets counted: all worker threads, plus the calling thread itself on
-        // `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
-        threads_to_sync_.store(threads, std::memory_order_relaxed);
-
-        // We are most likely already "grinding", but in the unlikely case we are not, let's wake up
-        // from the "chilling" state with relaxed semantics. Assuming the sleeping logic for the
-        // workers also checks the epoch counter, no synchronization is needed and no immediate
-        // wake-up is required. Strong, since this is the one store a worker still in its startup
-        // wait after a `sleep` waits on.
-        mood_t may_be_chilling = mood_t::chill_k;
-        bool const was_chilling = mood_.compare_exchange_strong( //
-            may_be_chilling, mood_t::grind_k,                    //
-            std::memory_order_relaxed, std::memory_order_relaxed);
-        generation_t const generation = epoch_.fetch_add(1, std::memory_order_release) + 1;
-
-        // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
-#if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
-        if (was_chilling) {
-            bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
-            for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
-                std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
-                if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
-                // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
-                // for another thread; its QoS class is fixed at creation.
-#if FORKUNION_OS_FREEBSD_
-                // Restore the timesharing class - "make runnable", not "boost to realtime".
-                struct ::rtprio rtp {RTP_PRIO_NORMAL, 0};
-                ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
-#else
-                // Back to the time-sharing class the worker started on: `SCHED_FIFO | SCHED_RR` is
-                // `SCHED_BATCH`, and a real-time class would be a boost, not a wake.
-                sched_param param {};
-                ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_OTHER, &param);
-#endif
-            }
-        }
-#else
-        fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin or Windows
-#endif
-        return generation;
+        assert(threads_count() != 0 && "Thread pool not initialized");
+        if (!claim_()) return 0;
+        if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind(); // ? The cursors are ours only from here
+        return publish_(fork);
     }
 
     /**
@@ -787,11 +738,12 @@ struct colocated_pool {
             thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
             assert(before_decrement > 0 && "The contributor count must include the caller");
 
-            // The last contributor to finish increments the epoch, signaling completion
-            if (before_decrement == 1) epoch_.fetch_add(1, std::memory_order_release);
+            // The last contributor steps the epoch, as its only writer, to signal completion
+            if (before_decrement == 1)
+                epoch_.store(static_cast<epoch_index_t>(generation + 1), std::memory_order_release);
         }
 
-        // Wait for the last contributor's completion increment. Only `epoch_` moves here, so a
+        // Wait for the last contributor's completion step. Only `epoch_` moves here, so a
         // monitored waiter arms the right line and the completing store wakes it as an event.
         micro_yield_t micro_yield;
         while (epoch_.load(std::memory_order_acquire) == generation)
@@ -847,17 +799,97 @@ struct colocated_pool {
 #pragma endregion ComputeDomains Compatibility
 
   private:
+    template <typename, typename, std::size_t>
+    friend struct distributed_pool;
+
     /** Clears the fork state and trampoline between dispatches. */
-    void _reset_fork() noexcept {
+    void reset_fork_() noexcept {
         fork_state_ = nullptr;
         fork_trampoline_ = nullptr;
+    }
+
+    /**
+     *  @brief Admits one dispatch by exchanging the countdown from zero, as it is with no
+     *      contributor running. It counts every contributor: all worker threads, plus the caller
+     *      on @c caller_inclusive_k pools, whose slice runs inside @c unsafe_join.
+     *  @return Whether this caller now holds the pool, and owes it a @c publish_.
+     *
+     *  The acquire carries the last generation's odd epoch to the wait in @c publish_, which would
+     *  otherwise read an older even one and step the odd epoch to an even token.
+     */
+    bool claim_() noexcept {
+        thread_index_t idle = 0;
+        return threads_to_sync_.compare_exchange_strong(idle, threads_count(), std::memory_order_acquire,
+                                                        std::memory_order_relaxed);
+    }
+
+    /** Gives back a claim no dispatch was published on, released, so the next claimer still follows
+     *  the contributors this one acquired. */
+    void unclaim_() noexcept { threads_to_sync_.store(0, std::memory_order_release); }
+
+    /**
+     *  @brief Publishes @p fork on a pool this caller claimed, once the last dispatch completed.
+     *  @return The odd @c generation_t token of this dispatch.
+     */
+    template <typename fork_type_>
+    generation_t publish_(fork_type_ &fork) noexcept {
+
+        // Configure "fork" details: every contributor of the last generation counted down already
+        fork_state_ = std::addressof(fork);
+        fork_trampoline_ = &call_as_lambda_<fork_type_>;
+
+        // The last contributor counts down to zero just before it steps the epoch to even
+        micro_yield_t micro_yield;
+        epoch_index_t previous_epoch;
+        while ((previous_epoch = epoch_.load(std::memory_order_acquire)) & 1u)
+            micro_yield(epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
+
+        // We are most likely already "grinding", but in the unlikely case we are not, let's wake up
+        // from the "chilling" state with relaxed semantics. Assuming the sleeping logic for the
+        // workers also checks the epoch counter, no synchronization is needed and no immediate
+        // wake-up is required. Strong, since this is the one store a worker still in its startup
+        // wait after a `sleep` waits on. Read first, so a grinding pool takes no locked step.
+        mood_t may_be_chilling = mood_t::chill_k;
+        bool const was_chilling = mood_.load(std::memory_order_relaxed) == mood_t::chill_k &&
+                                  mood_.compare_exchange_strong(may_be_chilling, mood_t::grind_k,
+                                                                std::memory_order_relaxed, std::memory_order_relaxed);
+
+        // The claim leaves this caller the epoch's only writer until its contributors count down
+        generation_t const generation = static_cast<generation_t>(previous_epoch + 1);
+        epoch_.store(generation, std::memory_order_release);
+
+        // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
+#if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
+        if (was_chilling) {
+            bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
+            for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
+                std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
+                if (pthread_id == 0) continue; // ! Unsigned now: `< 0` could never fire
+                // Nudge the sleeping worker back onto a runnable class. Darwin has no equivalent
+                // for another thread; its QoS class is fixed at creation.
+#if FORKUNION_OS_FREEBSD_
+                // Restore the timesharing class - "make runnable", not "boost to realtime".
+                struct ::rtprio rtp {RTP_PRIO_NORMAL, 0};
+                ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
+#else
+                // Back to the time-sharing class the worker started on: `SCHED_FIFO | SCHED_RR` is
+                // `SCHED_BATCH`, and a real-time class would be a boost, not a wake.
+                sched_param param {};
+                ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_OTHER, &param);
+#endif
+            }
+        }
+#else
+        fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin or Windows
+#endif
+        return generation;
     }
 
     /**
      *  @brief Restores the caller's CPU affinity to its pre-spawn snapshot.
      *  @sa restore_thread_cores.
      */
-    void _reset_affinity() noexcept {
+    void reset_affinity_() noexcept {
         [[maybe_unused]] status_t const restored = restore_thread_cores(caller_affinity_);
         caller_affinity_.reset();
     }
@@ -868,7 +900,7 @@ struct colocated_pool {
      *  @param[in] at The thread index paired with this pool's compute domain.
      */
     template <typename fork_type_>
-    static void _call_as_lambda(punned_fork_context_t punned_lambda_pointer, thread_in_domain_t at) noexcept {
+    static void call_as_lambda_(punned_fork_context_t punned_lambda_pointer, thread_in_domain_t at) noexcept {
         fork_type_ &lambda_object = *static_cast<fork_type_ *>(punned_lambda_pointer);
         lambda_object(at);
     }
@@ -877,7 +909,7 @@ struct colocated_pool {
      *  @brief The worker's run loop, shared by every platform's thread entry point.
      *  @note POSIX and Windows entry points differ only in signature, so both forward to this body.
      */
-    static void _worker_loop_body(colocated_pool *pool) noexcept {
+    static void worker_loop_body_(colocated_pool *pool) noexcept {
 
         // Following section until the main `while` loop may introduce race conditions, so spin-loop
         // for a bit until the pool is ready.
@@ -955,12 +987,14 @@ struct colocated_pool {
 
                 // ! The decrement must come after the task is executed. The `acq_rel` ordering
                 // ! chains every contributor's writes into the last one, so the completion
-                // ! increment below publishes all of them at once.
+                // ! step below publishes all of them at once.
                 thread_index_t const before_decrement = pool->threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
                 assert(before_decrement > 0 && "We can't be here if there are no worker threads");
 
-                // The last contributor to finish increments the epoch again, signaling completion
-                if (before_decrement == 1) pool->epoch_.fetch_add(1, std::memory_order_release);
+                // The last contributor to finish steps the epoch, signaling completion, as its only
+                // writer: the next claimer waits for this even epoch before it writes one
+                if (before_decrement == 1)
+                    pool->epoch_.store(static_cast<epoch_index_t>(new_epoch + 1), std::memory_order_release);
             }
             last_epoch = new_epoch;
         }
@@ -969,16 +1003,16 @@ struct colocated_pool {
     // Thread entry points: same body, different ABI. Only the one this build spawns exists.
 #if FORKUNION_OS_WINDOWS_
 
-    /** Windows thread entry point; forwards to @c _worker_loop_body. */
-    static DWORD WINAPI _win_worker_loop(LPVOID arg) noexcept {
-        _worker_loop_body(static_cast<colocated_pool *>(arg));
+    /** Windows thread entry point; forwards to @c worker_loop_body_. */
+    static DWORD WINAPI win_worker_loop_(LPVOID arg) noexcept {
+        worker_loop_body_(static_cast<colocated_pool *>(arg));
         return 0;
     }
 #else
 
-    /** POSIX thread entry point; forwards to @c _worker_loop_body. */
-    static void *_posix_worker_loop(void *arg) noexcept {
-        _worker_loop_body(static_cast<colocated_pool *>(arg));
+    /** POSIX thread entry point; forwards to @c worker_loop_body_. */
+    static void *posix_worker_loop_(void *arg) noexcept {
+        worker_loop_body_(static_cast<colocated_pool *>(arg));
         return nullptr;
     }
 #endif
@@ -997,7 +1031,7 @@ struct colocated_pool {
      *  all-efficiency chip honest - its E-cores are the fastest thing present. A hidden or unknown
      *  name parses to @c apple_performance_k, falling back to rank alone, never to @c UTILITY.
      */
-    static qos_class_t _qos_for_domain(compute_domain_t const &domain, std::size_t const levels) noexcept {
+    static qos_class_t qos_for_domain_(compute_domain_t const &domain, std::size_t const levels) noexcept {
         if (domain.compute_level + 1 >= levels) return QOS_CLASS_USER_INITIATED; // ? The fastest tier present
         if (domain.apple_core_quality == apple_efficiency_k)
             return QOS_CLASS_UTILITY; // ? Genuine E-cores - confine here
@@ -1122,8 +1156,8 @@ class invoke_distributed_for_n_dynamic {
     index_type_ n_;
 
     /** Where one domain's tasks live and how they split across its threads. Computed the same way
-     *  by @c reset_slices_ to publish cursors and by `operator()` to place the static prong, so the
-     *  two can never drift. */
+     *  by @c rewind to publish cursors and by `operator()` to place the static prong, so the two
+     *  cannot drift apart. */
     struct domain_layout_t {
 
         /** This domain's task span inside `[0, n_)`. */
@@ -1158,8 +1192,27 @@ class invoke_distributed_for_n_dynamic {
 
   public:
     invoke_distributed_for_n_dynamic(pool_type_ &pool, index_type_ n, fork_type_ &&fork) noexcept
-        : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n) {
-        reset_slices_();
+        : pool_(pool), fork_(std::forward<fork_type_>(fork)), n_(n) {}
+
+    /** Rewinds each thread's cursor in every domain, once this dispatch holds the pool. */
+    void rewind() noexcept {
+        typename pool_type_::cache_hints_t cache_hints;
+        index_type_ const compute_domains_count = pool_.compute_domains_count();
+        indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
+        for (index_type_ domain = 0; domain < compute_domains_count; ++domain) {
+            domain_layout_t const layout = layout_of_(split_between_compute_domains[domain], domain);
+            if (!layout.threads) continue; // ? A domain the spawn left empty owns no slices
+
+            indexed_split<index_type_> const split_local(layout.dynamic, layout.threads);
+            for (index_type_ local = 0; local < layout.threads; ++local) {
+                tasks_range<index_type_> const slice = split_local[local];
+                auto &claim = pool_.unsafe_dynamic_claim_ref(static_cast<index_type_>(layout.first_thread + local));
+                claim.end = static_cast<index_type_>(layout.range.first + slice.first + slice.count);
+                // ? Relaxed, since the dispatch's release on the epoch carries it
+                claim.next.store(static_cast<index_type_>(layout.range.first + slice.first), std::memory_order_relaxed);
+                cache_hints(&claim, demote_line_k); // ? Publish away, so each owner's first claim skips this core
+            }
+        }
     }
 
     void operator()(index_type_ const thread) noexcept {
@@ -1198,28 +1251,10 @@ class invoke_distributed_for_n_dynamic {
         for (auto domain = other_domains.begin(); domain != std::default_sentinel; ++domain)
             if (*domain != native_compute_domain) drain_domain_(*domain, thread, at);
     }
-
-  private:
-    /** Publishes one contiguous slice per thread in every domain. Runs before the broadcast. */
-    void reset_slices_() noexcept {
-        typename pool_type_::cache_hints_t cache_hints;
-        index_type_ const compute_domains_count = pool_.compute_domains_count();
-        indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
-        for (index_type_ domain = 0; domain < compute_domains_count; ++domain) {
-            domain_layout_t const layout = layout_of_(split_between_compute_domains[domain], domain);
-            if (!layout.threads) continue; // ? A domain the spawn left empty owns no slices
-
-            indexed_split<index_type_> const split_local(layout.dynamic, layout.threads);
-            for (index_type_ local = 0; local < layout.threads; ++local) {
-                tasks_range<index_type_> const slice = split_local[local];
-                auto &claim = pool_.unsafe_dynamic_claim_ref(static_cast<index_type_>(layout.first_thread + local));
-                claim.end = static_cast<index_type_>(layout.range.first + slice.first + slice.count);
-                claim.next.store(static_cast<index_type_>(layout.range.first + slice.first), std::memory_order_release);
-                cache_hints(&claim, demote_line_k); // ? Publish away, so each owner's first claim skips this core
-            }
-        }
-    }
 };
+
+template <typename pool_type_, typename fork_type_, typename index_type_>
+inline constexpr bool is_dynamic_invoker<invoke_distributed_for_n_dynamic<pool_type_, fork_type_, index_type_>> = true;
 
 /**
  *  @brief A Linux-only pool over distributed "thread compute_domains", NUMA nodes, and QoS levels.
@@ -1623,19 +1658,27 @@ struct distributed_pool {
     /**
      *  @brief Executes a @p fork function in parallel on all threads, not waiting for the result.
      *  @param[in] fork The callback @b reference, receiving the thread index as an argument.
-     *  @return A @c generation_t token identifying this dispatch.
+     *  @return A @c generation_t token identifying this dispatch, or the zero token when a sub-pool
+     *      refused it while another dispatch runs, another caller's or the one this call is in.
      *  @sa Use in conjunction with @c unsafe_join.
      */
     template <is_thread_callback<index_t> fork_type_>
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
         assert(colocations_ && "Thread pools must be initialized before broadcasting");
 
+        // Claim every sub-pool before publishing on any, so a refused dispatch leaves none running
+        for (std::size_t i = 0; i != colocations_.size(); ++i) {
+            if (colocations_[i].claim_()) continue;
+            while (i != 0) colocations_[--i].unclaim_();
+            return 0;
+        }
+        if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind(); // ? The cursors are ours only from here
+
         // Submit to every thread pool. All sub-pool epochs advance in lockstep as long as every
         // dispatch goes through this wrapper - never dispatch to a sub-pool directly.
         generation_t last_sub_generation {};
-        for (std::size_t i = 1; i < colocations_.size(); ++i)
-            last_sub_generation = colocations_[i].unsafe_for_threads(fork);
-        generation_t const generation = colocations_[0].unsafe_for_threads(fork);
+        for (std::size_t i = 1; i < colocations_.size(); ++i) last_sub_generation = colocations_[i].publish_(fork);
+        generation_t const generation = colocations_[0].publish_(fork);
         assert((colocations_.size() == 1 || last_sub_generation == generation) &&
                "ComputeDomain sub-pools must advance in generation lockstep");
         (void)last_sub_generation;

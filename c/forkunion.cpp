@@ -9,6 +9,7 @@
 #include <cstdint> // `std::uint8_t`
 
 #include <algorithm>   // `std::max`
+#include <atomic>      // `std::atomic`
 #include <new>         // placement `new` operator
 #include <type_traits> // `std::aligned_storage`
 #include <utility>     // `std::in_place_type_t`
@@ -253,6 +254,13 @@ static constexpr std::size_t poisoned_size_k = static_cast<std::size_t>(-1);
 /** Lowers a C++ status onto the C vocabulary; the values agree, so this only retypes. */
 inline fu_status_t lower(fu::status_t status) noexcept { return static_cast<fu_status_t>(status); }
 
+/** Joins @p broadcast and reports it: a refused one ran nothing and keeps the zero token. */
+template <typename broadcast_type_>
+fu_status_t join_status(broadcast_type_ &&broadcast) noexcept {
+    broadcast.join();
+    return broadcast.generation() != 0 ? fu_success_k : fu_contended_k;
+}
+
 /** Runs @p visitor on the live pool and returns its result, or @p empty on empty storage. */
 template <typename visitor_type_, typename result_type_>
 result_type_ visit(visitor_type_ &&visitor, pool_variants_t &variants, result_type_ empty) {
@@ -320,8 +328,9 @@ struct opaque_pool_t {
     /** Context held across a non-blocking @c fu_pool_unsafe_for_threads until its join. */
     fu_lambda_context_t current_context {nullptr};
 
-    /** Callback held across a non-blocking @c fu_pool_unsafe_for_threads until its join. */
-    fu_for_threads_t current_callback {nullptr};
+    /** Callback held across a non-blocking @c fu_pool_unsafe_for_threads until its join; claimed
+     *  from @c nullptr, so one split dispatch at a time owns this slot and @c current_context. */
+    std::atomic<fu_for_threads_t> current_callback {nullptr};
 
     /** The generation the held callback went out as; joining any other token leaves it alone. */
     fu_generation_t current_generation {0};
@@ -340,7 +349,7 @@ struct opaque_pool_t {
 
     /** A shim to redirect unsafe callbacks to the current context. */
     void operator()(fu::thread_in_domain_t pinned) const noexcept {
-        current_callback(current_context, pinned.thread, pinned.compute_domain);
+        current_callback.load(std::memory_order_relaxed)(current_context, pinned.thread, pinned.compute_domain);
     }
 };
 
@@ -1088,14 +1097,13 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
     // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
     if (!spawned(opaque->variants)) return fu_not_spawned_k;
-    visit(
+    return visit(
         [&](auto &variant) {
-            variant.for_threads([=](fu::thread_in_domain_t pinned) noexcept { //
+            return join_status(variant.for_threads([=](fu::thread_in_domain_t pinned) noexcept { //
                 callback(context, pinned.thread, pinned.compute_domain);
-            });
+            }));
         },
-        opaque->variants);
-    return fu_success_k;
+        opaque->variants, fu_not_spawned_k);
 }
 
 fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback, fu_lambda_context_t context) {
@@ -1104,14 +1112,13 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
     // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
     if (!spawned(opaque->variants)) return fu_not_spawned_k;
-    visit(
+    return visit(
         [&](auto &variant) {
-            variant.for_slices(n, [=](fu::tasks_range_t range, fu::thread_in_domain_t at) noexcept { //
+            return join_status(variant.for_slices(n, [=](fu::tasks_range_t range, fu::thread_in_domain_t at) noexcept {
                 callback(context, range.first, range.count, at.thread, at.compute_domain);
-            });
+            }));
         },
-        opaque->variants);
-    return fu_success_k;
+        opaque->variants, fu_not_spawned_k);
 }
 
 fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context) {
@@ -1120,14 +1127,13 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_l
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
     // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
     if (!spawned(opaque->variants)) return fu_not_spawned_k;
-    visit(
+    return visit(
         [&](auto &variant) {
-            variant.for_n(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
+            return join_status(variant.for_n(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
                 callback(context, task, at.thread, at.compute_domain);
-            });
+            }));
         },
-        opaque->variants);
-    return fu_success_k;
+        opaque->variants, fu_not_spawned_k);
 }
 
 fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context) {
@@ -1136,14 +1142,13 @@ fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callba
     // Without this an unspawned pool runs zero callbacks and returns normally, which a caller
     // cannot tell from a completed dispatch, and a terminated one divides by its zero threads.
     if (!spawned(opaque->variants)) return fu_not_spawned_k;
-    visit(
+    return visit(
         [&](auto &variant) {
-            variant.for_n_dynamic(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
+            return join_status(variant.for_n_dynamic(n, [=](std::size_t task, fu::thread_in_domain_t at) noexcept { //
                 callback(context, task, at.thread, at.compute_domain);
-            });
+            }));
         },
-        opaque->variants);
-    return fu_success_k;
+        opaque->variants, fu_not_spawned_k);
 }
 
 #pragma endregion Primary API
@@ -1157,10 +1162,18 @@ fu_status_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback
     if (!pool || !callback) return fu_invalid_argument_k;
     opaque_pool_t *opaque = upcast_pool(pool);
     if (!spawned(opaque->variants)) return fu_not_spawned_k;
+    // The slot is claimed before the pool, so a refused caller never overwrites a live callback
+    fu_for_threads_t idle = nullptr;
+    if (!opaque->current_callback.compare_exchange_strong(idle, callback, std::memory_order_acquire,
+                                                          std::memory_order_relaxed))
+        return fu_contended_k;
     opaque->current_context = context;
-    opaque->current_callback = callback;
     *generation_out = visit([&](auto &variant) -> fu_generation_t { return variant.unsafe_for_threads(*opaque); },
                             opaque->variants, fu_generation_t {0});
+    if (*generation_out == 0) {
+        opaque->current_callback.store(nullptr, std::memory_order_release);
+        return fu_contended_k;
+    }
     opaque->current_generation = *generation_out;
     return fu_success_k;
 }
@@ -1185,7 +1198,10 @@ fu_status_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation, fu_b
 void fu_pool_unsafe_join(fu_pool_t pool, fu_generation_t generation) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
-    if (opaque->current_callback == nullptr || generation != opaque->current_generation) return; // ? Idle, or stale
+    // A refusal's zero token joins nothing, whoever holds the slot meanwhile
+    if (generation == 0 || opaque->current_callback.load(std::memory_order_relaxed) == nullptr ||
+        generation != opaque->current_generation)
+        return; // ? Idle, refused, or stale
     visit(
         [generation](auto &variant) {
             variant.unsafe_join(
@@ -1193,7 +1209,8 @@ void fu_pool_unsafe_join(fu_pool_t pool, fu_generation_t generation) {
         },
         opaque->variants);
     opaque->current_context = nullptr;
-    opaque->current_callback = nullptr;
+    // Last and released, so the next claimer of the slot follows everything this dispatch did
+    opaque->current_callback.store(nullptr, std::memory_order_release);
 }
 
 #pragma endregion Flexible API
