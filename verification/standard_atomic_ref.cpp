@@ -2,12 +2,14 @@
  *  @file verification/standard_atomic_ref.cpp
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief GenMC client for the portable loops behind @c standard_atomic_ref in
- *      `include/forkunion/atomics.hpp`: two admitters through the free conditional add loop,
- *      @c atomic_fetch_add_if_at_most, against a ceiling of one, and two racing @c fetch_max calls.
+ *  @brief GenMC client for the portable loops of @c standard_atomic_ref in `forkunion/atomics.hpp`.
  *
- *  The ceiling is never crossed, every admission is counted, and the maximum is the maximum. Two of
- *  each: the read-first loops multiply GenMC's executions.
+ *  Two admitters run through the free conditional add loop, @c atomic_fetch_add_if_at_most,
+ *  against a ceiling of one, and two @c fetch_max calls race. The ceiling is never crossed, every
+ *  admission is counted, and the maximum is the maximum. Two of each, since the read-first loops
+ *  multiply GenMC's executions.
+ *
+ *  @verify pass sc,rc11,imm standard_atomic_ref
  */
 #include <cstdint> // `std::uint32_t` - the words the loops move
 
@@ -40,7 +42,7 @@ void *raise(void *operand) noexcept {
     return nullptr;
 }
 
-int main() {
+extern "C" int standard_atomic_ref() {
     thread_t admitters[2] = {spawn(admit, &admissions[0]), spawn(admit, &admissions[1])};
     join(admitters[0]);
     join(admitters[1]);

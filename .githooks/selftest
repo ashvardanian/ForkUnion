@@ -290,6 +290,17 @@ FIXTURE
 run_precommit
 expect_acceptance "quoted header beside the including file"
 
+stage_fixture_with_header bench/nested/probe.cpp <<'FIXTURE'
+#include <vector>
+
+#include "../harness.h"
+FIXTURE
+stage_sibling_with_header bench/harness.h <<'FIXTURE'
+int harness(void);
+FIXTURE
+run_precommit
+expect_acceptance "quoted header one directory above the including file"
+
 stage_fixture_with_header include/$project_directory/probe.h <<'FIXTURE'
 #include "probe_internal.h"
 FIXTURE

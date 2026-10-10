@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Runs every Promela model under every memory model it is meant for, and every GenMC client, and
-# compares each verdict with the expected one: `pass` means no assertion fails, `fail` means the
-# model admits the outcome the assertion forbids - the litmus shapes RC11 allows, the variants
-# that drop a fence or shrink a modulus. USearch's `check.sh` sources this one for its functions.
-# Needs `spin` and a C compiler; a GenMC on the path, or named by `GENMC`, also runs the clients.
+# Runs every `@verify` line of every Promela scenario and GenMC client and compares each verdict
+# with the expected one: `pass` means the search completed with no error, `fail` that an assertion
+# was violated, `stuck` that a process waits forever. Needs `spin` and a C compiler; a GenMC on the
+# path, or named by `GENMC`, also runs the clients.
 
 set -u
 build=$(mktemp -d)
@@ -37,8 +36,11 @@ verify() {
             cc -O2 -DSAFETY -DCOLLAPSE -DVECTORSZ=4096 -w -o pan pan.c >>pan.out 2>&1); then verdict=broken
         else
             (cd "$dir" && ./pan -m1000000 -w26 >>pan.out 2>&1)
-            if grep -q "errors: 0" "$dir/pan.out"; then verdict=pass
-            elif grep -qE "errors: [1-9]" "$dir/pan.out"; then verdict=fail
+            # A cut-short search, a knob defined twice, or a write or index past a scenario's shape proves nothing
+            if grep -qE "macro redefined|max search depth too small|invalid array index|violated.*history_full" "$dir/pan.out"; then verdict=broken
+            elif grep -q "errors: 0" "$dir/pan.out"; then verdict=pass
+            elif grep -q "pan:1: assertion violated" "$dir/pan.out"; then verdict=fail
+            elif grep -q "pan:1: invalid end state" "$dir/pan.out"; then verdict=stuck
             else verdict=broken; fi
         fi
         report "$verdict" "$expected" "$model $*" "$dir/pan.out" >"$dir/result"
@@ -105,89 +107,72 @@ limited() { # limited <seconds> <command...>
     return $status
 }
 
-# verify_client <client.cpp> <expected> <compiler flags...>
+# verify_client <client.cpp> <expected> <memory model> <entry>: GenMC exits 0 when it found no
+# error and 42 when it found one; `--check-liveness` makes a wait that never ends one of them.
 verify_client() {
-    local client=$1 expected=$2 dir=$build/$queued unroll=$genmc_unroll
-    shift 2
+    local client=$1 expected=$2 memory=$3 entry=$4 dir=$build/$queued unroll=$genmc_unroll
     mkdir -p "$dir"
     queued=$((queued + 1))
     throttle
     (
         local verdict
-        limited "${GENMC_SECONDS:-300}" "$genmc" --disable-estimation --unroll="$unroll" -- -std=c++23 -I"$shadow" -I"$harness" "$@" "$client" >"$dir/genmc.out" 2>&1 ||
-            echo "GenMC stopped: exit status $? after ${GENMC_SECONDS:-300}s or an error" >>"$dir/genmc.out"
-        if grep -q "No errors were detected" "$dir/genmc.out"; then verdict=pass
-        elif grep -qE "^Error|Assertion violation|: ERROR " "$dir/genmc.out"; then verdict=fail
-        else verdict=broken; fi
-        report "$verdict" "$expected" "$client $*" "$dir/genmc.out" >"$dir/result"
+        limited "${GENMC_SECONDS:-300}" "$genmc" --"$memory" --check-liveness --disable-estimation --unroll="$unroll" \
+            --program-entry-function="$entry" -- -std=c++23 -I"$shadow" -I"$harness" -I../include -I"$harness/../include" \
+            "$client" >"$dir/genmc.out" 2>&1
+        case $? in
+        0) if grep -q "complete executions explored: 0" "$dir/genmc.out"; then verdict=broken; else verdict=pass; fi ;;
+        42) if grep -q "Liveness violation" "$dir/genmc.out"; then verdict=stuck; else verdict=fail; fi ;;
+        *) verdict=broken ;;
+        esac
+        report "$verdict" "$expected" "$client $memory $entry" "$dir/genmc.out" >"$dir/result"
     ) &
 }
 
-# Sourced by USearch's `check.sh` for the functions above; run directly, it checks ForkUnion.
+# verify_all [file...]: every `@verify` line of the given scenarios and clients, or of every one
+# here and one directory down, then the verdicts in order. A line names the expected verdict and
+# the memory models, then knob overrides for a scenario or the entry for a client. Every knob the
+# files declare must be set on some line, and every knob a line sets must be declared.
+verify_all() {
+    local files=("$@") file expected memories rest memory declared used unmatched entries field entry
+    genmc_ready
+    [ ${#files[@]} -gt 0 ] || files=(*.pml */*.pml *.cpp */*.cpp)
+    declared=$(sed -n 's/^#ifndef \([a-z0-9_]*\)$/\1/p' "${files[@]}" */protocol.pml *.pml 2>/dev/null | grep -vx memory | sort -u)
+    used=$(sed -n 's/^ \*  @verify [a-z]* [a-z0-9,]* \([^:]*\).*/\1/p' "${files[@]}" 2>/dev/null | tr ' ' '\n' | sed -n 's/=.*//p' | sort -u)
+    [ $# -gt 0 ] && declared=$(comm -12 <(echo "$declared") <(echo "$used"))
+    unmatched=$(comm -3 <(echo "$declared") <(echo "$used") | xargs)
+    # A client's knobs are its `knobs_t` fields, each named by some entry, and every entry exists
+    for file in "${files[@]}"; do
+        [[ $file == *.cpp ]] && grep -qs '^ \*  @verify' "$file" || continue
+        entries=$(sed -n 's/^ \*  @verify [a-z]* [a-z0-9,]* \([a-z0-9_]*\).*/\1/p' "$file" | sort -u)
+        for field in $(sed -n '/^struct knobs_t {/,/^};/s/^ *[a-z_:]* \([a-z0-9_]*\) = .*;$/\1/p' "$file"); do
+            grep -q "_${field}_" <<<"$entries" || unmatched="$unmatched $file:$field"
+        done
+        for entry in $entries; do grep -q "^extern \"C\" int $entry()" "$file" || unmatched="$unmatched $file:$entry"; done
+    done
+    mkdir -p "$build/$queued"
+    if [ -z "$unmatched" ]; then echo "  ok    every knob is declared and set, every entry exists" >"$build/$queued/result"
+    else
+        echo "  WRONG knobs or entries declared or set alone: $unmatched" >"$build/$queued/result"
+        touch "$build/$queued/wrong"
+    fi
+    queued=$((queued + 1))
+    for file in "${files[@]}"; do
+        grep -qs '^ \*  @verify' "$file" || continue
+        [[ $file == *.cpp && -z "${genmc:-}" ]] && continue
+        section "$file: $(sed -n 's/^ \*  @brief //p' "$file" | head -1)"
+        while read -r expected memories rest; do
+            for memory in ${memories//,/ }; do
+                case $file in
+                *.pml) verify "$file" "$expected" -Dmemory="$memory" $(for knob in $rest; do echo "-D$knob"; done) ;;
+                *.cpp) verify_client "$file" "$expected" "$memory" "$rest" ;;
+                esac
+            done
+        done < <(sed -n 's/^ \*  @verify \([^:]*\).*/\1/p' "$file")
+    done
+    finish
+}
+
+# Sourced, it only defines the functions above; run directly, it checks the directory it lives in.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 cd "$(dirname "$0")"
-
-section "weak_memory_litmus.pml: the memory model against the shapes RC11 decides"
-for shape in message_passing_without_release:fail message_passing_release_acquire:pass message_passing_fences:pass \
-    release_sequence_read_modify_write:pass release_sequence_store:fail coherence:pass load_buffering:pass; do
-    verify weak_memory_litmus.pml pass -Dmemory=sequential -Dshape="${shape%%:*}"
-    verify weak_memory_litmus.pml "${shape##*:}" -Dshape="${shape%%:*}"
-    verify weak_memory_litmus.pml "${shape##*:}" -Dmemory=far -Dshape="${shape%%:*}"
-done
-verify weak_memory_litmus.pml pass -Dmemory=sequential -Dshape=far_add_before_release
-verify weak_memory_litmus.pml pass -Dshape=far_add_before_release
-verify weak_memory_litmus.pml fail -Dmemory=far -Dshape=far_add_before_release
-
-section "for_n_dynamic.pml: private cursors, the coprime steal, the static prongs, the overshoot bound, the join, and no reset in flight"
-verify for_n_dynamic.pml pass -Dmemory=sequential
-verify for_n_dynamic.pml pass
-verify for_n_dynamic.pml pass -Dtasks=2
-verify for_n_dynamic.pml pass -Dpublish_relaxed
-verify for_n_dynamic.pml fail -Dwithout_dispatch_release
-verify for_n_dynamic.pml fail -Dwithout_completion_acquire
-verify for_n_dynamic.pml fail -Dmemory=sequential -Dwithout_claim_guard
-verify for_n_dynamic.pml pass -Dmemory=sequential -Dwithout_probe
-verify for_n_dynamic.pml pass -Dmemory=sequential -Dwithout_single_visit
-verify for_n_dynamic.pml fail -Dmemory=sequential -Dwithout_probe -Dwithout_single_visit
-verify for_n_dynamic.pml fail -Dmemory=sequential -Dscenario=nested
-
-section "distributed_pool.pml: the lockstep dispatch, the ANDed completion, the caller-first join, and spin_mutex"
-verify distributed_pool.pml pass -Dmemory=sequential -Dgenerations=2
-verify distributed_pool.pml pass
-verify distributed_pool.pml fail -Dmemory=sequential -Dwithout_dispatch_before_join
-verify distributed_pool.pml pass -Dmemory=sequential -Dgenerations=2 -Dscenario=overlap
-verify distributed_pool.pml fail -Dmemory=sequential -Dscenario=overlap -Dwithout_caller_first_join
-verify distributed_pool.pml pass -Dscenario=locked
-verify distributed_pool.pml fail -Dscenario=locked -Dwithout_lock_acquire
-verify distributed_pool.pml fail -Dscenario=locked -Dwithout_unlock_release
-
-section "flat_pool.pml: the epoch clock, the countdown, what a completed join sees, and the C shim's callback slot"
-verify flat_pool.pml pass -Dmemory=sequential
-verify flat_pool.pml pass
-verify flat_pool.pml fail -Dwithout_decrement_acquire
-verify flat_pool.pml pass -Dmemory=sequential -Dscenario=moods
-verify flat_pool.pml pass -Dscenario=moods
-verify flat_pool.pml fail -Dmemory=sequential -Dscenario=moods -Dwithout_wait_cap
-verify flat_pool.pml fail -Dscenario=moods -Dwithout_chill_at_spawn
-verify flat_pool.pml fail -Dmemory=sequential -Dscenario=moods -Dwithout_strong_wake
-verify flat_pool.pml pass -Dscenario=respawn
-verify flat_pool.pml fail -Dmemory=sequential -Dscenario=respawn -Dwithout_join_before_reset
-verify flat_pool.pml pass -Dmemory=sequential -Dscenario=polling
-verify flat_pool.pml pass -Dscenario=polling -Dgenerations=1
-verify flat_pool.pml fail -Dscenario=polling -Dgenerations=1 -Dwithout_complete_acquire
-verify flat_pool.pml fail -Dmemory=sequential -Dscenario=polling -Depoch_modulus=2
-verify flat_pool.pml pass -Dmemory=sequential -Dscenario=redispatch
-verify flat_pool.pml pass -Dscenario=redispatch
-verify flat_pool.pml fail -Dmemory=sequential -Dscenario=redispatch -Dwithout_join_before_dispatch
-verify flat_pool.pml pass -Dmemory=sequential -Dscenario=stale_join
-verify flat_pool.pml pass -Dscenario=stale_join
-verify flat_pool.pml fail -Dmemory=sequential -Dscenario=stale_join -Dwithout_generation_check
-
-section "GenMC clients: the portable conditional and extremal loops, and the fork-join words"
-if genmc_ready; then
-    verify_client standard_atomic_ref.cpp pass -I../include
-    verify_client flat_pool.cpp pass
-    verify_client flat_pool.cpp fail -Dwithout_decrement_acquire
-fi
-
-finish
+verify_all "$@"

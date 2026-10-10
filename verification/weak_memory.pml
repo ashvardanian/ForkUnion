@@ -13,15 +13,16 @@
  *  Kaiser, Dang, Dreyer, Lahav and Vafeiadis, without promises, which makes it exactly RC11's
  *  release-acquire-relaxed fragment: load buffering is forbidden, as in RC11.
  *
- *  Three memory models share one interface, chosen by `-Dmemory=` at `spin -a` time:
+ *  Three memory models share one interface, chosen by `-Dmemory=` at `spin -a` time, and named as
+ *  GenMC names the same models, so one `@verify` line reads alike for a scenario and a client:
  *
- *  - @c sequential: one copy of every location, every access a single step.
- *  - @c views, the default: the views above.
+ *  - @c sc: one copy of every location, every access a single step.
+ *  - @c rc11, the default: the views above.
  *  - @c far: the views, plus a relaxed no-return add is posted rather than performed. The bit
  *    forms RAO-INT posts the same way, @c aand, @c aor and @c axor, have no inline here, since no
  *    model needs one; a model that adds one follows @c add_no_return.
  *
- *  The @c sequential model is the protocol layer: fast, and the place to find logic bugs first.
+ *  The @c sc model is the protocol layer: fast, and the place to find logic bugs first.
  *
  *  The @c far model lands a posted add in the history at some later step, in the @c far_cache
  *  process, and until then no release by the posting thread carries it. Same-address accesses by
@@ -29,27 +30,30 @@
  *  write-combining ordering, and only SFENCE or MFENCE order it, which a C++ release fence never
  *  emits on x86.
  *
- *  The module fixes its own shape - @c thread_count, @c location_count, and @c history_depth, the
- *  most writes one location may ever receive, the initial one included - as the maxima over every
- *  model; a model only names its threads and words and passes its thread index to every access.
- *  Orders are the four the indexes use; nothing here is sequentially consistent, since no index
- *  site asks for it.
+ *  Every scenario defines its own shape before including the module: @c thread_count, the threads
+ *  it runs; @c location_count, one past the highest word it touches; and @c history_depth, the most
+ *  writes one location receives, the initial one included. A scenario passes its thread index to
+ *  every access and reads the views only through @c newest_write and @c seen_write. Orders are the
+ *  four the indexes use; nothing here is sequentially consistent, since no index site asks for it.
  */
 
-#define thread_count 5
-#define location_count 9
-#define history_depth 16
+#if !defined(thread_count) || !defined(location_count) || !defined(history_depth)
+#error "a scenario defines thread_count, location_count and history_depth before its protocol"
+#endif
+#if thread_count > 5
+#error "far_cache lands the posted adds of five threads at most"
+#endif
 
 /** The knob's values are integers, so a typo in `-Dmemory=` fails the range check below instead of
  *  reading as zero inside `#if`. */
-#define sequential 1
-#define views 2
+#define sc 1
+#define rc11 2
 #define far 3
 #ifndef memory
-#define memory views
+#define memory rc11
 #endif
-#if memory < sequential || memory > far
-#error "memory is sequential, views or far"
+#if memory < sc || memory > far
+#error "memory is sc, rc11 or far"
 #endif
 
 /** The four orders the indexes use, as bits: the low one acquires, the high one releases. */
@@ -60,9 +64,9 @@
 #define acquires(order) ((order) & 1)
 #define releases(order) ((order) & 2)
 
-/*  Under @c sequential every location is one word and every access one atomic step, so each inline
- *  below is the interface the views further down implement, with the orders dropped. */
-#if memory == sequential
+/*  Under @c sc every location is one word and every access one atomic step, so each inline below is
+ *  the interface the views further down implement, with the orders dropped. */
+#if memory == sc
 
 int words[location_count];
 
@@ -104,6 +108,17 @@ inline fence_release(t) { skip }
 /** The value location @p l holds now, for a guard or an assertion that adds no access. */
 #define newest_value(l) words[l]
 
+/** One write per location: every write is the newest, and every thread has seen it. */
+#define newest_write(l) 0
+#define seen_write(t, l) 0
+
+/** Sets location @p l before any thread runs. */
+inline seed(l, value) { words[l] = value }
+
+/** One copy of every location, so no view moves. */
+inline merge_view(from, to) { skip }
+inline see_newest(t) { skip }
+
 /** Nothing is ever posted, so nothing waits to land. */
 inline landed(t) { skip }
 
@@ -115,14 +130,40 @@ byte newest[location_count];
 byte current[thread_count * location_count];
 byte released[thread_count * location_count];
 byte acquired[thread_count * location_count];
-byte view_location; // scratch for the view loops: every access is one atomic step
-byte picked;        // scratch: the write a load picked
-int summed;         // scratch: the value a no-return add read
+hidden byte view_location; // scratch for the view loops: every access is one atomic step
+hidden byte picked;        // scratch: the write a load picked
+hidden int summed;         // scratch: the value a no-return add read
+hidden byte history_full;  // scratch: a write past `history_depth`, which the runner reports as broken
 
 #define write_index(l, i) ((l) * history_depth + (i))
 #define view_index(l, i, m) (((l) * history_depth + (i)) * location_count + (m))
 #define thread_index(t, m) ((t) * location_count + (m))
 #define newest_value(l) history_value[write_index(l, newest[l])]
+
+/** The newest write to location @p l, and the oldest one thread @p t may still read. */
+#define newest_write(l) newest[l]
+#define seen_write(t, l) current[thread_index(t, l)]
+
+/** Sets location @p l's initial write before any thread runs. */
+inline seed(l, value) { history_value[write_index(l, 0)] = value }
+
+/** Thread @p to sees everything @p from has seen: a kernel launch, or half of `bar.warp.sync`. */
+inline merge_view(from, to) {
+    for (view_location : 0 .. location_count - 1) {
+        if
+        :: current[thread_index(from, view_location)] > current[thread_index(to, view_location)] ->
+            current[thread_index(to, view_location)] = current[thread_index(from, view_location)]
+        :: else
+        fi
+    }
+}
+
+/** Thread @p t sees the newest write of every location: the CUDA API edge between launches. */
+inline see_newest(t) {
+    for (view_location : 0 .. location_count - 1) {
+        current[thread_index(t, view_location)] = newest[view_location]
+    }
+}
 
 /** The thread's view joins the stamp of write @p i on location @p l into @c current,
  *  for an acquire. */
@@ -133,8 +174,7 @@ inline merge_current(t, l, i) {
             current[thread_index(t, view_location)] = history_view[view_index(l, i, view_location)]
         :: else
         fi
-    };
-    view_location = 0
+    }
 }
 
 /** The thread's view joins the stamp of write @p i on location @p l into @c acquired, for
@@ -146,8 +186,7 @@ inline merge_acquired(t, l, i) {
             acquired[thread_index(t, view_location)] = history_view[view_index(l, i, view_location)]
         :: else
         fi
-    };
-    view_location = 0
+    }
 }
 
 /** The thread's view joins the stamp of write @p i on location @p l: into @c current for an
@@ -168,8 +207,7 @@ inline stamp(t, l, i, order) {
         :: else -> history_view[view_index(l, i, view_location)] = released[thread_index(t, view_location)]
         fi
     };
-    history_view[view_index(l, i, l)] = i;
-    view_location = 0
+    history_view[view_index(l, i, l)] = i
 }
 
 /** Write @p i on @p l carries everything write `i - 1` carried: read-modify-writes
@@ -181,13 +219,13 @@ inline inherit(l, i) {
             history_view[view_index(l, i, view_location)] = history_view[view_index(l, i - 1, view_location)]
         :: else
         fi
-    };
-    view_location = 0
+    }
 }
 
 /** Appends @p value to the history of @p l as its newest write, stamped by @p t. */
 inline append(t, l, order, value) {
-    assert(newest[l] + 1 < history_depth);
+    history_full = newest[l] + 1 >= history_depth;
+    assert(!history_full);
     newest[l] = newest[l] + 1;
     history_value[write_index(l, newest[l])] = value;
     current[thread_index(t, l)] = newest[l];
@@ -203,14 +241,14 @@ int pending_operand[thread_count];
 inline land(t) {
     atomic {
         assert(pending_location[t] != 0);
-        assert(newest[pending_location[t] - 1] + 1 < history_depth);
+        history_full = newest[pending_location[t] - 1] + 1 >= history_depth;
+        assert(!history_full);
         newest[pending_location[t] - 1] = newest[pending_location[t] - 1] + 1;
         history_value[write_index(pending_location[t] - 1, newest[pending_location[t] - 1])] =
             history_value[write_index(pending_location[t] - 1, newest[pending_location[t] - 1] - 1)] + pending_operand[t];
         for (view_location : 0 .. location_count - 1) {
             history_view[view_index(pending_location[t] - 1, newest[pending_location[t] - 1], view_location)] = 0
         };
-        view_location = 0;
         history_view[view_index(pending_location[t] - 1, newest[pending_location[t] - 1], pending_location[t] - 1)] =
             newest[pending_location[t] - 1];
         inherit(pending_location[t] - 1, newest[pending_location[t] - 1]);
@@ -238,10 +276,10 @@ active proctype far_cache() {
 end:
     do
     :: atomic { pending_location[0] != 0 -> land(0) }
-    :: atomic { pending_location[1] != 0 -> land(1) }
-    :: atomic { pending_location[2] != 0 -> land(2) }
-    :: atomic { pending_location[3] != 0 -> land(3) }
-    :: atomic { pending_location[4] != 0 -> land(4) }
+    :: atomic { thread_count > 1 && pending_location[1] != 0 -> land(1) }
+    :: atomic { thread_count > 2 && pending_location[2] != 0 -> land(2) }
+    :: atomic { thread_count > 3 && pending_location[3] != 0 -> land(3) }
+    :: atomic { thread_count > 4 && pending_location[4] != 0 -> land(4) }
     od
 }
 #else
@@ -260,8 +298,7 @@ inline load(t, l, order, out) {
         od;
         out = history_value[write_index(l, picked)];
         current[thread_index(t, l)] = picked;
-        merge(t, l, picked, order);
-        picked = 0
+        merge(t, l, picked, order)
     }
 }
 
@@ -332,15 +369,13 @@ inline add_no_return(t, l, order, operand) {
             land_if_same_word(t, l);
             summed = newest_value(l) + operand;
             append(t, l, order, summed);
-            inherit(l, newest[l]);
-            summed = 0
+            inherit(l, newest[l])
         fi
 #else
         land_if_same_word(t, l);
         summed = newest_value(l) + operand;
         append(t, l, order, summed);
-        inherit(l, newest[l]);
-        summed = 0
+        inherit(l, newest[l])
 #endif
     }
 }
@@ -354,8 +389,7 @@ inline fence_acquire(t) {
                 current[thread_index(t, view_location)] = acquired[thread_index(t, view_location)]
             :: else
             fi
-        };
-        view_location = 0
+        }
     }
 }
 
@@ -364,8 +398,7 @@ inline fence_release(t) {
     atomic {
         for (view_location : 0 .. location_count - 1) {
             released[thread_index(t, view_location)] = current[thread_index(t, view_location)]
-        };
-        view_location = 0
+        }
     }
 }
 
