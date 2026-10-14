@@ -113,12 +113,10 @@ fn main() -> Result<(), cc::Error> {
     // Hand dependents the headers, so a crate compiling its own C against the `fu_*` ABI need not
     // vendor a copy that drifts; `links = "forkunion"` makes this their `DEP_FORKUNION_INCLUDE`.
     // Anchored to the manifest, not the cwd, so it resolves inside a published crate too.
-    println!(
-        "cargo:include={}",
-        Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR"))
-            .join("include")
-            .display()
-    );
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR");
+    println!("cargo:include={}", Path::new(&manifest).join("include").display());
+    // The whole tree, so a dependent's CMake adds the checkout Cargo resolved as a subdirectory.
+    println!("cargo:source={manifest}");
 
     println!("cargo:rerun-if-changed=c/forkunion.cpp");
     println!("cargo:rerun-if-changed=rust/forkunion.rs");

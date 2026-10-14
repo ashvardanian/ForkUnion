@@ -12,7 +12,7 @@ name = "forkunion"
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 preview = ["pixi-build"]
 readme = "README.md"
-version = "3.0.3"
+version = "4.0.0-rc.1"
 
 [dependencies]
 cxx-compiler = "*"
@@ -22,7 +22,7 @@ mojo = ">=1.0.0,<2"
 # and the C++ core together, so a `git` or `path` entry in their manifest is the whole install.
 [package]
 name = "forkunion"
-version = "3.0.3"
+version = "4.0.0-rc.1"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }

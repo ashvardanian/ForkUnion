@@ -1,7 +1,7 @@
 [package]
 name = "forkunion"
 description = "Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS loops, or false-sharing on the hot path"
-version = "3.0.3"
+version = "4.0.0-rc.1"
 edition = "2021"
 resolver = "3"                                                                                                                            # ? MSRV-aware resolution, so `rust-version` binds dependency selection too
 authors = ["Ash Vardanian"]
@@ -14,7 +14,8 @@ homepage = "https://github.com/ashvardanian/ForkUnion"
 keywords = ["numa", "parallel", "thread-pool", "allocator", "no-std"]
 categories = ["concurrency", "os::linux-apis", "no-std"]
 # Leading slashes anchor to the package root; Cargo matches these like gitignore, so a bare `README.md`
-# also picked up every one under `build*/_deps/`. The two benchmarks are here because `[[bin]]` names them.
+# also picked up every one under `build*/_deps/`. The two benchmarks are here because `[[bin]]` names them. The CMake
+# files and probes let a dependent build the C ABI from `DEP_FORKUNION_SOURCE`.
 include = [
     "/Cargo.toml",
     "/README.md",
@@ -23,6 +24,10 @@ include = [
     "/rust/**",
     "/include/**",
     "/c/**",
+    "/CMakeLists.txt",
+    "/VERSION",
+    "/cmake/**",
+    "/probes/**",
     "/bench/harness.rs",
     "/bench/nbody.rs",
     "/bench/propagation.rs",
