@@ -469,7 +469,8 @@
  *  pick unchecked. The trap-free hints - PAUSE, YIELD, WFE, PRFM, Zihintpause, the Zicbop
  *  prefetches, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and
  *  Zicbom, which no default ever picks and a caller admits at runtime, stay on the toolchain's
- *  verdict, WFET having no compiler macro at all.
+ *  verdict, WFET having no compiler macro at all. The wasm wait needs the threads feature the
+ *  module is built with, which @c __wasm_atomics__ reports.
  *
  *  The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches the two through intrinsics whose
  *  arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A extension's mnemonics need the
@@ -563,6 +564,13 @@
 #define FORKUNION_TARGET_RISC5_ZACAS 1
 #else
 #define FORKUNION_TARGET_RISC5_ZACAS 0
+#endif
+#endif
+#if !defined(FORKUNION_TARGET_WASM_WAIT)
+#if FORKUNION_ARCH_WASM_ && defined(__wasm_atomics__)
+#define FORKUNION_TARGET_WASM_WAIT 1
+#else
+#define FORKUNION_TARGET_WASM_WAIT 0
 #endif
 #endif
 

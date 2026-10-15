@@ -602,6 +602,53 @@ struct risc5_wrs_t {
 };
 #endif // FORKUNION_TARGET_RISC5_WRS
 
+#if FORKUNION_TARGET_WASM_WAIT
+
+/**
+ *  @brief On WebAssembly threads, worker waits that sleep in @c memory.atomic.wait.
+ *
+ *  Unlike a cache-line monitor, @c memory.atomic.wait is not woken by a plain store, only by
+ *  @c memory.atomic.notify on the same address, so a pool calls @c wake after the store that
+ *  releases its workers, and the 1 micro-second timeout bounds how late any other change is seen.
+ *  Uncapped waits spin instead: the pool's caller waits uncapped, and in a browser that is the main
+ *  thread, where @c memory.atomic.wait traps.
+ *
+ *  @warning Capped waits trap on a browser's main thread, so a @c spin_mutex over this waiter must
+ *      not be contended there.
+ */
+struct wasm_wait_t {
+    static constexpr capabilities_t capability_k = capabilities_unknown_k;
+
+    /** Sleeps until @c wake or a 1 micro-second timeout, for a loop guarding another line too. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
+                           wait_capped_t = {}) const noexcept {
+        static_assert(sizeof(value_type_) == 4 || sizeof(value_type_) == 8, "wasm waits on 32- or 64-bit words");
+        void *const address = const_cast<void *>(watched_address(watched));
+        if constexpr (sizeof(value_type_) == 4) {
+            int observed_bits = 0;
+            copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
+            __builtin_wasm_memory_atomic_wait32(static_cast<int *>(address), observed_bits, 1000);
+        }
+        else {
+            long long observed_bits = 0;
+            copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
+            __builtin_wasm_memory_atomic_wait64(static_cast<long long *>(address), observed_bits, 1000);
+        }
+    }
+
+    /** Spins, since the uncapped waiter may be a browser's main thread. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, wait_uncapped_t) const noexcept {}
+
+    /** Wakes every thread sleeping on @p watched. */
+    template <typename watched_type_>
+    static inline void wake(watched_type_ const &watched) noexcept {
+        __builtin_wasm_memory_atomic_notify(static_cast<int *>(const_cast<void *>(watched_address(watched))), ~0u);
+    }
+};
+#endif // FORKUNION_TARGET_WASM_WAIT
+
 /**
  *  @brief The fastest waiter this translation unit may use with @b no runtime feature probe.
  *
