@@ -466,10 +466,10 @@
  *  mnemonic, or nothing more where MSVC reaches the instruction through an intrinsic. A unit
  *  without them derives the bits a compile-time default can pick from what the compilation target
  *  promises through the compiler's macro for the extension, since @c preferred_yield_t runs its
- *  pick unchecked. The trap-free hints - PAUSE, YIELD, PRFM, Zihintpause, the Zicbop prefetches,
- *  CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and Zicbom, which no
- *  default ever picks and a caller admits at runtime, stay on the toolchain's verdict, WFET having
- *  no compiler macro at all.
+ *  pick unchecked. The trap-free hints - PAUSE, YIELD, WFE, PRFM, Zihintpause, the Zicbop
+ *  prefetches, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and
+ *  Zicbom, which no default ever picks and a caller admits at runtime, stay on the toolchain's
+ *  verdict, WFET having no compiler macro at all.
  *
  *  The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches the two through intrinsics whose
  *  arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A extension's mnemonics need the
@@ -505,6 +505,9 @@
 #endif
 #if !defined(FORKUNION_TARGET_ARM64_YIELD)
 #define FORKUNION_TARGET_ARM64_YIELD FORKUNION_ARCH_ARM64_
+#endif
+#if !defined(FORKUNION_TARGET_ARM64_WFE)
+#define FORKUNION_TARGET_ARM64_WFE (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
 #if !defined(FORKUNION_TARGET_ARM64_WFET)
 #define FORKUNION_TARGET_ARM64_WFET (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
@@ -563,9 +566,13 @@
 #endif
 #endif
 
-/*  RCpc extends LSE, RAO-INT extends CMPCCXADD and Zacas extends the A extension, so a rung without
- *  its parent is demoted: every `#if FORKUNION_TARGET_<CAPABILITY>` region is then complete on its
- *  own and never repeats the parent's bit. */
+/*  WFET extends WFE, RCpc extends LSE, RAO-INT extends CMPCCXADD and Zacas extends the A extension,
+ *  so a rung without its parent is demoted: every `#if FORKUNION_TARGET_<CAPABILITY>` region is
+ *  then complete on its own and never repeats the parent's bit. */
+#if !FORKUNION_TARGET_ARM64_WFE
+#undef FORKUNION_TARGET_ARM64_WFET
+#define FORKUNION_TARGET_ARM64_WFET 0
+#endif
 #if !FORKUNION_TARGET_ARM64_LSE
 #undef FORKUNION_TARGET_ARM64_RCPC
 #define FORKUNION_TARGET_ARM64_RCPC 0

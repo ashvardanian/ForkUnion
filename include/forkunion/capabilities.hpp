@@ -352,8 +352,81 @@ struct arm64_yield_t {
 };
 #endif // FORKUNION_TARGET_ARM64_YIELD
 
-/*  @c WFET and the exclusive-monitor @c LDAXR and @c CLREX it rides on have no MSVC intrinsic, so
- *  the timed waiter is inline-assembly only; MSVC-ARM64 keeps the @c arm64_yield_t hint above. */
+/*  @c WFE, @c WFET and the exclusive-monitor @c LDAXR and @c CLREX they ride on have no MSVC
+ *  intrinsic, so both monitored waiters are inline-assembly only; MSVC-ARM64 keeps the
+ *  @c arm64_yield_t hint above. */
+#if FORKUNION_TARGET_ARM64_WFE
+
+/**
+ *  @brief Arms this core's exclusive monitor on the word at @p watched_address and reports
+ *      whether to enter the wait.
+ *  @return true if the monitor is armed and the word still holds @p observed - proceed to wait,
+ *      false if the word already moved, so the monitor is dropped and the caller must re-check.
+ *
+ *  It only ever needs the address and the bit pattern, so both @c std::atomic objects and
+ *  in-place @c std::atomic_ref-owned words route here.
+ */
+template <typename value_type_>
+inline bool arm64_arm_monitor(void const *watched_address, value_type_ const observed) noexcept {
+    static_assert(sizeof(value_type_) <= 8, "The exclusive monitor watches at most a 64-bit word");
+
+    // Compare bit patterns, so an enum or any trivially-copyable word works unchanged.
+    std::uint64_t observed_bits = 0;
+    copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
+
+    // Arm the monitor with a single-copy-atomic exclusive load of the matching width. A store from
+    // any core clears the monitor, and that is what releases the wait below without a timeout. The
+    // sub-word and word widths share one 32-bit destination, so only the mnemonic suffix differs.
+    std::uint64_t current_bits;
+    if constexpr (sizeof(value_type_) <= 4) {
+        std::uint32_t narrow;
+        if constexpr (sizeof(value_type_) == 1)
+            __asm__ __volatile__("ldaxrb %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
+        else if constexpr (sizeof(value_type_) == 2)
+            __asm__ __volatile__("ldaxrh %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
+        else //
+            __asm__ __volatile__("ldaxr %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
+        current_bits = narrow;
+    }
+    else __asm__ __volatile__("ldaxr %0, [%1]" : "=r"(current_bits) : "r"(watched_address) : "memory");
+
+    // The word moved between the caller's check and our load: drop the monitor and re-check.
+    if (current_bits != observed_bits) {
+        __asm__ __volatile__("clrex" ::: "memory");
+        return false;
+    }
+    return true;
+}
+
+/**
+ *  @brief On AArch64 without @c FEAT_WFxT, a monitored wait for uncapped loops: @c LDAXR arms the
+ *      exclusive monitor and @c WFE sleeps until a store to the line clears it.
+ *
+ *  Grace, Graviton 3 and 4 and the Neoverse N-series lack @c WFET, so this is their only way to
+ *  sleep on a word. The store that clears the monitor also sets the event register, so a store
+ *  landing between the re-check and the @c WFE ends the wait at once instead of being lost.
+ *  Capped loops keep @c YIELD, since the kernel's event stream bounds a @c WFE only to about
+ *  100 micro-seconds, far coarser than the cap.
+ */
+struct arm64_wfe_t {
+    static constexpr capabilities_t capability_k = capability_arm64_yield_k;
+
+    /** Spins on @c YIELD, for a loop that also guards another line. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, wait_capped_t = {}) const noexcept {
+        __asm__ __volatile__("yield");
+    }
+
+    /** Sleeps until a store clears the monitor, for a single-word loop. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_>
+    inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
+                           wait_uncapped_t) const noexcept {
+        if (!arm64_arm_monitor(watched_address(watched), observed)) return;
+        __asm__ __volatile__("wfe" ::: "memory");
+    }
+};
+#endif // FORKUNION_TARGET_ARM64_WFE
+
 #if FORKUNION_TARGET_ARM64_WFET
 
 /**
@@ -384,7 +457,7 @@ struct arm64_wfet_t {
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
-        if (!arm_monitor_(watched_address(watched), observed)) return;
+        if (!arm64_arm_monitor(watched_address(watched), observed)) return;
         wfet_one_micro_();
     }
 
@@ -392,7 +465,7 @@ struct arm64_wfet_t {
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_uncapped_t) const noexcept {
-        if (!arm_monitor_(watched_address(watched), observed)) return;
+        if (!arm64_arm_monitor(watched_address(watched), observed)) return;
         // `WFE` returns on the monitor-clearing store; Apple's event stream is a periodic safety net.
         __asm__ __volatile__("wfe" ::: "memory");
     }
@@ -420,47 +493,6 @@ struct arm64_wfet_t {
             :
             : "r"(deadline)
             : "x0", "memory", "cc");
-    }
-
-    /**
-     *  @brief Arms this core's exclusive monitor on the word at @p watched_address and reports
-     *      whether to enter the wait.
-     *  @return true if the monitor is armed and the word still holds @p observed - proceed to wait,
-     *      false if the word already moved, so the monitor is dropped and the caller must re-check.
-     *
-     *  It only ever needs the address and the bit pattern, so both @c std::atomic objects and
-     *  in-place @c std::atomic_ref-owned words route here.
-     */
-    template <typename value_type_>
-    static inline bool arm_monitor_(void const *watched_address, value_type_ const observed) noexcept {
-        static_assert(sizeof(value_type_) <= 8, "The exclusive monitor watches at most a 64-bit word");
-
-        // Compare bit patterns, so an enum or any trivially-copyable word works unchanged.
-        std::uint64_t observed_bits = 0;
-        copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
-
-        // Arm the monitor with a single-copy-atomic exclusive load of the matching width. A store from
-        // any core clears the monitor, and that is what releases the wait below without a timeout. The
-        // sub-word and word widths share one 32-bit destination, so only the instruction suffix differs.
-        std::uint64_t current_bits;
-        if constexpr (sizeof(value_type_) <= 4) {
-            std::uint32_t narrow;
-            if constexpr (sizeof(value_type_) == 1)
-                __asm__ __volatile__("ldaxrb %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
-            else if constexpr (sizeof(value_type_) == 2)
-                __asm__ __volatile__("ldaxrh %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
-            else //
-                __asm__ __volatile__("ldaxr %w0, [%1]" : "=r"(narrow) : "r"(watched_address) : "memory");
-            current_bits = narrow;
-        }
-        else __asm__ __volatile__("ldaxr %0, [%1]" : "=r"(current_bits) : "r"(watched_address) : "memory");
-
-        // The word moved between the caller's check and our load: drop the monitor and re-check.
-        if (current_bits != observed_bits) {
-            __asm__ __volatile__("clrex" ::: "memory");
-            return false;
-        }
-        return true;
     }
 };
 
