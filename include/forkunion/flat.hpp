@@ -323,8 +323,7 @@ class flat_pool {
         // only where no platform source names a line. Both widths are powers of two, so a cell
         // rounded up to one both fits its slot and lands on its own alignment.
         std::size_t const measured = destructive_interference_bytes();
-        std::size_t const stride =
-            (std::max)(measured ? measured : alignment_k, round_up_to_pow2(sizeof(worker_cell_t)));
+        std::size_t const stride = max_of(measured ? measured : alignment_k, round_up_to_pow2(sizeof(worker_cell_t)));
         worker_cells_t cells {worker_cell_allocator_t {allocator_}, stride};
         if (status_t const grew = cells.resize(threads); failed(grew)) return grew;
 

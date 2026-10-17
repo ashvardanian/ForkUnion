@@ -93,7 +93,8 @@ struct log_memory_volume_t {
         char const *unit_color = colors.dim();
         char const *reset_color = colors.reset();
 
-        if (bytes >= (1ull << 40)) {
+        // A 32-bit `std::size_t` never reaches a TiB, so widen before comparing.
+        if (static_cast<std::uint64_t>(bytes) >= (1ull << 40)) {
             double tb = static_cast<double>(bytes) / (1ull << 40);
             std::snprintf(buffer, buffer_size, "%s%.1f%s %sTiB%s", value_color, tb, unit_color, unit_color,
                           reset_color);
@@ -254,7 +255,7 @@ struct log_numa_topology_t {
             // `snprintf` returns what it wanted to write; the clamp keeps a truncated row in bounds
             int pos = 0;
             auto const advance = [&](int written) noexcept {
-                if (written > 0) pos = (std::min)(pos + written, static_cast<int>(sizeof(line_buffer)) - 1);
+                if (written > 0) pos = min_of(pos + written, static_cast<int>(sizeof(line_buffer)) - 1);
             };
             advance(std::snprintf(                                                        //
                 line_buffer, sizeof(line_buffer),                                         //

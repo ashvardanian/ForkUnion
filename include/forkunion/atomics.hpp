@@ -30,6 +30,8 @@
  *    forms - and @c lr and @c sc loops for compare-exchange and byte exchanges; fences around loads
  *    & stores.
  *  - @c risc5_zacas_atomic_ref: compare-exchange as one @c amocas.
+ *  - @c wasm_atomic_ref: the standard operations, with @c memory.atomic.notify after each releasing
+ *    write to a 32- or 64-bit word, as no WebAssembly store wakes a @c memory.atomic.wait sleeper.
  *
  *  Only the widths & operations the indexes use are spelled: byte exchanges & compare-exchanges for
  *  flags, 32-bit forms for node ids, 64-bit forms for counters & packed words. Every reference
@@ -3059,6 +3061,198 @@ struct risc5_zacas_atomic_ref<value_type_ const> {
 
 #endif // FORKUNION_TARGET_RISC5_ZACAS
 
+/*  @c memory.atomic.notify: wakes the threads @c memory.atomic.wait sleeps on one 4-byte-aligned
+ *  address, all of them for a count of `~0u`. No store wakes a sleeper in WebAssembly, so the
+ *  reference below notifies after each of its releasing writes. */
+#if FORKUNION_TARGET_WASM_WAIT
+#pragma region WebAssembly
+
+inline void wasm_memory_atomic_notify(void *word) noexcept {
+    __builtin_wasm_memory_atomic_notify(static_cast<int *>(word), ~0u);
+}
+
+/**
+ *  @brief The standard operations for WebAssembly threads, each store and read-modify-write ordered
+ *      release, acq_rel or seq_cst on a 32- or 64-bit word followed by @c memory.atomic.notify,
+ *      waking every thread @c wasm_wait_t sleeps on that word.
+ *
+ *  A compare-exchange notifies only when it wrote. Acquire and relaxed operations notify nothing,
+ *  and neither do 1- and 2-byte words: @c wasm_wait_t spins on those, and @c memory.atomic.notify
+ *  needs a 4-byte-aligned address.
+ *
+ *  @sa wasm_wait_t, the waiter it wakes.
+ */
+template <typename value_type_>
+struct wasm_atomic_ref {
+    using value_t = value_type_;
+    static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
+
+    explicit wasm_atomic_ref(value_type_ &word) noexcept : word_(&word) {}
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().load(order);
+    }
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        weaker_().store(desired, order);
+        notify_(order);
+    }
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ const observed = weaker_().exchange(desired, order);
+        notify_(order);
+        return observed;
+    }
+
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        bool const exchanged = weaker_().compare_exchange_strong(expected, desired, success, failure);
+        if (exchanged) notify_(success);
+        return exchanged;
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired, std::memory_order success,
+                               std::memory_order failure) const noexcept {
+        bool const exchanged = weaker_().compare_exchange_weak(expected, desired, success, failure);
+        if (exchanged) notify_(success);
+        return exchanged;
+    }
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired,
+                                 std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        bool const exchanged = weaker_().compare_exchange_strong(expected, desired, order);
+        if (exchanged) notify_(order);
+        return exchanged;
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        bool const exchanged = weaker_().compare_exchange_weak(expected, desired, order);
+        if (exchanged) notify_(order);
+        return exchanged;
+    }
+
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ const observed = weaker_().fetch_add(operand, order);
+        notify_(order);
+        return observed;
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ const observed = weaker_().fetch_sub(operand, order);
+        notify_(order);
+        return observed;
+    }
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ const observed = weaker_().fetch_and(mask, order);
+        notify_(order);
+        return observed;
+    }
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ const observed = weaker_().fetch_or(bits, order);
+        notify_(order);
+        return observed;
+    }
+    value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ const observed = weaker_().fetch_xor(bits, order);
+        notify_(order);
+        return observed;
+    }
+    value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        value_type_ const observed = weaker_().fetch_max(operand, order);
+        notify_(order);
+        return observed;
+    }
+    value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        value_type_ const observed = weaker_().fetch_min(operand, order);
+        notify_(order);
+        return observed;
+    }
+
+    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
+                                     std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        value_type_ const observed = weaker_().fetch_add_if_at_most(operand, limit, order);
+        notify_(order);
+        return observed;
+    }
+    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        value_type_ const observed = weaker_().fetch_sub_if_at_least(operand, floor, order);
+        notify_(order);
+        return observed;
+    }
+
+    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().add(operand, order);
+        notify_(order);
+    }
+    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().sub(operand, order);
+        notify_(order);
+    }
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().set_bits(bits, order);
+        notify_(order);
+    }
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().clear_bits(bits, order);
+        notify_(order);
+    }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        weaker_().flip_bits(bits, order);
+        notify_(order);
+    }
+
+  private:
+    /** The previous rung, built on demand: it holds this same pointer and nothing else. */
+    standard_atomic_ref<value_type_> weaker_() const noexcept { return standard_atomic_ref<value_type_>(*word_); }
+
+    /** Wakes the word's sleepers after a write ordered @p order, if that order releases. */
+    void notify_(std::memory_order order) const noexcept {
+        if ((sizeof(value_type_) == 4 || sizeof(value_type_) == 8) && releases(order)) wasm_memory_atomic_notify(word_);
+    }
+
+    value_type_ *word_;
+};
+
+/**
+ *  @brief Read-only access through @ref wasm_atomic_ref, whose loads notify nothing.
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
+template <typename value_type_>
+struct wasm_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
+
+    explicit wasm_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+
+    /** A temporary would die before the reference does. */
+    wasm_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_.load(order);
+    }
+
+  private:
+    standard_atomic_ref<value_type_ const> portable_;
+};
+
+#pragma endregion WebAssembly
+
+#endif // FORKUNION_TARGET_WASM_WAIT
+
 /** The newest reference this translation unit may run with no runtime probe, reading each rung's
  *  `FORKUNION_TARGET_<CAPABILITY>` alone - in a unit that dispatches nothing the compilation
  *  target's promise, so the pick can never be illegal there. In a unit that dispatches at runtime -
@@ -3083,6 +3277,9 @@ using preferred_atomic_ref = risc5_zacas_atomic_ref<value_type_>;
 #elif FORKUNION_TARGET_RISC5_ATOMIC
 template <typename value_type_>
 using preferred_atomic_ref = risc5_atomic_ref<value_type_>;
+#elif FORKUNION_TARGET_WASM_WAIT
+template <typename value_type_>
+using preferred_atomic_ref = wasm_atomic_ref<value_type_>;
 #else
 template <typename value_type_>
 using preferred_atomic_ref = standard_atomic_ref<value_type_>;

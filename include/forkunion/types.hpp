@@ -469,8 +469,8 @@
  *  pick unchecked. The trap-free hints - PAUSE, YIELD, WFE, PRFM, Zihintpause, the Zicbop
  *  prefetches, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and
  *  Zicbom, which no default ever picks and a caller admits at runtime, stay on the toolchain's
- *  verdict, WFET having no compiler macro at all. The wasm wait needs the threads feature the
- *  module is built with, which @c __wasm_atomics__ reports.
+ *  verdict, WFET having no compiler macro at all. The wasm wait and notify need the threads
+ *  feature the module is built with, which @c __wasm_atomics__ reports.
  *
  *  The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches the two through intrinsics whose
  *  arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A extension's mnemonics need the
@@ -1186,6 +1186,18 @@ inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
     unsigned char *to_bytes = reinterpret_cast<unsigned char *>(to);
     for (std::size_t byte_index = 0; byte_index < sizeof(value_type_); ++byte_index)
         to_bytes[byte_index] = from_bytes[byte_index];
+}
+
+/** The smaller of @p first and @p second, without `<algorithm>` or the `windows.h` @c min macro. */
+template <typename value_type_>
+constexpr value_type_ min_of(value_type_ first, value_type_ second) noexcept {
+    return second < first ? second : first;
+}
+
+/** The larger of @p first and @p second, the @c max twin of @ref min_of. */
+template <typename value_type_>
+constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
+    return first < second ? second : first;
 }
 
 /**

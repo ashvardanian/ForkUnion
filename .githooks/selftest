@@ -1949,6 +1949,15 @@ assert_accepts "ceiling division through the helper" include/forkunion/probe.hpp
 static inline int probe(int count, int size) { return fu::div_ceil(count, size); }
 FIXTURE
 
+assert_rejects "std::max in a header" "calls std::min or std::max" include/forkunion/probe.hpp <<'FIXTURE'
+static inline int probe(int count, int size) { return (std::max)(count, size); }
+FIXTURE
+
+assert_accepts "max_of in a header, and a comment naming std::max" include/forkunion/probe.hpp <<'FIXTURE'
+/** The larger of @p count and @p size, like `std::max(count, size)`. */
+static inline int probe(int count, int size) { return max_of(count, size); }
+FIXTURE
+
 assert_rejects "raw platform macro" "asks a raw platform macro" include/forkunion/probe.hpp <<'FIXTURE'
 #if defined(__linux__)
 #define FORKUNION_PROBE_ 1

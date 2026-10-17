@@ -2358,6 +2358,16 @@ check_ceiling_division_uses_helper() {
         "            std.math.divCeil in Zig, or std.math.ceildiv in Mojo, and re-read the change against types.hpp:"
 }
 
+# Rejects `std::min` and `std::max` in the headers, because `types.hpp` names `fu::min_of` and `fu::max_of`,
+# which need no `<algorithm>` and no parentheses against the `windows.h` macros. Comments may name them.
+check_minmax_uses_helpers() {
+    local rolled
+    rolled=$(printf '%s\n' "$staged_added_text" | grep -vE "$added_comment_line_pattern" |
+        blank_c_comments_preserving_columns | grep -E '\(?std::(min|max)\)?[[:space:]]*[<(]' || true)
+    [ -z "$rolled" ] || reject_with_reason "$rolled" \
+        "$staged_path calls std::min or std::max; write fu::min_of or fu::max_of from types.hpp:"
+}
+
 # Rejects a raw platform predefine outside `types.hpp`, because `types.hpp` resolves them once into the FORKUNION_*
 # vocabulary. The probes predate that vocabulary, and a genuine exception carries `// FU-ALLOW: <reason>`.
 check_platform_macros_through_vocabulary() {
@@ -2442,6 +2452,9 @@ run_project_checks() {
         check_ceiling_division_uses_helper
         check_macro_names_current
         ;;
+    esac
+    case "$staged_path" in
+    include/*.hpp) check_minmax_uses_helpers ;;
     esac
     case "$staged_path" in
     test/main.*) ;; # ? The harness: it owns stdout

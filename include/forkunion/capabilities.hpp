@@ -608,29 +608,35 @@ struct risc5_wrs_t {
  *  @brief On WebAssembly threads, worker waits that sleep in @c memory.atomic.wait.
  *
  *  Unlike a cache-line monitor, @c memory.atomic.wait is not woken by a plain store, only by
- *  @c memory.atomic.notify on the same address, so a pool calls @c wake after the store that
- *  releases its workers, and the 1 micro-second timeout bounds how late any other change is seen.
- *  Uncapped waits spin instead: the pool's caller waits uncapped, and in a browser that is the main
- *  thread, where @c memory.atomic.wait traps.
+ *  @c memory.atomic.notify on the same address, so a 32- or 64-bit wait ends on a releasing write
+ *  through @c wasm_atomic_ref, which notifies, or on its 1 micro-second timeout, which bounds how
+ *  late any other change is seen. Uncapped waits spin instead: the pool's caller waits uncapped,
+ *  and in a browser that is the main thread, where @c memory.atomic.wait traps.
  *
- *  @warning Capped waits trap on a browser's main thread, so a @c spin_mutex over this waiter must
- *      not be contended there.
+ *  WebAssembly has @c memory.atomic.wait only at 32- and 64-bit width, so a watch of 1 or 2 bytes
+ *  spins and never sleeps, whatever thread it runs on.
+ *
+ *  @warning Capped 32- and 64-bit waits trap on a browser's main thread, so only a 1- or 2-byte
+ *      watch, like @c spin_mutex's @c bool flag, is safe to contend there.
  */
 struct wasm_wait_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
 
-    /** Sleeps until @c wake or a 1 micro-second timeout, for a loop guarding another line too. */
+    /** Sleeps a 32- or 64-bit watch until a @c wasm_atomic_ref releasing write or a 1 micro-second
+     *  timeout, for a loop guarding another line too; a 1- or 2-byte watch returns at once, and its
+     *  caller spins on it. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &watched, value_type_ const observed, thread_index_type_,
                            wait_capped_t = {}) const noexcept {
-        static_assert(sizeof(value_type_) == 4 || sizeof(value_type_) == 8, "wasm waits on 32- or 64-bit words");
-        void *const address = const_cast<void *>(watched_address(watched));
+        static_assert(sizeof(value_type_) <= 8, "wasm waits on at most a 64-bit word");
         if constexpr (sizeof(value_type_) == 4) {
+            void *const address = const_cast<void *>(watched_address(watched));
             int observed_bits = 0;
             copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
             __builtin_wasm_memory_atomic_wait32(static_cast<int *>(address), observed_bits, 1000);
         }
-        else {
+        else if constexpr (sizeof(value_type_) == 8) {
+            void *const address = const_cast<void *>(watched_address(watched));
             long long observed_bits = 0;
             copy_bytes(&observed, reinterpret_cast<value_type_ *>(&observed_bits));
             __builtin_wasm_memory_atomic_wait64(static_cast<long long *>(address), observed_bits, 1000);
@@ -640,12 +646,6 @@ struct wasm_wait_t {
     /** Spins, since the uncapped waiter may be a browser's main thread. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, wait_uncapped_t) const noexcept {}
-
-    /** Wakes every thread sleeping on @p watched. */
-    template <typename watched_type_>
-    static inline void wake(watched_type_ const &watched) noexcept {
-        __builtin_wasm_memory_atomic_notify(static_cast<int *>(const_cast<void *>(watched_address(watched))), ~0u);
-    }
 };
 #endif // FORKUNION_TARGET_WASM_WAIT
 
@@ -669,6 +669,8 @@ using preferred_yield_t = arm64_yield_t;
 using preferred_yield_t = risc5_wrs_t;
 #elif FORKUNION_TARGET_RISC5_PAUSE
 using preferred_yield_t = risc5_pause_t;
+#elif FORKUNION_TARGET_WASM_WAIT
+using preferred_yield_t = wasm_wait_t;
 #else
 using preferred_yield_t = standard_yield_t;
 #endif
