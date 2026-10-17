@@ -21,22 +21,23 @@ namespace fu = ashvardanian::forkunion;
 
 using thread_allocator_t = std::allocator<std::thread>;
 
-/** The concrete pool type for a shape, a waiter, and a cache-hints policy - the reverse map from a
- *  pool's @c kind_k and its stored capability bits. */
-template <fu::pool_kind_t kind_, typename yield_type_, typename cache_hints_type_>
+/** The concrete pool type for a shape, a waiter, an atomic reference and a cache-hints policy - the
+ *  reverse map from a pool's @c kind_k and its stored capability bits. */
+template <fu::pool_kind_t kind_, typename yield_type_, template <typename> class atomic_ref_template_,
+          typename cache_hints_type_>
 struct pool_for;
-template <typename yield_type_, typename cache_hints_type_>
-struct pool_for<fu::pool_kind_t::flat_k, yield_type_, cache_hints_type_> {
-    using type = fu::flat_pool<thread_allocator_t, yield_type_, cache_hints_type_>;
+template <typename yield_type_, template <typename> class atomic_ref_template_, typename cache_hints_type_>
+struct pool_for<fu::pool_kind_t::flat_k, yield_type_, atomic_ref_template_, cache_hints_type_> {
+    using type = fu::flat_pool<thread_allocator_t, yield_type_, atomic_ref_template_, cache_hints_type_>;
 };
 #if FORKUNION_WITH_OS_THREADS
-template <typename yield_type_, typename cache_hints_type_>
-struct pool_for<fu::pool_kind_t::colocated_k, yield_type_, cache_hints_type_> {
-    using type = fu::colocated_pool<yield_type_, cache_hints_type_>;
+template <typename yield_type_, template <typename> class atomic_ref_template_, typename cache_hints_type_>
+struct pool_for<fu::pool_kind_t::colocated_k, yield_type_, atomic_ref_template_, cache_hints_type_> {
+    using type = fu::colocated_pool<yield_type_, atomic_ref_template_, cache_hints_type_>;
 };
-template <typename yield_type_, typename cache_hints_type_>
-struct pool_for<fu::pool_kind_t::distributed_k, yield_type_, cache_hints_type_> {
-    using type = fu::distributed_pool<yield_type_, cache_hints_type_>;
+template <typename yield_type_, template <typename> class atomic_ref_template_, typename cache_hints_type_>
+struct pool_for<fu::pool_kind_t::distributed_k, yield_type_, atomic_ref_template_, cache_hints_type_> {
+    using type = fu::distributed_pool<yield_type_, atomic_ref_template_, cache_hints_type_>;
 };
 #endif
 
@@ -57,73 +58,95 @@ struct pool_variants_t {
         static constexpr std::size_t alignment_k = std::max({alignof(types_)...});
     };
 
-    /*  Every (waiter, cache-hints) pair the @c select_pool cascade below may instantiate, spelled
-     *  out per shape. A missed entry cannot silently under-size the storage: @c construct
-     *  static-asserts every pool it places against these bounds, so drift fails the build. */
+    /*  Every waiter, atomic reference and cache-hints triple the @c select_pool cascade below may
+     *  instantiate, spelled out per shape. A missed entry cannot silently under-size the storage,
+     *  since @c construct static-asserts every pool it places against these bounds. */
     using pool_traits_t = max_size_align< //
 #if FORKUNION_TARGET_X86_TPAUSE && FORKUNION_TARGET_X86_CLDEMOTE
-        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::x86_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::standard_atomic_ref, fu::x86_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_X86_TPAUSE
-        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::standard_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::x86_tpause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_X86_PAUSE
-        fu::flat_pool<thread_allocator_t, fu::x86_pause_t, fu::standard_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::x86_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_ARM64_WFET
-        fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
+#if FORKUNION_TARGET_ARM64_WFET && FORKUNION_TARGET_ARM64_RCPC
+        fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_RCPC
+        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_LSE
+        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD
-        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
-        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
-        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
-        fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+        fu::flat_pool<thread_allocator_t, fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>, //
 #endif
 
 #if FORKUNION_WITH_OS_THREADS
-        fu::colocated_pool<fu::standard_yield_t, fu::standard_cache_hints_t>,   // Single-compute-domain pools
-        fu::distributed_pool<fu::standard_yield_t, fu::standard_cache_hints_t>, // Whole-machine pools
+        // Single-compute-domain and whole-machine pools
+        fu::colocated_pool<fu::standard_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,   //
+        fu::distributed_pool<fu::standard_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>, //
 #if FORKUNION_TARGET_X86_TPAUSE && FORKUNION_TARGET_X86_CLDEMOTE
-        fu::colocated_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>,   //
-        fu::distributed_pool<fu::x86_tpause_t, fu::x86_cache_hints_t>, //
+        fu::colocated_pool<fu::x86_tpause_t, fu::standard_atomic_ref, fu::x86_cache_hints_t>,   //
+        fu::distributed_pool<fu::x86_tpause_t, fu::standard_atomic_ref, fu::x86_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_X86_TPAUSE
-        fu::colocated_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>,   //
-        fu::distributed_pool<fu::x86_tpause_t, fu::standard_cache_hints_t>, //
+        fu::colocated_pool<fu::x86_tpause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,   //
+        fu::distributed_pool<fu::x86_tpause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_X86_PAUSE
-        fu::colocated_pool<fu::x86_pause_t, fu::standard_cache_hints_t>,   //
-        fu::distributed_pool<fu::x86_pause_t, fu::standard_cache_hints_t>, //
+        fu::colocated_pool<fu::x86_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,   //
+        fu::distributed_pool<fu::x86_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_ARM64_WFET
-        fu::colocated_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>,   //
-        fu::distributed_pool<fu::arm64_wfet_t, fu::preferred_cache_hints_t>, //
+#if FORKUNION_TARGET_ARM64_WFET && FORKUNION_TARGET_ARM64_RCPC
+        fu::colocated_pool<fu::arm64_wfet_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>,   //
+        fu::distributed_pool<fu::arm64_wfet_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_RCPC
+        fu::colocated_pool<fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>,   //
+        fu::distributed_pool<fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_LSE
+        fu::colocated_pool<fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>,   //
+        fu::distributed_pool<fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD
-        fu::colocated_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>,   //
-        fu::distributed_pool<fu::arm64_yield_t, fu::preferred_cache_hints_t>, //
+        fu::colocated_pool<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>,   //
+        fu::distributed_pool<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
-        fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>, //
+        fu::colocated_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>,   //
+        fu::distributed_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
-        fu::colocated_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_wrs_t, fu::risc5_cache_hints_t>, //
+        fu::colocated_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>,   //
+        fu::distributed_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
-        fu::colocated_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_pause_t, fu::risc5_cache_hints_t>, //
+        fu::colocated_pool<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>,   //
+        fu::distributed_pool<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+        fu::colocated_pool<fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>,   //
+        fu::distributed_pool<fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>, //
 #endif
 #endif // FORKUNION_WITH_OS_THREADS
 
-        fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_cache_hints_t> //
+        fu::flat_pool<thread_allocator_t, fu::standard_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t> //
         >;
 
     /** Raw aligned storage for the one live pool, read per @c kind_ and @c capabilities_. */
@@ -132,7 +155,7 @@ struct pool_variants_t {
     /** The stored pool's shape, or @c unknown_k when the storage is empty - no pool spawned yet. */
     fu::pool_kind_t kind_ {fu::pool_kind_t::unknown_k};
 
-    /** The busy-wait bit the stored pool uses; with @c kind_ it names the concrete type. */
+    /** The waiter, reference and hints bits the stored pool uses; with @c kind_, its type. */
     fu::capabilities_t capabilities_ {fu::capabilities_unknown_k};
 
     pool_variants_t() = default;
@@ -151,9 +174,10 @@ struct pool_variants_t {
         static_assert(alignof(pool_type_) <= pool_traits_t::alignment_k, "Add this pool to `pool_traits_t`");
         new (storage_) pool_type_(std::forward<args_types_>(args)...);
         kind_ = pool_type_::kind_k;
-        // The waiter and the hints declare distinct bits, so their union names the combination
-        // unambiguously, and `select_pool` decodes the exact type back, a deterministic round-trip.
+        // The waiter, the reference and the hints declare distinct bits, so their union names the
+        // combination unambiguously, and `select_pool` decodes the exact type back.
         capabilities_ = static_cast<fu::capabilities_t>(pool_type_::micro_yield_t::capability_k |
+                                                        pool_type_::template atomic_ref<std::size_t>::capabilities_k |
                                                         pool_type_::cache_hints_t::capability_k);
     }
 };
@@ -164,20 +188,22 @@ struct pool_type_tag {
     using type = pool_type_;
 };
 
-/** Whether every capability bit the @p yield_type_ and @p hints_type_ declare is in @p bits. */
-template <typename yield_type_, typename hints_type_>
+/** Whether every capability bit the @p yield_type_, @p atomic_ref_template_ and @p hints_type_
+ *  declare is in @p bits. */
+template <typename yield_type_, template <typename> class atomic_ref_template_, typename hints_type_>
 static bool selects(fu::capabilities_t const bits) noexcept {
-    auto const required = yield_type_::capability_k | hints_type_::capability_k;
+    auto const required =
+        yield_type_::capability_k | atomic_ref_template_<std::size_t>::capabilities_k | hints_type_::capability_k;
     return (bits & required) == static_cast<fu::capabilities_t>(required);
 }
 
 /**
- *  @brief The one capability → type cascade: walks the silicon-real waiter and cache-hints pairs,
- *      most capable first, and invokes @p action with the tag of the first pair whose every
- *      declared bit is in @p bits.
+ *  @brief The one capability → type cascade: walks the silicon-real waiter, atomic reference and
+ *      cache-hints triples, most capable first, and invokes @p action with the tag of the first
+ *      triple whose every declared bit is in @p bits.
  *
- *  Anything unexpected degrades to the nearest pair that only drops capabilities, down to the
- *  portable @b (standard_yield_t,standard_cache_hints_t) fallback.
+ *  Anything unexpected degrades to the nearest triple that only drops capabilities, down to the
+ *  portable @b (standard_yield_t,standard_atomic_ref,standard_cache_hints_t) fallback.
  *
  *  Serves both directions - @c construct_pool passes the probed machine capabilities, @c visit_kind
  *  passes the bits stored at construction - so selection and decoding can never disagree.
@@ -186,46 +212,78 @@ template <fu::pool_kind_t kind_, typename action_type_>
 static auto select_pool([[maybe_unused]] fu::capabilities_t const bits, action_type_ &&action) {
     // WAITPKG ships in Tremont, Alder Lake, and Sapphire Rapids onward; CLDEMOTE only ever shipped
     // alongside it (Tremont, SPR, GNR - fused off on Alder/Raptor/Meteor client parts), so the
-    // (pause + cldemote) cell has no silicon and is deliberately not offered.
+    // (pause + cldemote) cell has no silicon and is deliberately not offered. The newer x86
+    // references change none of the pool's operations, so every x86 pool keeps the standard one.
 #if FORKUNION_TARGET_X86_TPAUSE && FORKUNION_TARGET_X86_CLDEMOTE
-    if (selects<fu::x86_tpause_t, fu::x86_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::x86_tpause_t, fu::x86_cache_hints_t>::type> {});
+    if (selects<fu::x86_tpause_t, fu::standard_atomic_ref, fu::x86_cache_hints_t>(bits))
+        return action(
+            pool_type_tag<
+                typename pool_for<kind_, fu::x86_tpause_t, fu::standard_atomic_ref, fu::x86_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_X86_TPAUSE
-    if (selects<fu::x86_tpause_t, fu::standard_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::x86_tpause_t, fu::standard_cache_hints_t>::type> {});
+    if (selects<fu::x86_tpause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::x86_tpause_t, fu::standard_atomic_ref,
+                                                      fu::standard_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_X86_PAUSE
-    if (selects<fu::x86_pause_t, fu::standard_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::x86_pause_t, fu::standard_cache_hints_t>::type> {});
+    if (selects<fu::x86_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::x86_pause_t, fu::standard_atomic_ref,
+                                                      fu::standard_cache_hints_t>::type> {});
 #endif
     // `DC CVAC` legality is an OS property (`SCTLR_EL1.UCI`), so the hints half is decided at
     // compile time by `preferred_cache_hints_t` - the clean on Linux, a no-op elsewhere - and the
-    // runtime axis stays the waiter alone.
-#if FORKUNION_TARGET_ARM64_WFET
-    if (selects<fu::arm64_wfet_t, fu::preferred_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_wfet_t, fu::preferred_cache_hints_t>::type> {});
+    // runtime axis stays the waiter and the atomics. WFxT is Armv8.7, where LSE (8.1) and RCpc
+    // (8.3) are mandatory, so it only ever pairs with RCpc; the spin serves the Armv8.0-8.6 cores.
+#if FORKUNION_TARGET_ARM64_WFET && FORKUNION_TARGET_ARM64_RCPC
+    if (selects<fu::arm64_wfet_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_wfet_t, fu::arm64_rcpc_atomic_ref,
+                                                      fu::preferred_cache_hints_t>::type> {});
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_RCPC
+    if (selects<fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref,
+                                                      fu::preferred_cache_hints_t>::type> {});
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_LSE
+    if (selects<fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::arm64_lse_atomic_ref,
+                                                      fu::preferred_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD
-    if (selects<fu::arm64_yield_t, fu::preferred_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::preferred_cache_hints_t>::type> {});
+    if (selects<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::standard_atomic_ref,
+                                                      fu::preferred_cache_hints_t>::type> {});
 #endif
     // RVA23 mandates Zawrs and Zicbom together, so the monitored waiter travels with the
     // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space `prefetch.w`
-    // promotion that can never fault.
+    // promotion that can never fault. The RISC-V references emit no better code than the standard
+    // one for the pool's operations, so every RISC-V pool keeps it.
 #if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
-    if (selects<fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cbo_cache_hints_t>::type> {});
+    if (selects<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::standard_atomic_ref,
+                                                      fu::risc5_cbo_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
-    if (selects<fu::risc5_wrs_t, fu::risc5_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::risc5_cache_hints_t>::type> {});
+    if (selects<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>(bits))
+        return action(
+            pool_type_tag<
+                typename pool_for<kind_, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
-    if (selects<fu::risc5_pause_t, fu::risc5_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_pause_t, fu::risc5_cache_hints_t>::type> {});
+    if (selects<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_pause_t, fu::standard_atomic_ref,
+                                                      fu::risc5_cache_hints_t>::type> {});
 #endif
-    return action(pool_type_tag<typename pool_for<kind_, fu::standard_yield_t, fu::standard_cache_hints_t>::type> {});
+    // WebAssembly threads declare no bit, so the sleeping waiter, woken by its notifying reference,
+    // stands in for the portable pair wherever the module is built with them.
+#if FORKUNION_TARGET_WASM_WAIT
+    if (selects<fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>(bits))
+        return action(
+            pool_type_tag<
+                typename pool_for<kind_, fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>::type> {});
+#endif
+    return action(pool_type_tag<typename pool_for<kind_, fu::standard_yield_t, fu::standard_atomic_ref,
+                                                  fu::standard_cache_hints_t>::type> {});
 }
 
 /**

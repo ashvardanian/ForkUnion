@@ -258,7 +258,8 @@ struct alignas(fu::default_alignment_k) tally_t {
     std::uint64_t value {0};
 };
 
-using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t, fu::preferred_cache_hints_t>;
+using distributed_pool_t =
+    fu::distributed_pool<fu::preferred_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>;
 
 /**
  *  @brief One read-only replica of the CSR per memory domain, so no adjacency is ever remote.

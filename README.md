@@ -1083,6 +1083,16 @@ cmake --preset wasm32_wasi_threads              # wasi-threads under Wasmtime
 cmake --build --preset wasm64_emscripten && ctest --preset wasm64_emscripten
 ```
 
+To cross-compile for Android, point the `android` preset at the NDK's toolchain file and pick an ABI; the binaries only compile, since they need a device to run:
+
+```bash
+export CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake
+cmake --preset android -D ANDROID_ABI=arm64-v8a -D ANDROID_PLATFORM=24    # or armeabi-v7a
+cmake --build --preset android
+```
+
+Android builds need __NDK r28__ or newer, the first with libc++ 19 and its `std::atomic_ref`, and CI builds with the `dockcross/android-arm64` and `dockcross/android-arm` images.
+
 Machine-specific settings, like a compiler path, belong in an untracked `CMakeUserPresets.json`.
 
 The wasm32 module has one thread, so its pool spawns caller-inclusive and the multi-threaded tests only compile there; the other two shapes run the whole suite.

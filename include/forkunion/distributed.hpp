@@ -131,10 +131,14 @@ struct alignas(default_alignment_k) pinned_thread_t {
  *  The synchronization protocol - epochs, generations, contributor counting, and the memory
  *  ordering rules - is identical to @c flat_pool.
  *
+ *  @tparam atomic_ref_template_ The reference every synchronizing word is accessed through;
+ *      @c wasm_wait_t needs @c wasm_atomic_ref, whose releasing writes notify, or its 32- and
+ *      64-bit waits end only on their timeout.
  *  @sa pool_concurrency_model
  */
-template <typename micro_yield_type_ = standard_yield_t, typename cache_hints_type_ = standard_cache_hints_t,
-          std::size_t alignment_ = default_alignment_k>
+template <typename micro_yield_type_ = standard_yield_t,
+          template <typename> class atomic_ref_template_ = standard_atomic_ref,
+          typename cache_hints_type_ = standard_cache_hints_t, std::size_t alignment_ = default_alignment_k>
 struct colocated_pool {
 
   public:
@@ -150,6 +154,10 @@ struct colocated_pool {
 
     /** Functor spinning threads while they wait on an atomic. */
     using micro_yield_t = micro_yield_type_;
+
+    /** Reference reading and writing the words the pool synchronizes through. */
+    template <typename value_type_>
+    using atomic_ref = atomic_ref_template_<value_type_>;
 
     /** Functor demoting and promoting individual cache lines. */
     using cache_hints_t = cache_hints_type_;
@@ -247,7 +255,7 @@ struct colocated_pool {
 
     /** Lifecycle switch between spinning at @c grind_k, sleeping at @c chill_k, and exiting at
      *  @c die_k. */
-    alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
+    alignas(alignment_k) mood_t mood_ {mood_t::grind_k};
 
     /* Task-specific variables. */
 
@@ -258,10 +266,10 @@ struct colocated_pool {
     trampoline_t fork_trampoline_ {nullptr};
 
     /** Countdown of contributors still running; the one reaching zero signals completion. */
-    alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
+    alignas(alignment_k) thread_index_t threads_to_sync_ {0};
 
     /** Generation clock: odd while a fork is in flight, even when idle. */
-    alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
+    alignas(alignment_k) epoch_index_t epoch_ {0};
 
   public:
     colocated_pool(colocated_pool &&) = delete;
@@ -292,7 +300,9 @@ struct colocated_pool {
     }
 
     /** Checks if the thread-pool's core synchronization points are lock-free. */
-    bool is_lock_free() const noexcept { return mood_.is_lock_free() && threads_to_sync_.is_lock_free(); }
+    bool is_lock_free() const noexcept {
+        return std::atomic_ref<mood_t>::is_always_lock_free && std::atomic_ref<thread_index_t>::is_always_lock_free;
+    }
 
     /**
      *  @brief Returns the memory domain this thread-pool is pinned to.
@@ -437,7 +447,7 @@ struct colocated_pool {
         // The startup sequence for the POSIX threads differs from the `flat_pool`,
         // where at start up there is a race condition to read the `pthreads_`.
         // So we mark the threads as "chilling" until the
-        mood_.store(mood_t::chill_k, std::memory_order_release);
+        atomic_ref<mood_t>(mood_).store(mood_t::chill_k, std::memory_order_release);
 
         // Initializing the thread pool can fail for all kinds of reasons, like:
         // - `EAGAIN` if we reach the `RLIMIT_NPROC` soft resource limit.
@@ -476,7 +486,7 @@ struct colocated_pool {
 #endif
 
             if (!created) {
-                mood_.store(mood_t::die_k, std::memory_order_release);
+                signal_die_();
                 for (thread_index_t j = use_caller_thread; j < i; ++j) {
                     native_thread_t const started = pthreads_[j].handle.load(std::memory_order_relaxed);
 #if FORKUNION_OS_WINDOWS_
@@ -527,7 +537,7 @@ struct colocated_pool {
         }
 
         // If all went well, we can store the thread-pool and start using it
-        mood_.store(mood_t::grind_k, std::memory_order_release);
+        atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_release);
         return status_t::success_k;
     }
 
@@ -560,14 +570,15 @@ struct colocated_pool {
      *  - when you want to @b restart with a different number of threads.
      */
     void terminate() noexcept {
-        assert(threads_to_sync_.load(std::memory_order_seq_cst) == 0); // ! No tasks must be running
-        assert((epoch_.load(std::memory_order_seq_cst) & 1u) == 0);    // ! Last dispatch must be joined
-        if (pthreads_.size() == 0) return;                             // ? Uninitialized
+        // ! No tasks must be running, and the last dispatch must be joined
+        assert(atomic_ref<thread_index_t>(threads_to_sync_).load(std::memory_order_seq_cst) == 0);
+        assert((atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_seq_cst) & 1u) == 0);
+        if (pthreads_.size() == 0) return; // ? Uninitialized
 
         pinned_threads_allocator_t pthread_allocator {allocator_};
 
         // Stop all threads and wait for them to finish
-        mood_.store(mood_t::die_k, std::memory_order_release);
+        signal_die_();
 
         caller_exclusivity_t const exclusivity = caller_exclusivity();
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
@@ -591,8 +602,8 @@ struct colocated_pool {
         if (use_caller_thread) reset_affinity_();
         reset_fork_();
 
-        mood_.store(mood_t::grind_k, std::memory_order_relaxed);
-        epoch_.store(0, std::memory_order_relaxed);
+        atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_relaxed);
+        atomic_ref<epoch_index_t>(epoch_).store(0, std::memory_order_relaxed);
     }
 
     /**
@@ -609,7 +620,7 @@ struct colocated_pool {
     void sleep(std::size_t wake_up_periodicity_micros) noexcept {
         assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
         sleep_length_micros_ = wake_up_periodicity_micros;
-        mood_.store(mood_t::chill_k, std::memory_order_release);
+        atomic_ref<mood_t>(mood_).store(mood_t::chill_k, std::memory_order_release);
 
         // On Linux the thread's scheduling class can go IDLE to cut power draw:
 #if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
@@ -717,7 +728,7 @@ struct colocated_pool {
      *  the calling thread's slice, so poll-then-join is reserved for @c caller_exclusive_k pools.
      */
     bool is_complete(generation_t generation) const noexcept {
-        return generation != epoch_.load(std::memory_order_acquire);
+        return generation != atomic_ref<epoch_index_t const>(epoch_).load(std::memory_order_acquire);
     }
 
     /**
@@ -728,31 +739,34 @@ struct colocated_pool {
      */
     void unsafe_join(generation_t generation) noexcept {
         assert((generation & 1u) == 1 && "Generation tokens are always odd");
-        if (epoch_.load(std::memory_order_acquire) != generation) return; // ? Stale or already complete
+        // ? Stale or already complete
+        if (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) != generation) return;
 
         // On inclusive pools the calling thread is a contributor: execute its slice and count it
         // down exactly like a worker thread would.
         bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
         if (use_caller_thread) {
             fork_trampoline_(fork_state_, thread_in_domain_t {static_cast<thread_index_t>(0), compute_domain_index_});
-            thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
+            thread_index_t const before_decrement =
+                atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
             assert(before_decrement > 0 && "The contributor count must include the caller");
 
             // The last contributor steps the epoch, as its only writer, to signal completion
             if (before_decrement == 1)
-                epoch_.store(static_cast<epoch_index_t>(generation + 1), std::memory_order_release);
+                atomic_ref<epoch_index_t>(epoch_).store(static_cast<epoch_index_t>(generation + 1),
+                                                        std::memory_order_release);
         }
 
         // Wait for the last contributor's completion step. Only `epoch_` moves here, so a
         // monitored waiter arms the right line and the completing store wakes it as an event.
         micro_yield_t micro_yield;
-        while (epoch_.load(std::memory_order_acquire) == generation)
-            micro_yield(epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
+        while (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) == generation)
+            micro_yield(&epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
     }
 
     /** Blocks the calling thread until the currently broadcasted task finishes. */
     void unsafe_join() noexcept {
-        epoch_index_t const current_epoch = epoch_.load(std::memory_order_acquire);
+        epoch_index_t const current_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire);
         if (current_epoch & 1u) unsafe_join(static_cast<generation_t>(current_epoch)); // ? Even means idle
     }
 
@@ -799,13 +813,22 @@ struct colocated_pool {
 #pragma endregion ComputeDomains Compatibility
 
   private:
-    template <typename, typename, std::size_t>
+    template <typename, template <typename> class, typename, std::size_t>
     friend struct distributed_pool;
 
     /** Clears the fork state and trampoline between dispatches. */
     void reset_fork_() noexcept {
         fork_state_ = nullptr;
         fork_trampoline_ = nullptr;
+    }
+
+    /** Switches the mood to @c die_k, then re-releases the idle epoch, which no worker writes, so
+     *  the workers asleep on it wake to exit: the write ends a monitored wait on its line, and a
+     *  notifying reference like @c wasm_atomic_ref ends a @c wasm_wait_t one. */
+    void signal_die_() noexcept {
+        atomic_ref<mood_t>(mood_).store(mood_t::die_k, std::memory_order_release);
+        atomic_ref<epoch_index_t> const epoch(epoch_);
+        epoch.store(epoch.load(std::memory_order_relaxed), std::memory_order_release);
     }
 
     /**
@@ -819,13 +842,13 @@ struct colocated_pool {
      */
     bool claim_() noexcept {
         thread_index_t idle = 0;
-        return threads_to_sync_.compare_exchange_strong(idle, threads_count(), std::memory_order_acquire,
-                                                        std::memory_order_relaxed);
+        return atomic_ref<thread_index_t>(threads_to_sync_)
+            .compare_exchange_strong(idle, threads_count(), std::memory_order_acquire, std::memory_order_relaxed);
     }
 
     /** Gives back a claim no dispatch was published on, released, so the next claimer still follows
      *  the contributors this one acquired. */
-    void unclaim_() noexcept { threads_to_sync_.store(0, std::memory_order_release); }
+    void unclaim_() noexcept { atomic_ref<thread_index_t>(threads_to_sync_).store(0, std::memory_order_release); }
 
     /**
      *  @brief Publishes @p fork on a pool this caller claimed, once the last dispatch completed.
@@ -841,8 +864,8 @@ struct colocated_pool {
         // The last contributor counts down to zero just before it steps the epoch to even
         micro_yield_t micro_yield;
         epoch_index_t previous_epoch;
-        while ((previous_epoch = epoch_.load(std::memory_order_acquire)) & 1u)
-            micro_yield(epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
+        while ((previous_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) & 1u)
+            micro_yield(&epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
 
         // We are most likely already "grinding", but in the unlikely case we are not, let's wake up
         // from the "chilling" state with relaxed semantics. Assuming the sleeping logic for the
@@ -850,13 +873,14 @@ struct colocated_pool {
         // wake-up is required. Strong, since this is the one store a worker still in its startup
         // wait after a `sleep` waits on. Read first, so a grinding pool takes no locked step.
         mood_t may_be_chilling = mood_t::chill_k;
-        bool const was_chilling = mood_.load(std::memory_order_relaxed) == mood_t::chill_k &&
-                                  mood_.compare_exchange_strong(may_be_chilling, mood_t::grind_k,
-                                                                std::memory_order_relaxed, std::memory_order_relaxed);
+        bool const was_chilling =
+            atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed) == mood_t::chill_k &&
+            atomic_ref<mood_t>(mood_).compare_exchange_strong(may_be_chilling, mood_t::grind_k,
+                                                              std::memory_order_relaxed, std::memory_order_relaxed);
 
         // The claim leaves this caller the epoch's only writer until its contributors count down
         generation_t const generation = static_cast<generation_t>(previous_epoch + 1);
-        epoch_.store(generation, std::memory_order_release);
+        atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
 
         // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
 #if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
@@ -916,9 +940,9 @@ struct colocated_pool {
         mood_t mood;
         micro_yield_t micro_yield;
         // Only `mood_` moves here, so a monitored waiter wakes on the store leaving `chill_k`.
-        while ((mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::chill_k)
+        while ((mood = atomic_ref<mood_t>(pool->mood_).load(std::memory_order_acquire)) == mood_t::chill_k)
             // Technically, we are not on the zero thread index, but we don't know our index yet.
-            micro_yield(pool->mood_, mood_t::chill_k, static_cast<thread_index_t>(0), wait_uncapped_k);
+            micro_yield(&pool->mood_, mood_t::chill_k, static_cast<thread_index_t>(0), wait_uncapped_k);
 
         // If we are ready to start grinding, export this threads metadata to make it externally
         // observable and controllable.
@@ -969,9 +993,10 @@ struct colocated_pool {
             // Wait for either a new ticket or a stop flag. Two independent lines guard this loop -
             // arm the hot one, `epoch_`, bumped by a dispatch, and let the waiter's timeout cap
             // bound how late a rare `mood_` change is noticed.
-            while ((new_epoch = pool->epoch_.load(std::memory_order_acquire)) == last_epoch &&
-                   (mood = pool->mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                micro_yield(pool->epoch_, last_epoch, global_thread_index);
+            while ((new_epoch = atomic_ref<epoch_index_t>(pool->epoch_).load(std::memory_order_acquire)) ==
+                       last_epoch &&
+                   (mood = atomic_ref<mood_t>(pool->mood_).load(std::memory_order_acquire)) == mood_t::grind_k)
+                micro_yield(&pool->epoch_, last_epoch, global_thread_index);
 
             if (mood == mood_t::die_k) [[unlikely]]
                 break;
@@ -988,13 +1013,15 @@ struct colocated_pool {
                 // ! The decrement must come after the task is executed. The `acq_rel` ordering
                 // ! chains every contributor's writes into the last one, so the completion
                 // ! step below publishes all of them at once.
-                thread_index_t const before_decrement = pool->threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
+                thread_index_t const before_decrement =
+                    atomic_ref<thread_index_t>(pool->threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
                 assert(before_decrement > 0 && "We can't be here if there are no worker threads");
 
                 // The last contributor to finish steps the epoch, signaling completion, as its only
                 // writer: the next claimer waits for this even epoch before it writes one
                 if (before_decrement == 1)
-                    pool->epoch_.store(static_cast<epoch_index_t>(new_epoch + 1), std::memory_order_release);
+                    atomic_ref<epoch_index_t>(pool->epoch_)
+                        .store(static_cast<epoch_index_t>(new_epoch + 1), std::memory_order_release);
             }
             last_epoch = new_epoch;
         }
@@ -1270,12 +1297,15 @@ inline constexpr bool is_dynamic_invoker<invoke_distributed_for_n_dynamic<pool_t
  *
  *  This thread-pool doesn't yet provide "reductions" or other reach operations, but uses a small
  *  pool of NUMA-local memory to dampen the cost of @c for_n_dynamic scheduling.
+ *
+ *  @tparam atomic_ref_template_ The reference each @c colocated_pool synchronizes through.
  */
-template <typename micro_yield_type_ = standard_yield_t, typename cache_hints_type_ = standard_cache_hints_t,
-          std::size_t alignment_ = default_alignment_k>
+template <typename micro_yield_type_ = standard_yield_t,
+          template <typename> class atomic_ref_template_ = standard_atomic_ref,
+          typename cache_hints_type_ = standard_cache_hints_t, std::size_t alignment_ = default_alignment_k>
 struct distributed_pool {
 
-    using colocated_pool_t = colocated_pool<micro_yield_type_, cache_hints_type_, alignment_>;
+    using colocated_pool_t = colocated_pool<micro_yield_type_, atomic_ref_template_, cache_hints_type_, alignment_>;
     using machine_topology_t = machine_topology<>;
     static constexpr pool_kind_t kind_k = pool_kind_t::distributed_k;
 
@@ -1283,6 +1313,8 @@ struct distributed_pool {
     using allocator_t = typename colocated_pool_t::allocator_t;
 
     using micro_yield_t = typename colocated_pool_t::micro_yield_t;
+    template <typename value_type_>
+    using atomic_ref = atomic_ref_template_<value_type_>;
     using cache_hints_t = typename colocated_pool_t::cache_hints_t;
     using index_t = typename colocated_pool_t::index_t;
     using epoch_index_t = typename colocated_pool_t::epoch_index_t;
@@ -1434,7 +1466,7 @@ struct distributed_pool {
         // performance and efficiency cores on one node become separate, independently pinned pools.
         compute_domain_t const &first_domain = topology.compute_domain_at(compute_domain_index_t {});
         allocator_t allocator = allocator_for_node(first_domain.memory_domain_id);
-        index_t const colocations_count = std::min(topology.compute_domains_count(), threads);
+        index_t const colocations_count = min_of(topology.compute_domains_count(), threads);
 
         colocations_t colocations(allocator);
         if (status_t const grew = colocations.resize(colocations_count); failed(grew)) return grew;
@@ -1509,7 +1541,7 @@ struct distributed_pool {
         if (local_domains_count == 0) return status_t::invalid_argument_k;
 
         allocator_t allocator = allocator_for_node(memory_domain_id);
-        index_t const colocations_count = std::min(local_domains_count, static_cast<index_t>(threads));
+        index_t const colocations_count = min_of(local_domains_count, static_cast<index_t>(threads));
 
         colocations_t colocations(allocator);
         if (status_t const grew = colocations.resize(colocations_count); failed(grew)) return grew;
@@ -1864,7 +1896,7 @@ inline std::size_t chase_ns_per_hop_(chase_slot_t const *slots, std::size_t cons
         auto const elapsed = std::chrono::steady_clock::now() - started;
         std::size_t const nanoseconds =
             static_cast<std::size_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
-        best_nanoseconds = (std::min)(best_nanoseconds, nanoseconds);
+        best_nanoseconds = min_of(best_nanoseconds, nanoseconds);
     }
     return best_nanoseconds / hops + (position == ~0u); // ? The data-dependent tail defeats elision
 }
@@ -1888,7 +1920,7 @@ inline void run_on_worker_(pool_type_ &pool, std::size_t const thread, work_type
  */
 inline std::size_t chase_list_bytes_(memory_domain_t const &target) noexcept {
     std::size_t bytes = std::size_t(128) << 20;
-    if (target.volume_ram) bytes = (std::min)(bytes, target.volume_ram / 8);
+    if (target.volume_ram) bytes = min_of(bytes, target.volume_ram / 8);
     return bytes;
 }
 
@@ -1913,15 +1945,15 @@ inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_doma
                                  std::size_t const widest_domain_threads) noexcept {
     std::uint64_t largest_cache = 0;
     for (std::size_t domain = 0; domain != topology.compute_domains_count(); ++domain)
-        largest_cache =
-            (std::max)(largest_cache,
-                       static_cast<std::uint64_t>(
-                           topology.compute_domain_at(static_cast<compute_domain_index_t>(domain)).cache_bytes));
+        largest_cache = max_of(
+            largest_cache, static_cast<std::uint64_t>(
+                               topology.compute_domain_at(static_cast<compute_domain_index_t>(domain)).cache_bytes));
     // ? 64-bit math: a giant L3 times 8 overflows a 32-bit `size_t` before the RAM clamp can bite
-    std::uint64_t bytes = (std::max)((std::max)(largest_cache * 8, std::uint64_t(128) << 20),
-                                     static_cast<std::uint64_t>(widest_domain_threads) * (std::uint64_t(8) << 20));
-    if (target.volume_ram) bytes = (std::min)(bytes, static_cast<std::uint64_t>(target.volume_ram) / 8);
-    return static_cast<std::size_t>((std::min)(bytes, std::uint64_t {~std::size_t(0)} / 2));
+    std::uint64_t bytes = max_of(max_of(largest_cache * 8, std::uint64_t(128) << 20),
+                                 static_cast<std::uint64_t>(widest_domain_threads) * (std::uint64_t(8) << 20));
+    if (target.volume_ram) bytes = min_of(bytes, static_cast<std::uint64_t>(target.volume_ram) / 8);
+    bytes = min_of(bytes, std::uint64_t {~std::size_t(0)} / 2);
+    return static_cast<std::size_t>(bytes);
 }
 
 /** Marks a fabric position the pool has no worker on - cpuless, or beyond a partial spawn. */
@@ -1964,11 +1996,10 @@ inline status_t measure_bandwidth_edges_(machine_topology_t const &topology, poo
     memory_domain_t const &target_domain = topology.memory_domain_at(static_cast<memory_domain_index_t>(target));
     std::size_t widest_domain_threads = 1;
     for (std::size_t domain = 0; domain != pool.compute_domains_count(); ++domain)
-        widest_domain_threads = (std::max)(widest_domain_threads, static_cast<std::size_t>(pool.threads_count(domain)));
+        widest_domain_threads = max_of(widest_domain_threads, static_cast<std::size_t>(pool.threads_count(domain)));
 
-    std::size_t const words =
-        (std::max)(stream_bytes_(topology, target_domain, widest_domain_threads) / sizeof(std::uint64_t),
-                   widest_domain_threads);
+    std::size_t const words = max_of(
+        stream_bytes_(topology, target_domain, widest_domain_threads) / sizeof(std::uint64_t), widest_domain_threads);
     dynamic_array<std::uint64_t> stream;
     if (status_t const grew = stream.resize_uninitialized(words); failed(grew)) return grew;
     run_on_worker_(pool, toucher, [&]() noexcept { fill_stream_words_(stream.data(), words); });
@@ -1987,16 +2018,15 @@ inline status_t measure_bandwidth_edges_(machine_topology_t const &topology, poo
                 checksums[thread] = stream_words_(stream.data() + stripe.first, stripe.count);
             });
             auto const elapsed = std::chrono::steady_clock::now() - started;
-            std::uint64_t const nanoseconds =
-                (std::max)(static_cast<std::uint64_t>(
-                               std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
-                           std::uint64_t(1));
+            std::uint64_t const nanoseconds = max_of(
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+                std::uint64_t(1));
             std::uint64_t folded = 0;
             for (std::size_t thread = 0; thread != domain_threads; ++thread) folded ^= checksums[first_thread + thread];
             std::uint64_t const megabytes_per_second =
                 static_cast<std::uint64_t>(words) * sizeof(std::uint64_t) * 1000u / nanoseconds +
                 (folded == 0x5Fu); // ? The data-dependent tail defeats elision
-            best_megabytes_per_second = (std::max)(best_megabytes_per_second, megabytes_per_second);
+            best_megabytes_per_second = max_of(best_megabytes_per_second, megabytes_per_second);
         }
 
         // ? A bandwidth-only observation: the streaming experiment says nothing about latency
@@ -2205,7 +2235,7 @@ class measured_fabric {
         std::size_t const to_target = memory_latency(initiator, target);
         std::size_t const to_local = memory_latency(initiator, static_cast<memory_domain_index_t>(local));
         if (to_target == 0 || to_local == 0) return local == target ? 10u : 20u;
-        return (std::max)((10 * to_target + to_local / 2) / to_local, std::size_t(10));
+        return max_of((10 * to_target + to_local / 2) / to_local, std::size_t(10));
     }
 
     /**
@@ -2277,9 +2307,9 @@ class measured_fabric {
         // A scratch the toucher streams through after each fill, flushing the freshly written list
         // out of its own caches; generous, but never past what a tight cgroup can spare.
         std::size_t evictor_bytes = std::size_t(256) << 20;
-        if (volume_ram()) evictor_bytes = (std::min)(evictor_bytes, volume_ram() / 8);
+        if (volume_ram()) evictor_bytes = min_of(evictor_bytes, volume_ram() / 8);
         dynamic_array<chase_slot_t> evictor;
-        if (status_t const grew = evictor.resize((std::max)(evictor_bytes / sizeof(chase_slot_t), std::size_t(1)));
+        if (status_t const grew = evictor.resize(max_of(evictor_bytes / sizeof(chase_slot_t), std::size_t(1)));
             failed(grew))
             return grew;
 
@@ -2291,9 +2321,9 @@ class measured_fabric {
             std::size_t const segments = 3;
             memory_domain_t const &target_domain =
                 topology.memory_domain_at(static_cast<memory_domain_index_t>(target));
-            std::size_t const slots = (std::max)(chase_list_bytes_(target_domain) / sizeof(chase_slot_t), segments);
+            std::size_t const slots = max_of(chase_list_bytes_(target_domain) / sizeof(chase_slot_t), segments);
             std::size_t const hops =
-                (std::min)(slots / segments, std::size_t(1) << 20); // ? At least 1, as slots >= segments
+                min_of(slots / segments, std::size_t(1) << 20); // ? At least 1, as slots >= segments
 
             // Every compute domain chases separately: sibling domains on one memory controller
             // still differ - efficiency cores trail performance cores to the very same DRAM.

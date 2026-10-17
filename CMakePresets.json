@@ -101,7 +101,7 @@
     {
       "name": "android",
       "inherits": ["release", "cross"],
-      "displayName": "Whichever ABI the dockcross Android image's toolchain names, compile only",
+      "displayName": "Whichever ABI the Android NDK r28+ toolchain file names, compile only",
       "toolchainFile": "$env{CMAKE_TOOLCHAIN_FILE}"
     },
     {

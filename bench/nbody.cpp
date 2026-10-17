@@ -174,7 +174,8 @@ static inline float random_unit(std::uint64_t const key, std::uint64_t const cou
  *  already falls back to a heap-backed replica where no NUMA API exists, so a machine with one
  *  memory domain sees the per-node replicas collapse to one.
  */
-using distributed_pool_t = fu::distributed_pool<fu::preferred_yield_t, fu::preferred_cache_hints_t>;
+using distributed_pool_t =
+    fu::distributed_pool<fu::preferred_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>;
 
 /**
  *  @brief Copies canonical @p bodies into every per-domain replica.

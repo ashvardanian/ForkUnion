@@ -139,23 +139,25 @@ static void install_crash_handlers_() noexcept {
 static void install_crash_handlers_() noexcept {}
 #endif
 
-using fu32_t =
-    fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t, std::uint32_t>;
-using fu16_t =
-    fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t, std::uint16_t>;
-using fu8_t =
-    fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t, std::uint8_t>;
+using fu32_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::standard_atomic_ref,
+                             fu::preferred_cache_hints_t, std::uint32_t>;
+using fu16_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::standard_atomic_ref,
+                             fu::preferred_cache_hints_t, std::uint16_t>;
+using fu8_t = fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::standard_atomic_ref,
+                            fu::preferred_cache_hints_t, std::uint8_t>;
 
 /*  Explicitly instantiate the thread-pools to cover all of their logic, but avoid the "duplicate
  *  explicit instantiation" error on platforms where @c std::size_t is @c uint64_t.
  *
  *  template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, std::size_t> */
-template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
-                             std::uint32_t>;
-template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
-                             std::uint16_t>;
-template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::preferred_cache_hints_t,
-                             std::uint8_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::standard_atomic_ref,
+                             fu::preferred_cache_hints_t, std::uint32_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::standard_atomic_ref,
+                             fu::preferred_cache_hints_t, std::uint16_t>;
+template class fu::flat_pool<std::allocator<std::thread>, fu::standard_yield_t, fu::standard_atomic_ref,
+                             fu::preferred_cache_hints_t, std::uint8_t>;
+
+template class fu::spin_mutex<fu::preferred_yield_t>;
 
 #if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 template struct fu::colocated_pool<>;
@@ -1584,6 +1586,9 @@ static void test_atomic_refs() noexcept {
 #endif
 #if FORKUNION_TARGET_RISC5_ZACAS
     check_atomic_ref<fu::risc5_zacas_atomic_ref>();
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+    check_atomic_ref<fu::wasm_atomic_ref>();
 #endif
 }
 

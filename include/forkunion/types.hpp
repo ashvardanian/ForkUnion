@@ -1048,7 +1048,7 @@ enum capabilities_t : unsigned int {
      *  @sa capability_name - which names single bits only, never this composite.
      */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
-        capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
+                             capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
 
 };
 

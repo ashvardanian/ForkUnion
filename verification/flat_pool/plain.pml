@@ -46,7 +46,7 @@ proctype dispatcher(byte t) {
         join(t, generation, seen_epoch, seen_fork, seen_callback, before, observed);
         check_results(t, generation, observed)
     };
-    atomic { store(t, mood, order_release, die); wake(mood) }
+    signal_die(t, observed)
 }
 
 init { atomic { run dispatcher(caller) } }

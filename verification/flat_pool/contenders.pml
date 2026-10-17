@@ -30,15 +30,15 @@
  *      sees a new one, the countdown never reaches zero, and the join waits forever
  */
 #define thread_count 4
-#define location_count 7
+#define location_count 10
 #define history_depth 9
 #define through_c_shim false
 #include "protocol.pml"
 
-/** The thread that dispatches beside the caller. */
+/** The thread that dispatches beside the caller, and the word it releases once it finished, past
+ *  the words of the flat pool, as the program's own hand-off before @c terminate would. */
 #define rival 3
-
-bool rival_finished;
+#define rival_finished 9
 
 /** A worker the spawn starts: contributes to every dispatch until die. */
 proctype worker(byte t) {
@@ -59,8 +59,12 @@ proctype dispatcher(byte t) {
         check_results(t, generation, observed)
     :: else
     fi;
-    (rival_finished);
-    atomic { store(t, mood, order_release, die); wake(mood) }
+    (newest_value(rival_finished) == 1);
+    do
+    :: load(t, rival_finished, order_acquire, observed);
+       if :: observed == 1 -> break :: else fi
+    od;
+    signal_die(t, observed)
 }
 
 /** A second holder of the pool: dispatches fork 2 after the spawn, and joins it if admitted. */
@@ -75,7 +79,7 @@ proctype contender(byte t) {
         check_results(t, generation, observed)
     :: else
     fi;
-    rival_finished = true
+    store(t, rival_finished, order_release, 1)
 }
 
 init { atomic { run dispatcher(caller); run contender(rival) } }

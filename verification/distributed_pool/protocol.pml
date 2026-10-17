@@ -19,7 +19,8 @@
  *  waits for the second's. The workers are the colocated loop: they wait on their epoch,
  *  contribute, count down with @c acq_rel, and the last one steps the epoch with a release; the
  *  fork word is dropped, since `flat_pool/` covers it, and the mood is a ghost the capped waits
- *  notice. Every wait is the @c wait_on of `monitor_wait.pml`.
+ *  notice, followed by a re-release of every epoch that wakes the workers waiting on it. Every
+ *  wait is the @c wait_on of `monitor_wait.pml`.
  *
  *  Lockstep: both colocations return the same token, and after the join both epochs are past it.
  *  A refused dispatch published on no colocation. Every contributor runs each generation once.
@@ -195,6 +196,16 @@ inline join_all(t, generation, seen_epoch, before, observed) {
     join(t, 1, generation, seen_epoch)
 }
 
+/** Die, then each colocation's current epoch re-released, whose write wakes the workers asleep
+ *  on it: @c colocated_pool::signal_die_ in `distributed.hpp`, over the caller's @p observed. */
+inline signal_die(t, observed) {
+    terminated = true;
+    load(t, epoch(0), order_relaxed, observed);
+    atomic { store(t, epoch(0), order_release, observed); wake(epoch(0)) };
+    load(t, epoch(1), order_relaxed, observed);
+    atomic { store(t, epoch(1), order_release, observed); wake(epoch(1)) }
+}
+
 /** The caller: dispatches to every colocation, joins them caller first, and checks every round. */
 inline dispatch_and_join(t) {
     int round, observed, generation, remote_generation, seen_epoch, before;
@@ -214,7 +225,7 @@ inline dispatch_and_join(t) {
         fi;
         assert(newest_value(epoch(0)) == generation + 1 && newest_value(epoch(1)) == generation + 1)
     };
-    terminated = true;
+    signal_die(t, observed);
     (workers_exited == 2)
 }
 

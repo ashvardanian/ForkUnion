@@ -45,7 +45,7 @@ proctype dispatcher(byte t) {
         join(t, generation, seen_epoch, seen_fork, seen_callback, before, observed);
         check_results(t, generation, observed)
     };
-    atomic { store(t, mood, order_release, die); wake(mood) }
+    signal_die(t, observed)
 }
 
 /** A second holder of the first token: @c flat_pool::is_complete polled, the results, then the

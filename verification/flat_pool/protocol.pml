@@ -22,7 +22,9 @@
  *  first step acquires the spawn, since a new thread's view is its creator's.
  *
  *  Every wait is the @c wait_on of `monitor_wait.pml`, and every write to the epoch or the mood
- *  wakes the threads armed on it, as any store to a monitored line does.
+ *  wakes the threads armed on it, as any store to a monitored line does and as a notifying
+ *  reference's releasing store does. Die re-releases the idle epoch after the mood, so a worker
+ *  waiting on the epoch alone wakes to exit.
  *
  *  No fork is torn: a dispatch writes the @c fork_state only once every contributor of the last
  *  generation counted down, and every contributor reads the @c fork_state its generation
@@ -170,15 +172,23 @@ inline spawn(t) {
     run worker(2)
 }
 
-/** Die with a release after the last join, the joins, then the resets, as @c flat_pool::terminate
- *  in `flat.hpp` does, over the caller's @p observed. */
+/** Die with a release, then the epoch's current value re-released, whose write wakes the workers
+ *  asleep on it: @c flat_pool::signal_die_ in `flat.hpp`, over the caller's @p observed. */
+inline signal_die(t, observed) {
+    atomic { store(t, mood, order_release, die); terminated = true; wake(mood) };
+    load(t, epoch, order_relaxed, observed);
+    atomic { store(t, epoch, order_release, observed); wake(epoch) }
+}
+
+/** Die after the last join, the joins, then the resets, as @c flat_pool::terminate in `flat.hpp`
+ *  does, over the caller's @p observed. */
 inline terminate(t, observed) {
     // The header's two asserts read seq_cst; acquire is the strongest order the module spells.
     load(t, threads_to_sync, order_acquire, observed);
     assert(observed == 0);
     load(t, epoch, order_acquire, observed);
     assert((observed % 2) == 0);
-    atomic { store(t, mood, order_release, die); terminated = true; wake(mood) };
+    signal_die(t, observed);
     (workers_exited == 2);
     atomic { store(t, mood, order_relaxed, grind); terminated = false; wake(mood) };
     atomic { store(t, epoch, order_relaxed, 0); wake(epoch) }

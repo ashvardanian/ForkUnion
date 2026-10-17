@@ -110,16 +110,20 @@ namespace forkunion {
  *
  *  @tparam allocator_type_ The type of the allocator to be used for the thread pool.
  *  @tparam micro_yield_type_ The type of the yield function to be used for busy-waiting.
+ *  @tparam atomic_ref_template_ The reference every synchronizing word is accessed through;
+ *      @c wasm_wait_t needs @c wasm_atomic_ref, whose releasing writes notify, or its 32- and
+ *      64-bit waits end only on their timeout.
  *  @tparam cache_hints_type_ The cache-line demote/promote policy for the dynamic claim cursors.
  *  @tparam index_type_ Use @c std::size_t, but or a smaller type for debugging.
  *  @tparam alignment_ The alignment of the thread pool. Defaults to @c default_alignment_k.
  */
-template <                                                  //
-    typename allocator_type_ = std::allocator<std::thread>, //
-    typename micro_yield_type_ = standard_yield_t,          //
-    typename cache_hints_type_ = standard_cache_hints_t,    //
-    typename index_type_ = std::size_t,                     //
-    std::size_t alignment_ = default_alignment_k            //
+template <                                                                //
+    typename allocator_type_ = std::allocator<std::thread>,               //
+    typename micro_yield_type_ = standard_yield_t,                        //
+    template <typename> class atomic_ref_template_ = standard_atomic_ref, //
+    typename cache_hints_type_ = standard_cache_hints_t,                  //
+    typename index_type_ = std::size_t,                                   //
+    std::size_t alignment_ = default_alignment_k                          //
     >
 class flat_pool {
 
@@ -129,6 +133,10 @@ class flat_pool {
 
     /** Functor spinning threads while they wait on an atomic. */
     using micro_yield_t = micro_yield_type_;
+
+    /** Reference reading and writing the words the pool synchronizes through. */
+    template <typename value_type_>
+    using atomic_ref = atomic_ref_template_<value_type_>;
 
     /** Functor demoting and promoting individual cache lines. */
     using cache_hints_t = cache_hints_type_;
@@ -231,7 +239,7 @@ class flat_pool {
 
     /** Lifecycle switch between spinning at @c grind_k, sleeping at @c chill_k, and exiting at
      *  @c die_k. */
-    alignas(alignment_k) std::atomic<mood_t> mood_ {mood_t::grind_k};
+    alignas(alignment_k) mood_t mood_ {mood_t::grind_k};
 
     /* Task-specific variables: */
 
@@ -242,10 +250,10 @@ class flat_pool {
     trampoline_t fork_trampoline_ {nullptr};
 
     /** Countdown of contributors still running; the one reaching zero signals completion. */
-    alignas(alignment_k) std::atomic<thread_index_t> threads_to_sync_ {0};
+    alignas(alignment_k) thread_index_t threads_to_sync_ {0};
 
     /** Generation clock: odd while a fork is in flight, even when idle. */
-    alignas(alignment_k) std::atomic<epoch_index_t> epoch_ {0};
+    alignas(alignment_k) epoch_index_t epoch_ {0};
 
   public:
     flat_pool(flat_pool &&) = delete;
@@ -263,7 +271,9 @@ class flat_pool {
     std::size_t memory_usage() const noexcept { return sizeof(flat_pool) + workers_.size() * workers_.stride(); }
 
     /** Checks if the thread-pool's core synchronization points are lock-free. */
-    bool is_lock_free() const noexcept { return mood_.is_lock_free() && threads_to_sync_.is_lock_free(); }
+    bool is_lock_free() const noexcept {
+        return std::atomic_ref<mood_t>::is_always_lock_free && std::atomic_ref<thread_index_t>::is_always_lock_free;
+    }
 
     /**
      *  @brief Returns the memory domain this thread-pool is pinned to.
@@ -332,7 +342,7 @@ class flat_pool {
         workers_ = std::move(cells);
         threads_count_ = threads;
         exclusivity_ = exclusivity;
-        mood_.store(mood_t::grind_k, std::memory_order_release);
+        atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_release);
         auto reset_on_failure = [&]() noexcept {
             workers_ = {}; // ? Cells are default-constructed, so no `std::thread` is joinable here
             threads_count_ = 0;
@@ -362,7 +372,7 @@ class flat_pool {
             if (spawn_worker(i)) continue;
 
             // ! Failed to spawn a thread, roll back everything
-            mood_.store(mood_t::die_k, std::memory_order_release);
+            signal_die_();
             for (thread_index_t j = 0; j < i; ++j) workers_[j + use_caller_thread].worker.join();
             reset_on_failure();
             return status_t::thread_refused_k;
@@ -404,11 +414,12 @@ class flat_pool {
 
         caller_exclusivity_t const exclusivity = caller_exclusivity();
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
-        assert(threads_to_sync_.load(std::memory_order_seq_cst) == 0); // ! No tasks must be running
-        assert((epoch_.load(std::memory_order_seq_cst) & 1u) == 0);    // ! Last dispatch must be joined
+        // ! No tasks must be running, and the last dispatch must be joined
+        assert(atomic_ref<thread_index_t>(threads_to_sync_).load(std::memory_order_seq_cst) == 0);
+        assert((atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_seq_cst) & 1u) == 0);
 
         // Notify all worker threads...
-        mood_.store(mood_t::die_k, std::memory_order_release);
+        signal_die_();
 
         // ... and wait for them to finish
         thread_index_t const worker_threads = threads_count_ - use_caller_thread;
@@ -420,8 +431,8 @@ class flat_pool {
         threads_count_ = 0;
         workers_ = {};
         reset_fork_();
-        mood_.store(mood_t::grind_k, std::memory_order_relaxed);
-        epoch_.store(0, std::memory_order_relaxed);
+        atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_relaxed);
+        atomic_ref<epoch_index_t>(epoch_).store(0, std::memory_order_relaxed);
     }
 
     /**
@@ -438,7 +449,7 @@ class flat_pool {
     void sleep(std::size_t wake_up_periodicity_micros) noexcept {
         assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
         sleep_length_micros_ = wake_up_periodicity_micros;
-        mood_.store(mood_t::chill_k, std::memory_order_release);
+        atomic_ref<mood_t>(mood_).store(mood_t::chill_k, std::memory_order_release);
     }
 
     /** Helper function to create a spin mutex with same yield characteristics. */
@@ -513,8 +524,8 @@ class flat_pool {
         // Every contributor gets counted: all worker threads, plus the calling thread itself on
         // `caller_inclusive_k` pools, where its slice runs inside `unsafe_join`.
         thread_index_t idle = 0;
-        if (!threads_to_sync_.compare_exchange_strong(idle, threads, std::memory_order_acquire,
-                                                      std::memory_order_relaxed))
+        if (!atomic_ref<thread_index_t>(threads_to_sync_)
+                 .compare_exchange_strong(idle, threads, std::memory_order_acquire, std::memory_order_relaxed))
             return 0;
         if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind(); // ? The cursors are ours only from here
 
@@ -525,21 +536,21 @@ class flat_pool {
         // The last contributor counts down to zero just before it steps the epoch to even
         micro_yield_t micro_yield;
         epoch_index_t previous_epoch;
-        while ((previous_epoch = epoch_.load(std::memory_order_acquire)) & 1u)
-            micro_yield(epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
+        while ((previous_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) & 1u)
+            micro_yield(&epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
 
         // We are most likely already "grinding", but in the unlikely case we are not, let's wake up
         // from the "chilling" state with relaxed semantics. Assuming the sleeping logic for the
         // workers also checks the epoch counter, no synchronization is needed and no immediate
         // wake-up is required. Read first, so a grinding pool takes no locked step.
         mood_t may_be_chilling = mood_t::chill_k;
-        if (mood_.load(std::memory_order_relaxed) == mood_t::chill_k)
-            mood_.compare_exchange_strong(may_be_chilling, mood_t::grind_k, std::memory_order_relaxed,
-                                          std::memory_order_relaxed);
+        if (atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed) == mood_t::chill_k)
+            atomic_ref<mood_t>(mood_).compare_exchange_strong(may_be_chilling, mood_t::grind_k,
+                                                              std::memory_order_relaxed, std::memory_order_relaxed);
 
         // The claim leaves this caller the epoch's only writer until its contributors count down
         generation_t const generation = static_cast<generation_t>(previous_epoch + 1);
-        epoch_.store(generation, std::memory_order_release);
+        atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
         return generation;
     }
 
@@ -551,7 +562,7 @@ class flat_pool {
      *  slice, so poll-then-join applies only to @c caller_exclusive_k pools.
      */
     bool is_complete(generation_t generation) const noexcept {
-        return generation != epoch_.load(std::memory_order_acquire);
+        return generation != atomic_ref<epoch_index_t const>(epoch_).load(std::memory_order_acquire);
     }
 
     /**
@@ -562,31 +573,34 @@ class flat_pool {
      */
     void unsafe_join(generation_t generation) noexcept {
         assert((generation & 1u) == 1 && "Generation tokens are always odd");
-        if (epoch_.load(std::memory_order_acquire) != generation) return; // ? Stale or already complete
+        // ? Stale or already complete
+        if (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) != generation) return;
 
         // On inclusive pools the calling thread is a contributor: execute its slice and count it
         // down exactly like a worker thread would.
         bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
         if (use_caller_thread) {
             fork_trampoline_(fork_state_, static_cast<thread_index_t>(0));
-            thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
+            thread_index_t const before_decrement =
+                atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
             assert(before_decrement > 0 && "The contributor count must include the caller");
 
             // The last contributor steps the epoch, as its only writer, to signal completion
             if (before_decrement == 1)
-                epoch_.store(static_cast<epoch_index_t>(generation + 1), std::memory_order_release);
+                atomic_ref<epoch_index_t>(epoch_).store(static_cast<epoch_index_t>(generation + 1),
+                                                        std::memory_order_release);
         }
 
         // Wait for the last contributor's completion step: only `epoch_` moves here, so a
         // monitored waiter arms the right line, and the completing store's release wakes it.
         micro_yield_t micro_yield;
-        while (epoch_.load(std::memory_order_acquire) == generation)
-            micro_yield(epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
+        while (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) == generation)
+            micro_yield(&epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
     }
 
     /** Blocks the calling thread until the currently broadcasted task finishes. */
     void unsafe_join() noexcept {
-        epoch_index_t const current_epoch = epoch_.load(std::memory_order_acquire);
+        epoch_index_t const current_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire);
         if (current_epoch & 1u) unsafe_join(static_cast<generation_t>(current_epoch)); // ? Even means idle
     }
 
@@ -639,6 +653,15 @@ class flat_pool {
         fork_trampoline_ = nullptr;
     }
 
+    /** Switches the mood to @c die_k, then re-releases the idle epoch, which no worker writes, so
+     *  the workers asleep on it wake to exit: the write ends a monitored wait on its line, and a
+     *  notifying reference like @c wasm_atomic_ref ends a @c wasm_wait_t one. */
+    void signal_die_() noexcept {
+        atomic_ref<mood_t>(mood_).store(mood_t::die_k, std::memory_order_release);
+        atomic_ref<epoch_index_t> const epoch(epoch_);
+        epoch.store(epoch.load(std::memory_order_relaxed), std::memory_order_release);
+    }
+
     /**
      *  @brief A trampoline function that is used to call the user-defined lambda.
      *  @param[in] punned_lambda_pointer The pointer to the user-defined lambda.
@@ -668,9 +691,9 @@ class flat_pool {
             // This loop guards two lines, the epoch and the mood: a monitor arms only the hot one,
             // since a dispatch bumps `epoch_`, while the waiter's timeout bounds how late a rare
             // `mood_` change is caught.
-            while ((new_epoch = epoch_.load(std::memory_order_acquire)) == last_epoch &&
-                   (mood = mood_.load(std::memory_order_acquire)) == mood_t::grind_k)
-                micro_yield(epoch_, last_epoch, thread_index);
+            while ((new_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) == last_epoch &&
+                   (mood = atomic_ref<mood_t>(mood_).load(std::memory_order_acquire)) == mood_t::grind_k)
+                micro_yield(&epoch_, last_epoch, thread_index);
 
             if (mood == mood_t::die_k) [[unlikely]]
                 break;
@@ -686,13 +709,15 @@ class flat_pool {
                 // ! The decrement must come after the task is executed. The `acq_rel` ordering
                 // ! chains every contributor's writes into the last one, so the completion
                 // ! step below publishes all of them at once.
-                thread_index_t const before_decrement = threads_to_sync_.fetch_sub(1, std::memory_order_acq_rel);
+                thread_index_t const before_decrement =
+                    atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
                 assert(before_decrement > 0 && "We can't be here if there are no worker threads");
 
                 // The last contributor to finish steps the epoch, signaling completion, as its only
                 // writer: the next claimer waits for this even epoch before it writes one
                 if (before_decrement == 1)
-                    epoch_.store(static_cast<epoch_index_t>(new_epoch + 1), std::memory_order_release);
+                    atomic_ref<epoch_index_t>(epoch_).store(static_cast<epoch_index_t>(new_epoch + 1),
+                                                            std::memory_order_release);
             }
             last_epoch = new_epoch;
         }

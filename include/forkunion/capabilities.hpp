@@ -610,8 +610,10 @@ struct risc5_wrs_t {
  *  Unlike a cache-line monitor, @c memory.atomic.wait is not woken by a plain store, only by
  *  @c memory.atomic.notify on the same address, so a 32- or 64-bit wait ends on a releasing write
  *  through @c wasm_atomic_ref, which notifies, or on its 1 micro-second timeout, which bounds how
- *  late any other change is seen. Uncapped waits spin instead: the pool's caller waits uncapped,
- *  and in a browser that is the main thread, where @c memory.atomic.wait traps.
+ *  late any other change is seen, so a pool over this waiter must take @c wasm_atomic_ref as its
+ *  atomic reference, or its 32- and 64-bit waits end only on that timeout. Uncapped waits spin
+ *  instead: the pool's caller waits uncapped, and in a browser that is the main thread, where
+ *  @c memory.atomic.wait traps.
  *
  *  WebAssembly has @c memory.atomic.wait only at 32- and 64-bit width, so a watch of 1 or 2 bytes
  *  spins and never sleeps, whatever thread it runs on.

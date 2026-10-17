@@ -20,15 +20,15 @@
  *      leaves its fork running there with nobody to join it
  */
 #define thread_count 4
-#define location_count 7
+#define location_count 8
 #define history_depth 7
 #define remote_lags false
 #include "protocol.pml"
 
-/** The thread that dispatches beside the caller. */
+/** The thread that dispatches beside the caller, and the count of finished holders, past the words
+ *  of the pool, whose @c acq_rel steps are the program's own hand-off before @c terminate. */
 #define rival 3
-
-byte finished;
+#define finished 7
 
 /** A holder of the pool: one dispatch, joined caller first if admitted; the second to finish lets
  *  the workers go. */
@@ -41,7 +41,8 @@ proctype dispatcher(byte t) {
     :: generation != 0 -> join_all(t, generation, seen_epoch, before, observed)
     :: else
     fi;
-    atomic { finished++; terminated = finished == 2 }
+    read_modify_write(t, finished, order_acq_rel, before, before + 1);
+    if :: before == 1 -> signal_die(t, observed) :: else fi
 }
 
 /** A worker on its own colocation, until the caller terminates. */

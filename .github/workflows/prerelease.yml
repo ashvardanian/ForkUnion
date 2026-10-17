@@ -689,6 +689,7 @@ jobs:
 
   # Bionic shares the kernel ABI but not every GLibC extension; the toolchain defines __ANDROID__, so this
   # compile proves the threaded build survives it. Compile-only - device binaries can't run here.
+  # The images ship NDK r28b, whose libc++ 19 is the first with the `std::atomic_ref` the pools need.
   test_android:
     name: Build for Android ${{ matrix.name }}
     runs-on: ubuntu-26.04
