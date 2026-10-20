@@ -42,14 +42,6 @@ namespace fu = ashvardanian::forkunion;
 #define FORKUNION_TEST_SKIP_STRESS_ 0
 #endif
 
-#if defined(__SANITIZE_THREAD__)
-#define FORKUNION_TEST_UNDER_TSAN_ 1
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define FORKUNION_TEST_UNDER_TSAN_ 1
-#endif
-#endif
-
 /** Formats an integral, pointer, enum, or bool into @p buffer; anything else prints `?`. */
 template <typename value_type_>
 static void format_value_(char *buffer, std::size_t capacity, value_type_ const &value) noexcept {
@@ -1567,13 +1559,6 @@ static void check_atomic_ref() noexcept {
     }
     (check_atomic_ref_words<atomic_ref_, word_types_>(), ...);
     (check_atomic_ref_extensions<atomic_ref_, word_types_>(), ...);
-#if defined(FORKUNION_TEST_UNDER_TSAN_)
-    // TSan sees no inline asm, so an ISA reference's spin lock reads as a race, or hangs under it.
-    if (needed) {
-        skip_("ThreadSanitizer cannot see inline asm");
-        return;
-    }
-#endif
     check_atomic_ref_under_contention<atomic_ref_>();
 }
 

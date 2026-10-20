@@ -65,6 +65,9 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "FORKUNION_BUILD_BENCH": "OFF",
         "FORKUNION_WITH_TOPOLOGY": "OFF",
+        "FORKUNION_TARGET_ARM64_LSE": "OFF",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "OFF",
+        "FORKUNION_TARGET_RISC5_ATOMIC": "OFF",
         "CMAKE_C_FLAGS": "-fsanitize=thread -g",
         "CMAKE_CXX_FLAGS": "-fsanitize=thread -g",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
