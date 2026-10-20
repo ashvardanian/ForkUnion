@@ -1411,29 +1411,32 @@ static void test_caller_affinity_preserved() noexcept {
 
 #if defined(__cpp_lib_atomic_ref) && defined(__cpp_lib_bit_cast)
 
-/** The standard operations a reference spells by hand: every return value is the word before. */
-template <template <typename> class atomic_ref_>
+/** The standard operations a reference spells by hand: every return value is the word before. The
+ *  bit patterns truncate with the word, so one set serves every width. */
+template <template <typename> class atomic_ref_, typename word_type_>
 static void check_atomic_ref_words() noexcept {
-    std::uint32_t word = 5;
-    atomic_ref_<std::uint32_t> reference(word);
-    expect_eq(reference.exchange(9u, std::memory_order_acq_rel), 5u);
-    expect_eq(reference.fetch_add(3u, std::memory_order_acquire), 9u);
-    expect_eq(reference.fetch_sub(2u, std::memory_order_relaxed), 12u);
-    expect_eq(reference.load(std::memory_order_acquire), 10u);
-    std::uint32_t expected = 10;
-    expect(reference.compare_exchange_strong(expected, 11u, std::memory_order_acq_rel, std::memory_order_acquire));
+    word_type_ word = 5;
+    atomic_ref_<word_type_> reference(word);
+    expect_eq(reference.exchange(word_type_(9), std::memory_order_acq_rel), word_type_(5));
+    expect_eq(reference.fetch_add(word_type_(3), std::memory_order_acquire), word_type_(9));
+    expect_eq(reference.fetch_sub(word_type_(2), std::memory_order_relaxed), word_type_(12));
+    expect_eq(reference.load(std::memory_order_acquire), word_type_(10));
+    word_type_ expected = 10;
+    expect(reference.compare_exchange_strong(expected, word_type_(11), std::memory_order_acq_rel,
+                                             std::memory_order_acquire));
     expected = 3;
-    expect(!reference.compare_exchange_weak(expected, 12u, std::memory_order_acquire, std::memory_order_relaxed));
-    expect_eq(expected, 11u); // ? The failed compare reports what it saw
-    reference.store(6u, std::memory_order_release);
-    expect_eq(word, 6u);
+    expect(!reference.compare_exchange_weak(expected, word_type_(12), std::memory_order_acquire,
+                                            std::memory_order_relaxed));
+    expect_eq(expected, word_type_(11)); // ? The failed compare reports what it saw
+    reference.store(word_type_(6), std::memory_order_release);
+    expect_eq(word, word_type_(6));
 
-    std::uint64_t bits = 0xF0F0;
-    atomic_ref_<std::uint64_t> bits_reference(bits);
-    expect_eq(bits_reference.fetch_and(0xFF00ull, std::memory_order_acq_rel), 0xF0F0ull);
-    expect_eq(bits_reference.fetch_or(0x1ull, std::memory_order_acq_rel), 0xF000ull);
-    expect_eq(bits_reference.fetch_xor(0xFFull, std::memory_order_acq_rel), 0xF001ull);
-    expect_eq(bits, 0xF0FEull);
+    word_type_ bits = word_type_(0xF0F0);
+    atomic_ref_<word_type_> bits_reference(bits);
+    expect_eq(bits_reference.fetch_and(word_type_(0xFF00), std::memory_order_acq_rel), word_type_(0xF0F0));
+    expect_eq(bits_reference.fetch_or(word_type_(0x1), std::memory_order_acq_rel), word_type_(0xF000));
+    expect_eq(bits_reference.fetch_xor(word_type_(0xFF), std::memory_order_acq_rel), word_type_(0xF001));
+    expect_eq(bits, word_type_(0xF0FE));
 
     bool flag = false;
     atomic_ref_<bool> flag_reference(flag);
@@ -1444,41 +1447,50 @@ static void check_atomic_ref_words() noexcept {
 
 /** The operations past the standard - no-return forms, @c fetch_max and @c fetch_min, the
  *  conditional adds - each refusing exactly at its bound, unsigned and signed alike. */
-template <template <typename> class atomic_ref_>
+template <template <typename> class atomic_ref_, typename word_type_>
 static void check_atomic_ref_extensions() noexcept {
-    std::uint32_t word = 11;
-    atomic_ref_<std::uint32_t> reference(word);
-    expect_eq(reference.fetch_max(7u, std::memory_order_acq_rel), 11u);  // ? Loses: writes nothing
-    expect_eq(reference.fetch_max(12u, std::memory_order_acq_rel), 11u); // ? Wins
-    expect_eq(reference.fetch_min(3u, std::memory_order_relaxed), 12u);
-    reference.add(4u, std::memory_order_release);
-    reference.sub(2u, std::memory_order_relaxed);
-    expect_eq(word, 5u);
-    expect_eq(reference.fetch_add_if_at_most(3u, 8u, std::memory_order_acq_rel), 5u);  // 5 + 3 <= 8: adds
-    expect_eq(reference.fetch_add_if_at_most(1u, 8u, std::memory_order_acq_rel), 8u);  // 8 + 1 > 8: refuses
-    expect_eq(reference.fetch_sub_if_at_least(8u, 0u, std::memory_order_acquire), 8u); // 8 - 8 >= 0: subtracts
-    expect_eq(reference.fetch_sub_if_at_least(1u, 0u, std::memory_order_acquire), 0u); // 0 - 1 < 0: refuses
-    expect_eq(reference.fetch_add_if_at_most(9u, 8u, std::memory_order_acq_rel), 0u);  // ? An operand past the limit
-    expect_eq(reference.fetch_sub_if_at_least(1u, ~0u, std::memory_order_acquire),
-              0u); // ? A floor plus operand that wraps
-    expect_eq(word, 0u);
+    word_type_ word = 11;
+    atomic_ref_<word_type_> reference(word);
+    expect_eq(reference.fetch_max(word_type_(7), std::memory_order_acq_rel), word_type_(11)); // ? Loses: writes nothing
+    expect_eq(reference.fetch_max(word_type_(12), std::memory_order_acq_rel), word_type_(11)); // ? Wins
+    expect_eq(reference.fetch_min(word_type_(3), std::memory_order_relaxed), word_type_(12));
+    reference.add(word_type_(4), std::memory_order_release);
+    reference.sub(word_type_(2), std::memory_order_relaxed);
+    expect_eq(word, word_type_(5));
+    expect_eq(reference.fetch_add_if_at_most(word_type_(3), word_type_(8), std::memory_order_acq_rel),
+              word_type_(5)); // 5 + 3 <= 8: adds
+    expect_eq(reference.fetch_add_if_at_most(word_type_(1), word_type_(8), std::memory_order_acq_rel),
+              word_type_(8)); // 8 + 1 > 8: refuses
+    expect_eq(reference.fetch_sub_if_at_least(word_type_(8), word_type_(0), std::memory_order_acquire),
+              word_type_(8)); // 8 - 8 >= 0: subtracts
+    expect_eq(reference.fetch_sub_if_at_least(word_type_(1), word_type_(0), std::memory_order_acquire),
+              word_type_(0)); // 0 - 1 < 0: refuses
+    expect_eq(reference.fetch_add_if_at_most(word_type_(9), word_type_(8), std::memory_order_acq_rel),
+              word_type_(0)); // ? An operand past the limit
+    expect_eq(reference.fetch_sub_if_at_least(word_type_(1), word_type_(-1), std::memory_order_acquire),
+              word_type_(0)); // ? A floor plus operand that wraps
+    expect_eq(word, word_type_(0));
 
-    std::uint64_t bits = 0xF0F0;
-    atomic_ref_<std::uint64_t> bits_reference(bits);
-    bits_reference.clear_bits(0xF0u, std::memory_order_release);
-    bits_reference.set_bits(0x0Fu, std::memory_order_relaxed);
-    expect_eq(bits, 0xF00Full);
-    bits_reference.flip_bits(0xFF00u, std::memory_order_release);
-    expect_eq(bits, 0x0F0Full);
+    word_type_ bits = word_type_(0xF0F0);
+    atomic_ref_<word_type_> bits_reference(bits);
+    bits_reference.clear_bits(word_type_(0xF0), std::memory_order_release);
+    bits_reference.set_bits(word_type_(0x0F), std::memory_order_relaxed);
+    expect_eq(bits, word_type_(0xF00F));
+    bits_reference.flip_bits(word_type_(0xFF00), std::memory_order_release);
+    expect_eq(bits, word_type_(0x0F0F));
 
-    std::int64_t signed_word = -5;
-    atomic_ref_<std::int64_t> signed_reference(signed_word);
-    expect_eq(signed_reference.fetch_max(std::int64_t(-9), std::memory_order_acquire), std::int64_t(-5));
-    expect_eq(signed_reference.fetch_sub_if_at_least(std::int64_t(3), std::int64_t(-8), std::memory_order_acq_rel),
-              std::int64_t(-5));
-    expect_eq(signed_reference.fetch_sub_if_at_least(std::int64_t(1), std::int64_t(-8), std::memory_order_acq_rel),
-              std::int64_t(-8)); // ? -8 - 1 < -8: refuses
-    expect_eq(signed_word, std::int64_t(-8));
+    using signed_word_t = std::make_signed_t<word_type_>;
+    signed_word_t signed_word = -5;
+    atomic_ref_<signed_word_t> signed_reference(signed_word);
+    expect_eq(signed_reference.fetch_max(signed_word_t(-9), std::memory_order_acquire), signed_word_t(-5));
+    expect_eq(signed_reference.fetch_sub_if_at_least(signed_word_t(3), signed_word_t(-8), std::memory_order_acq_rel),
+              signed_word_t(-5));
+    expect_eq(signed_reference.fetch_sub_if_at_least(signed_word_t(1), signed_word_t(-8), std::memory_order_acq_rel),
+              signed_word_t(-8)); // ? -8 - 1 < -8: refuses
+    expect_eq(signed_reference.fetch_max(signed_word_t(2), std::memory_order_acq_rel),
+              signed_word_t(-8)); // ? Wins only under a signed compare
+    expect_eq(signed_reference.fetch_min(signed_word_t(-3), std::memory_order_relaxed), signed_word_t(2));
+    expect_eq(signed_word, signed_word_t(-3));
 }
 
 /** The free functions post through any reference: the standard's with the result discarded, a
@@ -1539,9 +1551,10 @@ static void check_atomic_ref_under_contention() noexcept {
     expect_eq(guarded, threads_k * rounds_k); // ? The lock serialized every increment
 }
 
-/** Runs one reference through the contract where the machine admits it: the bits it declares match
- *  what a CPU class needs before dispatch may pick it, and a missing one is skipped by name. */
-template <template <typename> class atomic_ref_>
+/** Runs one reference through the contract at every width it spells, where the machine admits it:
+ *  the bits it declares match what a CPU class needs before dispatch may pick it, and a missing one
+ *  is skipped by name. */
+template <template <typename> class atomic_ref_, typename... word_types_>
 static void check_atomic_ref() noexcept {
     fu::capabilities_t const needed = atomic_ref_<std::uint32_t>::capabilities_k;
     unsigned const missing = needed & ~fu::runtime_capabilities();
@@ -1552,8 +1565,8 @@ static void check_atomic_ref() noexcept {
         skip_(reason);
         return;
     }
-    check_atomic_ref_words<atomic_ref_>();
-    check_atomic_ref_extensions<atomic_ref_>();
+    (check_atomic_ref_words<atomic_ref_, word_types_>(), ...);
+    (check_atomic_ref_extensions<atomic_ref_, word_types_>(), ...);
 #if defined(FORKUNION_TEST_UNDER_TSAN_)
     // TSan sees no inline asm, so an ISA reference's spin lock reads as a race, or hangs under it.
     if (needed) {
@@ -1567,28 +1580,28 @@ static void check_atomic_ref() noexcept {
 /** Every reference the build spells - the standard one everywhere, the instruction-set ones the
  *  toolchain can emit - each run only where the machine admits it. */
 static void test_atomic_refs() noexcept {
-    check_atomic_ref<fu::standard_atomic_ref>();
+    check_atomic_ref<fu::standard_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
     check_atomic_verbs();
 #if FORKUNION_TARGET_X86_CMPCCXADD
-    check_atomic_ref<fu::x86_cmpccxadd_atomic_ref>();
+    check_atomic_ref<fu::x86_cmpccxadd_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_X86_RAOINT
-    check_atomic_ref<fu::x86_raoint_atomic_ref>();
+    check_atomic_ref<fu::x86_raoint_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_ARM64_LSE
-    check_atomic_ref<fu::arm64_lse_atomic_ref>();
+    check_atomic_ref<fu::arm64_lse_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_ARM64_RCPC
-    check_atomic_ref<fu::arm64_rcpc_atomic_ref>();
+    check_atomic_ref<fu::arm64_rcpc_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_RISC5_ATOMIC
-    check_atomic_ref<fu::risc5_atomic_ref>();
+    check_atomic_ref<fu::risc5_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_RISC5_ZACAS
-    check_atomic_ref<fu::risc5_zacas_atomic_ref>();
+    check_atomic_ref<fu::risc5_zacas_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
-    check_atomic_ref<fu::wasm_atomic_ref>();
+    check_atomic_ref<fu::wasm_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
 }
 

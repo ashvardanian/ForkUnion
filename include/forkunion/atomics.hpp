@@ -34,7 +34,8 @@
  *    write to a 32- or 64-bit word, as no WebAssembly store wakes a @c memory.atomic.wait sleeper.
  *
  *  Only the widths & operations the indexes use are spelled: byte exchanges & compare-exchanges for
- *  flags, 32-bit forms for node ids, 64-bit forms for counters & packed words. Every reference
+ *  flags, 32-bit forms for node ids, 64-bit forms for counters & packed words. The Arm references
+ *  spell all four widths, as LSE has byte & halfword forms of every operation. Every reference
  *  assembles in a baseline translation unit: on Arm the extension is named in the assembly text -
  *  `.arch_extension` - the RISC-V base atomics are the A-extension mnemonics every @c rv64gc
  *  toolchain assembles, and the x86 and RISC-V extension instructions are raw bytes; the runtime
@@ -50,7 +51,7 @@
  *  them - a C++20 language mode over a library that still lacks them sees nothing here.
  */
 #pragma once
-#include <cstdint> // `std::uint8_t`, `std::uint32_t`, `std::uint64_t`, their signed twins
+#include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::uint32_t`, `std::uint64_t`, their signed twins
 
 #include <atomic>      // `std::memory_order`
 #include <bit>         // `std::bit_cast`
@@ -76,8 +77,10 @@ concept atomic_integer = std::integral<value_type_> && !std::same_as<value_type_
 
 /** The unsigned word a value of one width travels through the instructions as. */
 template <typename value_type_>
-using atomic_word = std::conditional_t<sizeof(value_type_) == 1, std::uint8_t,
-                                       std::conditional_t<sizeof(value_type_) == 4, std::uint32_t, std::uint64_t>>;
+using atomic_word =
+    std::conditional_t<sizeof(value_type_) == 1, std::uint8_t,
+                       std::conditional_t<sizeof(value_type_) == 2, std::uint16_t,
+                                          std::conditional_t<sizeof(value_type_) == 4, std::uint32_t, std::uint64_t>>>;
 
 /** Whether an order carries acquire or release semantics - the two bits every ISA's mnemonics
  *  encode. */
@@ -797,17 +800,22 @@ struct x86_raoint_atomic_ref<value_type_ const> {
 
 /*  Loads: plain and acquire. */
 
-inline std::uint8_t arm64_ldr_u8(std::uint8_t const *word) noexcept {
+inline std::uint8_t arm64_load_u8(std::uint8_t const *word) noexcept {
     std::uint8_t value;
     __asm__ __volatile__("ldrb %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
-inline std::uint32_t arm64_ldr_u32(std::uint32_t const *word) noexcept {
+inline std::uint16_t arm64_load_u16(std::uint16_t const *word) noexcept {
+    std::uint16_t value;
+    __asm__ __volatile__("ldrh %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
+    return value;
+}
+inline std::uint32_t arm64_load_u32(std::uint32_t const *word) noexcept {
     std::uint32_t value;
     __asm__ __volatile__("ldr %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
-inline std::uint64_t arm64_ldr_u64(std::uint64_t const *word) noexcept {
+inline std::uint64_t arm64_load_u64(std::uint64_t const *word) noexcept {
     std::uint64_t value;
     __asm__ __volatile__("ldr %x0, [%1]" : "=r"(value) : "r"(word) : "memory");
     return value;
@@ -816,6 +824,11 @@ inline std::uint64_t arm64_ldr_u64(std::uint64_t const *word) noexcept {
 inline std::uint8_t arm64_ldar_u8(std::uint8_t const *word) noexcept {
     std::uint8_t value;
     __asm__ __volatile__("ldarb %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
+    return value;
+}
+inline std::uint16_t arm64_ldar_u16(std::uint16_t const *word) noexcept {
+    std::uint16_t value;
+    __asm__ __volatile__("ldarh %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
 inline std::uint32_t arm64_ldar_u32(std::uint32_t const *word) noexcept {
@@ -831,18 +844,24 @@ inline std::uint64_t arm64_ldar_u64(std::uint64_t const *word) noexcept {
 
 /*  Stores: plain and release. */
 
-inline void arm64_str_u8(std::uint8_t *word, std::uint8_t value) noexcept {
+inline void arm64_store_u8(std::uint8_t *word, std::uint8_t value) noexcept {
     __asm__ __volatile__("strb %w0, [%1]" : : "r"(value), "r"(word) : "memory");
 }
-inline void arm64_str_u32(std::uint32_t *word, std::uint32_t value) noexcept {
+inline void arm64_store_u16(std::uint16_t *word, std::uint16_t value) noexcept {
+    __asm__ __volatile__("strh %w0, [%1]" : : "r"(value), "r"(word) : "memory");
+}
+inline void arm64_store_u32(std::uint32_t *word, std::uint32_t value) noexcept {
     __asm__ __volatile__("str %w0, [%1]" : : "r"(value), "r"(word) : "memory");
 }
-inline void arm64_str_u64(std::uint64_t *word, std::uint64_t value) noexcept {
+inline void arm64_store_u64(std::uint64_t *word, std::uint64_t value) noexcept {
     __asm__ __volatile__("str %x0, [%1]" : : "r"(value), "r"(word) : "memory");
 }
 
 inline void arm64_stlr_u8(std::uint8_t *word, std::uint8_t value) noexcept {
     __asm__ __volatile__("stlrb %w0, [%1]" : : "r"(value), "r"(word) : "memory");
+}
+inline void arm64_stlr_u16(std::uint16_t *word, std::uint16_t value) noexcept {
+    __asm__ __volatile__("stlrh %w0, [%1]" : : "r"(value), "r"(word) : "memory");
 }
 inline void arm64_stlr_u32(std::uint32_t *word, std::uint32_t value) noexcept {
     __asm__ __volatile__("stlr %w0, [%1]" : : "r"(value), "r"(word) : "memory");
@@ -878,6 +897,38 @@ inline std::uint8_t arm64_swp_u8(std::uint8_t *word, std::uint8_t desired, std::
         break;
     default:
         __asm__ __volatile__(".arch_extension lse\n\tswpalb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint16_t arm64_swp_u16(std::uint16_t *word, std::uint16_t desired, std::memory_order order) noexcept {
+    std::uint16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tswph %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tswpah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tswplh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tswpalh %w1, %w0, [%2]"
                              : "=r"(observed)
                              : "r"(desired), "r"(word)
                              : "memory");
@@ -950,6 +1001,70 @@ inline std::uint64_t arm64_swp_u64(std::uint64_t *word, std::uint64_t desired, s
     return observed;
 }
 
+inline std::uint8_t arm64_ldadd_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    std::uint8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddalb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint16_t arm64_ldadd_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    std::uint16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldaddalh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
 inline std::uint32_t arm64_ldadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
     switch (order) {
@@ -1015,6 +1130,70 @@ inline std::uint64_t arm64_ldadd_u64(std::uint64_t *word, std::uint64_t operand,
 }
 
 /** @c ldclr clears the operand's bits: a word's `fetch_and(mask)` is `ldclr ~mask`. */
+inline std::uint8_t arm64_ldclr_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    std::uint8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldclrb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldclrab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldclrlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldclralb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint16_t arm64_ldclr_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    std::uint16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldclrh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldclrah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldclrlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldclralh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(bits), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
 inline std::uint64_t arm64_ldclr_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     std::uint64_t observed;
     switch (order) {
@@ -1079,6 +1258,70 @@ inline std::uint32_t arm64_ldclr_u32(std::uint32_t *word, std::uint32_t operand,
     return observed;
 }
 
+inline std::uint8_t arm64_ldset_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    std::uint8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldsetb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldsetab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldsetlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldsetalb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint16_t arm64_ldset_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    std::uint16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldseth %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldsetah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldsetlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldsetalh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
 inline std::uint32_t arm64_ldset_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
     switch (order) {
@@ -1135,6 +1378,70 @@ inline std::uint64_t arm64_ldset_u64(std::uint64_t *word, std::uint64_t operand,
         break;
     default:
         __asm__ __volatile__(".arch_extension lse\n\tldsetal %x1, %x0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint8_t arm64_ldeor_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    std::uint8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldeorb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldeorab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldeorlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldeoralb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint16_t arm64_ldeor_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    std::uint16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldeorh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldeorah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldeorlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldeoralh %w1, %w0, [%2]"
                              : "=r"(observed)
                              : "r"(operand), "r"(word)
                              : "memory");
@@ -1209,6 +1516,16 @@ inline std::uint64_t arm64_ldeor_u64(std::uint64_t *word, std::uint64_t operand,
 
 /*  No-return forms: nothing comes back, so only the plain and release flavors exist. */
 
+inline void arm64_stadd_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tstaddb %w0, [%1]" : : "r"(operand), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tstaddlb %w0, [%1]" : : "r"(operand), "r"(word) : "memory");
+}
+inline void arm64_stadd_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tstaddh %w0, [%1]" : : "r"(operand), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tstaddlh %w0, [%1]" : : "r"(operand), "r"(word) : "memory");
+}
 inline void arm64_stadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__(".arch_extension lse\n\tstadd %w0, [%1]" : : "r"(operand), "r"(word) : "memory");
@@ -1219,10 +1536,30 @@ inline void arm64_stadd_u64(std::uint64_t *word, std::uint64_t operand, std::mem
         __asm__ __volatile__(".arch_extension lse\n\tstadd %x0, [%1]" : : "r"(operand), "r"(word) : "memory");
     else __asm__ __volatile__(".arch_extension lse\n\tstaddl %x0, [%1]" : : "r"(operand), "r"(word) : "memory");
 }
+inline void arm64_stclr_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tstclrb %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tstclrlb %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
+inline void arm64_stclr_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tstclrh %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tstclrlh %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
 inline void arm64_stclr_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__(".arch_extension lse\n\tstclr %x0, [%1]" : : "r"(bits), "r"(word) : "memory");
     else __asm__ __volatile__(".arch_extension lse\n\tstclrl %x0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
+inline void arm64_stset_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tstsetb %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tstsetlb %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
+inline void arm64_stset_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tstseth %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tstsetlh %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
 }
 inline void arm64_stset_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
@@ -1240,6 +1577,16 @@ inline void arm64_stset_u32(std::uint32_t *word, std::uint32_t bits, std::memory
         __asm__ __volatile__(".arch_extension lse\n\tstset %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
     else __asm__ __volatile__(".arch_extension lse\n\tstsetl %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
 }
+inline void arm64_steor_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tsteorb %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tsteorlb %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
+inline void arm64_steor_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    if (order == std::memory_order_relaxed)
+        __asm__ __volatile__(".arch_extension lse\n\tsteorh %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+    else __asm__ __volatile__(".arch_extension lse\n\tsteorlh %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
+}
 inline void arm64_steor_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__(".arch_extension lse\n\tsteor %w0, [%1]" : : "r"(bits), "r"(word) : "memory");
@@ -1251,7 +1598,72 @@ inline void arm64_steor_u64(std::uint64_t *word, std::uint64_t bits, std::memory
     else __asm__ __volatile__(".arch_extension lse\n\tsteorl %x0, [%1]" : : "r"(bits), "r"(word) : "memory");
 }
 
-/*  LSE maxima & minima - signed & unsigned differ by instruction, the width by register. */
+/*  LSE maxima & minima - signed & unsigned differ by instruction, the width by register and the
+ *  byte & halfword suffix. */
+
+inline std::uint8_t arm64_ldumax_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    std::uint8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxalb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint16_t arm64_ldumax_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    std::uint16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldumaxalh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
 
 inline std::uint32_t arm64_ldumax_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
@@ -1309,6 +1721,70 @@ inline std::uint64_t arm64_ldumax_u64(std::uint64_t *word, std::uint64_t operand
         break;
     default:
         __asm__ __volatile__(".arch_extension lse\n\tldumaxal %x1, %x0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::int8_t arm64_ldsmax_i8(std::int8_t *word, std::int8_t operand, std::memory_order order) noexcept {
+    std::int8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxalb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::int16_t arm64_ldsmax_i16(std::int16_t *word, std::int16_t operand, std::memory_order order) noexcept {
+    std::int16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldsmaxalh %w1, %w0, [%2]"
                              : "=r"(observed)
                              : "r"(operand), "r"(word)
                              : "memory");
@@ -1381,6 +1857,70 @@ inline std::int64_t arm64_ldsmax_i64(std::int64_t *word, std::int64_t operand, s
     return observed;
 }
 
+inline std::uint8_t arm64_ldumin_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    std::uint8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminalb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::uint16_t arm64_ldumin_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    std::uint16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tlduminalh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
 inline std::uint32_t arm64_ldumin_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
     switch (order) {
@@ -1437,6 +1977,70 @@ inline std::uint64_t arm64_ldumin_u64(std::uint64_t *word, std::uint64_t operand
         break;
     default:
         __asm__ __volatile__(".arch_extension lse\n\tlduminal %x1, %x0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::int8_t arm64_ldsmin_i8(std::int8_t *word, std::int8_t operand, std::memory_order order) noexcept {
+    std::int8_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminab %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminlb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminalb %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    }
+    return observed;
+}
+
+inline std::int16_t arm64_ldsmin_i16(std::int16_t *word, std::int16_t operand, std::memory_order order) noexcept {
+    std::int16_t observed;
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminah %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminlh %w1, %w0, [%2]"
+                             : "=r"(observed)
+                             : "r"(operand), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tldsminalh %w1, %w0, [%2]"
                              : "=r"(observed)
                              : "r"(operand), "r"(word)
                              : "memory");
@@ -1542,6 +2146,38 @@ inline std::uint8_t arm64_cas_u8(std::uint8_t *word, std::uint8_t expected, std:
     return expected;
 }
 
+inline std::uint16_t arm64_cas_u16(std::uint16_t *word, std::uint16_t expected, std::uint16_t desired,
+                                   std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed:
+        __asm__ __volatile__(".arch_extension lse\n\tcash %w0, %w1, [%2]"
+                             : "+r"(expected)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_consume:
+    case std::memory_order_acquire:
+        __asm__ __volatile__(".arch_extension lse\n\tcasah %w0, %w1, [%2]"
+                             : "+r"(expected)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    case std::memory_order_release:
+        __asm__ __volatile__(".arch_extension lse\n\tcaslh %w0, %w1, [%2]"
+                             : "+r"(expected)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    default:
+        __asm__ __volatile__(".arch_extension lse\n\tcasalh %w0, %w1, [%2]"
+                             : "+r"(expected)
+                             : "r"(desired), "r"(word)
+                             : "memory");
+        break;
+    }
+    return expected;
+}
+
 inline std::uint32_t arm64_cas_u32(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired,
                                    std::memory_order order) noexcept {
     switch (order) {
@@ -1611,33 +2247,41 @@ inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, 
 /*  Loads: plain and acquire. `__iso_volatile_load*` is the plain load no optimizer may fold away,
  *  spelled over the signed widths; `__ldar*` takes the unsigned ones directly. */
 #if FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
-inline std::uint8_t arm64_ldr_u8(std::uint8_t const *word) noexcept {
+inline std::uint8_t arm64_load_u8(std::uint8_t const *word) noexcept {
     return static_cast<std::uint8_t>(__iso_volatile_load8(reinterpret_cast<char const volatile *>(word)));
 }
-inline std::uint32_t arm64_ldr_u32(std::uint32_t const *word) noexcept {
+inline std::uint16_t arm64_load_u16(std::uint16_t const *word) noexcept {
+    return static_cast<std::uint16_t>(__iso_volatile_load16(reinterpret_cast<short const volatile *>(word)));
+}
+inline std::uint32_t arm64_load_u32(std::uint32_t const *word) noexcept {
     return static_cast<std::uint32_t>(__iso_volatile_load32(reinterpret_cast<int const volatile *>(word)));
 }
-inline std::uint64_t arm64_ldr_u64(std::uint64_t const *word) noexcept {
+inline std::uint64_t arm64_load_u64(std::uint64_t const *word) noexcept {
     return static_cast<std::uint64_t>(__iso_volatile_load64(reinterpret_cast<__int64 const volatile *>(word)));
 }
 
 inline std::uint8_t arm64_ldar_u8(std::uint8_t const *word) noexcept { return __ldar8(word); }
+inline std::uint16_t arm64_ldar_u16(std::uint16_t const *word) noexcept { return __ldar16(word); }
 inline std::uint32_t arm64_ldar_u32(std::uint32_t const *word) noexcept { return __ldar32(word); }
 inline std::uint64_t arm64_ldar_u64(std::uint64_t const *word) noexcept { return __ldar64(word); }
 
 /*  Stores: plain and release. */
 
-inline void arm64_str_u8(std::uint8_t *word, std::uint8_t value) noexcept {
+inline void arm64_store_u8(std::uint8_t *word, std::uint8_t value) noexcept {
     __iso_volatile_store8(reinterpret_cast<char volatile *>(word), static_cast<char>(value));
 }
-inline void arm64_str_u32(std::uint32_t *word, std::uint32_t value) noexcept {
+inline void arm64_store_u16(std::uint16_t *word, std::uint16_t value) noexcept {
+    __iso_volatile_store16(reinterpret_cast<short volatile *>(word), static_cast<short>(value));
+}
+inline void arm64_store_u32(std::uint32_t *word, std::uint32_t value) noexcept {
     __iso_volatile_store32(reinterpret_cast<int volatile *>(word), static_cast<int>(value));
 }
-inline void arm64_str_u64(std::uint64_t *word, std::uint64_t value) noexcept {
+inline void arm64_store_u64(std::uint64_t *word, std::uint64_t value) noexcept {
     __iso_volatile_store64(reinterpret_cast<__int64 volatile *>(word), static_cast<__int64>(value));
 }
 
 inline void arm64_stlr_u8(std::uint8_t *word, std::uint8_t value) noexcept { __stlr8(word, value); }
+inline void arm64_stlr_u16(std::uint16_t *word, std::uint16_t value) noexcept { __stlr16(word, value); }
 inline void arm64_stlr_u32(std::uint32_t *word, std::uint32_t value) noexcept { __stlr32(word, value); }
 inline void arm64_stlr_u64(std::uint64_t *word, std::uint64_t value) noexcept { __stlr64(word, value); }
 
@@ -1651,6 +2295,15 @@ inline std::uint8_t arm64_swp_u8(std::uint8_t *word, std::uint8_t desired, std::
     case std::memory_order_acquire: return __swpa8(word, desired);
     case std::memory_order_release: return __swpl8(word, desired);
     default: return __swpal8(word, desired);
+    }
+}
+inline std::uint16_t arm64_swp_u16(std::uint16_t *word, std::uint16_t desired, std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __swp16(word, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __swpa16(word, desired);
+    case std::memory_order_release: return __swpl16(word, desired);
+    default: return __swpal16(word, desired);
     }
 }
 inline std::uint32_t arm64_swp_u32(std::uint32_t *word, std::uint32_t desired, std::memory_order order) noexcept {
@@ -1683,6 +2336,16 @@ inline std::uint8_t arm64_cas_u8(std::uint8_t *word, std::uint8_t expected, std:
     default: return __casal8(word, expected, desired);
     }
 }
+inline std::uint16_t arm64_cas_u16(std::uint16_t *word, std::uint16_t expected, std::uint16_t desired,
+                                   std::memory_order order) noexcept {
+    switch (order) {
+    case std::memory_order_relaxed: return __cas16(word, expected, desired);
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return __casa16(word, expected, desired);
+    case std::memory_order_release: return __casl16(word, expected, desired);
+    default: return __casal16(word, expected, desired);
+    }
+}
 inline std::uint32_t arm64_cas_u32(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired,
                                    std::memory_order order) noexcept {
     switch (order) {
@@ -1708,6 +2371,28 @@ inline std::uint64_t arm64_cas_u64(std::uint64_t *word, std::uint64_t expected, 
  *  `_Interlocked*` family carries them - one instruction under `/arch:armv8.1`, and a call into the
  *  CRT without it, which @c FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_ has already refused. */
 
+inline std::uint8_t arm64_ldadd_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    char volatile *target = reinterpret_cast<char volatile *>(word);
+    char const addend = static_cast<char>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint8_t>(_InterlockedExchangeAdd8_nf(target, addend));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint8_t>(_InterlockedExchangeAdd8_acq(target, addend));
+    case std::memory_order_release: return static_cast<std::uint8_t>(_InterlockedExchangeAdd8_rel(target, addend));
+    default: return static_cast<std::uint8_t>(_InterlockedExchangeAdd8(target, addend));
+    }
+}
+inline std::uint16_t arm64_ldadd_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    short volatile *target = reinterpret_cast<short volatile *>(word);
+    short const addend = static_cast<short>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint16_t>(_InterlockedExchangeAdd16_nf(target, addend));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint16_t>(_InterlockedExchangeAdd16_acq(target, addend));
+    case std::memory_order_release: return static_cast<std::uint16_t>(_InterlockedExchangeAdd16_rel(target, addend));
+    default: return static_cast<std::uint16_t>(_InterlockedExchangeAdd16(target, addend));
+    }
+}
 inline std::uint32_t arm64_ldadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     long volatile *target = reinterpret_cast<long volatile *>(word);
     long const addend = static_cast<long>(operand);
@@ -1732,6 +2417,28 @@ inline std::uint64_t arm64_ldadd_u64(std::uint64_t *word, std::uint64_t operand,
 }
 
 /** @c ldclr clears bits; @c _InterlockedAnd keeps the complement, so the mask flips. */
+inline std::uint8_t arm64_ldclr_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    char volatile *target = reinterpret_cast<char volatile *>(word);
+    char const kept = static_cast<char>(~bits);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint8_t>(_InterlockedAnd8_nf(target, kept));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint8_t>(_InterlockedAnd8_acq(target, kept));
+    case std::memory_order_release: return static_cast<std::uint8_t>(_InterlockedAnd8_rel(target, kept));
+    default: return static_cast<std::uint8_t>(_InterlockedAnd8(target, kept));
+    }
+}
+inline std::uint16_t arm64_ldclr_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    short volatile *target = reinterpret_cast<short volatile *>(word);
+    short const kept = static_cast<short>(~bits);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint16_t>(_InterlockedAnd16_nf(target, kept));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint16_t>(_InterlockedAnd16_acq(target, kept));
+    case std::memory_order_release: return static_cast<std::uint16_t>(_InterlockedAnd16_rel(target, kept));
+    default: return static_cast<std::uint16_t>(_InterlockedAnd16(target, kept));
+    }
+}
 inline std::uint32_t arm64_ldclr_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     long volatile *target = reinterpret_cast<long volatile *>(word);
     long const kept = static_cast<long>(~bits);
@@ -1755,6 +2462,28 @@ inline std::uint64_t arm64_ldclr_u64(std::uint64_t *word, std::uint64_t bits, st
     }
 }
 
+inline std::uint8_t arm64_ldset_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    char volatile *target = reinterpret_cast<char volatile *>(word);
+    char const bits = static_cast<char>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint8_t>(_InterlockedOr8_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint8_t>(_InterlockedOr8_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint8_t>(_InterlockedOr8_rel(target, bits));
+    default: return static_cast<std::uint8_t>(_InterlockedOr8(target, bits));
+    }
+}
+inline std::uint16_t arm64_ldset_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    short volatile *target = reinterpret_cast<short volatile *>(word);
+    short const bits = static_cast<short>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint16_t>(_InterlockedOr16_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint16_t>(_InterlockedOr16_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint16_t>(_InterlockedOr16_rel(target, bits));
+    default: return static_cast<std::uint16_t>(_InterlockedOr16(target, bits));
+    }
+}
 inline std::uint32_t arm64_ldset_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     long volatile *target = reinterpret_cast<long volatile *>(word);
     long const bits = static_cast<long>(operand);
@@ -1778,6 +2507,28 @@ inline std::uint64_t arm64_ldset_u64(std::uint64_t *word, std::uint64_t operand,
     }
 }
 
+inline std::uint8_t arm64_ldeor_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    char volatile *target = reinterpret_cast<char volatile *>(word);
+    char const bits = static_cast<char>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint8_t>(_InterlockedXor8_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint8_t>(_InterlockedXor8_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint8_t>(_InterlockedXor8_rel(target, bits));
+    default: return static_cast<std::uint8_t>(_InterlockedXor8(target, bits));
+    }
+}
+inline std::uint16_t arm64_ldeor_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    short volatile *target = reinterpret_cast<short volatile *>(word);
+    short const bits = static_cast<short>(operand);
+    switch (order) {
+    case std::memory_order_relaxed: return static_cast<std::uint16_t>(_InterlockedXor16_nf(target, bits));
+    case std::memory_order_consume:
+    case std::memory_order_acquire: return static_cast<std::uint16_t>(_InterlockedXor16_acq(target, bits));
+    case std::memory_order_release: return static_cast<std::uint16_t>(_InterlockedXor16_rel(target, bits));
+    default: return static_cast<std::uint16_t>(_InterlockedXor16(target, bits));
+    }
+}
 inline std::uint32_t arm64_ldeor_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     long volatile *target = reinterpret_cast<long volatile *>(word);
     long const bits = static_cast<long>(operand);
@@ -1804,11 +2555,23 @@ inline std::uint64_t arm64_ldeor_u64(std::uint64_t *word, std::uint64_t operand,
 /*  No-return forms: nothing spells @c stadd, @c stclr, @c stset or @c steor, so the returning
  *  instruction runs and its answer is dropped, a round trip the posted form skips. */
 
+inline void arm64_stadd_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint8_t const observed = arm64_ldadd_u8(word, operand, order);
+}
+inline void arm64_stadd_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint16_t const observed = arm64_ldadd_u16(word, operand, order);
+}
 inline void arm64_stadd_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint32_t const observed = arm64_ldadd_u32(word, operand, order);
 }
 inline void arm64_stadd_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint64_t const observed = arm64_ldadd_u64(word, operand, order);
+}
+inline void arm64_stclr_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint8_t const observed = arm64_ldclr_u8(word, bits, order);
+}
+inline void arm64_stclr_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint16_t const observed = arm64_ldclr_u16(word, bits, order);
 }
 inline void arm64_stclr_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint32_t const observed = arm64_ldclr_u32(word, bits, order);
@@ -1816,11 +2579,23 @@ inline void arm64_stclr_u32(std::uint32_t *word, std::uint32_t bits, std::memory
 inline void arm64_stclr_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint64_t const observed = arm64_ldclr_u64(word, bits, order);
 }
+inline void arm64_stset_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint8_t const observed = arm64_ldset_u8(word, bits, order);
+}
+inline void arm64_stset_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint16_t const observed = arm64_ldset_u16(word, bits, order);
+}
 inline void arm64_stset_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint32_t const observed = arm64_ldset_u32(word, bits, order);
 }
 inline void arm64_stset_u64(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint64_t const observed = arm64_ldset_u64(word, bits, order);
+}
+inline void arm64_steor_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint8_t const observed = arm64_ldeor_u8(word, bits, order);
+}
+inline void arm64_steor_u16(std::uint16_t *word, std::uint16_t bits, std::memory_order order) noexcept {
+    [[maybe_unused]] std::uint16_t const observed = arm64_ldeor_u16(word, bits, order);
 }
 inline void arm64_steor_u32(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     [[maybe_unused]] std::uint32_t const observed = arm64_ldeor_u32(word, bits, order);
@@ -1833,8 +2608,26 @@ inline void arm64_steor_u64(std::uint64_t *word, std::uint64_t bits, std::memory
  *  them, so a @c cas loop stands in. It swaps on every pass, an unchanged word included, so the
  *  ordered flavors stay the read-modify-write their callers were promised. */
 
+inline std::uint8_t arm64_ldumax_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    std::uint8_t observed = arm64_load_u8(word);
+    while (true) {
+        std::uint8_t const wanted = observed < operand ? operand : observed;
+        std::uint8_t const seen = arm64_cas_u8(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::uint16_t arm64_ldumax_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    std::uint16_t observed = arm64_load_u16(word);
+    while (true) {
+        std::uint16_t const wanted = observed < operand ? operand : observed;
+        std::uint16_t const seen = arm64_cas_u16(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
 inline std::uint32_t arm64_ldumax_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
-    std::uint32_t observed = arm64_ldr_u32(word);
+    std::uint32_t observed = arm64_load_u32(word);
     while (true) {
         std::uint32_t const wanted = observed < operand ? operand : observed;
         std::uint32_t const seen = arm64_cas_u32(word, observed, wanted, order);
@@ -1843,7 +2636,7 @@ inline std::uint32_t arm64_ldumax_u32(std::uint32_t *word, std::uint32_t operand
     }
 }
 inline std::uint64_t arm64_ldumax_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
-    std::uint64_t observed = arm64_ldr_u64(word);
+    std::uint64_t observed = arm64_load_u64(word);
     while (true) {
         std::uint64_t const wanted = observed < operand ? operand : observed;
         std::uint64_t const seen = arm64_cas_u64(word, observed, wanted, order);
@@ -1851,9 +2644,31 @@ inline std::uint64_t arm64_ldumax_u64(std::uint64_t *word, std::uint64_t operand
         observed = seen;
     }
 }
+inline std::int8_t arm64_ldsmax_i8(std::int8_t *word, std::int8_t operand, std::memory_order order) noexcept {
+    std::uint8_t *target = reinterpret_cast<std::uint8_t *>(word);
+    std::int8_t observed = static_cast<std::int8_t>(arm64_load_u8(target));
+    while (true) {
+        std::int8_t const wanted = observed < operand ? operand : observed;
+        std::int8_t const seen = static_cast<std::int8_t>(
+            arm64_cas_u8(target, static_cast<std::uint8_t>(observed), static_cast<std::uint8_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::int16_t arm64_ldsmax_i16(std::int16_t *word, std::int16_t operand, std::memory_order order) noexcept {
+    std::uint16_t *target = reinterpret_cast<std::uint16_t *>(word);
+    std::int16_t observed = static_cast<std::int16_t>(arm64_load_u16(target));
+    while (true) {
+        std::int16_t const wanted = observed < operand ? operand : observed;
+        std::int16_t const seen = static_cast<std::int16_t>(
+            arm64_cas_u16(target, static_cast<std::uint16_t>(observed), static_cast<std::uint16_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
 inline std::int32_t arm64_ldsmax_i32(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
     std::uint32_t *target = reinterpret_cast<std::uint32_t *>(word);
-    std::int32_t observed = static_cast<std::int32_t>(arm64_ldr_u32(target));
+    std::int32_t observed = static_cast<std::int32_t>(arm64_load_u32(target));
     while (true) {
         std::int32_t const wanted = observed < operand ? operand : observed;
         std::int32_t const seen = static_cast<std::int32_t>(
@@ -1864,7 +2679,7 @@ inline std::int32_t arm64_ldsmax_i32(std::int32_t *word, std::int32_t operand, s
 }
 inline std::int64_t arm64_ldsmax_i64(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
     std::uint64_t *target = reinterpret_cast<std::uint64_t *>(word);
-    std::int64_t observed = static_cast<std::int64_t>(arm64_ldr_u64(target));
+    std::int64_t observed = static_cast<std::int64_t>(arm64_load_u64(target));
     while (true) {
         std::int64_t const wanted = observed < operand ? operand : observed;
         std::int64_t const seen = static_cast<std::int64_t>(
@@ -1874,8 +2689,26 @@ inline std::int64_t arm64_ldsmax_i64(std::int64_t *word, std::int64_t operand, s
     }
 }
 
+inline std::uint8_t arm64_ldumin_u8(std::uint8_t *word, std::uint8_t operand, std::memory_order order) noexcept {
+    std::uint8_t observed = arm64_load_u8(word);
+    while (true) {
+        std::uint8_t const wanted = operand < observed ? operand : observed;
+        std::uint8_t const seen = arm64_cas_u8(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::uint16_t arm64_ldumin_u16(std::uint16_t *word, std::uint16_t operand, std::memory_order order) noexcept {
+    std::uint16_t observed = arm64_load_u16(word);
+    while (true) {
+        std::uint16_t const wanted = operand < observed ? operand : observed;
+        std::uint16_t const seen = arm64_cas_u16(word, observed, wanted, order);
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
 inline std::uint32_t arm64_ldumin_u32(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
-    std::uint32_t observed = arm64_ldr_u32(word);
+    std::uint32_t observed = arm64_load_u32(word);
     while (true) {
         std::uint32_t const wanted = operand < observed ? operand : observed;
         std::uint32_t const seen = arm64_cas_u32(word, observed, wanted, order);
@@ -1884,7 +2717,7 @@ inline std::uint32_t arm64_ldumin_u32(std::uint32_t *word, std::uint32_t operand
     }
 }
 inline std::uint64_t arm64_ldumin_u64(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
-    std::uint64_t observed = arm64_ldr_u64(word);
+    std::uint64_t observed = arm64_load_u64(word);
     while (true) {
         std::uint64_t const wanted = operand < observed ? operand : observed;
         std::uint64_t const seen = arm64_cas_u64(word, observed, wanted, order);
@@ -1892,9 +2725,31 @@ inline std::uint64_t arm64_ldumin_u64(std::uint64_t *word, std::uint64_t operand
         observed = seen;
     }
 }
+inline std::int8_t arm64_ldsmin_i8(std::int8_t *word, std::int8_t operand, std::memory_order order) noexcept {
+    std::uint8_t *target = reinterpret_cast<std::uint8_t *>(word);
+    std::int8_t observed = static_cast<std::int8_t>(arm64_load_u8(target));
+    while (true) {
+        std::int8_t const wanted = operand < observed ? operand : observed;
+        std::int8_t const seen = static_cast<std::int8_t>(
+            arm64_cas_u8(target, static_cast<std::uint8_t>(observed), static_cast<std::uint8_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
+inline std::int16_t arm64_ldsmin_i16(std::int16_t *word, std::int16_t operand, std::memory_order order) noexcept {
+    std::uint16_t *target = reinterpret_cast<std::uint16_t *>(word);
+    std::int16_t observed = static_cast<std::int16_t>(arm64_load_u16(target));
+    while (true) {
+        std::int16_t const wanted = operand < observed ? operand : observed;
+        std::int16_t const seen = static_cast<std::int16_t>(
+            arm64_cas_u16(target, static_cast<std::uint16_t>(observed), static_cast<std::uint16_t>(wanted), order));
+        if (seen == observed) return observed;
+        observed = seen;
+    }
+}
 inline std::int32_t arm64_ldsmin_i32(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
     std::uint32_t *target = reinterpret_cast<std::uint32_t *>(word);
-    std::int32_t observed = static_cast<std::int32_t>(arm64_ldr_u32(target));
+    std::int32_t observed = static_cast<std::int32_t>(arm64_load_u32(target));
     while (true) {
         std::int32_t const wanted = operand < observed ? operand : observed;
         std::int32_t const seen = static_cast<std::int32_t>(
@@ -1905,7 +2760,7 @@ inline std::int32_t arm64_ldsmin_i32(std::int32_t *word, std::int32_t operand, s
 }
 inline std::int64_t arm64_ldsmin_i64(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
     std::uint64_t *target = reinterpret_cast<std::uint64_t *>(word);
-    std::int64_t observed = static_cast<std::int64_t>(arm64_ldr_u64(target));
+    std::int64_t observed = static_cast<std::int64_t>(arm64_load_u64(target));
     while (true) {
         std::int64_t const wanted = operand < observed ? operand : observed;
         std::int64_t const seen = static_cast<std::int64_t>(
@@ -1929,8 +2784,9 @@ inline std::int64_t arm64_ldsmin_i64(std::int64_t *word, std::int64_t operand, s
 template <typename value_type_>
 struct arm64_lse_atomic_ref {
     static_assert(std::is_trivially_copyable_v<value_type_>, "Only trivially-copyable words are atomic");
-    static_assert(sizeof(value_type_) == 1 || sizeof(value_type_) == 4 || sizeof(value_type_) == 8,
-                  "Only byte, 32-bit and 64-bit words are spelled");
+    static_assert(sizeof(value_type_) == 1 || sizeof(value_type_) == 2 || sizeof(value_type_) == 4 ||
+                      sizeof(value_type_) == 8,
+                  "Only 8-, 16-, 32- and 64-bit words are spelled");
     using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k;
@@ -1942,11 +2798,13 @@ struct arm64_lse_atomic_ref {
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         if (order == std::memory_order_relaxed) {
-            if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldr_u8(word_));
-            else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldr_u32(word_));
-            else return std::bit_cast<value_type_>(arm64_ldr_u64(word_));
+            if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_load_u8(word_));
+            else if constexpr (sizeof(value_type_) == 2) return std::bit_cast<value_type_>(arm64_load_u16(word_));
+            else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_load_u32(word_));
+            else return std::bit_cast<value_type_>(arm64_load_u64(word_));
         }
         if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldar_u8(word_));
+        else if constexpr (sizeof(value_type_) == 2) return std::bit_cast<value_type_>(arm64_ldar_u16(word_));
         else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldar_u32(word_));
         else return std::bit_cast<value_type_>(arm64_ldar_u64(word_));
     }
@@ -1954,12 +2812,14 @@ struct arm64_lse_atomic_ref {
     void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         word_t const word = std::bit_cast<word_t>(desired);
         if (order == std::memory_order_relaxed) {
-            if constexpr (sizeof(value_type_) == 1) arm64_str_u8(word_, word);
-            else if constexpr (sizeof(value_type_) == 4) arm64_str_u32(word_, word);
-            else arm64_str_u64(word_, word);
+            if constexpr (sizeof(value_type_) == 1) arm64_store_u8(word_, word);
+            else if constexpr (sizeof(value_type_) == 2) arm64_store_u16(word_, word);
+            else if constexpr (sizeof(value_type_) == 4) arm64_store_u32(word_, word);
+            else arm64_store_u64(word_, word);
         }
         else {
             if constexpr (sizeof(value_type_) == 1) arm64_stlr_u8(word_, word);
+            else if constexpr (sizeof(value_type_) == 2) arm64_stlr_u16(word_, word);
             else if constexpr (sizeof(value_type_) == 4) arm64_stlr_u32(word_, word);
             else arm64_stlr_u64(word_, word);
         }
@@ -1968,6 +2828,8 @@ struct arm64_lse_atomic_ref {
     value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         word_t const word = std::bit_cast<word_t>(desired);
         if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_swp_u8(word_, word, order));
+        else if constexpr (sizeof(value_type_) == 2)
+            return std::bit_cast<value_type_>(arm64_swp_u16(word_, word, order));
         else if constexpr (sizeof(value_type_) == 4)
             return std::bit_cast<value_type_>(arm64_swp_u32(word_, word, order));
         else return std::bit_cast<value_type_>(arm64_swp_u64(word_, word, order));
@@ -1982,6 +2844,7 @@ struct arm64_lse_atomic_ref {
         std::memory_order const order = stronger_(success, failure);
         word_t observed;
         if constexpr (sizeof(value_type_) == 1) observed = arm64_cas_u8(word_, wanted, word, order);
+        else if constexpr (sizeof(value_type_) == 2) observed = arm64_cas_u16(word_, wanted, word, order);
         else if constexpr (sizeof(value_type_) == 4) observed = arm64_cas_u32(word_, wanted, word, order);
         else observed = arm64_cas_u64(word_, wanted, word, order);
         expected = std::bit_cast<value_type_>(observed);
@@ -2003,9 +2866,12 @@ struct arm64_lse_atomic_ref {
     value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte fetch-add is not spelled yet");
         word_t const word = std::bit_cast<word_t>(operand);
-        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldadd_u32(word_, word, order));
+        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldadd_u8(word_, word, order));
+        else if constexpr (sizeof(value_type_) == 2)
+            return std::bit_cast<value_type_>(arm64_ldadd_u16(word_, word, order));
+        else if constexpr (sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(arm64_ldadd_u32(word_, word, order));
         else return std::bit_cast<value_type_>(arm64_ldadd_u64(word_, word, order));
     }
     value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
@@ -2017,26 +2883,35 @@ struct arm64_lse_atomic_ref {
     value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte fetch-and is not spelled yet");
         word_t const cleared = static_cast<word_t>(~std::bit_cast<word_t>(mask));
-        if constexpr (sizeof(value_type_) == 4)
+        if constexpr (sizeof(value_type_) == 1)
+            return std::bit_cast<value_type_>(arm64_ldclr_u8(word_, cleared, order));
+        else if constexpr (sizeof(value_type_) == 2)
+            return std::bit_cast<value_type_>(arm64_ldclr_u16(word_, cleared, order));
+        else if constexpr (sizeof(value_type_) == 4)
             return std::bit_cast<value_type_>(arm64_ldclr_u32(word_, cleared, order));
         else return std::bit_cast<value_type_>(arm64_ldclr_u64(word_, cleared, order));
     }
     value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte fetch-or is not spelled yet");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldset_u32(word_, word, order));
+        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldset_u8(word_, word, order));
+        else if constexpr (sizeof(value_type_) == 2)
+            return std::bit_cast<value_type_>(arm64_ldset_u16(word_, word, order));
+        else if constexpr (sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(arm64_ldset_u32(word_, word, order));
         else return std::bit_cast<value_type_>(arm64_ldset_u64(word_, word, order));
     }
     value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte fetch-xor is not spelled yet");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldeor_u32(word_, word, order));
+        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldeor_u8(word_, word, order));
+        else if constexpr (sizeof(value_type_) == 2)
+            return std::bit_cast<value_type_>(arm64_ldeor_u16(word_, word, order));
+        else if constexpr (sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(arm64_ldeor_u32(word_, word, order));
         else return std::bit_cast<value_type_>(arm64_ldeor_u64(word_, word, order));
     }
 
@@ -2044,11 +2919,18 @@ struct arm64_lse_atomic_ref {
     value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte maxima are not spelled yet");
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
+        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 1)
+            return static_cast<value_type_>(arm64_ldsmax_i8(reinterpret_cast<std::int8_t *>(word_), operand, order));
+        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 2)
+            return static_cast<value_type_>(arm64_ldsmax_i16(reinterpret_cast<std::int16_t *>(word_), operand, order));
+        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
             return static_cast<value_type_>(arm64_ldsmax_i32(reinterpret_cast<std::int32_t *>(word_), operand, order));
         else if constexpr (std::signed_integral<value_type_>)
             return static_cast<value_type_>(arm64_ldsmax_i64(reinterpret_cast<std::int64_t *>(word_), operand, order));
+        else if constexpr (sizeof(value_type_) == 1)
+            return static_cast<value_type_>(arm64_ldumax_u8(word_, operand, order));
+        else if constexpr (sizeof(value_type_) == 2)
+            return static_cast<value_type_>(arm64_ldumax_u16(word_, operand, order));
         else if constexpr (sizeof(value_type_) == 4)
             return static_cast<value_type_>(arm64_ldumax_u32(word_, operand, order));
         else return static_cast<value_type_>(arm64_ldumax_u64(word_, operand, order));
@@ -2056,11 +2938,18 @@ struct arm64_lse_atomic_ref {
     value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte minima are not spelled yet");
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
+        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 1)
+            return static_cast<value_type_>(arm64_ldsmin_i8(reinterpret_cast<std::int8_t *>(word_), operand, order));
+        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 2)
+            return static_cast<value_type_>(arm64_ldsmin_i16(reinterpret_cast<std::int16_t *>(word_), operand, order));
+        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
             return static_cast<value_type_>(arm64_ldsmin_i32(reinterpret_cast<std::int32_t *>(word_), operand, order));
         else if constexpr (std::signed_integral<value_type_>)
             return static_cast<value_type_>(arm64_ldsmin_i64(reinterpret_cast<std::int64_t *>(word_), operand, order));
+        else if constexpr (sizeof(value_type_) == 1)
+            return static_cast<value_type_>(arm64_ldumin_u8(word_, operand, order));
+        else if constexpr (sizeof(value_type_) == 2)
+            return static_cast<value_type_>(arm64_ldumin_u16(word_, operand, order));
         else if constexpr (sizeof(value_type_) == 4)
             return static_cast<value_type_>(arm64_ldumin_u32(word_, operand, order));
         else return static_cast<value_type_>(arm64_ldumin_u64(word_, operand, order));
@@ -2070,9 +2959,10 @@ struct arm64_lse_atomic_ref {
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte no-return add is not spelled yet");
         word_t const word = std::bit_cast<word_t>(operand);
-        if constexpr (sizeof(value_type_) == 4) arm64_stadd_u32(word_, word, order);
+        if constexpr (sizeof(value_type_) == 1) arm64_stadd_u8(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 2) arm64_stadd_u16(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 4) arm64_stadd_u32(word_, word, order);
         else arm64_stadd_u64(word_, word, order);
     }
     void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
@@ -2083,25 +2973,28 @@ struct arm64_lse_atomic_ref {
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte no-return set is not spelled yet");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) arm64_stset_u32(word_, word, order);
+        if constexpr (sizeof(value_type_) == 1) arm64_stset_u8(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 2) arm64_stset_u16(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 4) arm64_stset_u32(word_, word, order);
         else arm64_stset_u64(word_, word, order);
     }
     void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte no-return clear is not spelled yet");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) arm64_stclr_u32(word_, word, order);
+        if constexpr (sizeof(value_type_) == 1) arm64_stclr_u8(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 2) arm64_stclr_u16(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 4) arm64_stclr_u32(word_, word, order);
         else arm64_stclr_u64(word_, word, order);
     }
     void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        static_assert(sizeof(value_type_) != 1, "Byte no-return flip is not spelled yet");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) arm64_steor_u32(word_, word, order);
+        if constexpr (sizeof(value_type_) == 1) arm64_steor_u8(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 2) arm64_steor_u16(word_, word, order);
+        else if constexpr (sizeof(value_type_) == 4) arm64_steor_u32(word_, word, order);
         else arm64_steor_u64(word_, word, order);
     }
 
@@ -2160,11 +3053,13 @@ struct arm64_lse_atomic_ref<value_type_ const> {
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         if (order == std::memory_order_relaxed) {
-            if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldr_u8(word_));
-            else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldr_u32(word_));
-            else return std::bit_cast<value_type_>(arm64_ldr_u64(word_));
+            if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_load_u8(word_));
+            else if constexpr (sizeof(value_type_) == 2) return std::bit_cast<value_type_>(arm64_load_u16(word_));
+            else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_load_u32(word_));
+            else return std::bit_cast<value_type_>(arm64_load_u64(word_));
         }
         if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldar_u8(word_));
+        else if constexpr (sizeof(value_type_) == 2) return std::bit_cast<value_type_>(arm64_ldar_u16(word_));
         else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldar_u32(word_));
         else return std::bit_cast<value_type_>(arm64_ldar_u64(word_));
     }
@@ -2188,6 +3083,11 @@ inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept {
     __asm__ __volatile__(".arch_extension rcpc\n\tldaprb %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
+inline std::uint16_t arm64_ldapr_u16(std::uint16_t const *word) noexcept {
+    std::uint16_t value;
+    __asm__ __volatile__(".arch_extension rcpc\n\tldaprh %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
+    return value;
+}
 inline std::uint32_t arm64_ldapr_u32(std::uint32_t const *word) noexcept {
     std::uint32_t value;
     __asm__ __volatile__(".arch_extension rcpc\n\tldapr %w0, [%1]" : "=r"(value) : "r"(word) : "memory");
@@ -2204,6 +3104,7 @@ inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept {
 #if FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
 
 inline std::uint8_t arm64_ldapr_u8(std::uint8_t const *word) noexcept { return __ldapr8(word); }
+inline std::uint16_t arm64_ldapr_u16(std::uint16_t const *word) noexcept { return __ldapr16(word); }
 inline std::uint32_t arm64_ldapr_u32(std::uint32_t const *word) noexcept { return __ldapr32(word); }
 inline std::uint64_t arm64_ldapr_u64(std::uint64_t const *word) noexcept { return __ldapr64(word); }
 
@@ -2228,6 +3129,7 @@ struct arm64_rcpc_atomic_ref {
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         if (order != std::memory_order_acquire && order != std::memory_order_consume) return weaker_().load(order);
         if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldapr_u8(word_));
+        else if constexpr (sizeof(value_type_) == 2) return std::bit_cast<value_type_>(arm64_ldapr_u16(word_));
         else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldapr_u32(word_));
         else return std::bit_cast<value_type_>(arm64_ldapr_u64(word_));
     }
@@ -2362,6 +3264,7 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
         if (order != std::memory_order_acquire && order != std::memory_order_consume) return weaker_().load(order);
         word_t const *word = reinterpret_cast<word_t const *>(word_);
         if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(arm64_ldapr_u8(word));
+        else if constexpr (sizeof(value_type_) == 2) return std::bit_cast<value_type_>(arm64_ldapr_u16(word));
         else if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(arm64_ldapr_u32(word));
         else return std::bit_cast<value_type_>(arm64_ldapr_u64(word));
     }
