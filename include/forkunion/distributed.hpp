@@ -1478,29 +1478,69 @@ struct distributed_pool {
                 colocations[compute_domain_index].terminate(); // ? A no-op on the pools not yet spawned
         };
 
+        // There may be a non-uniform number of cores in each compute domain. We need to distribute
+        // threads proportionately among compute domains so that there is no oversubscription due
+        // to pinning when the number of threads is equal to the number of logical cores. When the
+        // number of threads is not an integer muliple of the number of logical cores, assign the
+        // remainder to the highest index domains in the same manner as as `indexed_split`.
+        size_t max_cores_per_domain =
+            topology.compute_domain_at(static_cast<compute_domain_index_t>(0)).logical_cores_count;
+        for (size_t compute_domain_index = 1; compute_domain_index < colocations_count; compute_domain_index++) {
+            size_t logical_cores_count =
+                topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index))
+                    .logical_cores_count;
+            max_cores_per_domain = max_of(max_cores_per_domain, logical_cores_count);
+        }
+
+        dynamic_array<thread_index_t> threads_per_domain;
+        if (status_t const grew = threads_per_domain.resize(colocations_count); failed(grew)) return grew;
+
+        size_t threads_assigned = 0;
+        while (threads_assigned < threads) {
+            for (size_t core = 1; core <= max_cores_per_domain; core++) {
+                for (size_t domain_offset = 1; domain_offset <= colocations_count; domain_offset++) {
+                    size_t compute_domain_index = colocations_count - domain_offset;
+
+                    if (core > topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index))
+                                   .logical_cores_count) {
+                        continue;
+                    }
+
+                    threads_per_domain[compute_domain_index] += 1;
+                    threads_assigned += 1;
+
+                    if (threads_assigned == threads) { break; }
+                }
+
+                if (threads_assigned == threads) { break; }
+            }
+        }
+
         // Every compute-domain pool is spawned separately
         // - the first one may be "inclusive".
         // - others are always "exclusive" to the caller thread.
-        indexed_split<thread_index_t> threads_per_domain(threads, colocations_count);
         index_t const compute_levels = static_cast<index_t>(topology.compute_levels_count());
         // ? The sub-pool's reason propagates verbatim - a thread limit isn't an allocation failure
-        if (status_t const spawned = colocations[0].spawn(first_domain, threads_per_domain[0].count, exclusivity,
+        if (status_t const spawned = colocations[0].spawn(first_domain, threads_per_domain[0], exclusivity,
                                                           pin_granularity, 0, 0, compute_levels);
             failed(spawned)) {
             reset_on_failure();
             return spawned;
         }
 
+        threads_assigned = threads_per_domain[0];
+
         for (index_t compute_domain_index = 1; compute_domain_index < colocations_count; ++compute_domain_index) {
             compute_domain_t const &domain =
                 topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index));
             if (status_t const spawned = colocations[compute_domain_index].spawn(
-                    domain, threads_per_domain[compute_domain_index].count, caller_exclusive_k, pin_granularity,
-                    threads_per_domain[compute_domain_index].first, compute_domain_index, compute_levels);
+                    domain, threads_per_domain[compute_domain_index], caller_exclusive_k, pin_granularity,
+                    threads_assigned, compute_domain_index, compute_levels);
                 failed(spawned)) {
                 reset_on_failure();
                 return spawned;
             }
+            threads_assigned += threads_per_domain[compute_domain_index];
         }
 
         colocations_ = std::move(colocations);
