@@ -22,22 +22,22 @@ include("${CMAKE_CURRENT_LIST_DIR}/forkunionTargets.cmake")
 # CMake 3.18, and this file runs under the *consumer's* CMake, not ours. Below that, the namespaced
 # spelling still works; only this convenience is skipped, which beats failing the `find_package`.
 if (NOT CMAKE_VERSION VERSION_LESS 3.18)
-    foreach (_forkunion_flavor header static shared)
-        if (NOT TARGET forkunion_${_forkunion_flavor})
-            add_library(forkunion_${_forkunion_flavor} ALIAS forkunion::${_forkunion_flavor})
+    foreach (forkunion_flavor_ header static shared)
+        if (NOT TARGET forkunion_${forkunion_flavor_})
+            add_library(forkunion_${forkunion_flavor_} ALIAS forkunion::${forkunion_flavor_})
         endif ()
     endforeach ()
-    unset(_forkunion_flavor)
+    unset(forkunion_flavor_)
 endif ()
 
 # The three flavors as components. `check_required_components` reads these, so leaving them unset would
 # fail a correct `COMPONENTS static` too.
-foreach (_forkunion_flavor header static shared)
-    if (TARGET forkunion::${_forkunion_flavor})
-        set(forkunion_${_forkunion_flavor}_FOUND TRUE)
+foreach (forkunion_flavor_ header static shared)
+    if (TARGET forkunion::${forkunion_flavor_})
+        set(forkunion_${forkunion_flavor_}_FOUND TRUE)
     endif ()
 endforeach ()
-unset(_forkunion_flavor)
+unset(forkunion_flavor_)
 
 # No `forkunion_VERSION` here: `find_package` sets it from the version file before loading this one, and
 # the `@PACKAGE_VERSION@` that used to sit here expanded to nothing and overwrote it.

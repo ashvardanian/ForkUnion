@@ -24,10 +24,10 @@ if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git config core.hooksPath .githooks
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        RESULT_VARIABLE _fu_hooks_status
+        RESULT_VARIABLE forkunion_hooks_status_
         OUTPUT_QUIET ERROR_QUIET
     )
-    if (_fu_hooks_status EQUAL 0)
+    if (forkunion_hooks_status_ EQUAL 0)
         message(STATUS "forkunion: Git hooks enabled (core.hooksPath -> .githooks)")
     endif ()
 endif ()
@@ -78,7 +78,7 @@ set_property(CACHE FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN PROPERTY STRINGS "A
 set_property(CACHE FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY PROPERTY STRINGS "AUTO;ON;OFF")
 
 # Every optional capability macro, coarse and fine - the set `FORKUNION_PORTABLE` zeroes.
-set(FORKUNION_OPTIONAL_MACROS
+set(forkunion_optional_macros_
     FORKUNION_WITH_TOPOLOGY FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
     FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
     FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
@@ -216,8 +216,7 @@ target_link_libraries(forkunion_static PRIVATE $<BUILD_INTERFACE:forkunion_cpu_c
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
-set(HAS_CFP FALSE)
-check_cxx_compiler_flag("-fcf-protection=full" HAS_CFP)
+check_cxx_compiler_flag("-fcf-protection=full" forkunion_has_cf_protection_)
 
 # Security hardening flags for compiled libraries
 target_compile_options(
@@ -230,9 +229,9 @@ target_compile_options(
             $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
             $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
             # Control flow integrity and stack clash protection
-            $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
+            $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
             $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
-            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
+            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
             # MSVC security features
             $<$<CXX_COMPILER_ID:MSVC>:/GS
             /guard:cf>
@@ -243,9 +242,9 @@ target_compile_options(
             # Same reasoning as the shared target above.
             $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
             $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
-            $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
+            $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
             $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
-            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${HAS_CFP}>>:-fcf-protection=full>
+            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
             $<$<CXX_COMPILER_ID:MSVC>:/GS
             /guard:cf>
 )
@@ -288,12 +287,12 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_BINARY_DIR})
 
 # Static analysis tools
-find_program(CPPCHECK_EXECUTABLE cppcheck)
-if (CPPCHECK_EXECUTABLE)
+find_program(FORKUNION_CPPCHECK_EXECUTABLE cppcheck)
+if (FORKUNION_CPPCHECK_EXECUTABLE)
     add_custom_target(
         cppcheck
         COMMAND
-            ${CPPCHECK_EXECUTABLE} --enable=all --std=c++20 --verbose --quiet --error-exitcode=1
+            ${FORKUNION_CPPCHECK_EXECUTABLE} --enable=all --std=c++20 --verbose --quiet --error-exitcode=1
             --suppress=missingIncludeSystem --suppress=unusedFunction --suppress=unmatchedSuppression
             --suppress=ConfigurationNotChecked --suppress=knownConditionTrueFalse --suppress=shadowFunction
             --suppress=shadowVariable --suppress=useStlAlgorithm --suppress=noExplicitConstructor
@@ -302,12 +301,12 @@ if (CPPCHECK_EXECUTABLE)
     )
 endif ()
 
-find_program(CLANG_TIDY_EXECUTABLE clang-tidy)
-if (CLANG_TIDY_EXECUTABLE)
+find_program(FORKUNION_CLANG_TIDY_EXECUTABLE clang-tidy)
+if (FORKUNION_CLANG_TIDY_EXECUTABLE)
     add_custom_target(
         clang-tidy
         COMMAND
-            ${CLANG_TIDY_EXECUTABLE} --config-file=${CMAKE_CURRENT_SOURCE_DIR}/.clang-tidy --quiet
+            ${FORKUNION_CLANG_TIDY_EXECUTABLE} --config-file=${CMAKE_CURRENT_SOURCE_DIR}/.clang-tidy --quiet
             ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp ${CMAKE_CURRENT_SOURCE_DIR}/c/*.cpp --
             -I${CMAKE_CURRENT_SOURCE_DIR}/include -std=c++20
         COMMENT "Running clang-tidy static analysis"
@@ -414,9 +413,9 @@ check_cxx_source_compiles(
          value.byte.fetch_add(1);
          return static_cast<int>(value.wide.load()) + value.lock_free();
      }"
-    FORKUNION_ATOMICS_ARE_BUILTIN
+    forkunion_atomics_are_builtin_
 )
-if (NOT FORKUNION_ATOMICS_ARE_BUILTIN)
+if (NOT forkunion_atomics_are_builtin_)
     target_link_libraries(forkunion_header INTERFACE atomic)
 endif ()
 
@@ -425,39 +424,40 @@ endif ()
 # prefix against `${pcfiledir}` keeps it correct after `cmake --install --prefix` moves the tree. Under the same option
 # as the rules above, which is also what brought `GNUInstallDirs` in - without it these paths resolve empty.
 if (FORKUNION_INSTALL)
-    file(RELATIVE_PATH FORKUNION_PC_PREFIX "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
-    string(REGEX REPLACE "/+$" "" FORKUNION_PC_PREFIX "${FORKUNION_PC_PREFIX}")
-    set(FORKUNION_PC_PREFIX "\${pcfiledir}/${FORKUNION_PC_PREFIX}")
+    file(RELATIVE_PATH forkunion_pc_relative_prefix_ "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
+    string(REGEX REPLACE "/+$" "" forkunion_pc_trimmed_prefix_ "${forkunion_pc_relative_prefix_}")
+    set(forkunion_pc_prefix_ "\${pcfiledir}/${forkunion_pc_trimmed_prefix_}")
 
     # `GNUInstallDirs` returns a relative path unless a distro forced an absolute one; only the former may follow a
     # prefix.
     if (IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
-        set(FORKUNION_PC_LIBDIR "${CMAKE_INSTALL_LIBDIR}")
+        set(forkunion_pc_libdir_ "${CMAKE_INSTALL_LIBDIR}")
     else ()
-        set(FORKUNION_PC_LIBDIR "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
+        set(forkunion_pc_libdir_ "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
     endif ()
     if (IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
-        set(FORKUNION_PC_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}")
+        set(forkunion_pc_includedir_ "${CMAKE_INSTALL_INCLUDEDIR}")
     else ()
-        set(FORKUNION_PC_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+        set(forkunion_pc_includedir_ "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
     endif ()
 
     # A C caller linking the archive has to name the C++ runtime itself, so read it off the compiler rather than the
     # platform. These go in `Libs.private`, emitted only for `--static`; `Requires.private` would name pkg-config
     # modules, and none of the three ship one.
-    set(FORKUNION_PC_PRIVATE "")
-    foreach (fu_implicit_library IN LISTS CMAKE_CXX_IMPLICIT_LINK_LIBRARIES)
-        if (fu_implicit_library MATCHES "^(stdc\\+\\+|c\\+\\+)$")
-            list(APPEND FORKUNION_PC_PRIVATE "-l${fu_implicit_library}")
+    set(forkunion_pc_runtime_libraries_ "")
+    foreach (implicit_library_ IN LISTS CMAKE_CXX_IMPLICIT_LINK_LIBRARIES)
+        if (implicit_library_ MATCHES "^(stdc\\+\\+|c\\+\\+)$")
+            list(APPEND forkunion_pc_runtime_libraries_ "-l${implicit_library_}")
         endif ()
     endforeach ()
-    if (CMAKE_THREAD_LIBS_INIT)
-        list(APPEND FORKUNION_PC_PRIVATE "${CMAKE_THREAD_LIBS_INIT}")
+    if (forkunion_atomics_are_builtin_)
+        set(forkunion_pc_atomic_library_ "")
+    else ()
+        set(forkunion_pc_atomic_library_ "-latomic")
     endif ()
-    if (NOT FORKUNION_ATOMICS_ARE_BUILTIN)
-        list(APPEND FORKUNION_PC_PRIVATE "-latomic")
-    endif ()
-    list(JOIN FORKUNION_PC_PRIVATE " " FORKUNION_PC_PRIVATE)
+    string(JOIN " " forkunion_pc_private_ ${forkunion_pc_runtime_libraries_} ${CMAKE_THREAD_LIBS_INIT}
+           ${forkunion_pc_atomic_library_}
+    )
 
     configure_file(cmake/forkunion.pc.in "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" @ONLY)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
@@ -465,13 +465,13 @@ endif ()
 
 # Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
 # 0. Knows nothing of the environment: there is no longer an environment to know.
-function (forkunion_apply mode macro)
-    if (mode STREQUAL "ON")
-        target_compile_definitions(forkunion_header INTERFACE ${macro}=1)
-    elseif (mode STREQUAL "OFF")
-        target_compile_definitions(forkunion_header INTERFACE ${macro}=0)
-    elseif (NOT mode STREQUAL "AUTO")
-        message(FATAL_ERROR "${macro} tri-state must be AUTO, ON, or OFF - got '${mode}'")
+function (forkunion_apply_tri_state mode_ macro_)
+    if (mode_ STREQUAL "ON")
+        target_compile_definitions(forkunion_header INTERFACE ${macro_}=1)
+    elseif (mode_ STREQUAL "OFF")
+        target_compile_definitions(forkunion_header INTERFACE ${macro_}=0)
+    elseif (NOT mode_ STREQUAL "AUTO")
+        message(FATAL_ERROR "${macro_} tri-state must be AUTO, ON, or OFF - got '${mode_}'")
     endif ()
 endfunction ()
 
@@ -486,15 +486,15 @@ if (FORKUNION_PORTABLE)
     )
         message(FATAL_ERROR "FORKUNION_PORTABLE is ON, but a FORKUNION_WITH_* capability is forced ON")
     endif ()
-    foreach (macro IN LISTS FORKUNION_OPTIONAL_MACROS)
-        target_compile_definitions(forkunion_header INTERFACE ${macro}=0)
+    foreach (macro_ IN LISTS forkunion_optional_macros_)
+        target_compile_definitions(forkunion_header INTERFACE ${macro_}=0)
     endforeach ()
 else ()
     # No environment check precedes these. Forcing topology or placement ON used to need libnuma on the build host, and
     # so needed a sentence here rather than a wall of missing symbols at link time; now it needs a Linux kernel, which
     # the header checks for itself. A capability the platform cannot honour still stops at an `#error` in `types.hpp`.
-    forkunion_apply("${FORKUNION_WITH_TOPOLOGY}" FORKUNION_WITH_TOPOLOGY)
-    forkunion_apply("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN)
-    forkunion_apply("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
-    forkunion_apply("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY)
+    forkunion_apply_tri_state("${FORKUNION_WITH_TOPOLOGY}" FORKUNION_WITH_TOPOLOGY)
+    forkunion_apply_tri_state("${FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN}" FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN)
+    forkunion_apply_tri_state("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
+    forkunion_apply_tri_state("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY)
 endif ()
