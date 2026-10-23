@@ -631,17 +631,13 @@ namespace forkunion {
 #pragma region Domain Identifiers
 
 /** The OS's NUMA node id - on Linux, an @c N for which `/sys/devices/system/node/nodeN` exists. */
-using memory_domain_id_t = int;
+enum memory_domain_id_t : int {};
 
 /** Opaque logical-processor id; on Windows it packs a group and a bit. */
-using core_id_t = int;
+enum core_id_t : int {};
 
 /** Physical CPU socket, or -1 where the OS will not say. */
-using socket_id_t = int;
-
-/** A core's performance tier, ranked from fastest to lowest-power, like "performance" or
- *  "efficiency". */
-using core_quality_t = int;
+enum socket_id_t : int {};
 
 /*  The two @c mbind inputs `<numaif.h>` supplied. Syscall ABI, so naming them needs no header - and
  *  where `<linux/mempolicy.h>` is installed, the @c static_asserts match the kernel's spelling. */
@@ -686,6 +682,9 @@ inline constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(u
  *  Both compiled, both ran on every machine where the two counts happened to match, and both broke
  *  on the first chip with three compute domains over one memory domain.
  *
+ *  The OS IDs above - cores, memory domains and sockets - are plain enums for the same reason, and
+ *  so is @c compute_level_t, so a QoS rank never passes for a domain position.
+ *
  *  @note The implicit widening also means a raw `array[compute_domain]` still compiles. The enums
  *      stop the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
  */
@@ -693,6 +692,9 @@ enum compute_domain_index_t : std::size_t {};
 
 /** A position in @c machine_topology's array of @b memory domains, in [0, memory_domains_count). */
 enum memory_domain_index_t : std::size_t {};
+
+/** A rung of the dense QoS ladder, in [0, compute_levels_count), least performant first. */
+enum compute_level_t : std::size_t {};
 
 #pragma endregion Domain Identifiers
 
@@ -1238,12 +1240,11 @@ constexpr std::uint64_t split_mix(std::uint64_t const counter) noexcept {
 }
 
 template <typename value_type_, typename comparator_type_ = std::less<value_type_>>
-void bubble_sort(value_type_ *array, std::size_t size, comparator_type_ comp = {}) noexcept {
-    if (size < 2) return; // ? Already sorted; also guards the `size - 1` unsigned underflow
-    assert(array != nullptr && "Array must not be null");
-    for (std::size_t i = 0; i < size - 1; ++i)
-        for (std::size_t j = 0; j < size - i - 1; ++j)
-            if (comp(array[j + 1], array[j])) std::swap(array[j], array[j + 1]);
+void bubble_sort(std::span<value_type_> values, comparator_type_ comp = {}) noexcept {
+    if (values.size() < 2) return; // ? Already sorted; also guards the `size - 1` unsigned underflow
+    for (std::size_t i = 0; i < values.size() - 1; ++i)
+        for (std::size_t j = 0; j < values.size() - i - 1; ++j)
+            if (comp(values[j + 1], values[j])) std::swap(values[j], values[j + 1]);
 }
 
 /**
@@ -1952,7 +1953,7 @@ using spin_mutex_t = spin_mutex<>;
  *  exclusive end is `first + count`; an idle thread receives a range with `count == 0`.
  */
 template <typename index_type_ = std::size_t>
-struct tasks_range {
+struct [[nodiscard]] tasks_range {
     using index_t = index_type_;
 
     /** The first task index in the run. */
@@ -2245,7 +2246,8 @@ inline void drain_claim(dynamic_claim<index_type_> &claim, locator_type_ const &
     cache_hints(&claim, promote_line_k); // ? Overlap the exclusive-ownership fetch with the branch
     while (true) {
         index_type_ const task = claim.next.fetch_add(1, std::memory_order_relaxed);
-        if (task >= claim.end) break; // ? Overshoots by one, and only once per thread
+        if (task >= claim.end) [[unlikely]]
+            break; // ? Overshoots by one, and only once per thread
         fork(task, at);
     }
     cache_hints(&claim, demote_line_k); // ? Our overshooting add left the line dirty; hand it away

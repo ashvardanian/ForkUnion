@@ -78,7 +78,7 @@ inline void const *watched_address(value_type_ const *watched) noexcept {
  *  @brief All four registers of one @c CPUID invocation.
  *  @sa cpuid, the one home of both toolchain idioms.
  */
-struct cpuid_registers_t {
+struct [[nodiscard]] cpuid_registers_t {
     std::uint32_t eax, ebx, ecx, edx;
 };
 
@@ -1015,7 +1015,7 @@ inline bool linux_can_place_memory_on_domain() noexcept {
     if (probe == MAP_FAILED) return false;
     // ? Node 0, always present where a topology exists. Bare `MPOL_BIND` - this asks only whether the
     // ? kernel will place at all, not about a mode flag no caller requested.
-    bool const bound = succeeded(linux_bind_range_to_domain(probe, page_bytes, 0, mpol_bind_k));
+    bool const bound = succeeded(linux_bind_range_to_domain(probe, page_bytes, memory_domain_id_t {0}, mpol_bind_k));
     ::munmap(probe, page_bytes);
     return bound;
 }

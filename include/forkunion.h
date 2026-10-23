@@ -542,9 +542,9 @@ fu_status_t fu_compute_levels_count(fu_topology_t, size_t *count_out);
 fu_status_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index, size_t *capacity_out);
 
 /**
- *  @brief Returns the bytes of deepest cache private to a given compute domain's cores.
+ *  @brief Returns each logical core's share of the deepest cache confined to a compute domain.
  *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
- *  @return Cache bytes shared within the domain, or 0 if the index is out of range or unknown.
+ *  @return Bytes of one cache instance over the logical cores sharing it, or 0 if unknown.
  *
  *  Sizes a cache-resident chunk - a different question from how @b many chunks a domain deserves.
  *  Domains may sustain identical throughput yet back onto very differently sized caches, so neither
@@ -552,7 +552,7 @@ fu_status_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index, s
  *
  *  @sa fu_compute_capacity_in.
  */
-fu_status_t fu_compute_cache_bytes_in(fu_topology_t, size_t compute_domain_index, size_t *bytes_out);
+fu_status_t fu_compute_cache_bytes_per_core_in(fu_topology_t, size_t compute_domain_index, size_t *bytes_out);
 
 /**
  *  @brief Returns the number of memory domains - the distinct allocation targets.

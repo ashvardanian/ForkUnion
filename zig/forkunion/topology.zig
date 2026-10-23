@@ -28,7 +28,7 @@ extern fn fu_compute_levels_count(topology: *anyopaque, out: *usize) c_int;
 extern fn fu_logical_cores_count_in(topology: *anyopaque, compute_domain_index: usize, out: *usize) c_int;
 extern fn fu_compute_level_in(topology: *anyopaque, compute_domain_index: usize, out: *usize) c_int;
 extern fn fu_compute_capacity_in(topology: *anyopaque, compute_domain_index: usize, out: *usize) c_int;
-extern fn fu_compute_cache_bytes_in(topology: *anyopaque, compute_domain_index: usize, out: *usize) c_int;
+extern fn fu_compute_cache_bytes_per_core_in(topology: *anyopaque, compute_domain_index: usize, out: *usize) c_int;
 
 extern fn fu_memory_domains_count(topology: *anyopaque, out: *usize) c_int;
 extern fn fu_volume_ram(topology: *anyopaque, out: *usize) c_int;
@@ -244,13 +244,13 @@ pub const Topology = struct {
         return answer;
     }
 
-    /// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
+    /// Returns each core's share of the deepest cache confined to a compute domain (0 if unknown).
     ///
     /// Sizes a cache-resident chunk, a different question from how many chunks a domain deserves -
     /// domains of equal throughput may back onto very differently sized caches.
-    pub fn computeCacheBytesIn(self: Topology, compute_domain: ComputeDomain) Error!usize {
+    pub fn computeCacheBytesPerCoreIn(self: Topology, compute_domain: ComputeDomain) Error!usize {
         var answer: usize = std.math.maxInt(usize);
-        try check(fu_compute_cache_bytes_in(self.handle, compute_domain.index(), &answer));
+        try check(fu_compute_cache_bytes_per_core_in(self.handle, compute_domain.index(), &answer));
         return answer;
     }
 

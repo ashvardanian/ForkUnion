@@ -110,15 +110,15 @@ inline std::size_t possible_cores() noexcept {
  *  is still just an opaque, comparable id - only the pinning path decodes it. */
 #if FORKUNION_OS_WINDOWS_
 inline constexpr int win_core_group_shift_k = 6;
-inline constexpr core_id_t win_core_index_mask_k = (core_id_t {1} << win_core_group_shift_k) - 1;
+inline constexpr int win_core_index_mask_k = (1 << win_core_group_shift_k) - 1;
 
 /** Logical processors per Windows processor group - the @c KAFFINITY bit-width, a hard ABI cap of
  *  64 @b per @b group, never a cap on total cores - a machine with more uses several groups. */
 inline constexpr unsigned win_processors_per_group_k = 1u << win_core_group_shift_k;
 
 inline core_id_t win_encode_core_id(WORD group, unsigned bit) noexcept {
-    return (static_cast<core_id_t>(group) << win_core_group_shift_k) |
-           (static_cast<core_id_t>(bit) & win_core_index_mask_k);
+    return static_cast<core_id_t>((static_cast<int>(group) << win_core_group_shift_k) |
+                                  (static_cast<int>(bit) & win_core_index_mask_k));
 }
 inline WORD win_core_group(core_id_t id) noexcept { return static_cast<WORD>(id >> win_core_group_shift_k); }
 inline unsigned win_core_index(core_id_t id) noexcept { return static_cast<unsigned>(id & win_core_index_mask_k); }
@@ -362,21 +362,22 @@ inline status_t apply_thread_cores([[maybe_unused]] native_thread_t thread,
  *  @note A thin adaptor: it builds a @c core_mask and defers to @c try_apply_thread_cores, which is
  *      where the per-platform placement lives. It owns no platform logic of its own.
  */
-inline status_t pin_thread_to_cores([[maybe_unused]] native_thread_t thread, [[maybe_unused]] core_id_t const *cores,
-                                    [[maybe_unused]] std::size_t const count) noexcept {
 #if FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
-    if (count == 0) return status_t::invalid_argument_k;
+inline status_t pin_thread_to_cores(native_thread_t thread, std::span<core_id_t const> cores) noexcept {
+    if (cores.empty()) return status_t::invalid_argument_k;
     core_mask_t mask;
     if (status_t const grew = mask.resize(); failed(grew)) return grew;
-    for (std::size_t i = 0; i < count; ++i) {
-        assert(cores[i] >= 0 && "Invalid CPU core ID");
-        mask.add(cores[i]);
+    for (core_id_t const core : cores) {
+        assert(core >= 0 && "Invalid CPU core ID");
+        mask.add(core);
     }
     return apply_thread_cores(thread, mask);
-#else
-    return status_t::unsupported_k; // ? No placement here; the harvest still reports the domains
-#endif
 }
+#else
+inline status_t pin_thread_to_cores(native_thread_t, std::span<core_id_t const>) noexcept {
+    return status_t::unsupported_k; // ? No placement here; the harvest still reports the domains
+}
+#endif
 
 /**
  *  @brief Puts the calling thread back on the cores @p saved recorded before it was pinned.
@@ -429,15 +430,15 @@ inline status_t read_uint_at_path(char const *path, std::size_t &value) noexcept
  *  @note Truncation is a failure, not a prefix: a clipped cpulist names fewer cores than the kernel
  *      does, and would read like a complete answer.
  */
-inline status_t read_line_at_path(char const *path, char *line, std::size_t const line_capacity) noexcept {
+inline status_t read_line_at_path(char const *path, std::span<char> line) noexcept {
     FILE *file = ::fopen(path, "r");
     if (!file) return status_t::topology_unavailable_k;
-    bool complete = ::fgets(line, static_cast<int>(line_capacity), file) != nullptr;
+    bool complete = ::fgets(line.data(), static_cast<int>(line.size()), file) != nullptr;
     ::fclose(file);
     if (!complete) return status_t::topology_unavailable_k;
     // Truncation is a failure, not a prefix: a clipped cpulist would read like a complete answer.
-    std::size_t const length = std::strlen(line);
-    if (length == line_capacity - 1 && line[line_capacity - 2] != '\n') return status_t::topology_unavailable_k;
+    std::size_t const length = std::strlen(line.data());
+    if (length == line.size() - 1 && line[line.size() - 2] != '\n') return status_t::topology_unavailable_k;
     return status_t::success_k;
 }
 #endif // FORKUNION_OS_LINUX_
@@ -793,11 +794,8 @@ struct memory_domain {
     /** RAM volume in bytes. */
     std::size_t volume_ram {0};
 
-    /** Pointer to the first core ID in the @c core_ids array. */
-    core_id_t const *first_core_id {nullptr};
-
-    /** Number of items in the @c core_ids array. */
-    std::size_t logical_cores_count {0};
+    /** This node's logical cores, a slice of the topology's core array. */
+    std::span<core_id_t const> core_ids {};
 
     /** Huge page sizes available on this memory domain. */
     ram_page_settings<max_page_sizes_k> page_sizes {};
@@ -823,17 +821,17 @@ struct compute_domain_t {
     memory_domain_index_t memory_domain_index {};
 
     /** QoS ordinal, sorted least-to-most performant. */
-    std::size_t compute_level {0};
+    compute_level_t compute_level {};
 #if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 
     /**
-     *  @brief Apple's absolute class for these cores, from `hw.perflevelN.name`; -1 when unnamed.
+     *  @brief Apple's absolute class for these cores, from `hw.perflevelN.name`.
      *  @sa colocated_pool's @c qos_for_domain_, for why the relative rank above cannot replace it.
      *
-     *  Spawn-path plumbing, not a second caller-facing rank: like @c first_core_id, it is the raw
+     *  Spawn-path plumbing, not a second caller-facing rank: like @c core_ids, it is the raw
      *  material the platform's placement call consumes - an affinity mask there, a QoS class here.
      */
-    core_quality_t apple_core_quality {-1};
+    apple_core_quality_t apple_core_quality {apple_core_quality_t::unknown_k};
 #endif
 
     /**
@@ -843,86 +841,27 @@ struct compute_domain_t {
      *  Unlike @c compute_level, this is a magnitude, so it may be summed and divided. Where the
      *  kernel publishes a per-core rating - such as the Linux scheduler's @c cpu_capacity, scaled
      *  so the fastest core present reads 1024 - it lands here. Platforms that rank cores without
-     *  quantifying them leave it unknown; callers instead weigh domains by @c logical_cores_count.
+     *  quantifying them leave it unknown; callers instead weigh domains by their cores' count.
      */
     std::size_t capacity {0};
 
     /**
-     *  @brief Bytes of the deepest cache private to this domain's cores; 0 when unknown.
+     *  @brief Bytes of the deepest cache confined to this domain, divided among the logical cores
+     *      sharing one instance of it; 0 when unknown.
      *
      *  Sizes a cache-resident chunk, which is a different question from how many chunks a domain
      *  should receive - cores of equal throughput may back onto very differently sized caches, so
-     *  neither number can be derived from the other. Shared by every core in the domain.
+     *  neither number can be derived from the other.
      */
-    std::size_t cache_bytes {0};
+    std::size_t cache_bytes_per_core {0};
 
-    /** Pointer to the first core ID in this domain. */
-    core_id_t const *first_core_id {nullptr};
-
-    /** Number of cores in this domain. */
-    std::size_t logical_cores_count {0};
+    /** This domain's logical cores, a slice of the topology's core array. */
+    std::span<core_id_t const> core_ids {};
 };
 
 #pragma endregion Domain Descriptors
 
 #pragma region Core Attributes
-
-/**
- *  @brief Fetches the socket ID for a given CPU core.
- *  @param[in] core_id The CPU core ID to query.
- *  @return Socket ID >= 0 if successful, or -1 if failed.
- */
-inline socket_id_t socket_id_of_core([[maybe_unused]] core_id_t core_id) noexcept {
-
-    int socket_id = -1;
-
-#if FORKUNION_OS_LINUX_
-    char socket_path[256];
-    int path_result = std::snprintf(      //
-        socket_path, sizeof(socket_path), //
-        "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", core_id);
-    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(socket_path)) return -1; // ? Path too long
-
-    FILE *socket_file = ::fopen(socket_path, "r");
-    if (!socket_file) return -1; // ? Can't read socket info
-
-    if (::fscanf(socket_file, "%d", &socket_id) != 1) socket_id = -1; // ? Failed to parse
-    ::fclose(socket_file);
-#endif
-
-    return socket_id;
-}
-
-/**
- *  @brief Fetches the scheduler capacity of a CPU core, used to separate QoS classes.
- *  @return A capacity value where larger means more performant, or 0 if unavailable.
- *
- *  Reads `/sys/devices/system/cpu/cpuN/cpu_capacity`, which the kernel populates from the Energy
- *  Model on ARM @b big.LITTLE/DynamIQ and from ITMT/Thread-Director on Intel @b hybrid chips -
- *  performance cores report ~1024, efficiency cores less. A return of 0 means the core is
- *  homogeneous or the kernel does not expose capacities - the whole node is then one class.
- */
-inline std::size_t capacity_of_core([[maybe_unused]] core_id_t core_id) noexcept {
-
-    std::size_t capacity = 0;
-
-#if FORKUNION_OS_LINUX_
-    char capacity_path[256];
-    int path_result = std::snprintf(          //
-        capacity_path, sizeof(capacity_path), //
-        "/sys/devices/system/cpu/cpu%d/cpu_capacity", core_id);
-    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(capacity_path)) return 0; // ? Path too long
-
-    FILE *capacity_file = ::fopen(capacity_path, "r");
-    if (!capacity_file) return 0; // ? Homogeneous cores or unsupported kernel
-
-    unsigned long long parsed = 0;
-    if (::fscanf(capacity_file, "%llu", &parsed) == 1) capacity = static_cast<std::size_t>(parsed);
-    ::fclose(capacity_file);
-#endif
-
-    return capacity;
-}
 
 /**
  *  @brief Hands every `[low, high]` range in a Linux id list - "0", "0-3", "0,2-4" - to @p visit.
@@ -947,26 +886,57 @@ inline void for_each_id_list_range(char const *line, visitor_type_ &&visit) noex
  *  @brief Whether every core in a Linux cpulist line - "0", "0-3", "0,2-4" - belongs to @p cores.
  *  @note Pass only complete lines: a truncated tail could name cores the verdict never saw.
  */
-inline bool cpu_list_within(char const *line, core_id_t const *cores, std::size_t const cores_count) noexcept {
+inline bool cpu_list_within(char const *line, std::span<core_id_t const> cores) noexcept {
     bool within = true;
     for_each_id_list_range(line, [&](long const low, long const high) noexcept {
         for (long listed = low; listed <= high && within; ++listed) {
             bool found = false;
-            for (std::size_t i = 0; i != cores_count && !found; ++i) found = cores[i] == static_cast<core_id_t>(listed);
+            for (core_id_t const core : cores) found = found || core == listed;
             if (!found) within = false;
         }
     });
     return within;
 }
 
+/** One core's place in its node's compute split, read by the harvest's sorts. */
+struct core_order_t {
+
+    /** Scheduler capacity; 0 where the kernel publishes none or rates every core alike. */
+    std::uint32_t capacity {0};
+
+    /** Highest @c cpuinfo_max_freq among its core PMU's cores, set only when capacities tie. */
+    std::uint32_t class_max_frequency_khz {0};
+
+    /** Lowest core of the cluster cache it sits under; -1 when its whole class is one cluster. */
+    core_id_t cluster_core_id {-1};
+
+    /** 0 for a physical core's first hardware thread, 1 for its sibling. */
+    std::uint32_t sibling_rank {0};
+};
+
 #pragma endregion Core Attributes
 
 #pragma region Cache Hierarchy
 
+/** One instance of a cache: its bytes and the logical cores sharing it. */
+struct [[nodiscard]] cache_instance_t {
+
+    /** 0 when no platform source names the cache. */
+    std::size_t bytes {0};
+
+    /** Logical cores listed in its @c shared_cpu_list, or CPUID's sharing width. */
+    std::uint32_t sharing_cores {0};
+
+    /** Lowest core sharing it; -1 where only CPUID answered. */
+    core_id_t first_core_id {-1};
+
+    /** One instance's bytes divided among the logical cores sharing it. */
+    std::size_t bytes_per_core() const noexcept { return sharing_cores ? bytes / sharing_cores : 0; }
+};
+
 /**
- *  @brief Bytes of the deepest data or unified cache serving @p core_id, confined to
- *      @p domain_cores.
- *  @return The cache size in bytes, or 0 when no platform source can name it.
+ *  @brief The deepest data or unified cache serving @p core_id, confined to @p domain_cores.
+ *  @return The cache instance, with zero bytes when no platform source can name it.
  *
  *  Two exact sources, no measurement: Linux's per-core cacheinfo sysfs, counting a level only if
  *  its @c shared_cpu_list stays within the domain - a socket-wide L3 is not one QoS class's to
@@ -974,11 +944,10 @@ inline bool cpu_list_within(char const *line, core_id_t const *cores, std::size_
  *  containment. Arm has no userspace cache-geometry registers - @c CCSIDR_EL1 is EL1-only - so
  *  sysfs is the only Arm source and other Arm hosts honestly report 0.
  */
-inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
-                                       [[maybe_unused]] core_id_t const *domain_cores,
-                                       [[maybe_unused]] std::size_t domain_cores_count) noexcept {
+inline cache_instance_t deepest_cache_of_core([[maybe_unused]] core_id_t core_id,
+                                              [[maybe_unused]] std::span<core_id_t const> domain_cores) noexcept {
 #if FORKUNION_OS_LINUX_
-    std::size_t deepest_bytes = 0;
+    cache_instance_t deepest;
     for (int index = 0; index < 16; ++index) {
         char path[256];
         int written = std::snprintf(path, sizeof(path), //
@@ -994,17 +963,11 @@ inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
 
         // A level only counts if every core it serves belongs to this domain - a cache shared with
         // a sibling QoS class is not the domain's to size chunks by.
+        // ? A truncated list fails to read - its dropped tail could name cores outside the domain
         std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index%d/shared_cpu_list", core_id,
                       index);
-        FILE *shared_file = ::fopen(path, "r");
-        if (!shared_file) continue;
-        char line[256] = {0};
-        bool complete = ::fgets(line, sizeof(line), shared_file) != nullptr;
-        ::fclose(shared_file);
-        // ? A list that filled the buffer without its newline was truncated - the dropped tail
-        // ? could name cores outside the domain, so the honest verdict is "not contained"
-        complete = complete && !(std::strlen(line) == sizeof(line) - 1 && line[sizeof(line) - 2] != '\n');
-        if (!complete || !cpu_list_within(line, domain_cores, domain_cores_count)) continue;
+        char line[256];
+        if (failed(read_line_at_path(path, line)) || !cpu_list_within(line, domain_cores)) continue;
 
         std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index%d/size", core_id, index);
         FILE *size_file = ::fopen(path, "r");
@@ -1018,9 +981,14 @@ inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
         if (fields == 2 && (suffix == 'K' || suffix == 'k')) bytes <<= 10;
         if (fields == 2 && (suffix == 'M' || suffix == 'm')) bytes <<= 20;
         if (fields == 2 && (suffix == 'G' || suffix == 'g')) bytes <<= 30;
-        if (bytes > deepest_bytes) deepest_bytes = bytes;
+        if (bytes <= deepest.bytes) continue;
+        deepest = {bytes, 0, core_id_t {-1}};
+        for_each_id_list_range(line, [&](long const low, long const high) noexcept {
+            deepest.sharing_cores += static_cast<std::uint32_t>(high - low + 1);
+            if (deepest.first_core_id < 0) deepest.first_core_id = static_cast<core_id_t>(low);
+        });
     }
-    if (deepest_bytes) return deepest_bytes;
+    if (deepest.bytes) return deepest;
 #endif
 
 #if FORKUNION_ARCH_X86_64_
@@ -1032,12 +1000,13 @@ inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
     if (max_extended < deterministic_leaf && cpuid(0, 0).eax < 0x4u) {
         // ? A pre-leaf-4 part answers an unsupported leaf with its highest leaf's data - never
         // ? decode that. Old AMD still names its L2 in KB through the legacy leaf 0x80000006.
-        if (max_extended < 0x8000'0006u) return 0;
-        return static_cast<std::size_t>(cpuid(0x8000'0006u, 0).ecx >> 16) << 10;
+        // ? The legacy leaf names no sharing width, so the cache counts as the executing core's own
+        if (max_extended < 0x8000'0006u) return {};
+        return {static_cast<std::size_t>(cpuid(0x8000'0006u, 0).ecx >> 16) << 10, 1, core_id_t {-1}};
     }
     std::uint32_t const leaf = max_extended >= deterministic_leaf ? deterministic_leaf : 0x4u;
 
-    std::size_t deepest_cpuid_bytes = 0;
+    cache_instance_t deepest_cpuid;
     for (std::uint32_t subleaf = 0; subleaf < 16; ++subleaf) {
         cpuid_registers_t const r = cpuid(leaf, subleaf);
         // ? A type of 0 ends the list, and 2 is an instruction cache
@@ -1046,18 +1015,18 @@ inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
         if (cache_type == 2) continue;
         // A level shared by more logical cores than this domain holds reaches beyond the domain -
         // the register-only stand-in for the sysfs `shared_cpu_list` containment above.
-        std::size_t const sharing_cores = ((r.eax >> 14) & 0xFFFu) + 1;
-        if (sharing_cores > domain_cores_count) continue;
+        std::uint32_t const sharing_cores = ((r.eax >> 14) & 0xFFFu) + 1;
+        if (sharing_cores > domain_cores.size()) continue;
         std::size_t const line_bytes = (r.ebx & 0xFFFu) + 1;
         std::size_t const partitions = ((r.ebx >> 12) & 0x3FFu) + 1;
         std::size_t const ways = ((r.ebx >> 22) & 0x3FFu) + 1;
         std::size_t const sets = static_cast<std::size_t>(r.ecx) + 1;
         std::size_t const bytes = line_bytes * partitions * ways * sets;
-        if (bytes > deepest_cpuid_bytes) deepest_cpuid_bytes = bytes;
+        if (bytes > deepest_cpuid.bytes) deepest_cpuid = {bytes, sharing_cores, core_id_t {-1}};
     }
-    return deepest_cpuid_bytes;
+    return deepest_cpuid;
 #else
-    return 0;
+    return {};
 #endif
 }
 
@@ -1067,7 +1036,7 @@ inline std::size_t cache_bytes_of_core([[maybe_unused]] core_id_t core_id,
  *
  *  Exact sources only, no measurement: Linux's @c coherency_line_size - the only source on Arm,
  *  where @c CCSIDR_EL1 is EL1-only - Apple's `hw.cachelinesize`, Windows' @c CACHE_RELATIONSHIP,
- *  and x86 CPUID leaf 0x4, whose line field @c cache_bytes_of_core above already decodes for its
+ *  and x86 CPUID leaf 0x4, whose line field @c deepest_cache_of_core above already decodes for its
  *  size arithmetic. Every source is gated to a power of two in [16, 1024], so a bogus reading falls
  *  through to the caller's compiled default rather than sizing an arena.
  */
@@ -1170,8 +1139,9 @@ inline bool linux_has_memory_domains() noexcept {
 inline memory_domain_id_t max_memory_domain_id() noexcept {
     char path[256], line[256];
     int const path_result = std::snprintf(path, sizeof(path), "%s/online", sysfs_node_root_k);
-    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return -1; // ? Path too long
-    if (failed(read_line_at_path(path, line, sizeof(line)))) return -1;
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path))
+        return memory_domain_id_t {-1}; // ? Path too long
+    if (failed(read_line_at_path(path, line))) return memory_domain_id_t {-1};
 
     long highest = -1;
     for_each_id_list_range(line, [&](long, long const high) noexcept {
@@ -1221,7 +1191,7 @@ inline status_t capture_memory_domain_cores(memory_domain_id_t const id, core_ma
     int const path_result = std::snprintf(path, sizeof(path), "%s/node%d/cpulist", sysfs_node_root_k, id);
     if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path))
         return status_t::topology_unavailable_k; // ? Path too long
-    if (status_t const probed = read_line_at_path(path, line, sizeof(line)); failed(probed)) return probed;
+    if (status_t const probed = read_line_at_path(path, line); failed(probed)) return probed;
     if (status_t const grew = cores.resize(); failed(grew)) return grew; // ! Allocation failed
     cores.clear();
 
@@ -1232,6 +1202,127 @@ inline status_t capture_memory_domain_cores(memory_domain_id_t const id, core_ma
 }
 #endif // FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
 #pragma endregion Linux Memory Domains
+
+#pragma region Linux Core Classes
+/*  The per-core facts the Linux harvest splits compute domains by - all read from @c sysfs, where
+ *  the kernel publishes them exactly: sockets, capacities, clocks, core PMUs and SMT siblings. */
+#if FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
+
+/**
+ *  @brief Fetches the socket ID for a given CPU core.
+ *  @param[in] core_id The CPU core ID to query.
+ *  @return Socket ID >= 0 if successful, or -1 if failed.
+ */
+inline socket_id_t socket_id_of_core(core_id_t core_id) noexcept {
+    char socket_path[256];
+    int path_result = std::snprintf(      //
+        socket_path, sizeof(socket_path), //
+        "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", core_id);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(socket_path))
+        return socket_id_t {-1}; // ? Path too long
+
+    FILE *socket_file = ::fopen(socket_path, "r");
+    if (!socket_file) return socket_id_t {-1}; // ? Can't read socket info
+
+    int socket_id = -1;
+    if (::fscanf(socket_file, "%d", &socket_id) != 1) socket_id = -1; // ? Failed to parse
+    ::fclose(socket_file);
+    return static_cast<socket_id_t>(socket_id);
+}
+
+/**
+ *  @brief Fetches the scheduler capacity of a CPU core, used to separate QoS classes.
+ *  @return A capacity value where larger means more performant, or 0 if unavailable.
+ *
+ *  Reads `/sys/devices/system/cpu/cpuN/cpu_capacity`, which the kernel populates from the Energy
+ *  Model on ARM @b big.LITTLE/DynamIQ and from ITMT/Thread-Director on Intel @b hybrid chips -
+ *  performance cores report ~1024, efficiency cores less. A return of 0 means the core is
+ *  homogeneous or the kernel does not expose capacities - the whole node is then one class.
+ */
+inline std::size_t capacity_of_core(core_id_t core_id) noexcept {
+    char capacity_path[256];
+    int path_result = std::snprintf(          //
+        capacity_path, sizeof(capacity_path), //
+        "/sys/devices/system/cpu/cpu%d/cpu_capacity", core_id);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(capacity_path)) return 0; // ? Path too long
+
+    FILE *capacity_file = ::fopen(capacity_path, "r");
+    if (!capacity_file) return 0; // ? Homogeneous cores or unsupported kernel
+
+    std::size_t capacity = 0;
+    unsigned long long parsed = 0;
+    if (::fscanf(capacity_file, "%llu", &parsed) == 1) capacity = static_cast<std::size_t>(parsed);
+    ::fclose(capacity_file);
+    return capacity;
+}
+
+/**
+ *  @brief The highest clock @p core_id may reach, in kHz, or 0 without a cpufreq driver.
+ *  @note Ranks classes, never forms them: favored cores out-clock the rest of their own class.
+ */
+inline std::uint32_t max_frequency_of_core(core_id_t core_id) noexcept {
+    char frequency_path[256], line[64];
+    int const path_result = std::snprintf(      //
+        frequency_path, sizeof(frequency_path), //
+        "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", core_id);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(frequency_path)) return 0; // ? Path too long
+    if (failed(read_line_at_path(frequency_path, line))) return 0; // ? No cpufreq driver, as in most VMs
+    return static_cast<std::uint32_t>(::strtoul(line, nullptr, 10));
+}
+
+/**
+ *  @brief Fills every core's @c class_max_frequency_khz from the core PMU listing it.
+ *
+ *  A hybrid kernel registers one core PMU per microarchitecture - @c cpu_core and @c cpu_atom on
+ *  Intel, one Armv8 PMU per core type on Arm - each listing its cores in @c cpus. A homogeneous x86
+ *  kernel registers one @c cpu PMU without that file, and every core stays in one class.
+ */
+inline void rank_classes_by_core_pmus(std::span<core_order_t> core_orders) noexcept {
+    DIR *pmus = ::opendir("/sys/bus/event_source/devices");
+    if (!pmus) return;
+    while (dirent const *pmu = ::readdir(pmus)) {
+        if (pmu->d_name[0] == '.') continue;
+        char path[512], line[256];
+        int const path_result = std::snprintf(path, sizeof(path), "/sys/bus/event_source/devices/%s/cpus", pmu->d_name);
+        if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) continue; // ? Path too long
+        if (failed(read_line_at_path(path, line))) continue; // ? Uncore or software PMU
+        std::uint32_t highest = 0;
+        for_each_id_list_range(line, [&](long const low, long const high) noexcept {
+            for (long core = low; core <= high; ++core)
+                highest = max_of(highest, max_frequency_of_core(static_cast<core_id_t>(core)));
+        });
+        for_each_id_list_range(line, [&](long const low, long const high) noexcept {
+            for (long core = low; core <= high && static_cast<std::size_t>(core) < core_orders.size(); ++core)
+                core_orders[static_cast<std::size_t>(core)].class_max_frequency_khz = highest;
+        });
+    }
+    ::closedir(pmus);
+}
+
+/** A core's hardware threads: how many share its physical core, and its position among them. */
+struct [[nodiscard]] core_siblings_t {
+    std::uint32_t count {1};
+    std::uint32_t rank {0};
+};
+
+/** Reads `topology/thread_siblings_list`; one sibling at rank 0 where the kernel names none. */
+inline core_siblings_t siblings_of_core(core_id_t core_id) noexcept {
+    core_siblings_t siblings;
+    char path[256], line[256];
+    int const path_result = std::snprintf(path, sizeof(path), //
+                                          "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", core_id);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path)) return siblings; // ? Path too long
+    if (failed(read_line_at_path(path, line))) return siblings;
+    siblings.count = 0;
+    for_each_id_list_range(line, [&](long const low, long const high) noexcept {
+        siblings.count += static_cast<std::uint32_t>(high - low + 1);
+        for (long listed = low; listed <= high; ++listed) siblings.rank += listed < core_id;
+    });
+    return siblings;
+}
+
+#endif // FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
+#pragma endregion Linux Core Classes
 
 #pragma region Windows Processor Groups
 #if FORKUNION_OS_WINDOWS_
@@ -1247,8 +1338,8 @@ struct win_group_class_cell_t {
     /** OR of every core of this class in this group. */
     KAFFINITY mask {0};
 
-    /** Largest private L1/L2 cache seen for those cores. */
-    std::size_t cache_bytes {0};
+    /** Largest per-core share of an L1/L2 cache seen for those cores. */
+    std::size_t cache_bytes_per_core {0};
 };
 
 /**
@@ -1282,7 +1373,7 @@ inline void win_numa_for_each_group(numa_relationship_type_ const &node, visitor
 inline socket_id_t win_socket_for_node( //
     BYTE const *package_buffer, DWORD package_len, NUMA_NODE_RELATIONSHIP const &node, socket_id_t fallback) noexcept {
     if (!package_buffer) return fallback;
-    socket_id_t socket_index = 0;
+    int socket_index = 0;
     for (DWORD offset = 0; offset < package_len;) {
         auto const *record = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX const *>(package_buffer + offset);
         if (record->Relationship == RelationProcessorPackage) {
@@ -1294,7 +1385,7 @@ inline socket_id_t win_socket_for_node( //
                     if (node_group == package_affinity.Group && (node_mask & package_affinity.Mask)) intersects = true;
                 });
             }
-            if (intersects) return socket_index;
+            if (intersects) return static_cast<socket_id_t>(socket_index);
             socket_index += 1;
         }
         if (record->Size == 0) break;
@@ -1341,36 +1432,38 @@ inline void apple_sysctl_string(char const *name, char *out, std::size_t cap) no
  *  @note Absolute, unlike @c compute_level: "Performance" is the same class on an M1, its top tier,
  *      and an M5 Pro, its bottom. Apple has shipped exactly these three names.
  */
-enum apple_core_quality_t : core_quality_t {
-    apple_efficiency_k = 0,  // "Efficiency" - the only tier that is physically E-cores
-    apple_performance_k = 1, // "Performance"
-    apple_super_k = 2,       // "Super" - the M5-era top tier, still a big core
+enum class apple_core_quality_t : int {
+    unknown_k = -1,    // No `hw.perflevelN.name` read for these cores
+    efficiency_k = 0,  // "Efficiency" - the only tier that is physically E-cores
+    performance_k = 1, // "Performance"
+    super_k = 2,       // "Super" - the M5-era top tier, still a big core
 };
 
 /**
  *  @brief The name Apple gives an absolute core class, or @c nullptr for an unknown one.
  *  @note The one source of truth for the names; @c apple_core_quality_from_name inverts it.
  */
-inline char const *apple_core_quality_name(core_quality_t const quality) noexcept {
+inline char const *apple_core_quality_name(apple_core_quality_t const quality) noexcept {
     switch (quality) {
-    case apple_efficiency_k: return "Efficiency";
-    case apple_performance_k: return "Performance";
-    case apple_super_k: return "Super";
+    case apple_core_quality_t::efficiency_k: return "Efficiency";
+    case apple_core_quality_t::performance_k: return "Performance";
+    case apple_core_quality_t::super_k: return "Super";
     default: return nullptr;
     }
 }
 
 /**
  *  @brief Maps a `hw.perflevelN.name` to its absolute class; inverts @c apple_core_quality_name.
- *  @return apple_performance_k for a null or unrecognised name, so @c UTILITY is never guessed.
+ *  @return performance_k for a null or unrecognised name, so @c UTILITY is never guessed.
  */
-inline core_quality_t apple_core_quality_from_name(char const *name) noexcept {
-    if (name == nullptr) return apple_performance_k;
-    for (core_quality_t quality = apple_efficiency_k; quality <= apple_super_k; ++quality) {
+inline apple_core_quality_t apple_core_quality_from_name(char const *name) noexcept {
+    if (name == nullptr) return apple_core_quality_t::performance_k;
+    for (apple_core_quality_t const quality :
+         {apple_core_quality_t::efficiency_k, apple_core_quality_t::performance_k, apple_core_quality_t::super_k}) {
         char const *const candidate = apple_core_quality_name(quality);
         if (candidate != nullptr && std::strcmp(candidate, name) == 0) return quality;
     }
-    return apple_performance_k;
+    return apple_core_quality_t::performance_k;
 }
 #endif // FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 #pragma endregion Apple Performance Levels
@@ -1390,11 +1483,11 @@ template <std::size_t max_page_sizes_ = 4, typename allocator_type_ = std::alloc
 struct machine_topology {
 
     using allocator_t = allocator_type_;
-    using cores_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<int>;
+    using cores_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<core_id_t>;
     using memory_domains_allocator_t =
         typename std::allocator_traits<allocator_t>::template rebind_alloc<memory_domain_t>;
     using domains_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<compute_domain_t>;
-    using capacities_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::size_t>;
+    using core_orders_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<core_order_t>;
     static constexpr std::size_t max_page_sizes_k = max_page_sizes_;
 
   private:
@@ -1427,8 +1520,8 @@ struct machine_topology {
 
     constexpr machine_topology() noexcept = default;
 
-    // ! The arrays move their heap pointers, so the `first_core_id` slices the nodes and domains
-    // ! hold into `domain_core_ids_` survive a move untouched.
+    // ! The arrays move their heap pointers, so the `core_ids` slices the nodes and domains hold
+    // ! into `domain_core_ids_` survive a move untouched.
     machine_topology(machine_topology &&o) noexcept
         : allocator_(std::move(o.allocator_)), memory_domains_(std::move(o.memory_domains_)),
           domain_core_ids_(std::move(o.domain_core_ids_)), compute_domains_(std::move(o.compute_domains_)),
@@ -1488,19 +1581,22 @@ struct machine_topology {
         if (status_t const grew = scratch_domains.resize(other.logical_cores_count_); failed(grew))
             return grew; // ! OOM
 
-        // Deep copy, re-basing every `first_core_id` into our own core-id block
+        // Deep copy, re-basing every `core_ids` slice into our own block of core IDs
         core_id_t const *const other_cores = other.domain_core_ids_.data();
         if (other.logical_cores_count_ > 0)
             std::memcpy(scratch_core_ids.data(), other_cores, other.logical_cores_count_ * sizeof(core_id_t));
+        auto const rebase = [&](std::span<core_id_t const> const cores) noexcept {
+            if (cores.empty()) return std::span<core_id_t const> {}; // ? Cpuless nodes slice nothing
+            return std::span<core_id_t const>(scratch_core_ids)
+                .subspan(static_cast<std::size_t>(cores.data() - other_cores), cores.size());
+        };
         for (std::size_t i = 0; i < other.memory_domains_count_; ++i) {
             scratch_nodes[i] = other.memory_domains_[i];
-            std::ptrdiff_t const offset = other.memory_domains_[i].first_core_id - other_cores;
-            scratch_nodes[i].first_core_id = scratch_core_ids.data() + offset;
+            scratch_nodes[i].core_ids = rebase(other.memory_domains_[i].core_ids);
         }
         for (std::size_t i = 0; i < other.compute_domains_count_; ++i) {
             scratch_domains[i] = other.compute_domains_[i];
-            std::ptrdiff_t const offset = other.compute_domains_[i].first_core_id - other_cores;
-            scratch_domains[i].first_core_id = scratch_core_ids.data() + offset;
+            scratch_domains[i].core_ids = rebase(other.compute_domains_[i].core_ids);
         }
 
         memory_domains_ = std::move(scratch_nodes); // ? Assignment frees the old buffers
@@ -1589,22 +1685,20 @@ struct machine_topology {
         }
 
         memory_domain_t &node = nodes.data()[0];
-        node.memory_domain_id = 0;
-        node.socket_id = 0;
+        node.memory_domain_id = memory_domain_id_t {0};
+        node.socket_id = socket_id_t {0};
         node.volume_ram = volume_ram();
-        node.first_core_id = core_ids_ptr;
-        node.logical_cores_count = cores;
+        node.core_ids = std::span(core_ids);
 
         compute_domain_t &domain = domains.data()[0];
-        domain.memory_domain_id = 0;
-        domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
-        domain.compute_level = 0;
+        domain.memory_domain_id = memory_domain_id_t {0};
+        domain.memory_domain_index = memory_domain_index_t {0};
+        domain.compute_level = compute_level_t {0};
         domain.capacity = 0;
-        domain.cache_bytes = cache_bytes_of_core(core_ids_ptr[0], core_ids_ptr, cores);
-        domain.first_core_id = core_ids_ptr;
-        domain.logical_cores_count = cores;
+        domain.cache_bytes_per_core = deepest_cache_of_core(core_ids_ptr[0], node.core_ids).bytes_per_core();
+        domain.core_ids = node.core_ids;
 
-        // Moving an array keeps its heap pointer, so every `first_core_id` above stays valid.
+        // Moving an array keeps its heap pointer, so every `core_ids` slice above stays valid.
         memory_domains_ = std::move(nodes);
         domain_core_ids_ = std::move(core_ids);
         compute_domains_ = std::move(domains);
@@ -1705,25 +1799,24 @@ struct machine_topology {
             memory_domain_t &node = nodes_ptr[node_index];
             node.memory_domain_id = static_cast<memory_domain_id_t>(domain_id);
             // ? No socket map through this path; leave it as elsewhere non-Linux
-            node.socket_id = -1;
+            node.socket_id = socket_id_t {-1};
             node.volume_ram = ram_per_domain;
-            node.first_core_id = core_ids_ptr + core_begin;
-            node.logical_cores_count = node_cores;
+            node.core_ids = std::span(core_ids).subspan(core_begin, node_cores);
             [[maybe_unused]] status_t const pages = // ! Optional - huge pages are not required
                 node.page_sizes.harvest(static_cast<memory_domain_id_t>(domain_id));
 
             compute_domain_t &domain = domains_ptr[node_index];
             domain.memory_domain_id = static_cast<memory_domain_id_t>(domain_id);
             domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
-            domain.compute_level = 0;
+            domain.compute_level = compute_level_t {0};
             domain.capacity = 0;
-            domain.cache_bytes = cache_bytes_of_core(core_ids_ptr[core_begin], core_ids_ptr + core_begin, node_cores);
-            domain.first_core_id = core_ids_ptr + core_begin;
-            domain.logical_cores_count = node_cores;
+            domain.cache_bytes_per_core =
+                deepest_cache_of_core(core_ids_ptr[core_begin], node.core_ids).bytes_per_core();
+            domain.core_ids = node.core_ids;
             ++node_index;
         }
 
-        // Moving an array keeps its heap pointer, so every `first_core_id` slice above stays valid.
+        // Moving an array keeps its heap pointer, so every `core_ids` slice above stays valid.
         memory_domains_ = std::move(nodes);
         domain_core_ids_ = std::move(core_ids);
         compute_domains_ = std::move(domains);
@@ -1766,8 +1859,9 @@ struct machine_topology {
 
         // First pass - measure
         std::size_t fetched_memory_domains = 0, fetched_cores = 0;
-        memory_domain_id_t const max_numa_node_id = max_memory_domain_id();
-        for (memory_domain_id_t memory_domain_id = 0; memory_domain_id <= max_numa_node_id; ++memory_domain_id) {
+        std::size_t const memory_domain_ids = static_cast<std::size_t>(max_memory_domain_id() + 1); // ? 0 if unread
+        for (std::size_t node_number = 0; node_number != memory_domain_ids; ++node_number) {
+            memory_domain_id_t const memory_domain_id = static_cast<memory_domain_id_t>(node_number);
             std::size_t node_ram = 0;
             if (failed(read_ram_bytes_of_memory_domain(memory_domain_id, node_ram))) continue; // ! Offline
             if (failed(capture_memory_domain_cores(memory_domain_id, domain_mask))) continue;  // ! No CPU map
@@ -1794,29 +1888,28 @@ struct machine_topology {
         if (status_t const grew = nodes.resize(fetched_memory_domains); failed(grew)) return grew;
         if (status_t const grew = core_ids.resize(fetched_cores); failed(grew)) return grew;
         if (status_t const grew = domains.resize(fetched_cores); failed(grew)) return grew;
-        memory_domain_t *const domains_outb = nodes.data();
+        memory_domain_t *const nodes_ptr = nodes.data();
         core_id_t *const core_ids_ptr = core_ids.data();
         compute_domain_t *const domains_ptr = domains.data();
 
-        // A scratch table of every configured CPU's capacity, filled once below and read by the
-        // per-node QoS split - an O(n^2) comparison - instead of re-opening sysfs each time.
+        // A scratch table of every configured CPU's place in the split, filled once below and read
+        // by the per-node sorts - O(n^2) comparisons - instead of re-opening sysfs each time.
         std::size_t const configured_cores = possible_cores();
         if (configured_cores == 0) return status_t::topology_unavailable_k; // ! Not a valid state
-        dynamic_array<std::size_t, capacities_allocator_t> capacities {capacities_allocator_t {allocator_}};
-        if (status_t const grew = capacities.resize(configured_cores); failed(grew)) return grew;
-        std::size_t *const core_capacities = capacities.data();
+        dynamic_array<core_order_t, core_orders_allocator_t> core_orders {core_orders_allocator_t {allocator_}};
+        if (status_t const grew = core_orders.resize(configured_cores); failed(grew)) return grew;
 
         // Populate
-        for (memory_domain_id_t memory_domain_id = 0, core_index = 0, node_index = 0;
-             memory_domain_id <= max_numa_node_id; ++memory_domain_id) {
+        for (std::size_t node_number = 0, core_index = 0, node_index = 0; node_number != memory_domain_ids;
+             ++node_number) {
+            memory_domain_id_t const memory_domain_id = static_cast<memory_domain_id_t>(node_number);
             std::size_t node_ram = 0;
             if (failed(read_ram_bytes_of_memory_domain(memory_domain_id, node_ram))) continue;
             if (failed(capture_memory_domain_cores(memory_domain_id, domain_mask))) continue;
 
-            memory_domain_t &node = domains_outb[node_index];
+            memory_domain_t &node = nodes_ptr[node_index];
             node.memory_domain_id = memory_domain_id;
             node.volume_ram = node_ram;
-            node.first_core_id = core_ids_ptr + core_index;
 
             // Most likely, this will fill `core_ids_ptr` with `std::iota`-like values. The count is
             // whatever the loop admits, so the mask and the slice can never disagree.
@@ -1828,12 +1921,10 @@ struct machine_topology {
                 if (allowed_known && !allowed.contains(core)) continue;
                 core_ids_ptr[core_index++] = core;
             }
-            node.logical_cores_count = core_index - core_index_before;
+            node.core_ids = std::span(core_ids).subspan(core_index_before, core_index - core_index_before);
 
-            // ? Cpuless memory domains have no core to query - default the socket and skip the
-            // ? lookup.
-            // ! Valid only after the loop above initializes every `first_core_id` entry.
-            node.socket_id = node.logical_cores_count > 0 ? socket_id_of_core(node.first_core_id[0]) : -1;
+            // ? A cpuless memory domain has no core to query, so its socket stays unknown
+            node.socket_id = node.core_ids.empty() ? socket_id_t {-1} : socket_id_of_core(node.core_ids.front());
 
             // Fetch Huge Page sizes for this NUMA node
             [[maybe_unused]] status_t const pages = // ! Optional - huge pages are not required
@@ -1841,91 +1932,124 @@ struct machine_topology {
             node_index++;
         }
 
-        // Commit. The arrays keep their heap pointers across the move, so every `first_core_id`
-        // slice written above stays valid.
-        memory_domains_ = std::move(nodes);
-        domain_core_ids_ = std::move(core_ids);
-        memory_domains_count_ = fetched_memory_domains;
-        logical_cores_count_ = fetched_cores;
-
         // Sort the nodes by socket ID, then by number of cores, then by first core ID.
-        bubble_sort(memory_domains_.data(), memory_domains_count_,
-                    [](memory_domain_t const &a, memory_domain_t const &b) noexcept {
-                        if (a.socket_id != b.socket_id) return a.socket_id < b.socket_id;
-                        if (a.logical_cores_count != b.logical_cores_count)
-                            return a.logical_cores_count > b.logical_cores_count; // ? Sort by descending core count
-                        // ? Cpuless slices are empty, so guard the dereference and sort them first
-                        core_id_t const a_first = a.logical_cores_count ? a.first_core_id[0] : -1;
-                        core_id_t const b_first = b.logical_cores_count ? b.first_core_id[0] : -1;
-                        return a_first < b_first; // ? Sort by first core ID
-                    });
+        bubble_sort(std::span(nodes), [](memory_domain_t const &a, memory_domain_t const &b) noexcept {
+            if (a.socket_id != b.socket_id) return a.socket_id < b.socket_id;
+            if (a.core_ids.size() != b.core_ids.size())
+                return a.core_ids.size() > b.core_ids.size(); // ? Sort by descending core count
+            // ? Cpuless slices are empty, so guard the dereference and sort them first
+            core_id_t const a_first = a.core_ids.empty() ? core_id_t {-1} : a.core_ids.front();
+            core_id_t const b_first = b.core_ids.empty() ? core_id_t {-1} : b.core_ids.front();
+            return a_first < b_first; // ? Sort by first core ID
+        });
 
-        // Cache each harvested core's scheduler capacity once, keyed by core id. The QoS split
-        // below sorts and compares capacities repeatedly, so reading sysfs per comparison would be
+        // Cache each harvested core's scheduler capacity once, keyed by core ID. The split below
+        // sorts and compares capacities repeatedly, so reading sysfs per comparison would be
         // O(cores^2) file opens on a large node - a single pass here amortizes that to O(cores).
-        for (std::size_t core_index = 0; core_index < logical_cores_count_; ++core_index) {
-            core_id_t const core_id = domain_core_ids_[core_index];
+        for (core_id_t const core_id : std::span(core_ids))
             if (static_cast<std::size_t>(core_id) < configured_cores)
-                core_capacities[static_cast<std::size_t>(core_id)] = capacity_of_core(core_id);
+                core_orders[core_id].capacity = static_cast<std::uint32_t>(capacity_of_core(core_id));
+
+        // A kernel rating every core alike rates nothing - Intel hybrid with SMT on, or an Arm
+        // kernel publishing no capacities - yet still names each class exactly, through its PMU.
+        bool capacities_differ = false;
+        for (core_id_t const core_id : std::span(core_ids))
+            capacities_differ = capacities_differ || core_orders[core_id].capacity != core_orders[core_ids[0]].capacity;
+        if (!capacities_differ) {
+            for (core_id_t const core_id : std::span(core_ids)) core_orders[core_id].capacity = 0;
+            rank_classes_by_core_pmus(std::span(core_orders));
         }
 
-        // Split each memory domain's cores into compute domains by QoS class. We sort each node's
-        // cores by scheduler capacity, then cut the sorted run at every capacity change. Cores
-        // within a `memory_domain` slice are mutable here - `first_core_id` still bounds the slice.
-        {
-            std::size_t domains_written = 0;
-            for (std::size_t node_index = 0; node_index < memory_domains_count_; ++node_index) {
-                memory_domain_t &node = memory_domains_[node_index];
-                core_id_t *node_cores = const_cast<core_id_t *>(node.first_core_id);
+        // Split each memory domain's cores into compute domains: by class, then by cache cluster,
+        // with first hardware threads ahead of their siblings. The cores sort in place, within the
+        // node's slice of `core_ids`, which the harvest still owns.
+        auto const same_class = [&](core_id_t const a, core_id_t const b) noexcept {
+            return core_orders[a].capacity == core_orders[b].capacity &&
+                   core_orders[a].class_max_frequency_khz == core_orders[b].class_max_frequency_khz;
+        };
+        auto const class_before = [&](core_id_t const &a, core_id_t const &b) noexcept {
+            if (core_orders[a].capacity != core_orders[b].capacity)
+                return core_orders[a].capacity < core_orders[b].capacity;
+            return core_orders[a].class_max_frequency_khz < core_orders[b].class_max_frequency_khz;
+        };
+        std::size_t domains_written = 0;
+        for (std::size_t node_index = 0; node_index != fetched_memory_domains; ++node_index) {
+            memory_domain_t const &node = nodes_ptr[node_index];
+            if (node.core_ids.empty()) continue; // ? A cpuless node yields no compute domain
+            std::span<core_id_t> const node_cores = std::span(core_ids).subspan(
+                static_cast<std::size_t>(node.core_ids.data() - core_ids_ptr), node.core_ids.size());
 
-                // Ascending capacity groups efficiency cores before performance cores.
-                bubble_sort(node_cores, node.logical_cores_count,
-                            [core_capacities](core_id_t const &a, core_id_t const &b) noexcept {
-                                return core_capacities[static_cast<std::size_t>(a)] <
-                                       core_capacities[static_cast<std::size_t>(b)];
-                            });
+            // Ascending class groups efficiency cores before performance cores.
+            bubble_sort(node_cores, class_before);
 
-                std::size_t run_begin = 0;
-                for (std::size_t core = 1; core <= node.logical_cores_count; ++core) {
-                    bool const at_end = core == node.logical_cores_count;
-                    bool const capacity_changed =
-                        !at_end && core_capacities[static_cast<std::size_t>(node_cores[core])] !=
-                                       core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
-                    if (!at_end && !capacity_changed) continue;
-
-                    compute_domain_t &domain = domains_ptr[domains_written++];
-                    domain.memory_domain_id = node.memory_domain_id;
-                    domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
-                    domain.compute_level = core_capacities[static_cast<std::size_t>(
-                        node_cores[run_begin])]; // ? Raw capacity, ranked below
-                    // ! Keep the raw magnitude too - `compute_level` is about to collapse into an
-                    // ! ordinal.
-                    // TODO: measure `capacity` in-house too, like the memory edges. The scheduler's
-                    // `cpu_capacity` is the platform's opinion, and most kernels report none; the
-                    // measured-distances infrastructure could rate cores by observed throughput,
-                    // but needs the same bucketing as the fabric's tier derivation, or every domain
-                    // becomes its own `compute_level` and the QoS split explodes.
-                    domain.capacity = core_capacities[static_cast<std::size_t>(node_cores[run_begin])];
-                    domain.cache_bytes =
-                        cache_bytes_of_core(node_cores[run_begin], node_cores + run_begin, core - run_begin);
-                    domain.first_core_id = node_cores + run_begin;
-                    domain.logical_cores_count = core - run_begin;
-                    run_begin = core;
+            // Within each class, name every core's cluster and SMT rank. Only a cache confined to
+            // the class and wider than one physical core cuts it: four E-cores' shared L2 does, a
+            // P-core's own L2 does not, and a chip-wide L3 is confined to no class.
+            for (std::size_t class_begin = 0, core = 1; core <= node_cores.size(); ++core) {
+                if (core != node_cores.size() && same_class(node_cores[core], node_cores[class_begin])) continue;
+                std::span<core_id_t const> const class_cores = node_cores.subspan(class_begin, core - class_begin);
+                for (core_id_t const member : class_cores) {
+                    core_siblings_t const siblings = siblings_of_core(member);
+                    cache_instance_t const cache = deepest_cache_of_core(member, class_cores);
+                    core_orders[member].sibling_rank = siblings.rank;
+                    core_orders[member].cluster_core_id =
+                        cache.sharing_cores > siblings.count ? cache.first_core_id : core_id_t {-1};
                 }
+                class_begin = core;
             }
 
-            // Re-rank the raw capacities into dense QoS ordinals, sorted least-to-most performant.
-            compute_domains_ = std::move(domains);
-            compute_domains_count_ = domains_written;
-            compute_levels_count_ = dense_rank(
-                domains_written,
-                [core_capacities, domains_ptr](std::size_t index) noexcept {
-                    return core_capacities[static_cast<std::size_t>(domains_ptr[index].first_core_id[0])];
-                },
-                [domains_ptr](std::size_t index, std::size_t rank) noexcept {
-                    domains_ptr[index].compute_level = rank;
-                });
+            // Clusters next, then first hardware threads before their siblings, so a pool smaller
+            // than its domain spreads over physical cores before doubling up on any.
+            bubble_sort(node_cores, [&](core_id_t const &a, core_id_t const &b) noexcept {
+                if (!same_class(a, b)) return class_before(a, b);
+                if (core_orders[a].cluster_core_id != core_orders[b].cluster_core_id)
+                    return core_orders[a].cluster_core_id < core_orders[b].cluster_core_id;
+                return core_orders[a].sibling_rank < core_orders[b].sibling_rank;
+            });
+
+            std::size_t run_begin = 0;
+            for (std::size_t core = 1; core <= node_cores.size(); ++core) {
+                core_id_t const first = node_cores[run_begin];
+                bool const domain_continues =
+                    core != node_cores.size() && same_class(node_cores[core], first) &&
+                    core_orders[node_cores[core]].cluster_core_id == core_orders[first].cluster_core_id;
+                if (domain_continues) continue;
+
+                std::span<core_id_t const> const domain_cores = node_cores.subspan(run_begin, core - run_begin);
+                compute_domain_t &domain = domains_ptr[domains_written++];
+                domain.memory_domain_id = node.memory_domain_id;
+                domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
+                // TODO: measure `capacity` in-house too, like the memory edges. The scheduler's
+                // `cpu_capacity` is the platform's opinion, and most kernels report none; the
+                // measured-distances infrastructure could rate cores by observed throughput,
+                // but needs the same bucketing as the fabric's tier derivation, or every domain
+                // becomes its own `compute_level` and the QoS split explodes.
+                domain.capacity = core_orders[first].capacity; // ? 0 after a tie - ranked, not rated
+                domain.cache_bytes_per_core = deepest_cache_of_core(first, domain_cores).bytes_per_core();
+                domain.core_ids = domain_cores;
+                run_begin = core;
+            }
         }
+
+        // Rank the domains' classes into dense QoS ordinals, sorted least-to-most performant.
+        std::size_t const compute_levels = dense_rank(
+            domains_written,
+            [&](std::size_t index) noexcept {
+                core_order_t const &order = core_orders[domains_ptr[index].core_ids.front()];
+                return std::uint64_t {order.capacity} << 32 | order.class_max_frequency_khz;
+            },
+            [domains_ptr](std::size_t index, std::size_t rank) noexcept {
+                domains_ptr[index].compute_level = static_cast<compute_level_t>(rank);
+            });
+
+        // Commit. Moving an array keeps its heap pointer, so every `core_ids` slice stays valid.
+        memory_domains_ = std::move(nodes);
+        domain_core_ids_ = std::move(core_ids);
+        compute_domains_ = std::move(domains);
+        memory_domains_count_ = fetched_memory_domains;
+        logical_cores_count_ = fetched_cores;
+        compute_domains_count_ = domains_written;
+        compute_levels_count_ = compute_levels;
 
         // Memory tiers are not the harvest's to declare: the kernel's memory-tiering ranking was
         // dropped alongside ACPI HMAT - both are the platform's opinion of the fabric - and
@@ -1961,8 +2085,8 @@ struct machine_topology {
      *
      *  Performance levels rank cores without rating them, and the parts they distinguish need not
      *  differ in clock - some pair equal scalar throughput with unequal cache. So @c capacity stays
-     *  0 and only @c cache_bytes is populated; weighting work by the level ordinal would hand a
-     *  wide-cache cluster more tasks than it can necessarily retire any faster.
+     *  0 and only @c cache_bytes_per_core is populated; weighting work by the level ordinal would
+     *  hand a wide-cache cluster more tasks than it can necessarily retire any faster.
      *
      *  @note macOS exposes no hard pinning - `thread_policy_set(THREAD_AFFINITY_POLICY)` returns
      *      @c KERN_NOT_SUPPORTED on arm64, and QoS classes are the only placement lever. These
@@ -1991,17 +2115,16 @@ struct machine_topology {
         if (status_t const grew = nodes.resize(1); failed(grew)) return grew;
         if (status_t const grew = core_ids.resize(total_cores); failed(grew)) return grew;
         if (status_t const grew = domains.resize(total_cores); failed(grew)) return grew;
-        memory_domain_t *const domains_outb = nodes.data();
+        memory_domain_t *const nodes_ptr = nodes.data();
         core_id_t *const core_ids_ptr = core_ids.data();
         compute_domain_t *const domains_ptr = domains.data();
         for (std::size_t i = 0; i < total_cores; ++i) core_ids_ptr[i] = static_cast<core_id_t>(i);
 
-        memory_domain_t &node = domains_outb[0];
-        node.memory_domain_id = 0;
-        node.socket_id = 0;
+        memory_domain_t &node = nodes_ptr[0];
+        node.memory_domain_id = memory_domain_id_t {0};
+        node.socket_id = socket_id_t {0};
         node.volume_ram = memory_size;
-        node.first_core_id = core_ids_ptr;
-        node.logical_cores_count = total_cores;
+        node.core_ids = std::span(core_ids);
 
         // One compute domain per L2 cluster. Apple lists cores fastest-level first, so
         // `hw.perflevel0` takes the highest compute level; every cluster carved out of it repeats
@@ -2027,25 +2150,24 @@ struct machine_topology {
             std::snprintf(name, sizeof(name), "hw.perflevel%zu.name", level);
             char level_name[32];
             apple_sysctl_string(name, level_name, sizeof(level_name));
-            core_quality_t const level_quality = apple_core_quality_from_name(level_name);
+            apple_core_quality_t const level_quality = apple_core_quality_from_name(level_name);
 #endif
 
-            std::size_t const level_rank = nonempty_levels - 1 - levels_written;
+            compute_level_t const level_rank = static_cast<compute_level_t>(nonempty_levels - 1 - levels_written);
             for (std::size_t cut = 0; cut < level_cores; cut += cores_per_cluster) {
                 std::size_t const cluster_cores = (level_cores - cut) < cores_per_cluster //
                                                       ? (level_cores - cut)
                                                       : cores_per_cluster;
                 compute_domain_t &domain = domains_ptr[domains_written];
-                domain.memory_domain_id = 0;
-                domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
+                domain.memory_domain_id = memory_domain_id_t {0};
+                domain.memory_domain_index = memory_domain_index_t {0};
                 domain.compute_level = level_rank; // ? Sibling clusters share their level's rank
 #if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
                 domain.apple_core_quality = level_quality;
 #endif
                 domain.capacity = 0;
-                domain.cache_bytes = level_cache_bytes; // ? L2 is private to the cluster, shared within it
-                domain.first_core_id = core_ids_ptr + core_offset + cut;
-                domain.logical_cores_count = cluster_cores;
+                domain.cache_bytes_per_core = level_cache_bytes / cluster_cores; // ? One L2 per cluster
+                domain.core_ids = std::span(core_ids).subspan(core_offset + cut, cluster_cores);
                 domains_written += 1;
             }
             core_offset += level_cores;
@@ -2056,18 +2178,17 @@ struct machine_topology {
         // where the CPUID walk still names the cache the `sysctl` levels could not.
         if (domains_written == 0) {
             compute_domain_t &domain = domains_ptr[0];
-            domain.memory_domain_id = 0;
-            domain.memory_domain_index = static_cast<memory_domain_index_t>(0);
-            domain.compute_level = 0;
+            domain.memory_domain_id = memory_domain_id_t {0};
+            domain.memory_domain_index = memory_domain_index_t {0};
+            domain.compute_level = compute_level_t {0};
             domain.capacity = 0;
-            domain.cache_bytes = cache_bytes_of_core(core_ids_ptr[0], core_ids_ptr, total_cores);
-            domain.first_core_id = core_ids_ptr;
-            domain.logical_cores_count = total_cores;
+            domain.cache_bytes_per_core = deepest_cache_of_core(core_ids_ptr[0], node.core_ids).bytes_per_core();
+            domain.core_ids = node.core_ids;
             domains_written = 1;
             levels_written = 1;
         }
 
-        // Commit. Moving an array keeps its heap pointer, so every `first_core_id` stays valid.
+        // Commit. Moving an array keeps its heap pointer, so every `core_ids` slice stays valid.
         memory_domains_ = std::move(nodes);
         domain_core_ids_ = std::move(core_ids);
         compute_domains_ = std::move(domains);
@@ -2100,8 +2221,8 @@ struct machine_topology {
      *  it reads the compute domains straight out of masks, the unit Windows itself speaks in.
      *
      *  Efficiency class is an ordinal, not a magnitude - it ranks cores without rating them - so
-     *  @c capacity stays 0 and callers weigh domains by @c logical_cores_count, mirroring the Apple
-     *  path. @c cache_bytes is the largest private L1/L2 cache the kernel reports for the class.
+     *  @c capacity stays 0 and callers weigh domains by their cores' count, as on Apple. And
+     *  @c cache_bytes_per_core is the largest per-core share of an L1/L2 reported for the class.
      *
      *  @note A @c core_id_t here is not a flat index: it packs the group and in-group bit via
      *      @c win_encode_core_id, and @c try_pin_thread_to_cores decodes it into @c GROUP_AFFINITY.
@@ -2141,7 +2262,7 @@ struct machine_topology {
         dynamic_array<memory_domain_t, memory_domains_allocator_t> nodes {memory_domains_allocator_t {allocator_}};
         dynamic_array<core_id_t, cores_allocator_t> core_ids {cores_allocator_t {allocator_}};
         dynamic_array<compute_domain_t, domains_allocator_t> domains {domains_allocator_t {allocator_}};
-        memory_domain_t *domains_outb = nullptr;
+        memory_domain_t *nodes_ptr = nullptr;
         core_id_t *core_ids_ptr = nullptr;
         compute_domain_t *domains_ptr = nullptr;
         DWORD numa_len = 0, cores_len = 0, cache_len = 0, package_len = 0;
@@ -2196,12 +2317,14 @@ struct machine_topology {
                 if (record->Relationship == RelationCache && record->Cache.Level <= 2) {
                     GROUP_AFFINITY const affinity = record->Cache.GroupMask;
                     std::size_t const size_bytes = static_cast<std::size_t>(record->Cache.CacheSize);
+                    std::size_t const sharing_cores = static_cast<std::size_t>(std::popcount(affinity.Mask));
+                    std::size_t const share_bytes = sharing_cores ? size_bytes / sharing_cores : 0;
                     if (affinity.Group < group_span)
                         for (std::size_t c = 0; c < class_count; ++c) {
                             win_group_class_cell_t &cell =
                                 cells[static_cast<std::size_t>(affinity.Group) * class_count + c];
-                            if ((affinity.Mask & cell.mask) && size_bytes > cell.cache_bytes)
-                                cell.cache_bytes = size_bytes;
+                            if ((affinity.Mask & cell.mask) && share_bytes > cell.cache_bytes_per_core)
+                                cell.cache_bytes_per_core = share_bytes;
                         }
                 }
                 if (record->Size == 0) break;
@@ -2240,7 +2363,7 @@ struct machine_topology {
         if (failed(nodes.resize(counted_nodes))) goto failed_harvest;    // ! Out of memory
         if (failed(core_ids.resize(counted_cores))) goto failed_harvest; // ! Out of memory
         if (failed(domains.resize(counted_cores))) goto failed_harvest;  // ! Out of memory
-        domains_outb = nodes.data();
+        nodes_ptr = nodes.data();
         core_ids_ptr = core_ids.data();
         domains_ptr = domains.data();
 
@@ -2260,13 +2383,14 @@ struct machine_topology {
             for (std::size_t class_step = 0; class_step < class_count; ++class_step) {
                 std::size_t const cls = class_count - 1 - class_step; // ? Fastest (highest) class first
                 std::size_t const domain_first_core = core_cursor;
-                std::size_t domain_cache_bytes = 0;
+                std::size_t domain_cache_bytes_per_core = 0;
                 win_numa_for_each_group(memory_domain, [&](WORD group, KAFFINITY node_mask) noexcept {
                     if (group >= group_span) return; // ? Beyond the cell grid; should not happen
                     win_group_class_cell_t const &cell = cells[static_cast<std::size_t>(group) * class_count + cls];
                     KAFFINITY const domain_mask = node_mask & cell.mask;
                     if (!domain_mask) return;
-                    if (cell.cache_bytes > domain_cache_bytes) domain_cache_bytes = cell.cache_bytes;
+                    if (cell.cache_bytes_per_core > domain_cache_bytes_per_core)
+                        domain_cache_bytes_per_core = cell.cache_bytes_per_core;
                     for (unsigned bit = 0; bit < win_processors_per_group_k; ++bit)
                         if (domain_mask & (static_cast<KAFFINITY>(1) << bit))
                             core_ids_ptr[core_cursor++] = win_encode_core_id(group, bit);
@@ -2276,24 +2400,22 @@ struct machine_topology {
                 compute_domain_t &domain = domains_ptr[domain_cursor++];
                 domain.memory_domain_id = static_cast<memory_domain_id_t>(memory_domain.NodeNumber);
                 domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
-                domain.compute_level = cls; // ? Raw class now; dense-ranked below
+                domain.compute_level = static_cast<compute_level_t>(cls); // ? Raw class now; dense-ranked below
                 domain.capacity = 0;
-                domain.cache_bytes = domain_cache_bytes;
-                domain.first_core_id = core_ids_ptr + domain_first_core;
-                domain.logical_cores_count = core_cursor - domain_first_core;
+                domain.cache_bytes_per_core = domain_cache_bytes_per_core;
+                domain.core_ids = std::span(core_ids).subspan(domain_first_core, core_cursor - domain_first_core);
             }
 
             ULONGLONG available_bytes = 0;
             (void)::GetNumaAvailableMemoryNodeEx(static_cast<USHORT>(memory_domain.NodeNumber), &available_bytes);
 
-            memory_domain_t &node = domains_outb[node_index];
+            memory_domain_t &node = nodes_ptr[node_index];
             node.memory_domain_id = static_cast<memory_domain_id_t>(memory_domain.NodeNumber);
             node.socket_id = win_socket_for_node(package_buf, package_len, memory_domain,
                                                  static_cast<socket_id_t>(memory_domain.NodeNumber));
             node.volume_ram =
                 static_cast<std::size_t>(available_bytes); // ? Available, not installed - Windows has no per-node total
-            node.first_core_id = core_ids_ptr + node_first_core;
-            node.logical_cores_count = core_cursor - node_first_core;
+            node.core_ids = std::span(core_ids).subspan(node_first_core, core_cursor - node_first_core);
             [[maybe_unused]] status_t const pages = // ! Optional - records the large-page size if any
                 node.page_sizes.harvest(node.memory_domain_id);
             node_index += 1;
@@ -2315,9 +2437,11 @@ struct machine_topology {
                 [domains_ptr](std::size_t i) noexcept {
                     return static_cast<std::size_t>(domains_ptr[i].compute_level);
                 },
-                [domains_ptr](std::size_t i, std::size_t rank) noexcept { domains_ptr[i].compute_level = rank; });
+                [domains_ptr](std::size_t i, std::size_t rank) noexcept {
+                    domains_ptr[i].compute_level = static_cast<compute_level_t>(rank);
+                });
 
-        // Commit. Moving an array keeps its heap pointer, so every `first_core_id` stays valid.
+        // Commit. Moving an array keeps its heap pointer, so every `core_ids` slice stays valid.
         memory_domains_ = std::move(nodes);
         domain_core_ids_ = std::move(core_ids);
         compute_domains_ = std::move(domains);

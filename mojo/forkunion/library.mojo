@@ -126,8 +126,8 @@ struct Symbols:
     """`fu_compute_level_in`."""
     var compute_capacity_in: TopologyCountIn
     """`fu_compute_capacity_in`."""
-    var compute_cache_bytes_in: TopologyCountIn
-    """`fu_compute_cache_bytes_in`."""
+    var compute_cache_bytes_per_core_in: TopologyCountIn
+    """`fu_compute_cache_bytes_per_core_in`."""
     var memory_domains_count: TopologyCount
     """`fu_memory_domains_count`."""
     var memory_domain_id_at_index: MemoryDomainIdAt
@@ -240,7 +240,7 @@ struct Symbols:
         self.compute_levels_count = _resolve[TopologyCount](handle, "fu_compute_levels_count")
         self.compute_level_in = _resolve[TopologyCountIn](handle, "fu_compute_level_in")
         self.compute_capacity_in = _resolve[TopologyCountIn](handle, "fu_compute_capacity_in")
-        self.compute_cache_bytes_in = _resolve[TopologyCountIn](handle, "fu_compute_cache_bytes_in")
+        self.compute_cache_bytes_per_core_in = _resolve[TopologyCountIn](handle, "fu_compute_cache_bytes_per_core_in")
         self.memory_domains_count = _resolve[TopologyCount](handle, "fu_memory_domains_count")
         self.memory_domain_id_at_index = _resolve[MemoryDomainIdAt](handle, "fu_memory_domain_id_at_index")
         self.local_memory_of = _resolve[TopologyCountIn](handle, "fu_local_memory_of")

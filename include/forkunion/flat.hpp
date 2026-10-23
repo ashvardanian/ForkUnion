@@ -279,7 +279,7 @@ class flat_pool {
      *  @brief Returns the memory domain this thread-pool is pinned to.
      *  @return -1, since this pool is not memory-domain-aware.
      */
-    constexpr memory_domain_id_t memory_domain_id() const noexcept { return -1; }
+    constexpr memory_domain_id_t memory_domain_id() const noexcept { return memory_domain_id_t {-1}; }
 
     /**
      *  @brief Returns the first thread index in the thread-pool.

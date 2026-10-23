@@ -25,7 +25,11 @@ extern "C" {
     fn fu_compute_level_in(topology: *mut c_void, compute_domain_index: usize, level_out: *mut usize) -> c_int;
     fn fu_compute_levels_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
     fn fu_compute_capacity_in(topology: *mut c_void, compute_domain_index: usize, capacity_out: *mut usize) -> c_int;
-    fn fu_compute_cache_bytes_in(topology: *mut c_void, compute_domain_index: usize, bytes_out: *mut usize) -> c_int;
+    fn fu_compute_cache_bytes_per_core_in(
+        topology: *mut c_void,
+        compute_domain_index: usize,
+        bytes_out: *mut usize,
+    ) -> c_int;
     fn fu_memory_domains_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
     fn fu_local_memory_of(topology: *mut c_void, compute_domain_index: usize, memory_domain_out: *mut usize) -> c_int;
     fn fu_volume_ram_in(topology: *mut c_void, memory_domain_index: usize, bytes_out: *mut usize) -> c_int;
@@ -211,6 +215,13 @@ pub struct ComputeDomain(pub usize);
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomain(pub usize);
 
+/// A rung of the dense QoS ladder, in `[0, compute_levels_count())`, least performant first.
+///
+/// An ordinal for grouping, never a magnitude to weigh work by, and never a domain position -
+/// so it is neither a bare `usize` nor interchangeable with [`ComputeDomain`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComputeLevel(pub usize);
+
 /// An OS memory-domain id - a NUMA node - the allocators key off, obtained from
 /// [`Topology::memory_domain_id_at_index`]; `-1` when there is none.
 ///
@@ -231,6 +242,15 @@ impl ComputeDomain {
 
 impl MemoryDomain {
     /// The raw index, for the FFI boundary and for arithmetic.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl ComputeLevel {
+    /// The raw rung, for the FFI boundary and for indexing a per-level table.
     #[inline]
     #[must_use]
     pub fn get(self) -> usize {
@@ -341,13 +361,13 @@ impl Topology {
     }
 
     /// Returns the performance level of a compute domain (higher = more performant).
-    pub fn compute_level_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
+    pub fn compute_level_in(&self, compute_domain: ComputeDomain) -> Result<ComputeLevel> {
         let mut answer = usize::MAX;
         Error::check(
             unsafe { fu_compute_level_in(self.inner, compute_domain.get(), &mut answer) },
             "fu_compute_level_in",
         )?;
-        Ok(answer)
+        Ok(ComputeLevel(answer))
     }
 
     /// Returns the number of distinct Quality-of-Service levels.
@@ -379,15 +399,15 @@ impl Topology {
         Ok(answer)
     }
 
-    /// Returns the bytes of deepest cache private to a compute domain's cores (0 if unknown).
+    /// Returns each core's share of the deepest cache confined to a compute domain (0 if unknown).
     ///
     /// Sizes a cache-resident chunk, which is a different question from how many chunks a domain
     /// deserves - domains of equal throughput may back onto very differently sized caches.
-    pub fn compute_cache_bytes_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
+    pub fn compute_cache_bytes_per_core_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
-            unsafe { fu_compute_cache_bytes_in(self.inner, compute_domain.get(), &mut answer) },
-            "fu_compute_cache_bytes_in",
+            unsafe { fu_compute_cache_bytes_per_core_in(self.inner, compute_domain.get(), &mut answer) },
+            "fu_compute_cache_bytes_per_core_in",
         )?;
         Ok(answer)
     }
@@ -574,11 +594,11 @@ pub(crate) mod tests {
         assert!(compute_levels <= compute_domains);
 
         for domain in (0..compute_domains).map(ComputeDomain) {
-            assert!(topology.compute_level_in(domain).unwrap() < compute_levels.max(1));
+            assert!(topology.compute_level_in(domain).unwrap().get() < compute_levels.max(1));
             assert!(topology.local_memory_of(domain).unwrap().get() < memory_domains);
             // Capacity and cache are magnitudes; 0 is unknown, never negative, nonzero unasserted.
             let _capacity = topology.compute_capacity_in(domain).unwrap();
-            let _cache_bytes = topology.compute_cache_bytes_in(domain).unwrap();
+            let _cache_bytes_per_core = topology.compute_cache_bytes_per_core_in(domain).unwrap();
         }
 
         // An index this machine does not have is absence, and now says so instead of answering 0 -
@@ -587,7 +607,7 @@ pub(crate) mod tests {
             .compute_capacity_in(ComputeDomain(compute_domains + 64))
             .is_err());
         assert!(topology
-            .compute_cache_bytes_in(ComputeDomain(compute_domains + 64))
+            .compute_cache_bytes_per_core_in(ComputeDomain(compute_domains + 64))
             .is_err());
         assert!(topology.local_memory_of(ComputeDomain(compute_domains + 64)).is_err());
     }

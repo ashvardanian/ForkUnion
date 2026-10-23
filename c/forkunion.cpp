@@ -551,19 +551,18 @@ void fu_topology_delete(fu_topology_t handle) {
     fu_aligned_free(topology, alignof(fu::machine_topology_t));
 }
 
-fu_status_t fu_logical_cores_count_in([[maybe_unused]] fu_topology_t topology,
-                                      [[maybe_unused]] size_t compute_domain_index, size_t *cores_out) {
+fu_status_t fu_logical_cores_count_in(fu_topology_t topology, size_t compute_domain_index, size_t *cores_out) {
     if (!cores_out) return fu_invalid_argument_k;
     *cores_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
     if (compute_domain_index >= (*upcast_topology(topology)).compute_domains_count()) return fu_invalid_argument_k;
     *cores_out = (*upcast_topology(topology))
                      .compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index))
-                     .logical_cores_count;
+                     .core_ids.size();
     return fu_success_k;
 }
 
-fu_status_t fu_logical_cores_count([[maybe_unused]] fu_topology_t topology, size_t *cores_out) {
+fu_status_t fu_logical_cores_count(fu_topology_t topology, size_t *cores_out) {
     if (!cores_out) return fu_invalid_argument_k;
     *cores_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -571,7 +570,7 @@ fu_status_t fu_logical_cores_count([[maybe_unused]] fu_topology_t topology, size
     return fu_success_k;
 }
 
-fu_status_t fu_compute_domains_count([[maybe_unused]] fu_topology_t topology, size_t *count_out) {
+fu_status_t fu_compute_domains_count(fu_topology_t topology, size_t *count_out) {
     if (!count_out) return fu_invalid_argument_k;
     *count_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -579,8 +578,7 @@ fu_status_t fu_compute_domains_count([[maybe_unused]] fu_topology_t topology, si
     return fu_success_k;
 }
 
-fu_status_t fu_compute_level_in([[maybe_unused]] fu_topology_t topology, [[maybe_unused]] size_t compute_domain_index,
-                                size_t *level_out) {
+fu_status_t fu_compute_level_in(fu_topology_t topology, size_t compute_domain_index, size_t *level_out) {
     if (!level_out) return fu_invalid_argument_k;
     *level_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -591,7 +589,7 @@ fu_status_t fu_compute_level_in([[maybe_unused]] fu_topology_t topology, [[maybe
     return fu_success_k;
 }
 
-fu_status_t fu_compute_levels_count([[maybe_unused]] fu_topology_t topology, size_t *count_out) {
+fu_status_t fu_compute_levels_count(fu_topology_t topology, size_t *count_out) {
     if (!count_out) return fu_invalid_argument_k;
     *count_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -599,8 +597,7 @@ fu_status_t fu_compute_levels_count([[maybe_unused]] fu_topology_t topology, siz
     return fu_success_k;
 }
 
-fu_status_t fu_compute_capacity_in([[maybe_unused]] fu_topology_t topology,
-                                   [[maybe_unused]] size_t compute_domain_index, size_t *capacity_out) {
+fu_status_t fu_compute_capacity_in(fu_topology_t topology, size_t compute_domain_index, size_t *capacity_out) {
     if (!capacity_out) return fu_invalid_argument_k;
     *capacity_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -611,19 +608,18 @@ fu_status_t fu_compute_capacity_in([[maybe_unused]] fu_topology_t topology,
     return fu_success_k;
 }
 
-fu_status_t fu_compute_cache_bytes_in([[maybe_unused]] fu_topology_t topology,
-                                      [[maybe_unused]] size_t compute_domain_index, size_t *bytes_out) {
+fu_status_t fu_compute_cache_bytes_per_core_in(fu_topology_t topology, size_t compute_domain_index, size_t *bytes_out) {
     if (!bytes_out) return fu_invalid_argument_k;
     *bytes_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
     if (compute_domain_index >= (*upcast_topology(topology)).compute_domains_count()) return fu_invalid_argument_k;
     *bytes_out = (*upcast_topology(topology))
                      .compute_domain_at(static_cast<fu::compute_domain_index_t>(compute_domain_index))
-                     .cache_bytes;
+                     .cache_bytes_per_core;
     return fu_success_k;
 }
 
-fu_status_t fu_memory_domains_count([[maybe_unused]] fu_topology_t topology, size_t *count_out) {
+fu_status_t fu_memory_domains_count(fu_topology_t topology, size_t *count_out) {
     if (!count_out) return fu_invalid_argument_k;
     *count_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -631,8 +627,7 @@ fu_status_t fu_memory_domains_count([[maybe_unused]] fu_topology_t topology, siz
     return fu_success_k;
 }
 
-fu_status_t fu_local_memory_of([[maybe_unused]] fu_topology_t topology, [[maybe_unused]] size_t compute_domain_index,
-                               size_t *memory_domain_out) {
+fu_status_t fu_local_memory_of(fu_topology_t topology, size_t compute_domain_index, size_t *memory_domain_out) {
     if (!memory_domain_out) return fu_invalid_argument_k;
     *memory_domain_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -644,8 +639,7 @@ fu_status_t fu_local_memory_of([[maybe_unused]] fu_topology_t topology, [[maybe_
     return fu_success_k;
 }
 
-fu_status_t fu_volume_ram_in([[maybe_unused]] fu_topology_t topology, [[maybe_unused]] size_t memory_domain_index,
-                             size_t *bytes_out) {
+fu_status_t fu_volume_ram_in(fu_topology_t topology, size_t memory_domain_index, size_t *bytes_out) {
     if (!bytes_out) return fu_invalid_argument_k;
     *bytes_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -656,7 +650,7 @@ fu_status_t fu_volume_ram_in([[maybe_unused]] fu_topology_t topology, [[maybe_un
     return fu_success_k;
 }
 
-fu_status_t fu_volume_ram([[maybe_unused]] fu_topology_t topology, size_t *bytes_out) {
+fu_status_t fu_volume_ram(fu_topology_t topology, size_t *bytes_out) {
     if (!bytes_out) return fu_invalid_argument_k;
     *bytes_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -664,8 +658,7 @@ fu_status_t fu_volume_ram([[maybe_unused]] fu_topology_t topology, size_t *bytes
     return fu_success_k;
 }
 
-fu_status_t fu_volume_huge_pages_in([[maybe_unused]] fu_topology_t topology,
-                                    [[maybe_unused]] size_t memory_domain_index, size_t *bytes_out) {
+fu_status_t fu_volume_huge_pages_in(fu_topology_t topology, size_t memory_domain_index, size_t *bytes_out) {
     if (!bytes_out) return fu_invalid_argument_k;
     *bytes_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -678,7 +671,7 @@ fu_status_t fu_volume_huge_pages_in([[maybe_unused]] fu_topology_t topology,
     return fu_success_k;
 }
 
-fu_status_t fu_volume_huge_pages([[maybe_unused]] fu_topology_t topology, size_t *bytes_out) {
+fu_status_t fu_volume_huge_pages(fu_topology_t topology, size_t *bytes_out) {
     if (!bytes_out) return fu_invalid_argument_k;
     *bytes_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -695,8 +688,7 @@ fu_status_t fu_volume_huge_pages([[maybe_unused]] fu_topology_t topology, size_t
     return fu_success_k;
 }
 
-fu_status_t fu_huge_pages_count_in([[maybe_unused]] fu_topology_t topology, [[maybe_unused]] size_t memory_domain_index,
-                                   size_t *pages_out) {
+fu_status_t fu_huge_pages_count_in(fu_topology_t topology, size_t memory_domain_index, size_t *pages_out) {
     if (!pages_out) return fu_invalid_argument_k;
     *pages_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;
@@ -709,7 +701,7 @@ fu_status_t fu_huge_pages_count_in([[maybe_unused]] fu_topology_t topology, [[ma
     return fu_success_k;
 }
 
-fu_status_t fu_huge_pages_count([[maybe_unused]] fu_topology_t topology, size_t *pages_out) {
+fu_status_t fu_huge_pages_count(fu_topology_t topology, size_t *pages_out) {
     if (!pages_out) return fu_invalid_argument_k;
     *pages_out = poisoned_size_k;
     if (!topology) return fu_invalid_argument_k;

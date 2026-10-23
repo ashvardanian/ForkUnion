@@ -48,7 +48,7 @@ inline void sleep_for_micros([[maybe_unused]] std::size_t const micros) noexcept
  *  letting it idle while a sibling core is busy. Pinning to a node hands the kernel the whole
  *  domain to schedule within, which survives a core going offline and suits oversubscribed hosts.
  */
-enum pin_granularity_t {
+enum pin_granularity_t : unsigned int {
 
     /** Bind each worker to exactly one logical core. */
     pin_to_core_k = 0,
@@ -89,10 +89,10 @@ struct alignas(default_alignment_k) pinned_thread_t {
 #if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
 
     /**
-     *  @brief Apple's absolute class for this worker's domain, or -1 when unnamed.
+     *  @brief Apple's absolute class for this worker's domain.
      *  @sa compute_domain_t::apple_core_quality, copied here at spawn.
      */
-    core_quality_t apple_core_quality {-1};
+    apple_core_quality_t apple_core_quality {apple_core_quality_t::unknown_k};
 #endif
 
     /**
@@ -364,7 +364,7 @@ struct colocated_pool {
      */
     status_t spawn(compute_domain_t const &domain,
                    caller_exclusivity_t const exclusivity = caller_inclusive_k) noexcept {
-        return spawn(domain, domain.logical_cores_count, exclusivity);
+        return spawn(domain, domain.core_ids.size(), exclusivity);
     }
 
     /**
@@ -419,7 +419,7 @@ struct colocated_pool {
         pin_granularity_ = pin_granularity;
         auto reset_on_failure = [&]() noexcept {
             pthreads_ = {};
-            memory_domain_id_ = -1;
+            memory_domain_id_ = memory_domain_id_t {-1};
             pin_granularity_ = pin_to_core_k;
         };
 
@@ -480,7 +480,7 @@ struct colocated_pool {
             pthreads_[i].handle.store(new_pthread_handle, std::memory_order_relaxed);
             pthreads_[i].id.store(0, std::memory_order_relaxed); // ? 0 means "not published yet"
 #endif
-            pthreads_[i].core_id = -1; // ? Not pinned yet
+            pthreads_[i].core_id = core_id_t {-1}; // ? Not pinned yet
 #if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
             pthreads_[i].apple_core_quality = domain.apple_core_quality;
 #endif
@@ -508,11 +508,10 @@ struct colocated_pool {
         // Compose each thread's name. Apple can only name the calling thread, so the worker applies
         // it to itself; we merely publish it here, before the workers read their cells.
 
-        // ! `i % logical_cores_count` since a pool may outnumber its domain's cores.
+        // ! `i % core_ids.size()` since a pool may outnumber its domain's cores.
         for (thread_index_t i = 0; i < pthreads_.size(); ++i)
             fill_thread_name(pthreads_[i].name, name_,
-                             static_cast<std::size_t>(domain.first_core_id[i % domain.logical_cores_count]),
-                             max_possible_cores);
+                             static_cast<std::size_t>(domain.core_ids[i % domain.core_ids.size()]), max_possible_cores);
         if (use_caller_thread) set_current_thread_name(pthreads_[0].name);
 
         // Pin all of the threads. Where the kernel refuses, the domains still describe the machine
@@ -522,17 +521,16 @@ struct colocated_pool {
         unpinned_threads_ = 0;
         if (pin_granularity == pin_to_core_k) {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
-                core_id_t const cpu = domain.first_core_id[i % domain.logical_cores_count];
+                std::span<core_id_t const> const cpu = domain.core_ids.subspan(i % domain.core_ids.size(), 1);
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                if (succeeded(pin_thread_to_cores(pin_handle, &cpu, 1))) pthreads_[i].core_id = cpu;
+                if (succeeded(pin_thread_to_cores(pin_handle, cpu))) pthreads_[i].core_id = cpu.front();
                 else ++unpinned_threads_;
             }
         }
         else {
             for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
-                if (failed(pin_thread_to_cores(pin_handle, domain.first_core_id, domain.logical_cores_count)))
-                    ++unpinned_threads_;
+                if (failed(pin_thread_to_cores(pin_handle, domain.core_ids))) ++unpinned_threads_;
             }
         }
 
@@ -753,8 +751,7 @@ struct colocated_pool {
 
             // The last contributor steps the epoch, as its only writer, to signal completion
             if (before_decrement == 1)
-                atomic_ref<epoch_index_t>(epoch_).store(static_cast<epoch_index_t>(generation + 1),
-                                                        std::memory_order_release);
+                atomic_ref<epoch_index_t>(epoch_).store(generation + 1, std::memory_order_release);
         }
 
         // Wait for the last contributor's completion step. Only `epoch_` moves here, so a
@@ -879,7 +876,7 @@ struct colocated_pool {
                                                               std::memory_order_relaxed, std::memory_order_relaxed);
 
         // The claim leaves this caller the epoch's only writer until its contributors count down
-        generation_t const generation = static_cast<generation_t>(previous_epoch + 1);
+        generation_t const generation = previous_epoch + 1;
         atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
 
         // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
@@ -1020,8 +1017,7 @@ struct colocated_pool {
                 // The last contributor to finish steps the epoch, signaling completion, as its only
                 // writer: the next claimer waits for this even epoch before it writes one
                 if (before_decrement == 1)
-                    atomic_ref<epoch_index_t>(pool->epoch_)
-                        .store(static_cast<epoch_index_t>(new_epoch + 1), std::memory_order_release);
+                    atomic_ref<epoch_index_t>(pool->epoch_).store(new_epoch + 1, std::memory_order_release);
             }
             last_epoch = new_epoch;
         }
@@ -1056,11 +1052,11 @@ struct colocated_pool {
      *  cannot decide that: the bottom rank is E-cores on an A18 but big cores on an M5 Pro, where
      *  @c UTILITY would banish two thirds of the machine. Checking rank first keeps an
      *  all-efficiency chip honest - its E-cores are the fastest thing present. A hidden or unknown
-     *  name parses to @c apple_performance_k, falling back to rank alone, never to @c UTILITY.
+     *  name parses to @c performance_k, falling back to rank alone, never to @c UTILITY.
      */
     static qos_class_t qos_for_domain_(compute_domain_t const &domain, std::size_t const levels) noexcept {
         if (domain.compute_level + 1 >= levels) return QOS_CLASS_USER_INITIATED; // ? The fastest tier present
-        if (domain.apple_core_quality == apple_efficiency_k)
+        if (domain.apple_core_quality == apple_core_quality_t::efficiency_k)
             return QOS_CLASS_UTILITY; // ? Genuine E-cores - confine here
         return QOS_CLASS_DEFAULT;     // ? A slower big tier stays big
     }
@@ -1154,7 +1150,8 @@ class invoke_distributed_for_n {
  *  @section distributed_scheduling Scheduling Logic
  *
  *  The same protocol as @c invoke_for_n_dynamic, applied at two levels. Let's say we receive N
- *  tasks for T threads across C compute_domains. Each compute_domain takes (N/C) tasks, reserves
+ *  tasks for T threads across C compute_domains. Each compute_domain takes N/T tasks per local
+ *  thread - the union of its threads' even shares, so a large domain never idles early - reserves
  *  one trailing static prong per local thread, and splits the rest into one contiguous slice per
  *  local thread - so every thread drains its own slice with an @b uncontended @c fetch_add on a
  *  cursor line nobody else touches. A drained thread first helps its same-domain neighbours,
@@ -1200,10 +1197,18 @@ class invoke_distributed_for_n_dynamic {
         index_type_ dynamic;
     };
 
-    domain_layout_t layout_of_(tasks_range<index_type_> const range, index_type_ const domain) const noexcept {
+    /** Where @p domain's tasks live: the union of its threads' even shares of `[0, n_)`, so every
+     *  domain starts with tasks in proportion to its workers. */
+    domain_layout_t layout_of_(index_type_ const domain) const noexcept {
         index_type_ const threads = pool_.threads_count(domain);
-        index_type_ const dynamic = range.count > threads ? static_cast<index_type_>(range.count - threads) : 0;
-        return {range, threads, pool_.first_thread(domain), dynamic};
+        index_type_ const first_thread = pool_.first_thread(domain);
+        if (!threads) return {{}, 0, first_thread, 0};
+        indexed_split<index_type_> const split_between_threads(n_, static_cast<index_type_>(pool_.threads_count()));
+        tasks_range<index_type_> const first_share = split_between_threads[first_thread];
+        tasks_range<index_type_> const last_share = split_between_threads[first_thread + threads - 1];
+        index_type_ const count = static_cast<index_type_>(last_share.first + last_share.count - first_share.first);
+        index_type_ const dynamic = count > threads ? static_cast<index_type_>(count - threads) : 0;
+        return {{first_share.first, count}, threads, first_thread, dynamic};
     }
 
     /** Helps every thread of @p compute_domain, in a coprime order seeded by the caller. */
@@ -1225,9 +1230,8 @@ class invoke_distributed_for_n_dynamic {
     void rewind() noexcept {
         typename pool_type_::cache_hints_t cache_hints;
         index_type_ const compute_domains_count = pool_.compute_domains_count();
-        indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
         for (index_type_ domain = 0; domain < compute_domains_count; ++domain) {
-            domain_layout_t const layout = layout_of_(split_between_compute_domains[domain], domain);
+            domain_layout_t const layout = layout_of_(domain);
             if (!layout.threads) continue; // ? A domain the spawn left empty owns no slices
 
             indexed_split<index_type_> const split_local(layout.dynamic, layout.threads);
@@ -1254,12 +1258,10 @@ class invoke_distributed_for_n_dynamic {
         thread_in_domain<index_type_> const at {thread, pool_.compute_domain_index_of(native_compute_domain)};
 
         // Run (up to) one static prong from the native domain's trailing reservation.
-        indexed_split<index_type_> const split_between_compute_domains(n_, compute_domains_count);
-        domain_layout_t const home = layout_of_(split_between_compute_domains[native_compute_domain], //
-                                                native_compute_domain);
+        domain_layout_t const home = layout_of_(native_compute_domain);
         index_type_ const local = pool_.thread_local_index(thread, native_compute_domain);
         index_type_ const static_index = static_cast<index_type_>(home.dynamic + local);
-        if (static_index < home.range.count) // ? Fewer tasks than threads leaves the domain's tail idle
+        if (static_index < home.range.count) [[likely]] // ? Fewer tasks than threads leaves the domain's tail idle
             fork_(static_cast<index_type_>(home.range.first + static_index), at);
 
         // Home domain first: our own slice (still uncontended), then the same-domain neighbours -
@@ -1456,57 +1458,13 @@ struct distributed_pool {
         caller_exclusivity_t const exclusivity = caller_inclusive_k,
         pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
 
-        if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
-        if (threads_count_ != 0) return status_t::already_spawned_k;
-
-        // The topology is borrowed for the duration of this call only - every sub-pool below
-        // captures what it needs by value, so the pool never retains a reference to it.
-        // Place the array itself on the first compute domain, pinning the caller there too.
-        // We spawn one sub-pool per compute domain, a same-QoS core run, not per NUMA node, so
-        // performance and efficiency cores on one node become separate, independently pinned pools.
-        compute_domain_t const &first_domain = topology.compute_domain_at(compute_domain_index_t {});
-        allocator_t allocator = allocator_for_node(first_domain.memory_domain_id);
-        index_t const colocations_count = min_of(topology.compute_domains_count(), threads);
-
-        colocations_t colocations(allocator);
-        if (status_t const grew = colocations.resize(colocations_count); failed(grew)) return grew;
-        for (index_t compute_domain_index = 0; compute_domain_index < colocations_count; ++compute_domain_index)
-            colocations[compute_domain_index].rename(name_);
-
-        auto reset_on_failure = [&]() noexcept {
-            for (index_t compute_domain_index = 0; compute_domain_index < colocations_count; ++compute_domain_index)
-                colocations[compute_domain_index].terminate(); // ? A no-op on the pools not yet spawned
-        };
-
-        // Every compute-domain pool is spawned separately
-        // - the first one may be "inclusive".
-        // - others are always "exclusive" to the caller thread.
-        indexed_split<thread_index_t> threads_per_domain(threads, colocations_count);
-        index_t const compute_levels = static_cast<index_t>(topology.compute_levels_count());
-        // ? The sub-pool's reason propagates verbatim - a thread limit isn't an allocation failure
-        if (status_t const spawned = colocations[0].spawn(first_domain, threads_per_domain[0].count, exclusivity,
-                                                          pin_granularity, 0, 0, compute_levels);
-            failed(spawned)) {
-            reset_on_failure();
-            return spawned;
-        }
-
-        for (index_t compute_domain_index = 1; compute_domain_index < colocations_count; ++compute_domain_index) {
-            compute_domain_t const &domain =
-                topology.compute_domain_at(static_cast<compute_domain_index_t>(compute_domain_index));
-            if (status_t const spawned = colocations[compute_domain_index].spawn(
-                    domain, threads_per_domain[compute_domain_index].count, caller_exclusive_k, pin_granularity,
-                    threads_per_domain[compute_domain_index].first, compute_domain_index, compute_levels);
-                failed(spawned)) {
-                reset_on_failure();
-                return spawned;
-            }
-        }
-
-        colocations_ = std::move(colocations);
-        threads_count_ = threads;
-        exclusivity_ = exclusivity;
-        return status_t::success_k;
+        // Place the array itself on the first compute domain, pinning the caller there too. We
+        // spawn one sub-pool per compute domain, not per NUMA node, so performance and efficiency
+        // cores on one node become separate, independently pinned pools.
+        if (topology.compute_domains_count() == 0) return status_t::invalid_argument_k;
+        return spawn_over_domains_(topology, threads, exclusivity, pin_granularity,
+                                   topology.compute_domain_at(compute_domain_index_t {}).memory_domain_id,
+                                   [](compute_domain_t const &) noexcept { return true; });
     }
 
     /**
@@ -1526,58 +1484,10 @@ struct distributed_pool {
         machine_topology_t const &topology, memory_domain_id_t const memory_domain_id, thread_index_t const threads,
         caller_exclusivity_t const exclusivity = caller_inclusive_k,
         pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
-
-        if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
-        if (threads_count_ != 0) return status_t::already_spawned_k;
-
-        // Count the local compute domains first: the array is sized to them alone, and the first of
-        // them hosts the array and pins the caller.
-        index_t const machine_domains_count = static_cast<index_t>(topology.compute_domains_count());
-        index_t local_domains_count = 0;
-        for (index_t domain_index = 0; domain_index < machine_domains_count; ++domain_index)
-            if (topology.compute_domain_at(static_cast<compute_domain_index_t>(domain_index)).memory_domain_id ==
-                memory_domain_id)
-                ++local_domains_count;
-        if (local_domains_count == 0) return status_t::invalid_argument_k;
-
-        allocator_t allocator = allocator_for_node(memory_domain_id);
-        index_t const colocations_count = min_of(local_domains_count, static_cast<index_t>(threads));
-
-        colocations_t colocations(allocator);
-        if (status_t const grew = colocations.resize(colocations_count); failed(grew)) return grew;
-        for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index)
-            colocations[colocation_index].rename(name_);
-
-        auto reset_on_failure = [&]() noexcept {
-            for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index)
-                colocations[colocation_index].terminate(); // ? A no-op on the pools not yet spawned
-        };
-
-        // Sub-pools sit at compacted colocation indices but carry their topology-wide domain index,
-        // so a worker's reported compute domain means what it does under a full spawn.
-        indexed_split<thread_index_t> threads_per_domain(threads, colocations_count);
-        index_t const compute_levels = static_cast<index_t>(topology.compute_levels_count());
-        index_t colocation_index = 0;
-        for (index_t domain_index = 0; domain_index < machine_domains_count && colocation_index < colocations_count;
-             ++domain_index) {
-            compute_domain_t const &domain =
-                topology.compute_domain_at(static_cast<compute_domain_index_t>(domain_index));
-            if (domain.memory_domain_id != memory_domain_id) continue;
-            caller_exclusivity_t const local_exclusivity = colocation_index == 0 ? exclusivity : caller_exclusive_k;
-            if (status_t const spawned = colocations[colocation_index].spawn(
-                    domain, threads_per_domain[colocation_index].count, local_exclusivity, pin_granularity,
-                    threads_per_domain[colocation_index].first, domain_index, compute_levels);
-                failed(spawned)) {
-                reset_on_failure();
-                return spawned;
-            }
-            ++colocation_index;
-        }
-
-        colocations_ = std::move(colocations);
-        threads_count_ = threads;
-        exclusivity_ = exclusivity;
-        return status_t::success_k;
+        return spawn_over_domains_(topology, threads, exclusivity, pin_granularity, memory_domain_id,
+                                   [memory_domain_id](compute_domain_t const &domain) noexcept {
+                                       return domain.memory_domain_id == memory_domain_id;
+                                   });
     }
 
     /**
@@ -1817,6 +1727,85 @@ struct distributed_pool {
         return allocator_t {};
 #endif
     }
+
+    /**
+     *  @brief Spawns one sub-pool per compute domain that @p admits, each taking threads in
+     *      proportion to its cores, so a four-core cluster never holds as many workers as a
+     *      sixteen-thread domain at the same pool size.
+     *  @return `invalid_argument_k` when @p threads is zero or no admitted domain has a core.
+     *
+     *  Shares are cut at integer prefix boundaries over the admitted cores, and a domain whose
+     *  share rounds to zero gets no sub-pool. Sub-pools sit at compacted colocation indices but
+     *  carry their topology-wide domain index, so a worker's reported compute domain means the same
+     *  under every spawn. The topology is borrowed for this call alone, as each sub-pool copies the
+     *  slice of it that it needs.
+     */
+    template <typename admits_type_>
+    status_t spawn_over_domains_(                                                        //
+        machine_topology_t const &topology, thread_index_t const threads,                //
+        caller_exclusivity_t const exclusivity, pin_granularity_t const pin_granularity, //
+        memory_domain_id_t const home_memory_domain_id, admits_type_ const &admits) noexcept {
+
+        if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
+        if (threads_count_ != 0) return status_t::already_spawned_k;
+
+        index_t const machine_domains_count = static_cast<index_t>(topology.compute_domains_count());
+        auto const domain_at = [&](index_t const domain_index) noexcept -> compute_domain_t const & {
+            return topology.compute_domain_at(static_cast<compute_domain_index_t>(domain_index));
+        };
+        std::size_t admitted_cores = 0;
+        for (index_t domain_index = 0; domain_index < machine_domains_count; ++domain_index)
+            if (admits(domain_at(domain_index))) admitted_cores += domain_at(domain_index).core_ids.size();
+        if (admitted_cores == 0) return status_t::invalid_argument_k;
+        auto const threads_before = [&](std::size_t const cores_before) noexcept {
+            return static_cast<thread_index_t>(threads * cores_before / admitted_cores);
+        };
+
+        // The array is sized to the domains whose share is non-zero; the first of them hosts it.
+        index_t colocations_count = 0;
+        for (index_t domain_index = 0, cores_before = 0; domain_index < machine_domains_count; ++domain_index) {
+            if (!admits(domain_at(domain_index))) continue;
+            std::size_t const cores_after = cores_before + domain_at(domain_index).core_ids.size();
+            colocations_count += threads_before(cores_after) != threads_before(cores_before);
+            cores_before = cores_after;
+        }
+
+        colocations_t colocations(allocator_for_node(home_memory_domain_id));
+        if (status_t const grew = colocations.resize(colocations_count); failed(grew)) return grew;
+        for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index)
+            colocations[colocation_index].rename(name_);
+
+        auto reset_on_failure = [&]() noexcept {
+            for (index_t colocation_index = 0; colocation_index < colocations_count; ++colocation_index)
+                colocations[colocation_index].terminate(); // ? A no-op on the pools not yet spawned
+        };
+
+        index_t const compute_levels = static_cast<index_t>(topology.compute_levels_count());
+        index_t colocation_index = 0;
+        for (index_t domain_index = 0, cores_before = 0; domain_index < machine_domains_count; ++domain_index) {
+            compute_domain_t const &domain = domain_at(domain_index);
+            if (!admits(domain)) continue;
+            thread_index_t const first_thread = threads_before(cores_before);
+            cores_before += domain.core_ids.size();
+            thread_index_t const domain_threads = threads_before(cores_before) - first_thread;
+            if (!domain_threads) continue; // ? A small pool's share of a small domain
+            // ? Only the first sub-pool may take the caller; a sub-pool's refusal propagates as is
+            caller_exclusivity_t const local_exclusivity = colocation_index == 0 ? exclusivity : caller_exclusive_k;
+            if (status_t const spawned =
+                    colocations[colocation_index].spawn(domain, domain_threads, local_exclusivity, pin_granularity,
+                                                        first_thread, domain_index, compute_levels);
+                failed(spawned)) {
+                reset_on_failure();
+                return spawned;
+            }
+            ++colocation_index;
+        }
+
+        colocations_ = std::move(colocations);
+        threads_count_ = threads;
+        exclusivity_ = exclusivity;
+        return status_t::success_k;
+    }
 };
 
 using colocated_pool_t = colocated_pool<>;
@@ -1944,10 +1933,11 @@ inline std::uint64_t stream_words_(std::uint64_t const *words, std::size_t const
 inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_domain_t const &target,
                                  std::size_t const widest_domain_threads) noexcept {
     std::uint64_t largest_cache = 0;
-    for (std::size_t domain = 0; domain != topology.compute_domains_count(); ++domain)
-        largest_cache = max_of(
-            largest_cache, static_cast<std::uint64_t>(
-                               topology.compute_domain_at(static_cast<compute_domain_index_t>(domain)).cache_bytes));
+    for (std::size_t domain = 0; domain != topology.compute_domains_count(); ++domain) {
+        compute_domain_t const &compute = topology.compute_domain_at(static_cast<compute_domain_index_t>(domain));
+        largest_cache =
+            max_of(largest_cache, static_cast<std::uint64_t>(compute.cache_bytes_per_core) * compute.core_ids.size());
+    }
     // ? 64-bit math: a giant L3 times 8 overflows a 32-bit `size_t` before the RAM clamp can bite
     std::uint64_t bytes = max_of(max_of(largest_cache * 8, std::uint64_t(128) << 20),
                                  static_cast<std::uint64_t>(widest_domain_threads) * (std::uint64_t(8) << 20));
@@ -2076,7 +2066,7 @@ inline std::size_t derive_memory_levels_(measured_edge_t const *edges, std::size
         any_observed = bandwidths[i] != 0 || latencies[i] != 0;
     if (!any_observed) return 1; // ? Nothing probed yet - a single tier covers every domain
 
-    bubble_sort(order, memory_domains_count,
+    bubble_sort(std::span(order, memory_domains_count),
                 [bandwidths, latencies](std::size_t const &a, std::size_t const &b) noexcept {
                     if (bandwidths[a] != bandwidths[b]) return bandwidths[a] > bandwidths[b];
                     std::size_t const latency_a = latencies[a] ? latencies[a] : ~std::size_t(0);

@@ -125,9 +125,8 @@ struct log_memory_volume_t {
 struct log_core_range_t {
 
     /**
-     *  @brief Prints @p count core IDs into @p buffer, collapsing a contiguous run into a range.
-     *  @param[in] core_ids Core IDs to format, expected in ascending order; may be empty.
-     *  @param[in] count Number of entries in @p core_ids.
+     *  @brief Prints @p core_ids into @p buffer, collapsing a contiguous run into a range.
+     *  @param[in] core_ids Core IDs to format, in the order given; may be empty.
      *  @param[out] buffer Destination for the NUL-terminated string.
      *  @param[in] buffer_size Capacity of @p buffer in bytes, including the terminator.
      *  @param[in] colors Palette tinting the numbers.
@@ -135,10 +134,11 @@ struct log_core_range_t {
      *      the middle is elided with an ellipsis.
      *  @note Truncated to fit and always NUL-terminated; allow 256 bytes for colored output.
      */
-    void operator()(                                  //
-        core_id_t const *core_ids, std::size_t count, //
-        char *buffer, std::size_t buffer_size, logging_colors_t colors) const noexcept {
+    void operator()( //
+        std::span<core_id_t const> core_ids, char *buffer, std::size_t buffer_size,
+        logging_colors_t colors) const noexcept {
 
+        std::size_t const count = core_ids.size();
         if (count == 0) {
             std::snprintf(buffer, buffer_size, "%snone%s", colors.dim(), colors.reset());
             return;
@@ -244,7 +244,7 @@ struct log_numa_topology_t {
 
             // Format core range and memory
             char cores_str[256], memory_str[64];
-            log_core_range_t {}(node.first_core_id, node.logical_cores_count, cores_str, sizeof(cores_str), colorless);
+            log_core_range_t {}(node.core_ids, cores_str, sizeof(cores_str), colorless);
             log_memory_volume_t {}(node.volume_ram, memory_str, sizeof(memory_str), colorless);
 
             // Tree structure prefixes
@@ -257,15 +257,15 @@ struct log_numa_topology_t {
             auto const advance = [&](int written) noexcept {
                 if (written > 0) pos = min_of(pos + written, static_cast<int>(sizeof(line_buffer)) - 1);
             };
-            advance(std::snprintf(                                                        //
-                line_buffer, sizeof(line_buffer),                                         //
-                "%s%s%s%sNode%s %s%d%s • %sCores:%s %s%s (%zu)%s • %sMemory:%s %s%s%s",   //
-                colors.dim(), socket_prefix, node_connector,                              //
-                colors.cyan(), /* "Node" */ colors.reset(),                               //
-                colors.bold_cyan(), node.memory_domain_id, colors.reset(),                //
-                colors.green(), /* "Cores:" */ colors.reset(),                            //
-                colors.bold_green(), cores_str, node.logical_cores_count, colors.reset(), //
-                colors.yellow(), /* "Memory:" */ colors.reset(),                          //
+            advance(std::snprintf(                                                      //
+                line_buffer, sizeof(line_buffer),                                       //
+                "%s%s%s%sNode%s %s%d%s • %sCores:%s %s%s (%zu)%s • %sMemory:%s %s%s%s", //
+                colors.dim(), socket_prefix, node_connector,                            //
+                colors.cyan(), /* "Node" */ colors.reset(),                             //
+                colors.bold_cyan(), node.memory_domain_id, colors.reset(),              //
+                colors.green(), /* "Cores:" */ colors.reset(),                          //
+                colors.bold_green(), cores_str, node.core_ids.size(), colors.reset(),   //
+                colors.yellow(), /* "Memory:" */ colors.reset(),                        //
                 colors.bold_yellow(), memory_str, colors.reset()));
 
             // Add huge pages if any exist

@@ -259,12 +259,11 @@ static void test_topology_invariants() noexcept {
     std::size_t cores_across_domains = 0;
     for (std::size_t i = 0; i < compute_domains; ++i) {
         fu::compute_domain_t const &domain = topology.compute_domain_at(static_cast<fu::compute_domain_index_t>(i));
-        expect(domain.logical_cores_count != 0);
-        expect(domain.first_core_id != nullptr);
+        expect(!domain.core_ids.empty());
         expect(domain.compute_level < compute_levels);
         expect(domain.memory_domain_index < memory_domains);
         compute_level_seen[domain.compute_level] = true;
-        cores_across_domains += domain.logical_cores_count;
+        cores_across_domains += domain.core_ids.size();
     }
     // Every core must belong to exactly one compute domain.
     expect_eq(cores_across_domains, topology.logical_cores_count());
@@ -1306,6 +1305,14 @@ static void expect_spawn_shape_dispatches_(std::size_t const threads) noexcept {
     fu::distributed_pool_t pool("forkunion");
     expect(fu::succeeded(pool.spawn(machine_topology, threads)));
     expect_eq(pool.threads_count(), threads); // ! A shape was silently resized
+
+    // A pool no larger than the machine never doubles its workers up on any domain's cores.
+    for (std::size_t colocation = 0; colocation != pool.compute_domains_count(); ++colocation) {
+        fu::compute_domain_t const &domain = machine_topology.compute_domain_at(
+            static_cast<fu::compute_domain_index_t>(pool.compute_domain_index_of(colocation)));
+        if (threads <= machine_topology.logical_cores_count())
+            expect(pool.threads_count(colocation) <= domain.core_ids.size());
+    }
 
     pool.for_n_dynamic(tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
         std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
