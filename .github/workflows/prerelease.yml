@@ -146,12 +146,13 @@ jobs:
       - name: Test Rust
         run: cargo test
 
-      # Every other Rust step runs stable, so a post-1.84 API would silently raise the real floor.
+      # Every other Rust step runs the newest toolchain, so a post-MSRV API would silently raise the floor.
       # Unlocked on purpose: it is also the check on `resolver = "3"` holding dependencies to it.
+      # ? 1.100 is the beta channel until 2026-11-12; pin `1.100` here once it ships.
       - name: Test Rust at the MSRV
         run: |
-          rustup toolchain install 1.84 --profile minimal
-          cargo +1.84 test --lib
+          rustup toolchain install beta --profile minimal
+          cargo +beta test --lib
 
       # Nothing else builds `benchmarks`, so both `[[bin]]` targets went uncompiled.
       - name: Build the Rust benchmarks

@@ -5,6 +5,9 @@
 //! File: rust/forkunion/allocators.rs
 //! Author: Ash Vardanian
 
+use alloc::collections::TryReserveError;
+use alloc::vec::Vec;
+use core::alloc::{AllocError, Allocator, Layout};
 use core::ffi::{c_int, c_void};
 use core::ptr::NonNull;
 use core::slice;
@@ -36,13 +39,13 @@ extern "C" {
     fn fu_free_symmetric(base: *mut c_void, total_bytes: usize);
 }
 
-/// Result of a memory-domain allocation; carries only the OS id, so it can outlive the topology.
+/// Result of a memory-domain allocation; carries only the OS ID, so it can outlive the topology.
 #[derive(Debug)]
 pub struct AllocationResult {
     ptr: NonNull<u8>,
     allocated_bytes: usize,
     bytes_per_page: usize,
-    // The OS memory-domain id is all `fu_free_on_domain_id` needs, so the allocation carries no
+    // The OS memory-domain ID is all `fu_free_on_domain_id` needs, so the allocation carries no
     // topology handle and can outlive the `Topology` it came from.
     memory_domain_id: MemoryDomainId,
 }
@@ -78,7 +81,7 @@ impl AllocationResult {
         self.bytes_per_page
     }
 
-    /// Returns the OS id of the memory domain this memory was allocated on.
+    /// Returns the OS ID of the memory domain this memory was allocated on.
     #[must_use]
     pub fn memory_domain_id(&self) -> MemoryDomainId {
         self.memory_domain_id
@@ -162,11 +165,11 @@ impl DomainAllocator {
     ///
     /// # Arguments
     ///
-    /// - `memory_domain_id` - The OS memory-domain id from [`Topology::memory_domain_id_at_index`]
+    /// - `memory_domain_id` - The OS memory-domain ID from [`Topology::memory_domain_id_at_index`]
     ///
     /// # Errors
     ///
-    /// Returns `None` if the id is the `-1` sentinel, i.e. it names no domain.
+    /// Returns `None` if the ID is the `-1` sentinel, i.e. it names no domain.
     ///
     /// # Examples
     ///
@@ -190,14 +193,14 @@ impl DomainAllocator {
         if !memory_domain_id.is_valid() {
             return Err(Error::new(
                 Status::InvalidArgument,
-                "the memory domain id names no domain",
+                "the memory domain ID names no domain",
             ));
         }
 
         Ok(Self { memory_domain_id })
     }
 
-    /// Returns the OS id of the memory domain this allocator is bound to.
+    /// Returns the OS ID of the memory domain this allocator is bound to.
     #[must_use]
     pub fn memory_domain_id(&self) -> MemoryDomainId {
         self.memory_domain_id
@@ -393,6 +396,33 @@ impl DomainAllocator {
     }
 }
 
+// SAFETY: blocks come from `fu_allocate_on_domain_id` and return through `fu_free_on_domain_id`
+// at the same size, every copy of an allocator names the same domain, and alignments past the
+// core's are refused.
+unsafe impl Allocator for DomainAllocator {
+    fn allocate(&self, layout: Layout) -> core::result::Result<NonNull<[u8]>, AllocError> {
+        if layout.align() > DEFAULT_ALIGNMENT {
+            return Err(AllocError);
+        }
+        if layout.size() == 0 {
+            let dangling = NonNull::new(core::ptr::without_provenance_mut(layout.align())).ok_or(AllocError)?;
+            return Ok(NonNull::slice_from_raw_parts(dangling, 0));
+        }
+        let mut memory: *mut c_void = core::ptr::null_mut();
+        let status = unsafe { fu_allocate_on_domain_id(self.memory_domain_id.get(), layout.size(), &mut memory) };
+        let memory = NonNull::new(memory.cast::<u8>())
+            .filter(|_| status == 0)
+            .ok_or(AllocError)?;
+        Ok(NonNull::slice_from_raw_parts(memory, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        if layout.size() != 0 {
+            unsafe { fu_free_on_domain_id(self.memory_domain_id.get(), ptr.as_ptr().cast(), layout.size()) }
+        }
+    }
+}
+
 /// Creates an allocator for memory domain 0, used when the specific domain does not matter.
 ///
 /// # Examples
@@ -419,6 +449,11 @@ impl DomainAllocator {
 /// ```
 pub fn default_pinned_allocator(topology: &Topology) -> Result<DomainAllocator> {
     DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0))?)
+}
+
+/// The error a [`PinnedVec`] reports when its allocator refuses growth or its length would wrap.
+fn refused_growth(_: TryReserveError) -> Error {
+    Error::new(Status::BadAlloc, "the domain allocator refused to grow the vector")
 }
 
 /// A Vec-like container that uses NUMA-aware pinned memory allocation.
@@ -453,11 +488,8 @@ pub fn default_pinned_allocator(topology: &Topology) -> Result<DomainAllocator> 
 /// ```
 #[derive(Debug)]
 pub struct PinnedVec<T> {
-    allocator: DomainAllocator,
-    allocation: Option<AllocationResult>,
-    len: usize,
-    capacity: usize,
-    _phantom: core::marker::PhantomData<T>,
+    // Only fallible growth reaches it: `Vec`'s own growing methods abort on a refusal.
+    items: Vec<T, DomainAllocator>,
 }
 
 impl<T> PinnedVec<T> {
@@ -481,11 +513,7 @@ impl<T> PinnedVec<T> {
     #[must_use]
     pub fn new_in(allocator: DomainAllocator) -> Self {
         Self {
-            allocator,
-            allocation: None,
-            len: 0,
-            capacity: 0,
-            _phantom: core::marker::PhantomData,
+            items: Vec::new_in(allocator),
         }
     }
 
@@ -512,43 +540,33 @@ impl<T> PinnedVec<T> {
     /// assert_eq!(vec.capacity(), 100);
     /// ```
     pub fn with_capacity_in(allocator: DomainAllocator, capacity: usize) -> Result<Self> {
-        let mut vec = Self {
-            allocator,
-            allocation: None,
-            len: 0,
-            capacity: 0,
-            _phantom: core::marker::PhantomData,
-        };
-
-        if capacity > 0 {
-            vec.reserve(capacity)?;
-        }
-
+        let mut vec = Self::new_in(allocator);
+        vec.items.try_reserve_exact(capacity).map_err(refused_growth)?;
         Ok(vec)
     }
 
     /// Returns the number of elements in the vector.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.len
+        self.items.len()
     }
 
     /// Returns `true` if the vector contains no elements.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.items.is_empty()
     }
 
     /// Returns the number of elements the vector can hold without reallocating.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.items.capacity()
     }
 
-    /// Returns the OS id of the memory domain this vector's memory is allocated on.
+    /// Returns the OS ID of the memory domain this vector's memory is allocated on.
     #[must_use]
     pub fn memory_domain_id(&self) -> MemoryDomainId {
-        self.allocator.memory_domain_id()
+        self.items.allocator().memory_domain_id()
     }
 
     /// Reserves capacity for at least `additional` more elements.
@@ -573,38 +591,7 @@ impl<T> PinnedVec<T> {
     /// assert!(vec.capacity() >= 10);
     /// ```
     pub fn reserve(&mut self, additional: usize) -> Result<()> {
-        let needed_capacity = self
-            .len
-            .checked_add(additional)
-            .ok_or(Error::new(Status::InvalidArgument, "the reserved capacity would wrap"))?;
-        if needed_capacity <= self.capacity {
-            return Ok(());
-        }
-
-        let new_capacity = needed_capacity.max(self.capacity.saturating_mul(2)).max(4);
-        self.grow_to(new_capacity)
-    }
-
-    /// Grows the vector to the specified capacity.
-    fn grow_to(&mut self, new_capacity: usize) -> Result<()> {
-        if new_capacity <= self.capacity {
-            return Ok(());
-        }
-
-        let new_allocation = self.allocator.allocate_for::<T>(new_capacity)?;
-
-        if let Some(old_allocation) = self.allocation.take() {
-            // Copy existing elements to new allocation
-            unsafe {
-                let old_ptr = old_allocation.as_ptr() as *const T;
-                let new_ptr = new_allocation.as_ptr() as *mut T;
-                core::ptr::copy_nonoverlapping(old_ptr, new_ptr, self.len);
-            }
-        }
-
-        self.allocation = Some(new_allocation);
-        self.capacity = new_capacity;
-        Ok(())
+        self.items.try_reserve(additional).map_err(refused_growth)
     }
 
     /// Appends an element to the back of the vector.
@@ -630,15 +617,8 @@ impl<T> PinnedVec<T> {
     /// assert_eq!(vec[0], 42);
     /// ```
     pub fn push(&mut self, value: T) -> Result<()> {
-        if self.len >= self.capacity {
-            self.reserve(1)?;
-        }
-
-        unsafe {
-            let ptr = self.as_mut_ptr().add(self.len);
-            core::ptr::write(ptr, value);
-        }
-        self.len += 1;
+        self.reserve(1)?;
+        self.items.push(value); // ? Never reallocates after the reservation above
         Ok(())
     }
 
@@ -661,15 +641,7 @@ impl<T> PinnedVec<T> {
     /// assert_eq!(vec.pop(), None);
     /// ```
     pub fn pop(&mut self) -> Option<T> {
-        if self.len == 0 {
-            return None;
-        }
-
-        self.len -= 1;
-        unsafe {
-            let ptr = self.as_mut_ptr().add(self.len);
-            Some(core::ptr::read(ptr))
-        }
+        self.items.pop()
     }
 
     /// Clears the vector, removing all values.
@@ -687,31 +659,19 @@ impl<T> PinnedVec<T> {
     /// assert_eq!(vec.len(), 0);
     /// ```
     pub fn clear(&mut self) {
-        unsafe {
-            let ptr = self.as_mut_ptr();
-            for i in 0..self.len {
-                core::ptr::drop_in_place(ptr.add(i));
-            }
-        }
-        self.len = 0;
+        self.items.clear();
     }
 
     /// Returns a raw pointer to the vector's buffer.
     #[must_use]
     pub fn as_ptr(&self) -> *const T {
-        match &self.allocation {
-            Some(alloc) => alloc.as_ptr() as *const T,
-            None => core::ptr::NonNull::dangling().as_ptr(),
-        }
+        self.items.as_ptr()
     }
 
     /// Returns a mutable raw pointer to the vector's buffer.
     #[must_use]
     pub fn as_mut_ptr(&mut self) -> *mut T {
-        match &self.allocation {
-            Some(alloc) => alloc.as_ptr() as *mut T,
-            None => core::ptr::NonNull::dangling().as_ptr(),
-        }
+        self.items.as_mut_ptr()
     }
 
     /// Returns a synchronization-friendly mutable pointer wrapper.
@@ -719,23 +679,19 @@ impl<T> PinnedVec<T> {
     /// The pointer may be shared between threads as long as each accesses disjoint indices.
     #[must_use]
     pub fn sync_ptr(&self) -> SyncMutPtr<T> {
-        let ptr = match &self.allocation {
-            Some(alloc) => alloc.as_ptr() as *mut T,
-            None => core::ptr::NonNull::dangling().as_ptr(),
-        };
-        SyncMutPtr::new(ptr)
+        SyncMutPtr::new(self.items.as_ptr().cast_mut())
     }
 
     /// Returns a slice containing the entire vector.
     #[must_use]
     pub fn as_slice(&self) -> &[T] {
-        unsafe { core::slice::from_raw_parts(self.as_ptr(), self.len) }
+        &self.items
     }
 
     /// Returns a mutable slice containing the entire vector.
     #[must_use]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
+        &mut self.items
     }
 
     /// Returns an iterator over the vector.
@@ -778,20 +734,15 @@ impl<T> PinnedVec<T> {
     ///
     /// Returns an error if allocation fails when growing the vector.
     pub fn insert(&mut self, index: usize, element: T) -> Result<()> {
-        if index > self.len {
-            panic!("insertion index (is {}) should be <= len (is {})", index, self.len);
+        if index > self.items.len() {
+            panic!(
+                "insertion index (is {}) should be <= len (is {})",
+                index,
+                self.items.len()
+            );
         }
-
-        if self.len >= self.capacity {
-            self.reserve(1)?;
-        }
-
-        unsafe {
-            let ptr = self.as_mut_ptr();
-            core::ptr::copy(ptr.add(index), ptr.add(index + 1), self.len - index);
-            core::ptr::write(ptr.add(index), element);
-        }
-        self.len += 1;
+        self.reserve(1)?;
+        self.items.insert(index, element); // ? Never reallocates after the reservation above
         Ok(())
     }
 
@@ -806,17 +757,7 @@ impl<T> PinnedVec<T> {
     /// Panics if `index >= len`.
     #[must_use]
     pub fn remove(&mut self, index: usize) -> T {
-        if index >= self.len {
-            panic!("removal index (is {}) should be < len (is {})", index, self.len);
-        }
-
-        unsafe {
-            let ptr = self.as_mut_ptr();
-            let result = core::ptr::read(ptr.add(index));
-            core::ptr::copy(ptr.add(index + 1), ptr.add(index), self.len - index - 1);
-            self.len -= 1;
-            result
-        }
+        self.items.remove(index)
     }
 
     /// Extend the vector by cloning elements from a slice.
@@ -833,9 +774,7 @@ impl<T> PinnedVec<T> {
         T: Clone,
     {
         self.reserve(other.len())?;
-        for item in other {
-            self.push(item.clone())?;
-        }
+        self.items.extend_from_slice(other); // ? Never reallocates after the reservation above
         Ok(())
     }
 
@@ -896,15 +835,7 @@ impl<T> PinnedVec<T> {
 
     /// Shortens the vector, keeping the first `len` elements and dropping the rest.
     pub fn truncate(&mut self, len: usize) {
-        if len < self.len {
-            unsafe {
-                let ptr = self.as_mut_ptr();
-                for i in len..self.len {
-                    core::ptr::drop_in_place(ptr.add(i));
-                }
-            }
-            self.len = len;
-        }
+        self.items.truncate(len);
     }
 
     /// Resizes the vector in-place so that `len` is equal to `new_len`.
@@ -912,14 +843,8 @@ impl<T> PinnedVec<T> {
     where
         T: Clone,
     {
-        if new_len > self.len {
-            self.reserve(new_len - self.len)?;
-            while self.len < new_len {
-                self.push(value.clone())?;
-            }
-        } else {
-            self.truncate(new_len);
-        }
+        self.reserve(new_len.saturating_sub(self.items.len()))?;
+        self.items.resize(new_len, value); // ? Never reallocates after the reservation above
         Ok(())
     }
 
@@ -928,15 +853,8 @@ impl<T> PinnedVec<T> {
     where
         F: FnMut() -> T,
     {
-        if new_len > self.len {
-            self.reserve(new_len - self.len)?;
-            let mut f = f;
-            while self.len < new_len {
-                self.push(f())?;
-            }
-        } else {
-            self.truncate(new_len);
-        }
+        self.reserve(new_len.saturating_sub(self.items.len()))?;
+        self.items.resize_with(new_len, f); // ? Never reallocates after the reservation above
         Ok(())
     }
 
@@ -1004,15 +922,6 @@ impl<T> core::ops::IndexMut<usize> for PinnedVec<T> {
         &mut self.as_mut_slice()[index]
     }
 }
-
-impl<T> Drop for PinnedVec<T> {
-    fn drop(&mut self) {
-        self.clear();
-    }
-}
-
-unsafe impl<T: Send> Send for PinnedVec<T> {}
-unsafe impl<T: Sync> Sync for PinnedVec<T> {}
 
 /// One symmetric mapping the C allocator stripes across every memory domain and frees as a whole.
 ///
@@ -1686,6 +1595,26 @@ mod tests {
         assert!(topology
             .memory_domain_id_at_index(MemoryDomain(memory_domains + 1))
             .is_err());
+    }
+
+    /// Standard containers keep their storage on the domain, and a growth the allocator refuses
+    /// comes back as `BadAlloc` rather than aborting the process, as `Vec::push` itself would.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn domain_allocator_backs_standard_containers() {
+        let topology = Topology::new().unwrap();
+        let allocator = default_pinned_allocator(&topology).unwrap();
+        let boxed = alloc::boxed::Box::new_in(42u64, allocator);
+        assert_eq!(*boxed, 42);
+        let mut items: Vec<u32, DomainAllocator> = Vec::new_in(allocator);
+        items.try_reserve(1024).unwrap();
+        items.extend(0..1024);
+        assert_eq!(items[1023], 1023);
+
+        #[repr(align(8192))]
+        struct OverAligned(#[allow(dead_code)] u8);
+        let mut refused = PinnedVec::<OverAligned>::new_in(allocator);
+        assert_eq!(refused.push(OverAligned(1)).unwrap_err().status, Status::BadAlloc);
     }
 
     #[test]

@@ -222,11 +222,11 @@ pub struct MemoryDomain(pub usize);
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComputeLevel(pub usize);
 
-/// An OS memory-domain id - a NUMA node - the allocators key off, obtained from
+/// An OS memory-domain ID - a NUMA node - the allocators key off, obtained from
 /// [`Topology::memory_domain_id_at_index`]; `-1` when there is none.
 ///
-/// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS id
-/// the kernel labels a node with. A [`DomainAllocator`] holds only this id, so it - and every
+/// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS ID
+/// the kernel labels a node with. A [`DomainAllocator`] holds only this ID, so it - and every
 /// [`AllocationResult`] it hands out - is free of the topology handle and can outlive it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomainId(pub i32);
@@ -259,14 +259,14 @@ impl ComputeLevel {
 }
 
 impl MemoryDomainId {
-    /// The raw OS id, for the FFI boundary; `-1` names no domain.
+    /// The raw OS ID, for the FFI boundary; `-1` names no domain.
     #[inline]
     #[must_use]
     pub fn get(self) -> i32 {
         self.0
     }
 
-    /// Whether this id names a real domain rather than the `-1` sentinel.
+    /// Whether this ID names a real domain rather than the `-1` sentinel.
     #[inline]
     #[must_use]
     pub fn is_valid(self) -> bool {
@@ -422,7 +422,7 @@ impl Topology {
         Ok(answer)
     }
 
-    /// Resolves a memory domain's dense index to the OS id a [`DomainAllocator`] takes.
+    /// Resolves a memory domain's dense index to the OS ID a [`DomainAllocator`] takes.
     ///
     /// A real domain may itself carry `-1` where the OS names none, so an out-of-range index is a
     /// reported failure rather than the same sentinel.

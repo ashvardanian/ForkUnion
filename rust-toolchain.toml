@@ -1,4 +1,4 @@
 [toolchain]
-channel = "stable"
+channel = "beta" # ? `rust-version = "1.100"` is beta until 2026-11-12; return to "stable" once it ships
 components = ["rustfmt", "clippy"]
 profile = "minimal"
