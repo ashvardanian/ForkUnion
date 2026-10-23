@@ -388,10 +388,10 @@ if (Threads_FOUND)
 endif ()
 
 # Does `std::atomic` need libatomic on this target? x86-64 inlines the 64-bit operations; 32-bit Arm resolves them
-# through the library, and the pools use `std::atomic<std::uint64_t>`. Probe the target rather than guess by platform -
-# LLVM's `CheckAtomic` pattern - and carry the answer on the header, so every consumer inherits it: the tests, the
-# compiled libraries, and a downstream `find_package` alike, none restating `-latomic`. The bare name `atomic` becomes
-# `-latomic` at link and stays relocatable, unlike the absolute path `find_library` would bake into the package.
+# through the library, and the pools use 64-bit atomic words. Probe the target rather than guess by platform - LLVM's
+# `CheckAtomic` pattern - and carry the answer on the header, so every consumer inherits it: the tests, the compiled
+# libraries, and a downstream `find_package` alike, none restating `-latomic`. The bare name `atomic` becomes `-latomic`
+# at link and stays relocatable, unlike the absolute path `find_library` would bake into the package.
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles(
     "#include <atomic>

@@ -1231,34 +1231,31 @@ pub fn named_spawn(topology: &Topology, name: &str, threads: usize) -> ThreadPoo
 }
 
 /// Standalone function to distribute `n` similar duration calls between threads.
-pub fn for_n<F>(pool: &mut ThreadPool, n: usize, function: F)
+pub fn for_n<F>(pool: &mut ThreadPool, n: usize, function: F) -> Result<()>
 where
     F: Fn(usize, ThreadInDomain) + Sync,
 {
-    let _operation = pool.for_n(n, function);
-    // Operation executes and joins in its destructor
+    pool.for_n(n, function)
 }
 
 /// Standalone function to execute `n` uneven tasks on all threads.
-pub fn for_n_dynamic<F>(pool: &mut ThreadPool, n: usize, function: F)
+pub fn for_n_dynamic<F>(pool: &mut ThreadPool, n: usize, function: F) -> Result<()>
 where
     F: Fn(usize, ThreadInDomain) + Sync,
 {
-    let _operation = pool.for_n_dynamic(n, function);
-    // Operation executes and joins in its destructor
+    pool.for_n_dynamic(n, function)
 }
 
 /// Standalone function to distribute `n` tasks in slices.
-pub fn for_slices<F>(pool: &mut ThreadPool, n: usize, function: F)
+pub fn for_slices<F>(pool: &mut ThreadPool, n: usize, function: F) -> Result<()>
 where
     F: Fn(TasksRange, ThreadInDomain) + Sync,
 {
-    let _operation = pool.for_slices(n, function);
-    // Operation executes and joins in its destructor
+    pool.for_slices(n, function)
 }
 
 /// Helper function to visit every element exactly once with mutable access.
-pub fn for_each_task_mut<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F)
+pub fn for_each_task_mut<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F) -> Result<()>
 where
     T: Send,
     F: Fn(&mut T, usize, ThreadInDomain) + Sync,
@@ -1266,14 +1263,14 @@ where
     let ptr = SyncMutPtr::new(data.as_mut_ptr());
     let n = data.len();
 
-    let _operation = pool.for_n(n, move |task, at| {
+    pool.for_n(n, move |task, at| {
         let item = unsafe { &mut *ptr.get(task) };
         function(item, task, at);
-    });
+    })
 }
 
 /// Helper function to visit every element exactly once with dynamic work-stealing.
-pub fn for_each_task_mut_dynamic<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F)
+pub fn for_each_task_mut_dynamic<T, F>(pool: &mut ThreadPool, data: &mut [T], function: F) -> Result<()>
 where
     T: Send,
     F: Fn(&mut T, usize, ThreadInDomain) + Sync,
@@ -1281,10 +1278,10 @@ where
     let ptr = SyncMutPtr::new(data.as_mut_ptr());
     let n = data.len();
 
-    let _operation = pool.for_n_dynamic(n, move |task, at| {
+    pool.for_n_dynamic(n, move |task, at| {
         let item = unsafe { &mut *ptr.get(task) };
         function(item, task, at);
-    });
+    })
 }
 
 #[cfg(test)]
@@ -1488,7 +1485,8 @@ mod tests {
             if visited_ref[task_index].swap(true, Ordering::Relaxed) {
                 duplicate_ref.store(true, Ordering::Relaxed);
             }
-        });
+        })
+        .unwrap();
 
         assert!(
             !duplicate.load(Ordering::Relaxed),
@@ -1515,7 +1513,8 @@ mod tests {
             if visited_ref[task_index].swap(true, Ordering::Relaxed) {
                 duplicate_ref.store(true, Ordering::Relaxed);
             }
-        });
+        })
+        .unwrap();
 
         assert!(
             !duplicate.load(Ordering::Relaxed),
@@ -1536,7 +1535,8 @@ mod tests {
 
         for_each_task_mut(&mut pool, &mut data, |x, task, _at| {
             *x = task as u64 * 2;
-        });
+        })
+        .unwrap();
 
         for (i, &value) in data.iter().enumerate() {
             assert_eq!(value, i as u64 * 2);

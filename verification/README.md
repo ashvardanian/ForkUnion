@@ -81,7 +81,7 @@ The calibration in `weak_memory_litmus/` pins the model to RC11 on message passi
 ## What the models found
 
 The pool's three atomics are sound, and the models prove the behaviours composed on them; what they found sits at the edges.
-Each finding is the `@verify` line that replays it, where the full counterexample is written out.
+Where a model replays a finding, its `@verify` line links it, and the full counterexample is written out there.
 
 - A dispatch waking a chilled pool restores the workers' scheduling class to `SCHED_OTHER`, the class they started on, since `SCHED_FIFO | SCHED_RR` is `SCHED_BATCH` on Linux.
 - The same wake-up exchanges the mood strongly, since a spurious failure of a weak one leaves a colocated worker in its startup wait forever: [`colocated_pool.pml`](colocated_pool.pml).

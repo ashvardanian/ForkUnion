@@ -44,10 +44,10 @@ namespace forkunion {
  *  #include <cstdlib>        // `EXIT_FAILURE`, `EXIT_SUCCESS`
  *  #include <forkunion.hpp>  // `flat_pool_t`
  *
- *  using fu = ashvardanian::forkunion;
+ *  namespace fu = ashvardanian::forkunion;
  *  int main() {
  *      fu::flat_pool_t pool; // ? Alias to `fu::flat_pool<>` template
- *      if (!pool.spawn(allowed_cores_count())) return EXIT_FAILURE;
+ *      if (fu::failed(pool.spawn(fu::allowed_cores_count()))) return EXIT_FAILURE;
  *      pool.for_threads([](std::size_t i) noexcept { std::printf("Hi from thread %zu\n", i); });
  *      return EXIT_SUCCESS;
  *  }

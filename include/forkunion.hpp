@@ -16,7 +16,7 @@
  *  #include <cstdlib>        // `EXIT_FAILURE`, `EXIT_SUCCESS`
  *  #include <forkunion.hpp>  // `fu::flat_pool_t`
  *
- *  using fu = ashvardanian::forkunion;
+ *  namespace fu = ashvardanian::forkunion;
  *  int main(int argc, char *argv[]) {
  *
  *      fu::flat_pool_t pool;

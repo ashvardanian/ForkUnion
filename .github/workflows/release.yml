@@ -45,6 +45,7 @@ jobs:
           update-major-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
             include/forkunion/types.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
+            mojo/forkunion/library.mojo:^comptime BINDING_MAJOR = (\d+)
           update-minor-version-in: |
             include/forkunion.hpp:^#define FORKUNION_VERSION_MINOR (\d+)
             include/forkunion/types.hpp:^#define FORKUNION_VERSION_MINOR (\d+)

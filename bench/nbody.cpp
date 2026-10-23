@@ -19,8 +19,7 @@
  *  rate it sustained. Contended-atomic paths amplify any background noise, and short dynamic runs
  *  swing ~±30%, so the window sizes the iteration count to the machine instead of guessing it per
  *  backend. Published comparisons run under `numactl --interleave=all` together with
- *  `OMP_PROC_BIND=spread OMP_PLACES=cores`; this C++ build also adds `-ffast-math`, which Rust
- *  cannot express globally.
+ *  `OMP_PROC_BIND=spread OMP_PLACES=cores`.
  *  To benchmark each backend:
  *
  *  @code{.sh}

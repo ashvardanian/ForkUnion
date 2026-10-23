@@ -803,6 +803,22 @@ struct memory_domain {
 
 using memory_domain_t = memory_domain<>;
 
+#if FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
+
+/**
+ *  @brief Apple's `hw.perflevelN.name` as an @b absolute ladder; higher is more performant.
+ *  @note Absolute, unlike @c compute_level: "Performance" is the same class on an M1, its top tier,
+ *      and an M5 Pro, its bottom. Apple has shipped exactly these three names.
+ */
+enum class apple_core_quality_t : int {
+    unknown_k = -1,    // No `hw.perflevelN.name` read for these cores
+    efficiency_k = 0,  // "Efficiency" - the only tier that is physically E-cores
+    performance_k = 1, // "Performance"
+    super_k = 2,       // "Super" - the M5-era top tier, still a big core
+};
+
+#endif // FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS
+
 /**
  *  @brief One bindable cluster of cores sharing a QoS class and locality - the compute axis.
  *  @sa memory_domain is the memory axis; a @c machine_topology exposes both plus their affinity.
@@ -1426,18 +1442,6 @@ inline void apple_sysctl_string(char const *name, char *out, std::size_t cap) no
     // ? A value that exactly filled the buffer arrives unterminated
     out[cap - 1] = '\0';
 }
-
-/**
- *  @brief Apple's `hw.perflevelN.name` as an @b absolute ladder; higher is more performant.
- *  @note Absolute, unlike @c compute_level: "Performance" is the same class on an M1, its top tier,
- *      and an M5 Pro, its bottom. Apple has shipped exactly these three names.
- */
-enum class apple_core_quality_t : int {
-    unknown_k = -1,    // No `hw.perflevelN.name` read for these cores
-    efficiency_k = 0,  // "Efficiency" - the only tier that is physically E-cores
-    performance_k = 1, // "Performance"
-    super_k = 2,       // "Super" - the M5-era top tier, still a big core
-};
 
 /**
  *  @brief The name Apple gives an absolute core class, or @c nullptr for an unknown one.

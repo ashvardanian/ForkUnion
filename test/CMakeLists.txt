@@ -19,17 +19,11 @@ function (forkunion_set_test_properties target_)
 
     # if we're not in Release mode
     if (NOT CMAKE_BUILD_TYPE STREQUAL "Release")
-        # if we're on GCC/Clang-compatible compiler and not in Release, turn on TSAN here too
+        # if we're on GCC/Clang-compatible compiler and not in Release, build unoptimized with frame pointers
         if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
             OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
             OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
         )
-            # Using thread sanitizers caused all kinds of stalls on NUMA systems
-            # ~~~
-            # message(STATUS "Enabling ThreadSanitizer for ${target_}")
-            # target_compile_options(${target_} PRIVATE -fsanitize=undefined,thread)
-            # target_link_options(${target_} PRIVATE -fsanitize=undefined,thread)
-            # ~~~
             target_compile_options(${target_} PRIVATE -g -O0)
             target_compile_options(${target_} PRIVATE -fno-omit-frame-pointer)
             target_link_options(${target_} PRIVATE)
@@ -75,7 +69,7 @@ endforeach ()
 
 enable_language(C)
 
-# Builds one `main.c` C-API test target, sharing the C11 / output-dir / libatomic wiring. Callers add the one flag that
+# Builds one `main.c` C-API test target, sharing the C11 / output-dir wiring. Callers add the one flag that
 # distinguishes their variant (GNU nested functions, Clang blocks).
 function (forkunion_add_c_test target_ extensions_)
     add_executable(${target_} main.c)

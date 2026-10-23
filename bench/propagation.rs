@@ -435,9 +435,9 @@ fn run_forkunion<S: Schedule, P: Placement>(c: &mut Ctx) {
             }
         };
         if S::STATIC_SCHEDULE {
-            fu::for_n(pool, vertices, body);
+            fu::for_n(pool, vertices, body).expect("round");
         } else {
-            fu::for_n_dynamic(pool, vertices, body);
+            fu::for_n_dynamic(pool, vertices, body).expect("round");
         }
         rounds += 1;
         let changes: u64 = c.counters.iter().map(|counter| counter.0).sum();

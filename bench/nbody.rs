@@ -370,9 +370,9 @@ fn for_each<S: Schedule, T: Send + Sync, F: Fn(&mut T, usize, fu::ThreadInDomain
     body: F,
 ) {
     if S::STATIC_SCHEDULE {
-        fu::for_each_task_mut(pool, data, body);
+        fu::for_each_task_mut(pool, data, body).expect("sweep");
     } else {
-        fu::for_each_task_mut_dynamic(pool, data, body);
+        fu::for_each_task_mut_dynamic(pool, data, body).expect("sweep");
     }
 }
 

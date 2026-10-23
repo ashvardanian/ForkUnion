@@ -24,9 +24,7 @@ if (NOT TARGET Taskflow::Taskflow)
     target_include_directories(Taskflow::Taskflow SYSTEM INTERFACE ${taskflow_SOURCE_DIR})
 endif ()
 
-# Both demo benchmarks share identical wiring - C++ for clear state ownership, but linking the pre-compiled C ABI so the
-# runtime busy-wait waiter resolves at runtime - the whole point, since AArch64 `WFET` is unreachable through the
-# compile-time C++ `preferred_yield_t`.
+# Both demo benchmarks share identical wiring and pick their waiter at compile time through `preferred_yield_t`.
 function (forkunion_add_benchmark target_ source_)
     add_executable(${target_} ${source_})
     # C++20 for the benchmark harness, as for the library; Taskflow v4 requires C++20 concepts.
