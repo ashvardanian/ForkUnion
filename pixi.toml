@@ -16,7 +16,7 @@ version = "4.0.0-rc.1"
 
 [dependencies]
 cxx-compiler = "*"
-mojo = ">=1.0.0,<2"
+mojo = ">=1.1.0,<1.2"
 
 # Consumers depend on this by source rather than by channel: `pixi-build-mojo` compiles the package
 # and the C++ core together, so a `git` or `path` entry in their manifest is the whole install.
@@ -43,7 +43,7 @@ test = { cmd = "mojo run -I mojo test/main.mojo", depends-on = ["build-native"] 
 # The demo benchmarks measure against a baseline the library itself never needs, so it is scoped
 # here rather than carried by every consumer.
 [feature.benchmarks.dependencies]
-max = "*"
+max = ">=26.6,<26.7"
 
 # The MAX runtime the baseline pulls in needs a newer glibc than conda-forge's default sysroot,
 # and the constraint below carries the floor. Scoped here so the library itself keeps the lower one.

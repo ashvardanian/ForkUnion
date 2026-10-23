@@ -54,7 +54,7 @@ from forkunion.topology import (
     TopologyDelete,
     TopologyNew,
 )
-from forkunion.types import Error, ErrorKind
+from forkunion.types import Error
 
 comptime LIBRARY_FILE = StaticString("libforkunion.so")
 """The name `build-native` installs on every platform, macOS included. The loader already searches
@@ -72,7 +72,7 @@ comptime VersionPart = def() thin abi("C") -> c_int
 # endregion Signatures
 
 
-@always_inline
+@inline(.always)
 def _resolve[
     Signature: TrivialRegisterPassable
 ](ref handle: OwnedDLHandle, name: StaticString) raises Error -> Signature:
@@ -84,7 +84,7 @@ def _resolve[
     comptime assert __fn_type_is_cabi[Signature](), 'the signature must carry abi("C")'
     var address = handle.get_symbol[NoneType](name)
     if not address:
-        raise Error(ErrorKind.SYMBOL_MISSING, name)
+        raise Error(.SYMBOL_MISSING, name)
     return Pointer(to=address.value()).unsafe_bitcast[Signature]()[]
 
 
@@ -302,11 +302,11 @@ struct _Loaded:
             # the final `dlclose` must leave the code mapped.
             self.handle = OwnedDLHandle(String(LIBRARY_FILE), DEFAULT_RTLD | RTLD.NODELETE)
         except:
-            raise Error(ErrorKind.LIBRARY_MISSING, LIBRARY_FILE)
+            raise Error(.LIBRARY_MISSING, LIBRARY_FILE)
         self.symbols = Symbols(self.handle)
         if Int(self.symbols.version_major()) != BINDING_MAJOR:
             raise Error(
-                ErrorKind.LIBRARY_MISSING,
+                .LIBRARY_MISSING,
                 "major version differs from the binding",
             )
 
@@ -330,7 +330,7 @@ struct Library(ImplicitlyCopyable):
         """
         self.shared = ArcPointer(_Loaded())
 
-    @always_inline
+    @inline(.always)
     def symbols(self) -> ref[origin_of(self.shared[].symbols)] Symbols:
         """The resolved entry points, borrowed rather than copied on every call.
 

@@ -1056,7 +1056,7 @@ Now, the Rust library is a wrapper over the C binding of the C++ core implementa
 
 Toolchain floors, never caps.
 The header needs __C++20__, a C++23 consumer keeps its own standard, and the pre-compiled libraries build at C++20 regardless.
-The C ABI needs __C99__, and the build tooling __CMake 3.21__ or 3.25 for the presets, __Rust 1.100__, __Zig 0.16__, and __Mojo 1.0__.
+The C ABI needs __C99__, and the build tooling __CMake 3.21__ or 3.25 for the presets, __Rust 1.100__, __Zig 0.16__, and __Mojo 1.1__.
 
 To run the C++ tests, use the CMake presets CI uses; `cmake --list-presets` shows the ones this machine can build:
 

@@ -94,31 +94,31 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
         Args:
             writer: The sink the reason is appended to.
         """
-        if self == Self.LIBRARY_MISSING:
+        if self == .LIBRARY_MISSING:
             writer.write("the core is not on the loader path")
-        elif self == Self.SYMBOL_MISSING:
+        elif self == .SYMBOL_MISSING:
             writer.write("the loaded core is missing a symbol")
-        elif self == Self.BAD_ALLOC:
+        elif self == .BAD_ALLOC:
             writer.write("an allocation failed")
-        elif self == Self.CAPACITY_EXHAUSTED:
+        elif self == .CAPACITY_EXHAUSTED:
             writer.write("a fixed capacity was exhausted")
-        elif self == Self.INVALID_ARGUMENT:
+        elif self == .INVALID_ARGUMENT:
             writer.write("an argument was rejected")
-        elif self == Self.CONFIG_MISMATCH:
+        elif self == .CONFIG_MISMATCH:
             writer.write("the handles cannot serve this call together")
-        elif self == Self.ALREADY_SPAWNED:
+        elif self == .ALREADY_SPAWNED:
             writer.write("the pool is already spawned")
-        elif self == Self.NOT_SPAWNED:
+        elif self == .NOT_SPAWNED:
             writer.write("the pool was never spawned")
-        elif self == Self.THREAD_REFUSED:
+        elif self == .THREAD_REFUSED:
             writer.write("the OS declined to create a thread")
-        elif self == Self.TOPOLOGY_UNAVAILABLE:
+        elif self == .TOPOLOGY_UNAVAILABLE:
             writer.write("the machine could not be described")
-        elif self == Self.PERMISSION_DENIED:
+        elif self == .PERMISSION_DENIED:
             writer.write("a privileged operation was declined")
-        elif self == Self.UNSUPPORTED:
+        elif self == .UNSUPPORTED:
             writer.write("this build has no such facility")
-        elif self == Self.CONTENDED:
+        elif self == .CONTENDED:
             writer.write("the pool is running another dispatch")
         else:
             writer.write("the core reported no reason")
@@ -174,7 +174,7 @@ def bytes_for_elements(count: Int, element_bytes: Int) raises Error -> Int:
         With `INVALID_ARGUMENT`, when the product would exceed `Int.MAX`.
     """
     if element_bytes != 0 and count > Int.MAX // element_bytes:
-        raise Error(ErrorKind.INVALID_ARGUMENT, "the element count times the element size would wrap")
+        raise Error(.INVALID_ARGUMENT, "the element count times the element size would wrap")
     return count * element_bytes
 
 
@@ -213,7 +213,7 @@ struct CallerExclusivity(Equatable, ImplicitlyCopyable, TrivialRegisterPassable,
         Args:
             writer: The sink the name is appended to.
         """
-        writer.write("inclusive" if self == Self.INCLUSIVE else "exclusive")
+        writer.write("inclusive" if self == .INCLUSIVE else "exclusive")
 
 
 # endregion Dispatch

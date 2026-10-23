@@ -317,22 +317,23 @@ def main() raises:
 
     # `parallelize` takes a capturing closure, which is exactly what ForkUnion cannot accept; the
     # baseline therefore reads the same bodies through the same flat pointers, with no scratch.
-    @parameter
-    def baseline_force(index: Int):
+    def baseline_force(index: Int) {var bodies}:
         var force = net_force(bodies, index)
         bodies.force_x[unsafe_offset=index] = force[0]
         bodies.force_y[unsafe_offset=index] = force[1]
         bodies.force_z[unsafe_offset=index] = force[2]
 
-    @parameter
-    def baseline_apply(index: Int):
+    def baseline_apply(index: Int) {mut bodies}:
         apply_prong(index, ThreadInDomain(0, 0), bodies)
 
-    @parameter
-    def one_pass() raises:
+    # A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
+    # window - long enough to amortize scheduling noise - and reports the rate it sustained, with
+    # no per-backend iteration guessing. One call is one step: two dispatches over `count` bodies.
+    var loop = Loop(settings.warmup_ns, settings.time_limit_ns)
+    while loop.next():
         if baseline:
-            parallelize[baseline_force](count, threads)
-            parallelize[baseline_apply](count, threads)
+            parallelize(baseline_force, count, threads)
+            parallelize(baseline_apply, count, threads)
         elif replicated:
             pool.for_slices[refresh_replicas](count, bodies)
             for_n_scheduled[force_replicated_prong](pool, dynamic, count, bodies)
@@ -340,13 +341,6 @@ def main() raises:
         else:
             for_n_scheduled[force_prong](pool, dynamic, count, bodies)
             for_n_scheduled[apply_prong](pool, dynamic, count, bodies)
-
-    # A fixed time budget beats a fixed iteration count: every backend runs the same wall-clock
-    # window - long enough to amortize scheduling noise - and reports the rate it sustained, with
-    # no per-backend iteration guessing. One call is one step: two dispatches over `count` bodies.
-    var loop = Loop(settings.warmup_ns, settings.time_limit_ns)
-    while loop.next():
-        one_pass()
     loop.rate("bodies", Float64(count))
     print_row(loop.row(backend))
 

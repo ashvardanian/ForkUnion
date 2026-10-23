@@ -224,13 +224,12 @@ def generate_necklace(
     for index in range(slots):
         order[index] = index
 
-    @parameter
-    def before(left: Int, right: Int) -> Bool:
+    def before(left: Int, right: Int) {imm rows, imm columns} -> Bool:
         if rows[left] != rows[right]:
             return rows[left] < rows[right]
         return columns[left] < columns[right]
 
-    sort[before](order)
+    sort(order, before)
 
     var live_rows = List[UInt32](capacity=slots)
     var live_columns = List[UInt32](capacity=slots)
@@ -286,11 +285,10 @@ def converge_with_parallelize(
     var rounds = 0
     while True:
 
-        @parameter
-        def sweep(vertex: Int):
+        def sweep(vertex: Int) {var graph, var old_labels, var new_labels}:
             new_labels[unsafe_offset=vertex] = min_label_of(graph, old_labels, vertex)
 
-        parallelize[sweep](vertices, threads)
+        parallelize(sweep, vertices, threads)
         rounds += 1
         var changes = 0
         for vertex in range(vertices):
@@ -476,8 +474,7 @@ def main() raises:
         local_memory.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
     )
 
-    @parameter
-    def one_pass() raises -> Int:
+    def one_pass() raises {mut} -> Int:
         if baseline:
             return converge_with_parallelize(template, vertices, threads, labels_a, labels_b)
         if replicated:

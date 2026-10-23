@@ -152,7 +152,7 @@ struct DomainAllocator(Equatable, ImplicitlyCopyable):
             When the id is negative, which is how a domain the OS names none of comes back.
         """
         if Int(memory_domain_id.identifier) < 0:
-            raise Error(ErrorKind.INVALID_ARGUMENT, "the memory domain id names no domain")
+            raise Error(.INVALID_ARGUMENT, "the memory domain id names no domain")
         return Self(library, memory_domain_id)
 
     def __eq__(self, other: Self) -> Bool:
@@ -181,7 +181,7 @@ struct DomainAllocator(Equatable, ImplicitlyCopyable):
             When the request is zero bytes, or the domain cannot back the placement.
         """
         if bytes == 0:
-            raise Error(ErrorKind.INVALID_ARGUMENT, "an allocation needs bytes")
+            raise Error(.INVALID_ARGUMENT, "an allocation needs bytes")
         # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, Int]()
         out[unsafe_offset=0] = 0
@@ -205,7 +205,7 @@ struct DomainAllocator(Equatable, ImplicitlyCopyable):
             When the request is zero bytes, or the domain cannot back the placement.
         """
         if minimum_bytes == 0:
-            raise Error(ErrorKind.INVALID_ARGUMENT, "an allocation needs bytes")
+            raise Error(.INVALID_ARGUMENT, "an allocation needs bytes")
         # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
         var out = stack_allocation[2, c_size_t]()
         out[unsafe_offset=0] = c_size_t(0)
@@ -332,7 +332,7 @@ struct SymmetricAllocation:
             When the request is zero bytes, or the mapping cannot be placed.
         """
         if bytes_per_domain == 0:
-            raise Error(ErrorKind.INVALID_ARGUMENT, "a symmetric mapping needs bytes")
+            raise Error(.INVALID_ARGUMENT, "a symmetric mapping needs bytes")
         # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
         var out = stack_allocation[4, c_size_t]()
         for slot in range(4):

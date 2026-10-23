@@ -1,7 +1,7 @@
 """The thread pool, its dispatch primitives, and the measured memory fabric.
 
 The callback is a parameter rather than a value, which is what lets the trampoline below become a
-plain C function pointer: it names only parameters, and parameters monomorphise. A `@parameter`
+plain C function pointer: it names only parameters, and parameters monomorphise. A `@__parameter`
 closure that captured anything would make the trampoline `capturing`, which cannot be handed to C
 at all, so the state a callback needs travels in an explicit scratch instead.
 
@@ -91,7 +91,7 @@ comptime PoolUnsafeJoin = def(Handle, c_size_t) thin abi("C") -> None
 # endregion Signatures
 
 
-@always_inline
+@inline(.always)
 def _erase[Scratch: AnyType, //](mut scratch: Scratch) -> Context:
     """The scratch as the type-punned context the C API carries through a dispatch."""
     return Pointer(to=scratch).unsafe_bitcast[NoneType]().unsafe_origin_cast[MutUntrackedOrigin]()
@@ -115,9 +115,9 @@ struct Pool:
         out self,
         topology: Topology,
         threads: Int,
-        exclusivity: CallerExclusivity = CallerExclusivity.INCLUSIVE,
+        exclusivity: CallerExclusivity = .INCLUSIVE,
         name: StaticString = "",
-        allowed: Capabilities = Capabilities.ALL,
+        allowed: Capabilities = .ALL,
     ) raises Error:
         """Spawns `threads` workers across the whole machine.
 
@@ -143,9 +143,9 @@ struct Pool:
         topology: Topology,
         domain: ComputeDomain,
         threads: Int,
-        exclusivity: CallerExclusivity = CallerExclusivity.INCLUSIVE,
+        exclusivity: CallerExclusivity = .INCLUSIVE,
         name: StaticString = "",
-        allowed: Capabilities = Capabilities.ALL,
+        allowed: Capabilities = .ALL,
     ) raises Error -> Self:
         """Spawns `threads` workers pinned to one compute domain.
 
@@ -215,7 +215,7 @@ struct Pool:
 
     # region Queries
 
-    @always_inline
+    @inline(.always)
     def _count(self, symbol: def(Handle, OutSize) thin abi("C") -> c_int, detail: StaticString) raises Error -> Int:
         """Runs a `(handle) -> status` query; an unspawned pool is a reported failure."""
         var out = stack_allocation[1, c_size_t]()
@@ -620,7 +620,7 @@ struct Fabric:
         if status != 0:
             raise Error(ErrorKind.of(status), "fu_fabric_harvest")
 
-    @always_inline
+    @inline(.always)
     def _edge(
         self,
         symbol: def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int,

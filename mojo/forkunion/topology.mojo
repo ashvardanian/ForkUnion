@@ -89,7 +89,7 @@ struct Topology:
         """Releases the harvested description; the loader reference goes with it."""
         self.library.symbols().topology_delete(self.handle)
 
-    @always_inline
+    @inline(.always)
     def _count(self, symbol: def(Handle, OutSize) thin abi("C") -> c_int) raises Error -> Int:
         """Runs a `(handle) -> status` query; the answer is meaningful only on success."""
         var out = stack_allocation[1, c_size_t]()
@@ -99,7 +99,7 @@ struct Topology:
             raise Error(ErrorKind.of(status), "a topology query was refused")
         return Int(out[unsafe_offset=0])
 
-    @always_inline
+    @inline(.always)
     def _count_in(
         self,
         symbol: def(Handle, c_size_t, OutSize) thin abi("C") -> c_int,
