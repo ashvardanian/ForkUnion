@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date June 29, 2025
  *  @brief Human-readable dumps of the harvested topology and capabilities.
- *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
+ *  @note Included by <tt>\<forkunion.hpp\></tt>; not meant to be included on its own.
  */
 #pragma once
 #include "topology.hpp"

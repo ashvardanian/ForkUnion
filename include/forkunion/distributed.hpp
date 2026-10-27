@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date June 10, 2025
  *  @brief Pools that know about compute domains: @c colocated_pool and @c distributed_pool.
- *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
+ *  @note Included by <tt>\<forkunion.hpp\></tt>; not meant to be included on its own.
  *
  *  These are the only pools that touch an operating system beyond @c std::thread: they pin threads
  *  to cores, place their own state on a memory domain, and steal work across domains. The
@@ -121,7 +121,7 @@ struct alignas(default_alignment_k) pinned_thread_t {
  *  When not to use this thread-pool?
  *  - don't use outside of Linux or in UMA systems - Uniform Memory Access.
  *  - don't use if you just need to pin everything to a single NUMA node, for that:
- *    `numactl --cpunodebind=2 --membind=2 your_program`
+ *    <tt>numactl --cpunodebind=2 --membind=2 your_program</tt>
  *
  *  How to best leverage this thread-pool?
  *  - use in conjunction with @b linux_numa_allocator to pin memory to the same NUMA node.
@@ -187,7 +187,7 @@ struct colocated_pool {
     /** Pointer to the on-stack fork lambda. */
     using punned_fork_context_t = void *;
 
-    /** Wraps the lambda's `operator()`. */
+    /** Wraps the lambda's <tt>operator()</tt>. */
     using trampoline_t = void (*)(punned_fork_context_t, thread_in_domain_t);
 
     static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
@@ -779,9 +779,9 @@ struct colocated_pool {
 
     /**
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
-     *  @return Same value as `threads_count()`, as we only support one compute_domain.
+     *  @return Same value as <tt>threads_count()</tt>, as we only support one compute_domain.
      *  @note Shape parity with @c distributed_pool: generic callers - the C ABI's @c visit and the
-     *      distributed invokers - call `pool.threads_count(domain)` on every pool kind.
+     *      distributed invokers - call <tt>pool.threads_count(domain)</tt> on every pool kind.
      */
     thread_index_t threads_count([[maybe_unused]] index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
@@ -790,7 +790,7 @@ struct colocated_pool {
 
     /**
      *  @brief Returns the first global thread index of a @b compute_domain.
-     *  @return Same value as `first_thread()`, as we only support one compute_domain.
+     *  @return Same value as <tt>first_thread()</tt>, as we only support one compute_domain.
      */
     thread_index_t first_thread([[maybe_unused]] index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
@@ -1165,10 +1165,10 @@ class invoke_distributed_for_n {
  *  @section distributed_overflow Overflow Considerations One Level Up
  *
  *  The flat invoker's proof balances a slice's trailing reservation against its visitor count -
- *  both equal @c threads there, so no cursor passes `max(n, threads)`. Here the reservation is per
+ *  both equal @c threads there, so no cursor passes <tt>max(n, threads)</tt>. Here the reservation is per
  *  domain - @c threads_local static prongs - while helping is pool-wide, so a slice may be visited
  *  by all T threads and its cursor may settle past @c n - by less than @c T increments. No
- *  out-of-range task is ever dispatched - `task >= end` guards every claim - and the read-only
+ *  out-of-range task is ever dispatched - <tt>task >= end</tt> guards every claim - and the read-only
  *  probe in @c drain_claim drives the drained-slice regime to zero overshoot, so wrapping would
  *  need @c n within a core-count of the index type's maximum.
  */
@@ -1180,11 +1180,11 @@ class invoke_distributed_for_n_dynamic {
     index_type_ n_;
 
     /** Where one domain's tasks live and how they split across its threads. Computed the same way
-     *  by @c rewind to publish cursors and by `operator()` to place the static prong, so the two
+     *  by @c rewind to publish cursors and by <tt>operator()</tt> to place the static prong, so the two
      *  cannot drift apart. */
     struct domain_layout_t {
 
-        /** This domain's task span inside `[0, n_)`. */
+        /** This domain's task span inside <tt>[0, n_)</tt>. */
         tasks_range<index_type_> range;
 
         /** Workers pinned here; 0 for a domain the spawn skipped. */
@@ -1197,7 +1197,7 @@ class invoke_distributed_for_n_dynamic {
         index_type_ dynamic;
     };
 
-    /** Where @p domain's tasks live: the union of its threads' even shares of `[0, n_)`, so every
+    /** Where @p domain's tasks live: the union of its threads' even shares of <tt>[0, n_)</tt>, so every
      *  domain starts with tasks in proportion to its workers. */
     domain_layout_t layout_of_(index_type_ const domain) const noexcept {
         index_type_ const threads = pool_.threads_count(domain);
@@ -1476,9 +1476,11 @@ struct distributed_pool {
      *  @param[in] threads The number of threads to be used.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
      *  @param[in] pin_granularity How to pin the threads to the NUMA node?
-     *  @return `invalid_argument_k` when no compute domain is local to @p memory_domain_id.
      *  @note Workers report their compute domain by its @b topology index, exactly as a
      *      whole-machine spawn does, so @c local_memory_of-style lookups stay valid.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k No compute domain is local to @p memory_domain_id.
      */
     status_t spawn_near_memory_domain( //
         machine_topology_t const &topology, memory_domain_id_t const memory_domain_id, thread_index_t const threads,
@@ -1732,7 +1734,7 @@ struct distributed_pool {
      *  @brief Spawns one sub-pool per compute domain that @p admits, each taking threads in
      *      proportion to its cores, so a four-core cluster never holds as many workers as a
      *      sixteen-thread domain at the same pool size.
-     *  @return `invalid_argument_k` when @p threads is zero or no admitted domain has a core.
+     *  @return @c invalid_argument_k when @p threads is zero or no admitted domain has a core.
      *
      *  Shares are cut at integer prefix boundaries over the admitted cores, and a domain whose
      *  share rounds to zero gets no sub-pool. Sub-pools sit at compacted colocation indices but
@@ -2031,7 +2033,7 @@ inline status_t measure_bandwidth_edges_(machine_topology_t const &topology, poo
 /**
  *  @brief Derives dense memory-tier ordinals from an edge log, writing one rank per memory domain
  *      into @p levels and returning the number of distinct tiers, at least 1.
- *  @param[out] scratch Caller-provided workspace of `4 * memory_domains_count` entries.
+ *  @param[out] scratch Caller-provided workspace of <tt>4 * memory_domains_count</tt> entries.
  *
  *  A tier is a property of the medium, independent of any initiator: each target is keyed by the
  *  best bandwidth any initiator sustained to it, ties split by the best latency - a 3 TB/s HBM pool
@@ -2244,7 +2246,7 @@ class measured_fabric {
     /** Number of recorded observations; each carries one experiment's metrics for one edge. */
     std::size_t edges_count() const noexcept { return edges_.size(); }
 
-    /** The observation at @p index, in [0, `edges_count()`). */
+    /** The observation at @p index, in [0, <tt>edges_count()</tt>). */
     measured_edge_t const &edge_at(std::size_t const index) const noexcept {
         assert(index < edges_.size() && "Edge index is out of bounds");
         return edges_[index];
@@ -2253,14 +2255,15 @@ class measured_fabric {
     /**
      *  @brief Harvests every reachable edge and the tiers derived from them through @p pool's
      *      workers, replacing any previous snapshot. The @p topology is only read.
-     *  @return `config_mismatch_k` when the pool cannot place pages on every domain it would walk,
-     *      as a terminated pool or an unpinned one on a machine of several domains cannot, or the
-     *      status of a failed allocation; the fabric is then left empty, never half-written.
      *  @note Not thread-safe: dispatches on the pool and rebuilds this fabric, so call it between
      *      task batches and do not query concurrently. Expect seconds of runtime on large fabrics.
      *
      *  Targets are the memory domains some worker can first-touch; @b cpuless domains, like CXL
      *  expanders, stay unwalked, since portable first-touch cannot place pages there.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The pool cannot place pages on every domain it would walk, as a
+     *    terminated pool or an unpinned one on a machine of several domains cannot.
      */
     template <typename pool_type_>
     status_t harvest(machine_topology_t const &topology, pool_type_ &pool) noexcept {

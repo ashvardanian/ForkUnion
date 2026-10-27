@@ -1,5 +1,5 @@
 /**
- *  @file probes/risc5_pause.cpp
+ *  @file probes/riscv64_pause.cpp
  *  @author Ash Vardanian
  *  @date September 7, 2026
  *  @brief ForkUnion probe: the raw @c Zihintpause word, `FENCE W, 0`.

@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date May 28, 2025
  *  @brief Vocabulary and utilities: task ranges, padded buffers, index splitting, claim cursors.
- *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
+ *  @note Included by <tt>\<forkunion.hpp\></tt>; not meant to be included on its own.
  */
 #pragma once
 #if defined(_MSC_VER)
@@ -64,7 +64,7 @@
 
 /** Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to
  *  derive the capabilities below. Nothing else in the library may ask @c __linux__ again. Identity
- *  is the kernel ABI - pthreads, @c sched_setaffinity, @c gettid, `/proc`, `/sys` - which Android
+ *  is the kernel ABI - pthreads, @c sched_setaffinity, @c gettid, @c /proc, @c /sys - which Android
  *  shares in full, and which is all the capabilities below now ask for. What Bionic lacks is GLibC,
  *  and that is the separate @c FORKUNION_HAS_GLIBC_ axis below; it gates no capability, because
  *  none is glibc's to grant. */
@@ -103,7 +103,7 @@
 
 /**
  *  @brief A sandbox rather than a kernel: the module is compiled once and run by whichever runtime
- *      loads it, so there is no affinity, no `/proc`, and no memory domain to place onto.
+ *      loads it, so there is no affinity, no @c /proc, and no memory domain to place onto.
  *
  *  What it does have depends on how it was built, which is @c FORKUNION_WITH_SHARED_MEMORY below
  *  rather than anything here.
@@ -129,8 +129,8 @@
 #define FORKUNION_HAS_GLIBC_ 0
 #endif
 
-/** The kernel UAPI headers ship separately from libc - `linux-headers` on Alpine and other musl
- *  distributions - so `<linux/mman.h>` must be probed, not assumed from the platform. */
+/** The kernel UAPI headers ship separately from libc - @c linux-headers on Alpine and other musl
+ *  distributions - so <tt>\<linux/mman.h\></tt> must be probed, not assumed from the platform. */
 #if FORKUNION_OS_LINUX_ && __has_include(<linux/mman.h>)
 #define FORKUNION_HAS_LINUX_MMAN_ 1
 #else
@@ -179,9 +179,9 @@
  *  No platform needs a separate library for it. Windows reports NUMA nodes, cores, processor
  *  groups, and caches in one @c GetLogicalProcessorInformationEx call, shipped since Vista.
  *  FreeBSD's in-kernel @c cpuset/NUMA framework enumerates memory domains through both
- *  `sysctl vm.ndomains` and `cpuset_getaffinity(CPU_WHICH_DOMAIN)`. Linux reads
- *  `/sys/devices/system/node`, which the kernel mounts wherever there are domains to report, so
- *  neither libc nor `libnuma-dev` on the build host gates it.
+ *  <tt>sysctl vm.ndomains</tt> and <tt>cpuset_getaffinity(CPU_WHICH_DOMAIN)</tt>. Linux reads
+ *  @c /sys/devices/system/node, which the kernel mounts wherever there are domains to report, so
+ *  neither libc nor @c libnuma-dev on the build host gates it.
  */
 #if !defined(FORKUNION_WITH_TOPOLOGY)
 #define FORKUNION_WITH_TOPOLOGY \
@@ -193,7 +193,7 @@
  *  @note Deliberately independent of @c FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN.
  *      @c pthread_setaffinity_np needs no @c libnuma, and a Linux box without it could pin
  *      perfectly well - it simply never did, because a single NUMA macro guarded both.
- *  @note False on Apple Silicon, where `thread_policy_set(THREAD_AFFINITY_POLICY)` answers
+ *  @note False on Apple Silicon, where <tt>thread_policy_set(THREAD_AFFINITY_POLICY)</tt> answers
  *      @c KERN_NOT_SUPPORTED. Its only placement lever is
  *      @c FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS.
  */
@@ -208,8 +208,8 @@
 
 /**
  *  @brief Can we change @b another thread's scheduling class, to sleep or wake it cheaply?
- *  @note Linux spells it `sched_setscheduler(SCHED_IDLE)`; FreeBSD rejects @c SCHED_IDLE but
- *      reaches the same idle class through `rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})`.
+ *  @note Linux spells it <tt>sched_setscheduler(SCHED_IDLE)</tt>; FreeBSD rejects @c SCHED_IDLE but
+ *      reaches the same idle class through <tt>rtprio_thread(RTP_SET, {RTP_PRIO_IDLE})</tt>.
  */
 #if !defined(FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS)
 #define FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_)
@@ -231,10 +231,10 @@
  *  @c MEM_LARGE_PAGES and gated behind the @c SeLockMemoryPrivilege the caller must already hold;
  *  FreeBSD hints the alignment with @c MAP_ALIGNED_SUPER and lets transparent superpages promote.
  *
- *  On Linux the @c MAP_HUGE_2MB-family constants live in `<linux/mman.h>`, and the kernel UAPI
- *  headers ship separately from libc - `linux-headers` on Alpine and other musl distributions - so
- *  the platform alone does not guarantee the header, and assuming it would fail at `#include`, not
- *  at a check.
+ *  On Linux the @c MAP_HUGE_2MB-family constants live in <tt>\<linux/mman.h\></tt>, and the kernel UAPI
+ *  headers ship separately from libc - @c linux-headers on Alpine and other musl distributions
+ *  - so the platform alone does not guarantee the header, and assuming it would fail at
+ *  @c \#include, not at a check.
  */
 #if !defined(FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
 #define FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN                                                              \
@@ -280,7 +280,7 @@
 /** The @c alignas width that keeps two threads' words off one line: 256-byte lines on s390x, 64 on
  *  wasm, which has no coherence to protect, and 128 elsewhere - x86 pairs its 64-byte lines in the
  *  adjacent-line prefetcher, and Apple's cores carry 128 outright. Neoverse lands there too:
- *  `aarch64-unknown-linux-gnu` cannot be told from Asahi Linux on Apple silicon, and under-padding
+ *  @c aarch64-unknown-linux-gnu cannot be told from Asahi Linux on Apple silicon, and under-padding
  *  costs far more than the bytes over-padding wastes. */
 #if !defined(FORKUNION_DEFAULT_ALIGNMENT)
 #if defined(__s390x__)
@@ -432,9 +432,10 @@
 #define FORKUNION_HAS_INLINE_ASM_ 0
 #endif
 
-/** Whether MSVC's cache-hint intrinsics are available: @c _mm_cldemote and @c _m_prefetchw on x64,
- *  @c __prefetch2 on AArch64 - all encoded unconditionally, no `/arch` flag needed. 1922 == VS 2019
- *  16.2, the release that introduced @c _mm_cldemote. clang-cl takes the inline-asm path above. */
+/** Whether MSVC's cache-hint intrinsics are available: @c _mm_cldemote and @c _m_prefetchw on
+ *  x64, @c __prefetch2 on AArch64 - all encoded unconditionally, no @c /arch flag needed.
+ *  1922 == VS 2019 16.2, the release that introduced @c _mm_cldemote. clang-cl takes the
+ *  inline-asm path above. */
 #if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER >= 1922
 #define FORKUNION_HAS_HINT_INTRINSICS_ 1
 #else
@@ -442,9 +443,9 @@
 #endif
 
 /** Whether MSVC's AArch64 atomic intrinsics are available and lower to LSE:
- *  @c __ldar, @c __stlr, @c __ldapr, `__swp*` and `__cas*` are encoded unconditionally, while the
- *  arithmetic tail rides `_Interlocked*`, which tail-calls the CRT unless `/arch:armv8.1` is given
- *  - reported as @c __ARM_FEATURE_ATOMICS, the macro GCC and Clang publish for `+lse`. clang-cl
+ *  @c __ldar, @c __stlr, @c __ldapr, @c __swp* and @c __cas* are encoded unconditionally, while the
+ *  arithmetic tail rides @c _Interlocked*, which tail-calls the CRT unless <tt>/arch:armv8.1</tt> is given
+ *  - reported as @c __ARM_FEATURE_ATOMICS, the macro GCC and Clang publish for @c +lse. clang-cl
  *  takes the inline-asm path above. */
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64) && defined(__ARM_FEATURE_ATOMICS)
 #define FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_ 1
@@ -459,7 +460,7 @@
 #endif
 
 /**
- *  @brief Whether this translation unit may use the bit's path - `FORKUNION_TARGET_<CAPABILITY>`.
+ *  @brief Whether this translation unit may use the bit's path - <tt>FORKUNION_TARGET_\<CAPABILITY\></tt>.
  *
  *  A unit with the build's probe verdicts or @c FORKUNION_RUNTIME_DISPATCH takes the toolchain's
  *  verdict, can it build the path: the architecture, plus inline assembly for a raw encoding or a
@@ -472,9 +473,9 @@
  *  verdict, WFET having no compiler macro at all. The wasm wait and notify need the threads
  *  feature the module is built with, which @c __wasm_atomics__ reports.
  *
- *  The LSE and RCpc mnemonics ride `.arch_extension`, MSVC reaches the two through intrinsics whose
- *  arithmetic tail asks for `/arch:armv8.1`, and the RISC-V A extension's mnemonics need the
- *  `-march` the compiler reports.
+ *  The LSE and RCpc mnemonics ride <tt>.arch_extension</tt>, MSVC reaches the two through intrinsics whose
+ *  arithmetic tail asks for <tt>/arch:armv8.1</tt>, and the RISC-V A extension's mnemonics need the
+ *  @c -march the compiler reports.
  */
 #if !defined(FORKUNION_TARGET_X86_PAUSE)
 #define FORKUNION_TARGET_X86_PAUSE FORKUNION_ARCH_X86_64_
@@ -536,41 +537,41 @@
 #define FORKUNION_TARGET_ARM64_RCPC 0
 #endif
 #endif
-#if !defined(FORKUNION_TARGET_RISC5_PAUSE)
-#define FORKUNION_TARGET_RISC5_PAUSE (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
+#if !defined(FORKUNION_TARGET_RISCV64_PAUSE)
+#define FORKUNION_TARGET_RISCV64_PAUSE (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
-#if !defined(FORKUNION_TARGET_RISC5_WRS)
+#if !defined(FORKUNION_TARGET_RISCV64_WRS)
 #if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__riscv_zawrs))
-#define FORKUNION_TARGET_RISC5_WRS 1
+#define FORKUNION_TARGET_RISCV64_WRS 1
 #else
-#define FORKUNION_TARGET_RISC5_WRS 0
+#define FORKUNION_TARGET_RISCV64_WRS 0
 #endif
 #endif
-#if !defined(FORKUNION_TARGET_RISC5_ZICBOM)
-#define FORKUNION_TARGET_RISC5_ZICBOM (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
+#if !defined(FORKUNION_TARGET_RISCV64_ZICBOM)
+#define FORKUNION_TARGET_RISCV64_ZICBOM (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
-#if !defined(FORKUNION_TARGET_RISC5_ZICBOP)
-#define FORKUNION_TARGET_RISC5_ZICBOP (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
+#if !defined(FORKUNION_TARGET_RISCV64_ZICBOP)
+#define FORKUNION_TARGET_RISCV64_ZICBOP (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
-#if !defined(FORKUNION_TARGET_RISC5_ATOMIC)
+#if !defined(FORKUNION_TARGET_RISCV64_ATOMIC)
 #if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && defined(__riscv_atomic)
-#define FORKUNION_TARGET_RISC5_ATOMIC 1
+#define FORKUNION_TARGET_RISCV64_ATOMIC 1
 #else
-#define FORKUNION_TARGET_RISC5_ATOMIC 0
+#define FORKUNION_TARGET_RISCV64_ATOMIC 0
 #endif
 #endif
-#if !defined(FORKUNION_TARGET_RISC5_ZACAS)
+#if !defined(FORKUNION_TARGET_RISCV64_ZACAS)
 #if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__riscv_zacas))
-#define FORKUNION_TARGET_RISC5_ZACAS 1
+#define FORKUNION_TARGET_RISCV64_ZACAS 1
 #else
-#define FORKUNION_TARGET_RISC5_ZACAS 0
+#define FORKUNION_TARGET_RISCV64_ZACAS 0
 #endif
 #endif
-#if !defined(FORKUNION_TARGET_RISC5_ZABHA)
+#if !defined(FORKUNION_TARGET_RISCV64_ZABHA)
 #if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__riscv_zabha))
-#define FORKUNION_TARGET_RISC5_ZABHA 1
+#define FORKUNION_TARGET_RISCV64_ZABHA 1
 #else
-#define FORKUNION_TARGET_RISC5_ZABHA 0
+#define FORKUNION_TARGET_RISCV64_ZABHA 0
 #endif
 #endif
 #if !defined(FORKUNION_TARGET_WASM_WAIT)
@@ -597,21 +598,21 @@
 #undef FORKUNION_TARGET_X86_RAOINT
 #define FORKUNION_TARGET_X86_RAOINT 0
 #endif
-#if !FORKUNION_TARGET_RISC5_ATOMIC
-#undef FORKUNION_TARGET_RISC5_ZACAS
-#define FORKUNION_TARGET_RISC5_ZACAS 0
+#if !FORKUNION_TARGET_RISCV64_ATOMIC
+#undef FORKUNION_TARGET_RISCV64_ZACAS
+#define FORKUNION_TARGET_RISCV64_ZACAS 0
 #endif
-#if !FORKUNION_TARGET_RISC5_ZACAS
-#undef FORKUNION_TARGET_RISC5_ZABHA
-#define FORKUNION_TARGET_RISC5_ZABHA 0
+#if !FORKUNION_TARGET_RISCV64_ZACAS
+#undef FORKUNION_TARGET_RISCV64_ZABHA
+#define FORKUNION_TARGET_RISCV64_ZABHA 0
 #endif
 
 /**
  *  @brief Can we deterministically push a freshly-written cache line away from this core?
  *
  *  x86 @c CLDEMOTE moves it toward the LLC and retains it; AArch64 has no demote, only a clean by
- *  `DC CVAC`, legal at EL0 only where the kernel sets `SCTLR_EL1.UCI` - Linux does, and Windows
- *  traps it. RISC-V `cbo.clean` traps unless the kernel set `senvcfg.CBCFE`, which no compile-time
+ *  <tt>DC CVAC</tt>, legal at EL0 only where the kernel sets <tt>SCTLR_EL1.UCI</tt> - Linux does, and Windows
+ *  traps it. RISC-V <tt>cbo.clean</tt> traps unless the kernel set <tt>senvcfg.CBCFE</tt>, which no compile-time
  *  macro can prove, so it is reached only through the runtime capability, never this gate. Derived
  *  from the two demote bits the toolchain can build.
  */
@@ -624,11 +625,11 @@
  *  @brief Can we pull a cache line toward this core with write intent, ahead of an atomic claim?
  *
  *  Every ISA here places its write-prefetch in hint space, so emission can never fault on any of
- *  them: x86 @c PREFETCHW, AArch64 `PRFM PSTL1KEEP`, RISC-V `prefetch.w`.
+ *  them: x86 @c PREFETCHW, AArch64 <tt>PRFM PSTL1KEEP</tt>, RISC-V <tt>prefetch.w</tt>.
  */
 #if !defined(FORKUNION_WITH_PROMOTE_CACHE_LINES)
 #define FORKUNION_WITH_PROMOTE_CACHE_LINES \
-    (FORKUNION_TARGET_X86_CLDEMOTE || FORKUNION_TARGET_ARM64_PRFM || FORKUNION_TARGET_RISC5_ZICBOP)
+    (FORKUNION_TARGET_X86_CLDEMOTE || FORKUNION_TARGET_ARM64_PRFM || FORKUNION_TARGET_RISCV64_ZICBOP)
 #endif
 
 #if FORKUNION_WITH_DEMOTE_CACHE_LINES && !(FORKUNION_TARGET_X86_CLDEMOTE || FORKUNION_TARGET_ARM64_DC_CVAC)
@@ -642,7 +643,7 @@ namespace forkunion {
 
 #pragma region Domain Identifiers
 
-/** The OS's NUMA node id - on Linux, an @c N for which `/sys/devices/system/node/nodeN` exists. */
+/** The OS's NUMA node id - on Linux, an @c N for which @c /sys/devices/system/node/nodeN exists. */
 enum memory_domain_id_t : int {};
 
 /** Opaque logical-processor id; on Windows it packs a group and a bit. */
@@ -668,13 +669,13 @@ static_assert(mpol_static_nodes_k == MPOL_F_STATIC_NODES, "MPOL_F_STATIC_NODES i
 
 /**
  *  @brief One past the highest memory-domain id we will bind - the node mask's width.
- *  @note The kernel's own ceiling: @c MAX_NUMNODES is `1 << CONFIG_NODES_SHIFT`, which peaks at 10.
+ *  @note The kernel's own ceiling: @c MAX_NUMNODES is <tt>1 << CONFIG_NODES_SHIFT</tt>, which peaks at 10.
  *      An id at or past this is one the kernel cannot represent, so declining it declines nothing.
  *      Bounds @b domains, never cores - those are a @c core_mask, which grows.
  */
 inline constexpr std::size_t max_memory_domains_k = 1024;
 
-/** The node mask's width in `unsigned long` words, as the @c mbind syscall counts it. */
+/** The node mask's width in <tt>unsigned long</tt> words, as the @c mbind syscall counts it. */
 inline constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(unsigned long) * 8);
 #endif // FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
 
@@ -683,21 +684,21 @@ inline constexpr std::size_t nodemask_words_k = max_memory_domains_k / (sizeof(u
  *      compute_domains_count).
  *  @sa memory_domain_index_t, which indexes a different array and must not be confused with this.
  *
- *  These are plain enums with a fixed underlying type, deliberately not `enum class`. The implicit
+ *  These are plain enums with a fixed underlying type, deliberately not <tt>enum class</tt>. The implicit
  *  widening to @c std::size_t survives, so comparisons and array subscripts work as on integers;
  *  what does @b not survive is passing one where the other is expected, because no conversion
  *  exists between two enumeration types. Minting one costs a @c static_cast, which is the point: it
  *  marks the spot where an untyped integer becomes a claim about @b which axis it indexes.
  *
  *  This is not hypothetical. @c RoundRobinVec handed a compute-domain index to an allocator
- *  expecting a memory-domain index, and `nbody.cpp` did the same to an array of per-node replicas.
+ *  expecting a memory-domain index, and <tt>nbody.cpp</tt> did the same to an array of per-node replicas.
  *  Both compiled, both ran on every machine where the two counts happened to match, and both broke
  *  on the first chip with three compute domains over one memory domain.
  *
  *  The OS IDs above - cores, memory domains and sockets - are plain enums for the same reason, and
  *  so is @c compute_level_t, so a QoS rank never passes for a domain position.
  *
- *  @note The implicit widening also means a raw `array[compute_domain]` still compiles. The enums
+ *  @note The implicit widening also means a raw <tt>array[compute_domain]</tt> still compiles. The enums
  *      stop the argument-passing mistake, not the subscript one. Rust's newtypes stop both.
  */
 enum compute_domain_index_t : std::size_t {};
@@ -713,15 +714,22 @@ enum compute_level_t : std::size_t {};
 #pragma region Status Codes
 
 /**
- *  @brief Why a call failed. Success is `0`; every failure is negative.
+ *  @brief Why a call failed. Success is @c 0; every failure is negative.
  *
- *  Every enumerator takes its value from @c fu_status_t in `forkunion.h`, so the C++ mirror and the
+ *  Every enumerator takes its value from @c fu_status_t in <tt>forkunion.h</tt>, so the C++ mirror and the
  *  ABI cannot drift - there is nothing to keep in step and nothing to assert.
  *
  *  Causes are collapsed on purpose where the remedy is the same, and split where it differs.
  *
+ *  Statuses fall into four categories, with no interruptions to report. Resources: @c bad_alloc_k,
+ *  @c thread_refused_k, @c topology_unavailable_k, @c permission_denied_k, @c library_missing_k and
+ *  @c symbol_missing_k. Input: @c invalid_argument_k. State: @c capacity_exhausted_k,
+ *  @c config_mismatch_k, @c already_spawned_k, @c not_spawned_k, @c unsupported_k and
+ *  @c contended_k. Defects: @c unknown_k. Any verb that allocates, binds a device or touches a file
+ *  may also return a Resources status. A verb's own block lists only what its contract adds.
+ *
  *  @note A refused affinity is not here. The pool still partitions work by domain when the kernel
- *      declines to pin; `all_threads_pinned()` is where that is reported.
+ *      declines to pin; <tt>all_threads_pinned()</tt> is where that is reported.
  */
 enum class [[nodiscard]] status_t : int {
 
@@ -780,8 +788,8 @@ constexpr bool failed(status_t status) noexcept { return status != status_t::suc
 
 /**
  *  @brief Static, English description of @p status. Never returns @c nullptr.
- *  @note The fall-through sits after the @c switch rather than in a `default:` label, so adding an
- *      enumerator without a text here is a `-Wswitch` warning instead of silent prose.
+ *  @note The fall-through sits after the @c switch rather than in a <tt>default:</tt> label, so adding an
+ *      enumerator without a text here is a @c -Wswitch warning instead of silent prose.
  */
 constexpr char const *status_to_string(status_t status) noexcept {
     switch (status) {
@@ -839,9 +847,9 @@ enum class mood_t : unsigned int {
  *  @sa comptime_capabilities and @c runtime_capabilities
  *
  *  One bit per facility, and two accessors ask two questions of the same bit.
- *  `comptime_capabilities()` reports whether the code for a facility was @b built:
+ *  <tt>comptime_capabilities()</tt> reports whether the code for a facility was @b built:
  *  @c capability_place_huge_pages_on_domain_k there means we compiled the path that asks the kernel
- *  for them. `runtime_capabilities()` reports whether the facility is @b present on this machine:
+ *  for them. <tt>runtime_capabilities()</tt> reports whether the facility is @b present on this machine:
  *  the same bit means the kernel is offering them now.
  *
  *  Neither implies the other.
@@ -849,7 +857,7 @@ enum class mood_t : unsigned int {
  *  the runtime accessor never sets that bit; and a machine with four NUMA nodes reports none of
  *  them to a build that left the topology out.
  *  A facility is usable here only when both accessors agree:
- *  the honest set is `comptime_capabilities() & runtime_capabilities()`.
+ *  the honest set is <tt>comptime_capabilities() & runtime_capabilities()</tt>.
  */
 enum capabilities_t : unsigned int {
 
@@ -864,8 +872,9 @@ enum capabilities_t : unsigned int {
     capability_x86_pause_k = 1 << 0,
 
     /**
-     *  @brief `TPAUSE` sleeps the core until a deadline rather than spinning - the @c WAITPKG
-     *      feature, `CPUID.(7,0):ECX[5]`, on Sapphire Rapids, Alder Lake and their successors.
+     *  @brief @c TPAUSE sleeps the core until a deadline rather than spinning - the
+     *      @c WAITPKG feature, the CPUID leaf 7, subleaf 0, ECX bit 5, on Sapphire Rapids, Alder
+     *      Lake and their successors.
      *  @sa x86_tpause_t - the waiter arming it; @c capability_x86_pause_k - the spin it replaces.
      */
     capability_x86_tpause_k = 1 << 1,
@@ -878,9 +887,9 @@ enum capabilities_t : unsigned int {
     capability_arm64_yield_k = 1 << 2,
 
     /**
-     *  @brief `WFET` sleeps the core until a deadline or an event on the monitored line -
+     *  @brief @c WFET sleeps the core until a deadline or an event on the monitored line -
      *      @c FEAT_WFxT, Armv8.7, read from @c ID_AA64ISAR2_EL1 on Linux and
-     *      `hw.optional.arm.FEAT_WFxT` on Apple.
+     *      <tt>hw.optional.arm.FEAT_WFxT</tt> on Apple.
      *  @sa arm64_wfet_t - the waiter arming it; @c capability_arm64_yield_k - the spin it replaces.
      */
     capability_arm64_wfet_k = 1 << 3,
@@ -893,7 +902,7 @@ enum capabilities_t : unsigned int {
     capability_risc5_pause_k = 1 << 4,
 
     /**
-     *  @brief `WRS.STO` sleeps the hart until a reservation breaks or a short timeout - the
+     *  @brief <tt>WRS.STO</tt> sleeps the hart until a reservation breaks or a short timeout - the
      *      @c Zawrs extension, attested by the kernel's @c hwprobe.
      *  @sa risc5_wrs_t - the waiter arming it; @c capability_risc5_pause_k - the spin replaced.
      */
@@ -965,7 +974,7 @@ enum capabilities_t : unsigned int {
     capability_colocate_pools_on_domain_k = 1 << 14,
 
     /**
-     *  @brief `CLDEMOTE` moves a just-written line from this core's private caches toward the
+     *  @brief @c CLDEMOTE moves a just-written line from this core's private caches toward the
      *      shared LLC and retains it there.
      *
      *  Runtime-detected on Sapphire-Rapids-class parts; the emitting functor is chosen at compile
@@ -976,46 +985,46 @@ enum capabilities_t : unsigned int {
     capability_x86_cldemote_k = 1 << 15,
 
     /**
-     *  @brief `DC CVAC` cleans a dirty line to the coherency point, AArch64's nearest thing to a
+     *  @brief <tt>DC CVAC</tt> cleans a dirty line to the coherency point, AArch64's nearest thing to a
      *      demote: the next claimer's snoop finds a clean line, forcing no dirty intervention.
      *
-     *  Set where EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
+     *  Set where EL0 execution is known-legal, i.e. Linux, which sets <tt>SCTLR_EL1.UCI</tt>.
      *
      *  @sa arm64_cache_hints_t - the functor emitting it.
      */
     capability_arm64_dc_cvac_k = 1 << 16,
 
     /**
-     *  @brief The kernel enabled user-mode Zicbom cache-block management - `senvcfg.CBCFE` -
-     *      attested through @c hwprobe, the only sound signal, since a compile-time `+zicbom`
+     *  @brief The kernel enabled user-mode Zicbom cache-block management - <tt>senvcfg.CBCFE</tt> -
+     *      attested through @c hwprobe, the only sound signal, since a compile-time @c +zicbom
      *      proves nothing about the kernel.
      *
-     *  No compile-time policy emits `cbo.clean` yet; the bit is the hook for runtime dispatch.
+     *  No compile-time policy emits <tt>cbo.clean</tt> yet; the bit is the hook for runtime dispatch.
      *
      *  @sa risc5_cbo_cache_hints_t - the functor that would emit it.
      */
     capability_risc5_zicbom_k = 1 << 17,
 
     /**
-     *  @brief `CMPCCXADD`, the conditional atomic add - `CPUID.(7,1):EAX[7]`, on Sierra Forest,
-     *      Diamond Rapids and their successors: a bounded claim as one instruction instead of a
-     *      compare-exchange loop.
+     *  @brief @c CMPCCXADD, the conditional atomic add - CPUID leaf 7, subleaf 1, EAX bit 7, on
+     *      Sierra Forest, Diamond Rapids and their successors: a bounded claim as one instruction
+     *      instead of a compare-exchange loop.
      *  @sa x86_cmpccxadd_atomic_ref - the reference this admits.
      */
     capability_x86_cmpccxadd_k = 1 << 18,
 
     /**
-     *  @brief RAO-INT @c aadd, @c aand, @c aor and @c axor - `CPUID.(7,1):EAX[3]`, on Grand Ridge:
-     *      no-return atomics executed at the shared cache rather than pulling the line; weakly
-     *      ordered, so relaxed only.
+     *  @brief RAO-INT @c aadd, @c aand, @c aor and @c axor - CPUID leaf 7, subleaf 1, EAX bit 3,
+     *      on Grand Ridge: no-return atomics executed at the shared cache rather than pulling the
+     *      line; weakly ordered, so relaxed only.
      *  @sa x86_raoint_atomic_ref, the admitted reference; extends @c capability_x86_cmpccxadd_k.
      */
     capability_x86_raoint_k = 1 << 19,
 
     /**
-     *  @brief Armv8.1 @c FEAT_LSE: @c swp, @c cas, @c ldadd and the no-return `st*` forms - one
+     *  @brief Armv8.1 @c FEAT_LSE: @c swp, @c cas, @c ldadd and the no-return @c st* forms - one
      *      instruction per read-modify-write instead of a load-exclusive loop. Read from
-     *      `ID_AA64ISAR0_EL1.Atomic` on Linux and `hw.optional.arm.FEAT_LSE` on Apple.
+     *      <tt>ID_AA64ISAR0_EL1.Atomic</tt> on Linux and <tt>hw.optional.arm.FEAT_LSE</tt> on Apple.
      *  @sa arm64_lse_atomic_ref - the reference this admits.
      */
     capability_arm64_lse_k = 1 << 20,
@@ -1023,20 +1032,20 @@ enum capabilities_t : unsigned int {
     /**
      *  @brief Armv8.3 @c FEAT_LRCPC: @c ldapr, the RCpc acquiring load that needn't wait for the
      *      core's earlier release stores the way RCsc @c ldar may. Read from
-     *      `ID_AA64ISAR1_EL1.LRCPC` on Linux and `hw.optional.arm.FEAT_LRCPC` on Apple.
+     *      <tt>ID_AA64ISAR1_EL1.LRCPC</tt> on Linux and <tt>hw.optional.arm.FEAT_LRCPC</tt> on Apple.
      *  @sa arm64_rcpc_atomic_ref, the admitted reference; extends @c capability_arm64_lse_k.
      */
     capability_arm64_rcpc_k = 1 << 21,
 
     /**
-     *  @brief `Zacas`: @c amocas, compare-and-swap as one instruction instead of an @c lr and @c sc
-     *      loop, attested by the kernel's @c hwprobe.
+     *  @brief @c Zacas: @c amocas, compare-and-swap as one instruction instead of an @c lr and
+     *      @c sc loop, attested by the kernel's @c hwprobe.
      *  @sa risc5_zacas_atomic_ref - the reference this admits.
      */
     capability_risc5_zacas_k = 1 << 22,
 
     /**
-     *  @brief The A extension: @c lr, @c sc and the `amo*` read-modify-writes, the RISC-V baseline
+     *  @brief The A extension: @c lr, @c sc and the @c amo* read-modify-writes, the RISC-V baseline
      *      every Linux ABI guarantees, so the detector sets it unconditionally.
      *  @sa risc5_atomic_ref, the admitted reference; extended by @c capability_risc5_zacas_k.
      */
@@ -1057,7 +1066,7 @@ enum capabilities_t : unsigned int {
     capability_risc5_zicbop_k = 1 << 25,
 
     /**
-     *  @brief `Zabha`: the byte and halfword @c amo forms, and with @c Zacas the byte and halfword
+     *  @brief @c Zabha: the byte and halfword @c amo forms, and with @c Zacas the byte and halfword
      *      @c amocas, attested by the kernel's @c hwprobe.
      *  @sa risc5_zabha_atomic_ref, the admitted reference; extends @c capability_risc5_zacas_k.
      */
@@ -1065,7 +1074,7 @@ enum capabilities_t : unsigned int {
 
     /**
      *  @brief Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
-     *      offers in one intersection with `runtime_capabilities()`.
+     *      offers in one intersection with <tt>runtime_capabilities()</tt>.
      *  @sa capability_name - which names single bits only, never this composite.
      */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
@@ -1173,11 +1182,11 @@ inline capabilities_t capability_named(char const *name) noexcept {
  *  @endcode
  *
  *  That however results into all kinds of ABI warnings with GCC, and suboptimal alignment choice,
- *  unless you hard-code `--param hardware_destructive_interference_size=64` or disable the warning
- *  with `-Wno-interference-size`.
+ *  unless you hard-code <tt>--param hardware_destructive_interference_size=64</tt> or disable the warning
+ *  with @c -Wno-interference-size.
  *
  *  So the width is @c FORKUNION_DEFAULT_ALIGNMENT, picked from the target. Only @c alignas
- *  rests on this guess; a per-thread stride takes `destructive_interference_bytes()`, which
+ *  rests on this guess; a per-thread stride takes <tt>destructive_interference_bytes()</tt>, which
  *  asks the machine.
  */
 inline constexpr std::size_t default_alignment_k = FORKUNION_DEFAULT_ALIGNMENT;
@@ -1198,9 +1207,9 @@ constexpr std::size_t bytes_for_elements(std::size_t count, std::size_t element_
  *  @brief Byte-wise @c memcpy of @p from into @p to, written as an explicit loop.
  *
  *  Not @c std::memcpy: the wait monitors that call this - @c arm64_wfet_t and @c risc5_wrs_t - are
- *  pinned to a narrower `target(...)` than `-march=native`, where the fortified @c always_inline
+ *  pinned to a narrower <tt>target(...)</tt> than @c -march=native, where the fortified @c always_inline
  *  @c memcpy cannot inline - "target specific option mismatch". Reading and writing through
- *  `unsigned char` keeps it well-defined.
+ *  <tt>unsigned char</tt> keeps it well-defined.
  */
 template <typename value_type_>
 inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
@@ -1210,7 +1219,8 @@ inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
         to_bytes[byte_index] = from_bytes[byte_index];
 }
 
-/** The smaller of @p first and @p second, without `<algorithm>` or the `windows.h` @c min macro. */
+/** The smaller of @p first and @p second, without <tt>\<algorithm\></tt> or the <tt>windows.h</tt> @c min
+ *  macro. */
 template <typename value_type_>
 constexpr value_type_ min_of(value_type_ first, value_type_ second) noexcept {
     return second < first ? second : first;
@@ -1250,7 +1260,7 @@ constexpr std::size_t round_up_to_pow2(std::size_t value) noexcept {
  *
  *  A counter-based generator instead of a stateful one: every draw is independent, so parallel
  *  consumers need no shared state, and a sequence is reproducible from indices alone. The same
- *  constants drive the benchmark generators in `bench/`, ported bit-identically to Rust and Zig.
+ *  constants drive the benchmark generators in @c bench/, ported bit-identically to Rust and Zig.
  */
 constexpr std::uint64_t split_mix(std::uint64_t const counter) noexcept {
     std::uint64_t x = (counter + 1) * 0x9E37'79B9'7F4A'7C15ull;
@@ -1269,9 +1279,9 @@ void bubble_sort(std::span<value_type_> values, comparator_type_ comp = {}) noex
 
 /**
  *  @brief Dense-ranks @p count items by an ascending integer key, writing each item's 0-based rank.
- *  @return The number of distinct keys, at least 1 when `count > 0`.
+ *  @return The number of distinct keys, at least 1 when <tt>count > 0</tt>.
  *
- *  `key(index)` must read a @b stable source and `assign(index, rank)` write a @b different field,
+ *  <tt>key(index)</tt> must read a @b stable source and <tt>assign(index, rank)</tt> write a @b different field,
  *  so ranking in place never corrupts a not-yet-ranked item whose key repeats. Used to turn raw CPU
  *  capacities into compute levels and raw memory tiers into memory levels.
  */
@@ -1396,12 +1406,12 @@ struct allocation_result {
 
 /**
  *  @brief Result of a @b symmetric allocation, one mapping with equal-stride slices per domain.
- *  @tparam value_type_ The element type; the base pointer is `value_type_ *`.
+ *  @tparam value_type_ The element type; the base pointer is <tt>value_type_ *</tt>.
  *
- *  Slice @b d begins at the byte address `ptr + d * stride_bytes` - see @c slice - and holds
+ *  Slice @b d begins at the byte address <tt>ptr + d * stride_bytes</tt> - see @c slice - and holds
  *  @c count elements. Every slice is a uniform distance @c stride_bytes apart - the CPU analog of a
  *  GPU symmetric heap. The stride is in bytes, not elements, because it is page-aligned and a page
- *  rarely divides `sizeof(value_type)`.
+ *  rarely divides <tt>sizeof(value_type)</tt>.
  */
 template <typename value_type_, typename size_type_ = std::size_t>
 struct symmetric_allocation_result {
@@ -1416,13 +1426,13 @@ struct symmetric_allocation_result {
     size_type count {0};
 
     /** Page-aligned @b byte distance between consecutive slice bases;
-     *  `>= count * sizeof(value_type)`. */
+     *  <tt>>= count * sizeof(value_type)</tt>. */
     size_type stride_bytes {0};
 
     /** Number of domain slices. */
     size_type domains {0};
 
-    /** Total mapped volume in bytes - `domains * stride_bytes`. */
+    /** Total mapped volume in bytes - <tt>domains * stride_bytes</tt>. */
     size_type bytes {0};
 
     /** Number of memory pages mapped across all slices. */
@@ -1431,7 +1441,7 @@ struct symmetric_allocation_result {
     explicit constexpr operator bool() const noexcept { return ptr != nullptr && count > 0; }
     size_type bytes_per_page() const noexcept { return pages ? bytes / pages : 0; }
 
-    /** Base of slice on memory domain @p domain_index, at `ptr + domain_index * stride_bytes`. */
+    /** Base of slice on memory domain @p domain_index, at <tt>ptr + domain_index * stride_bytes</tt>. */
     pointer_type slice(size_type domain_index) const noexcept {
         return reinterpret_cast<pointer_type>(reinterpret_cast<char *>(ptr) + domain_index * stride_bytes);
     }
@@ -1479,7 +1489,10 @@ class limited_array {
 
     constexpr limited_array() noexcept = default;
 
-    /** @return capacity_exhausted_k when already at the fixed ceiling; the value is not stored. */
+    /**
+     *  @par Statuses:
+     *  - @c capacity_exhausted_k Already at the fixed ceiling; the value is not stored.
+     */
     status_t push_back(value_t const &value) noexcept {
         if (size_ == capacity_k) return status_t::capacity_exhausted_k;
         values_[size_++] = value;
@@ -1523,7 +1536,7 @@ class dynamic_array {
     /** Number of live elements. */
     std::size_t size_ {0};
 
-    /** Allocated element slots; `>= size_`, doubled by @c push_back when full. */
+    /** Allocated element slots; <tt>>= size_</tt>, doubled by @c push_back when full. */
     std::size_t capacity_ {0};
 
     void destroy_all() noexcept {
@@ -1659,8 +1672,8 @@ class dynamic_array {
  *  @brief A @c dynamic_array with elements at a caller-chosen stride, each on its own cache line.
  *  @sa dynamic_array for the packed counterpart at natural alignment.
  *
- *  Move-only and owning like `std::unique_ptr<T[]>`, but it spaces objects by `stride()` bytes
- *  rather than `sizeof(T)` and honours over-alignment, so an `alignas(128)` pool cell never
+ *  Move-only and owning like <tt>std::unique_ptr<T[]></tt>, but it spaces objects by <tt>stride()</tt> bytes
+ *  rather than <tt>sizeof(T)</tt> and honours over-alignment, so an <tt>alignas(128)</tt> pool cell never
  *  false-shares and never lands in under-aligned storage. It also accepts an @c allocate_at_least
  *  allocator, the way the NUMA backends hand back more bytes than asked.
  */
@@ -1821,7 +1834,7 @@ struct dummy_lambda_t {};
  *
  *  For a loop guarding more than one word: the monitor arms a single line, so a store to another
  *  word goes unseen and the cap bounds how late it is noticed. Selects the timed instruction -
- *  @c WFET, `WRS.STO`. A spin waiter ignores the tag.
+ *  @c WFET, <tt>WRS.STO</tt>. A spin waiter ignores the tag.
  */
 struct wait_capped_t {};
 
@@ -1831,7 +1844,7 @@ struct wait_capped_t {};
  *
  *  For a loop guarding a single word: the monitor covers every wake source, so a timeout would only
  *  wake the core to learn nothing and waste power.
- *  Selects the untimed instruction - @c WFE, `WRS.NTO`.
+ *  Selects the untimed instruction - @c WFE, <tt>WRS.NTO</tt>.
  */
 struct wait_uncapped_t {};
 
@@ -1862,7 +1875,7 @@ struct standard_yield_t {
 
 /**
  *  @brief Whether @p yield_type_ is a valid waiter, callable as:
- *      `yield(watched, observed, thread_index)`.
+ *      <tt>yield(watched, observed, thread_index)</tt>.
  *
  *  Every waiter takes the atomic being watched, the value last seen, and the calling thread's
  *  index. A spin functor ignores the first two; a monitored functor arms a hardware address monitor
@@ -1895,7 +1908,7 @@ inline constexpr prefetch_line_t prefetch_line_k {};
 
 /**
  *  @brief The do-nothing cache-hints policy - the default, and the fallback for every ISA gap.
- *  @sa preferred_cache_hints_t in `capabilities.hpp`, which picks the per-ISA emitters where
+ *  @sa preferred_cache_hints_t in <tt>capabilities.hpp</tt>, which picks the per-ISA emitters where
  *      @c FORKUNION_WITH_DEMOTE_CACHE_LINES and @c FORKUNION_WITH_PROMOTE_CACHE_LINES hold.
  */
 struct standard_cache_hints_t {
@@ -1921,7 +1934,7 @@ struct is_cache_hints_functor {
 
 /**
  *  @brief A trivial minimalistic lock-free "mutex" implementation over a single
- *      `std::atomic<bool>`.
+ *      @c std::atomic<bool>.
  *  @tparam micro_yield_type_ The type of the waiter to be used for busy-waiting.
  *  @tparam alignment_ The alignment of the mutex. Defaults to @c default_alignment_k.
  *
@@ -1929,10 +1942,10 @@ struct is_cache_hints_functor {
  *  as well as @c std::atomic_flag::notify_one and @c std::this_thread::yield APIs, but our solution
  *  is better despite being more primitive.
  *
- *  A `std::atomic<bool>` is used rather than @c std::atomic_flag so the flag has an @b address a
+ *  A @c std::atomic<bool> is used rather than @c std::atomic_flag so the flag has an @b address a
  *  monitored waiter can arm: the lock loop is test-and-test-and-set, spinning on a plain load, so a
  *  monitored @c micro_yield sleeps the core until @c unlock's store to that line wakes it. On every
- *  platform we target `std::atomic<bool>` is lock-free, so the @c atomic_flag guarantee buys
+ *  platform we target @c std::atomic<bool> is lock-free, so the @c atomic_flag guarantee buys
  *  nothing. Compatible with STL unique locks.
  *
  *  @see Compatible with STL unique locks: https://en.cppreference.com/w/cpp/thread/unique_lock.html
@@ -1967,10 +1980,10 @@ using spin_mutex_t = spin_mutex<>;
 #pragma region Task Ranges
 
 /**
- *  @brief A half-open `[first, first + count)` run of task indices, the "what work" of a dispatch.
+ *  @brief A half-open <tt>[first, first + count)</tt> run of task indices, the "what work" of a dispatch.
  *
- *  Iterable, so a callback reads `for (auto task : range)` rather than rebuilding the bounds. The
- *  exclusive end is `first + count`; an idle thread receives a range with `count == 0`.
+ *  Iterable, so a callback reads <tt>for (auto task : range)</tt> rather than rebuilding the bounds. The
+ *  exclusive end is <tt>first + count</tt>; an idle thread receives a range with <tt>count == 0</tt>.
  */
 template <typename index_type_ = std::size_t>
 struct [[nodiscard]] tasks_range {
@@ -2004,8 +2017,8 @@ using tasks_range_t = tasks_range<>;
  *  @brief Splits a range of tasks into fair-sized runs for each thread.
  *  @see https://lemire.me/blog/2025/05/22/dividing-an-array-into-fair-sized-chunks/
  *
- *  The first `(tasks % threads)` runs have size `ceil(tasks / threads)`.
- *  The remaining `tasks - (tasks % threads)` runs have size `floor(tasks / threads)`. Has the
+ *  The first <tt>(tasks % threads)</tt> runs have size <tt>ceil(tasks / threads)</tt>.
+ *  The remaining <tt>tasks - (tasks % threads)</tt> runs have size <tt>floor(tasks / threads)</tt>. Has the
  *  convenient added property that the difference between the largest and smallest run size is at
  *  most 1, which can be used in some ordering algorithms.
  */
@@ -2043,9 +2056,9 @@ struct indexed_split {
     inline index_t largest_size() const noexcept { return quotient_ + (remainder_ > 0); }
 
     /**
-     *  @brief The run owning task @p task - the inverse of `operator[]`, in closed form.
+     *  @brief The run owning task @p task - the inverse of <tt>operator[]</tt>, in closed form.
      *  @note The first @c remainder_ runs are one task larger, so the boundary between the two
-     *      regimes sits at `remainder_ * (quotient_ + 1)`; a @c quotient_ of zero puts every valid
+     *      regimes sits at <tt>remainder_ * (quotient_ + 1)</tt>; a @c quotient_ of zero puts every valid
      *      task in the first regime, so the division by @c quotient_ below is never reached.
      */
     inline index_t index_of(index_t const task) const noexcept {
@@ -2061,7 +2074,7 @@ using indexed_split_t = indexed_split<>;
  *  @brief Iterator range over integers using a stride that is co-prime with length.
  *
  *  - Constant-time dereference: two integer ops and a branchless wrap-around.
- *  - Every value appears exactly once before `end()`.
+ *  - Every value appears exactly once before <tt>end()</tt>.
  *
  *  @code{.cpp}
  *  coprime_permutation_range<> perm(start, length, seed);
@@ -2137,7 +2150,7 @@ struct coprime_permutation_range {
         /** Current offset into the domain, in [0, length_). */
         index_t offset_ {0};
 
-        /** Countdown of values remaining until `end()`. */
+        /** Countdown of values remaining until <tt>end()</tt>. */
         index_t elements_left_ {0};
     };
 
@@ -2303,7 +2316,7 @@ inline void drain_claim(pool_type_ &pool, index_type_ const slice, locator_type_
  *
  *  If we run a default for-loop at 1 Billion times per second on a 64-bit machine, then every 585
  *  years of computational time we will wrap around the @c std::size_t capacity for the task index.
- *  In case we `n + thread >= std::size_t(-1)`, a simple condition won't be enough.
+ *  In case we <tt>n + thread >= std::size_t(-1)</tt>, a simple condition won't be enough.
  *  Alternatively, we can make sure, that each thread can do at least one increment of a cursor
  *  without worrying about the overflow. The way to achieve that is to preprocess the trailing
  *  @c threads of elements externally, before entering this loop!
@@ -2311,13 +2324,13 @@ inline void drain_claim(pool_type_ &pool, index_type_ const slice, locator_type_
  *  That trailing reservation also bounds the cursors. Every thread visits a given slice exactly
  *  once - each thread's coprime walk is a permutation of all the slices, beginning with its own -
  *  and a visit overshoots by at most one increment, since @c drain_claim leaves the moment it reads
- *  `>= end` and its read-only probe skips already-drained slices without any increment at all. A
- *  cursor therefore never passes `end + threads`.
+ *  <tt>>= end</tt> and its read-only probe skips already-drained slices without any increment at all. A
+ *  cursor therefore never passes <tt>end + threads</tt>.
  *
- *  Two regimes bound that. When `n > threads` the last slice ends at `n - threads`, so no cursor
- *  passes @c n. When `n <= threads` every slice is empty and `end == 0`, so no cursor passes
+ *  Two regimes bound that. When <tt>n > threads</tt> the last slice ends at <tt>n - threads</tt>, so no cursor
+ *  passes @c n. When <tt>n <= threads</tt> every slice is empty and <tt>end == 0</tt>, so no cursor passes
  *  @c threads, which may exceed @c n but must be representable anyway for the pool to have spawned.
- *  Either way `max(cursor) == max(n, threads)`, and no index type can wrap.
+ *  Either way <tt>max(cursor) == max(n, threads)</tt>, and no index type can wrap.
  */
 template <typename pool_type_, typename fork_type_, typename index_type_>
 class invoke_for_n_dynamic {

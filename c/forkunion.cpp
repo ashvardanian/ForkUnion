@@ -83,13 +83,13 @@ struct pool_variants_t {
 #if FORKUNION_TARGET_ARM64_YIELD
         fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
+#if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOP
         fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
+#if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
         fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
@@ -128,15 +128,15 @@ struct pool_variants_t {
         fu::colocated_pool<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>,   //
         fu::distributed_pool<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
         fu::colocated_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
+#if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOP
         fu::colocated_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
 #endif
-#if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
+#if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
         fu::colocated_pool<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>,   //
         fu::distributed_pool<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
 #endif
@@ -258,18 +258,18 @@ static auto select_pool([[maybe_unused]] fu::capabilities_t const bits, action_t
     // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space `prefetch.w`
     // promotion that can never fault. The RISC-V references emit no better code than the standard
     // one for the pool's operations, so every RISC-V pool keeps it.
-#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
     if (selects<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::standard_atomic_ref,
                                                       fu::risc5_cbo_cache_hints_t>::type> {});
 #endif
-#if FORKUNION_TARGET_RISC5_WRS && FORKUNION_TARGET_RISC5_ZICBOP
+#if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOP
     if (selects<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>(bits))
         return action(
             pool_type_tag<
                 typename pool_for<kind_, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>::type> {});
 #endif
-#if FORKUNION_TARGET_RISC5_PAUSE && FORKUNION_TARGET_RISC5_ZICBOP
+#if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
     if (selects<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::risc5_pause_t, fu::standard_atomic_ref,
                                                       fu::risc5_cache_hints_t>::type> {});
@@ -380,7 +380,7 @@ struct opaque_pool_t {
     /** The one live pool - flat, colocated, or distributed - or empty before the first spawn. */
     pool_variants_t variants;
 
-    /** The capability envelope `machine_capabilities() & allowed`, fixed at creation. */
+    /** The capability envelope <tt>machine_capabilities() & allowed</tt>, fixed at creation. */
     fu::capabilities_t effective {fu::capabilities_unknown_k};
 
     /** Context held across a non-blocking @c fu_pool_unsafe_for_threads until its join. */
@@ -794,7 +794,7 @@ void fu_free_symmetric(void *base, size_t total_bytes) {
 #pragma region Lifetime
 
 /**
- *  @brief Cross-platform aligned memory allocation via C++17 over-aligned `operator new`.
+ *  @brief Cross-platform aligned memory allocation via C++17 over-aligned <tt>operator new</tt>.
  *  @note Returns nullptr on failure, never throws exceptions.
  */
 inline void *fu_aligned_malloc(std::size_t size, std::size_t alignment) noexcept {
@@ -822,7 +822,7 @@ fu_status_t fu_pool_new([[maybe_unused]] char const *name, fu_capabilities_t all
     return fu_success_k;
 }
 
-/** Safely cast `fu_pool_t*` to `opaque_pool_t*` avoiding alignment violation warnings. */
+/** Safely cast <tt>fu_pool_t*</tt> to <tt>opaque_pool_t*</tt> avoiding alignment violation warnings. */
 inline opaque_pool_t *upcast_pool(fu_pool_t pool) noexcept {
     return std::launder(reinterpret_cast<opaque_pool_t *>(pool));
 }
@@ -974,7 +974,7 @@ fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t p
                                   exclusivity);
 }
 
-/** Safely cast @c fu_fabric_t to `fu::measured_fabric_t*` avoiding alignment violation warnings. */
+/** Safely cast @c fu_fabric_t to <tt>fu::measured_fabric_t*</tt> avoiding alignment violation warnings. */
 inline fu::measured_fabric_t *upcast_fabric(fu_fabric_t fabric) noexcept {
     return std::launder(reinterpret_cast<fu::measured_fabric_t *>(fabric));
 }

@@ -8,6 +8,10 @@ JIT and `lld`, and using it would put `-Xlinker -lforkunion` in every consumer's
 Every entry point is resolved once, when the library loads, into a typed `thin abi("C")` function
 pointer. `OwnedDLHandle.get_function` would run `dlsym` on every call and parameterises only on
 the return type, leaving arguments unchecked; a dispatch on the hot path cannot afford either.
+
+File: mojo/forkunion/library.mojo
+Author: Ash Vardanian
+Date: August 22, 2026
 """
 
 from std.ffi import DEFAULT_RTLD, RTLD, OwnedDLHandle, __fn_type_is_cabi, c_int, c_size_t

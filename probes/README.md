@@ -1,7 +1,7 @@
 # Toolchain probes
 
 One probe per instruction-level capability bit of `capabilities_t`, each emitting exactly what the header emits for that bit: a mnemonic, a raw encoding, or the intrinsic MSVC reaches it through.
-Each row of `cmake/fu_isa_probe.cmake` compiles one at configure time into the cached `fu_target_<capability>_compiles` and defines `FORKUNION_TARGET_<CAPABILITY>=0/1` on `forkunion::cpu_capabilities_compiled`, which the compiled libraries and the tests link privately, never `forkunion::header`.
+Each row of `cmake/forkunion_probes.cmake` compiles one at configure time into the cached `forkunion_target_<capability>_compiles` and defines `FORKUNION_TARGET_<CAPABILITY>=0/1` on `forkunion::cpu_capabilities_compiled`, which the compiled libraries and the tests link privately, never `forkunion::header`.
 A consumer's own unit derives each bit in `types.hpp` - what the toolchain builds when it sets `FORKUNION_RUNTIME_DISPATCH`, what the compilation target promises otherwise.
 
 The verdict answers one question: can this toolchain build this bit's path.
@@ -17,23 +17,23 @@ The OS-level bits - owned threads, topology, placements, transparent huge pages 
 
 Where a probe cell offers a second spelling, it is the intrinsic MSVC reaches the bit through.
 
-| bit             | probe                                                  | needs                          |
-| :-------------- | :----------------------------------------------------- | :----------------------------- |
-| `x86_pause`     | `pause`, or `_mm_pause`                                | nothing                        |
-| `x86_tpause`    | `umonitor` and `umwait` bytes, or intrinsics           | nothing                        |
-| `x86_cldemote`  | `cldemote` bytes, or `_mm_cldemote` and `_m_prefetchw` | nothing                        |
-| `x86_cmpccxadd` | `cmpbexadd` bytes                                      | inline assembly                |
-| `x86_raoint`    | `aadd` bytes                                           | inline assembly                |
-| `arm64_yield`   | `yield`, or `__yield`                                  | nothing                        |
-| `arm64_prfm`    | `prfm pldl2keep`, or `__prefetch2`                     | nothing                        |
-| `arm64_rcpc`    | `.arch_extension rcpc` and `ldapr`, or `__ldapr32`     | nothing                        |
-| `arm64_lse`     | `.arch_extension lse` and `swp`, or `__swp32`          | `/arch:armv8.1` on MSVC        |
-| `arm64_wfet`    | `wfet` word                                            | inline assembly                |
-| `arm64_dc_cvac` | `dc cvac`                                              | inline assembly                |
-| `risc5_atomic`  | `amoswap`, `lr` and `sc`                               | inline assembly, A in `-march` |
-| `risc5_pause`   | `pause` word                                           | inline assembly                |
-| `risc5_wrs`     | `wrs.sto` word                                         | inline assembly                |
-| `risc5_zicbom`  | `cbo.clean` word                                       | inline assembly                |
-| `risc5_zicbop`  | `prefetch.r` word                                      | inline assembly                |
-| `risc5_zacas`   | `amocas.w` word                                        | inline assembly                |
-| `risc5_zabha`   | `amoadd.b` word                                        | inline assembly                |
+| bit              | probe                                                  | needs                          |
+| :--------------- | :----------------------------------------------------- | :----------------------------- |
+| `x86_pause`      | `pause`, or `_mm_pause`                                | nothing                        |
+| `x86_tpause`     | `umonitor` and `umwait` bytes, or intrinsics           | nothing                        |
+| `x86_cldemote`   | `cldemote` bytes, or `_mm_cldemote` and `_m_prefetchw` | nothing                        |
+| `x86_cmpccxadd`  | `cmpbexadd` bytes                                      | inline assembly                |
+| `x86_raoint`     | `aadd` bytes                                           | inline assembly                |
+| `arm64_yield`    | `yield`, or `__yield`                                  | nothing                        |
+| `arm64_prfm`     | `prfm pldl2keep`, or `__prefetch2`                     | nothing                        |
+| `arm64_rcpc`     | `.arch_extension rcpc` and `ldapr`, or `__ldapr32`     | nothing                        |
+| `arm64_lse`      | `.arch_extension lse` and `swp`, or `__swp32`          | `/arch:armv8.1` on MSVC        |
+| `arm64_wfet`     | `wfet` word                                            | inline assembly                |
+| `arm64_dc_cvac`  | `dc cvac`                                              | inline assembly                |
+| `riscv64_atomic` | `amoswap`, `lr` and `sc`                               | inline assembly, A in `-march` |
+| `riscv64_pause`  | `pause` word                                           | inline assembly                |
+| `riscv64_wrs`    | `wrs.sto` word                                         | inline assembly                |
+| `riscv64_zicbom` | `cbo.clean` word                                       | inline assembly                |
+| `riscv64_zicbop` | `prefetch.r` word                                      | inline assembly                |
+| `riscv64_zacas`  | `amocas.w` word                                        | inline assembly                |
+| `riscv64_zabha`  | `amoadd.b` word                                        | inline assembly                |

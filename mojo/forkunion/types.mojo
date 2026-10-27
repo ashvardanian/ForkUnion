@@ -13,6 +13,10 @@ cannot hand a capturing closure to C, so these are what a caller reaches for mos
 per function and never widens a typed `raises` into a plain one, so a second would force every
 caller to catch and convert. A refusal is a failure, not an absence - a memory domain the machine
 does not have and a zero-byte allocation both raise rather than answering `Optional`.
+
+File: mojo/forkunion/types.mojo
+Author: Ash Vardanian
+Date: August 22, 2026
 """
 
 from std.ffi import c_int, c_size_t

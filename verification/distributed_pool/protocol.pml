@@ -8,35 +8,23 @@
  *  One generation token names every colocation; a dispatch claims every colocation before it
  *  publishes on any; the join runs the caller's slice on its own colocation first and waits for
  *  the others after; @c is_complete is true only once every colocation stepped past the token.
- *
  *  A dispatcher on a caller-inclusive pool of two colocations, the first with the caller and one
- *  worker, the second with one worker. Each dispatch claims the first colocation's countdown and
- *  then the second's, each by exchanging it from zero with an acquire; if either refuses, it
- *  stores zero back into the one it claimed, with a release, and returns the zero token. Once it
- *  holds both, it publishes on the second colocation and then the first, each by waiting for an
- *  even epoch and stepping it with a release, and asserts the two tokens agree. The join
- *  contributes the caller's slice to the first colocation, waits for its completion step, then
- *  waits for the second's. The workers are the colocated loop: they wait on their epoch,
- *  contribute, count down with @c acq_rel, and the last one steps the epoch with a release; the
- *  fork word is dropped, since `flat_pool/` covers it, and the mood is a ghost the capped waits
- *  notice, followed by a re-release of every epoch that wakes the workers waiting on it. Every
- *  wait is the @c wait_on of `monitor_wait.pml`.
+ *  worker, the second with one worker.
  *
- *  Lockstep: both colocations return the same token, and after the join both epochs are past it.
- *  A refused dispatch published on no colocation. Every contributor runs each generation once.
- *
- *  Every scenario beside this file defines its shape, and @c remote_lags for a second colocation
- *  that starts its slices only once the caller contributed its own.
+ *  - Lockstep: both colocations return the same token, and after the join both epochs are past it.
+ *  - A refused dispatch published on no colocation.
+ *  - Every contributor runs each generation once.
  */
-#include "../weak_memory.pml"
-#include "../monitor_wait.pml"
+#include <weak_memory.pml>
+#include <monitor_wait.pml>
 
 /** The caller's thread, which plays the dispatcher and contributes to the first colocation without
  *  a result word of its own. */
 #define caller 0
 
-/** The words, by the member each stands for: each colocation's clock and countdown, one result word
- *  per worker, and the token handed to the poller. */
+/** The words, by the member each stands for: each colocation's clock and countdown, one result
+ *  word per worker, and the token handed to the poller. The fork word is dropped, since
+ *  <tt>flat_pool/</tt> covers it. */
 #define epoch(colocation) (colocation)
 #define threads_to_sync(colocation) (2 + (colocation))
 #define result(worker) (3 + (worker))
@@ -63,7 +51,7 @@
 #endif
 
 byte workers_exited;
-bool terminated;                 // the ghost mood: die was stored
+bool terminated;                 // the ghost mood the capped waits notice: die was stored
 bool caller_contributed;         // the caller's slice of the current round ran
 byte ran[4 * (generations + 2)]; // slices run, per contributor and round
 
@@ -113,7 +101,8 @@ inline publish_colocation(t, colocation, generation, observed) {
  *  @c distributed_pool::unsafe_for_threads in `distributed.hpp`, over the caller's scratch.
  *  Without @c claim_first, each colocation is claimed and published in turn, the remote one first;
  *  without @c dispatch_before_join, only the caller's is, and the join dispatches the remote one.
- *  @p published counts the colocations this dispatch stepped. */
+ *  @p published counts the colocations this dispatch stepped. If either refuses, it stores zero
+ *  back into the one it claimed, with a release, and returns the zero token. */
 inline dispatch(t, generation, remote_generation, observed, claimed, published) {
     published = 0;
     if

@@ -5,6 +5,7 @@
 //!
 //! File: rust/forkunion/scheduling.rs
 //! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 use core::ffi::{c_char, c_int, c_void};
 use core::marker::PhantomData;
@@ -156,10 +157,12 @@ unsafe impl Send for ThreadPool {}
 unsafe impl Sync for ThreadPool {}
 
 impl ThreadPool {
+    /// Spawns a pool of the given size with the caller's participation set by `exclusivity`.
     pub fn spawn_with_exclusivity(topology: &Topology, threads: usize, exclusivity: CallerExclusivity) -> Result<Self> {
         Self::named_spawn_with_exclusivity(topology, None, threads, exclusivity)
     }
 
+    /// Spawns a named pool of the given size with the caller's participation set by `exclusivity`.
     pub fn named_spawn_with_exclusivity(
         topology: &Topology,
         name: Option<&str>,
@@ -1192,6 +1195,7 @@ where
     }
 }
 
+/// Folds every item of `iterator` into the per-thread slot of `scratch` that runs it.
 pub fn fold_with_scratch<I, S, T, F>(
     pool: &mut ThreadPool,
     iterator: I,

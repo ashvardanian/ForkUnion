@@ -8,24 +8,23 @@
  *  acquire loads, reads every result once it turns true, and then joins its stale token, which
  *  must return at once.
  *
+ *  @budget 2048
  *  @verify pass sc
  *  @verify pass rc11 generations=1
  *  @verify pass rc11 generations=2
- *  @verify fail rc11 generations=1 complete_order=order_relaxed: @c is_complete acquires the epoch;
- *      relaxed, the poller that saw the completion step reads a stale result
- *  @verify fail rc11 generations=1 caller_completion_order=order_relaxed: @c unsafe_join steps the
- *      epoch with a release when the caller's slice is the last; relaxed, it carries nothing of
- *      the workers' results it acquired through the countdown, and the poller that saw the step
- *      reads a stale result
- *  @verify fail sc epoch_modulus=2: the epoch's width aliases only at the debug widths, as the
- *      header prices; modulo 2, the stale token names the live generation, and the stale join
- *      contributes a slice that is not its own, taking the countdown past zero
+ *  @verify fail rc11 generations=1 complete_order=order_relaxed: relaxed, the poller that saw the
+ *      completion step reads a stale result
+ *  @verify fail rc11 generations=1 caller_completion_order=order_relaxed: relaxed, it carries
+ *      nothing of the workers' results it acquired through the countdown, and the poller that saw
+ *      the step reads a stale result
+ *  @verify fail sc epoch_modulus=2: modulo 2, the stale token names the live generation, and the
+ *      stale join contributes a slice that is not its own, taking the countdown past zero
  */
 #define thread_count 4
 #define location_count 9
 #define history_depth 9
 #define through_c_shim false
-#include "protocol.pml"
+#include <flat_pool/protocol.pml>
 
 /** A worker the spawn starts: contributes to every dispatch until die. */
 proctype worker(byte t) {

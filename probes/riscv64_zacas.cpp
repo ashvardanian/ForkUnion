@@ -1,5 +1,5 @@
 /**
- *  @file probes/risc5_zacas.cpp
+ *  @file probes/riscv64_zacas.cpp
  *  @author Ash Vardanian
  *  @date September 7, 2026
  *  @brief ForkUnion probe: the `amocas.w` word with its registers pinned - inline assembly alone.

@@ -12,14 +12,13 @@
  *  read an old write, and this shape shows they do read one; the ghost touches no location.
  *
  *  @verify pass sc
- *  @verify fail rc11,far: a reader that synchronized with nothing may read any write from its view
- *      onward; it reads the first write after the second one landed, which RC11 allows and
- *      sequential consistency forbids
+ *  @verify fail rc11,far: it reads the first write after the second one landed, which RC11 allows
+ *      and sequential consistency forbids
  */
 #define thread_count 2
 #define location_count 1
 #define history_depth 3
-#include "protocol.pml"
+#include <weak_memory_litmus/protocol.pml>
 
 bool written;
 

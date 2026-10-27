@@ -48,7 +48,7 @@ On `caller_exclusive_k` pools you can dispatch, overlap your own work, poll `is_
 On `caller_inclusive_k` pools the calling thread owes one slice of the work, which only runs inside `unsafe_join`, so completion can't be reached by polling alone.
 The same rule shapes the RAII guard returned by `for_threads` and, in C++, the `for_n` family: the workers start at the guard's construction on every pool, and on inclusive pools the caller's own slice runs at `join` or destruction.
 
-In C++ it provides [NUMA extensions](#non-uniform-memory-access-numa).
+In C++ it provides [NUMA extensions](#numa).
 That includes the `colocated_pool` analog of the `flat_pool` and the `domain_allocator_t` for allocating memory in a specific memory domain, backed by `linux_numa_allocator_t`, `freebsd_numa_allocator_t`, or `windows_numa_allocator_t`.
 Those are out-of-the-box compatible with the higher-level APIs.
 Most interestingly, for Big Data applications, a higher-level `distributed_pool` class addresses and balances the work across all compute domains.
@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-The `Topology` handle reports the [hardware topology](#hardware-topology), to size and place work:
+The `Topology` handle reports the [hardware topology](#topology), to size and place work:
 
 ```rust
 let topology = fu::Topology::new()?;
@@ -144,8 +144,8 @@ for domain in 0..topology.compute_domains_count()? {
 }
 ```
 
-For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
-For Rayon-style parallel iterators, import the `prelude` module and [check out related examples](#rayon-style-parallel-iterators).
+For advanced usage, refer to the [NUMA section below](#numa).
+For Rayon-style parallel iterators, import the `prelude` module and [check out related examples](#parallel-iterators).
 
 ### Intro in C++
 
@@ -216,7 +216,7 @@ int main() {
 }
 ```
 
-For advanced usage, refer to the [NUMA section below](#non-uniform-memory-access-numa).
+For advanced usage, refer to the [NUMA section below](#numa).
 Every kernel and ISA facility the library uses is detected by default.
 CMake pins the four kernel facilities with an `AUTO`/`ON`/`OFF` tri-state like `-D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON` or `-D FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=OFF`.
 Finer preprocessor gates - like the cache-line hints `FORKUNION_WITH_DEMOTE_CACHE_LINES`, which pushes a just-written line away from the core via x86 `CLDEMOTE` or Arm `DC CVAC`, and `FORKUNION_WITH_PROMOTE_CACHE_LINES`, which pulls a line in with write intent via x86 `PREFETCHW`, Arm `PRFM PSTL1KEEP`, or RISC-V `prefetch.w` - accept the same overrides as compile definitions.
@@ -296,7 +296,7 @@ pub fn main() !void {
 The context comes before the callback and travels as a caller-owned pointer, so the callback receives exactly the qualifiers the caller chose — the same shape `std.sort` uses, and the reason a `std.atomic.Value` in a context can never be silently copied per task.
 Pass `{}` when a kernel needs no state at all.
 
-The `Topology` handle reports the [hardware topology](#hardware-topology), to size and place work:
+The `Topology` handle reports the [hardware topology](#topology), to size and place work:
 
 ```zig
 const topology = try fu.Topology.init();
@@ -375,7 +375,7 @@ with pool.unsafe_for_threads[work](scratch) as dispatch:
         prepare_next_batch()
 ```
 
-The `Topology` handle reports the [hardware topology](#hardware-topology), to size and place work:
+The `Topology` handle reports the [hardware topology](#topology), to size and place work:
 
 ```mojo
 var topology = Topology(library)
@@ -436,7 +436,7 @@ int main(void) {
 }
 ```
 
-The `fu_`-prefixed functions report the [hardware topology](#hardware-topology), to size and place work:
+The `fu_`-prefixed functions report the [hardware topology](#topology), to size and place work:
 
 ```c
 fu_topology_t topology;
@@ -670,7 +670,7 @@ Because of these rules, padding hot variables to 128 bytes is a conservative but
 
 ## Pro Tips
 
-### Hardware Topology
+### Topology
 
 A machine is described along two independent axes.
 A __compute domain__ is a bindable group of cores sharing a Quality-of-Service class _and_ locality — it is what a pool spawns onto, and the index a worker callback receives.
@@ -711,7 +711,7 @@ Like the compute magnitudes, these are best-effort: fabric queries read 0 before
 Finally, `local_memory_of` bridges the axes, naming the memory domain a given compute domain should allocate from.
 Where no topology is harvested, every query degrades to a single compute domain and a single memory domain rather than failing, so these loops need no conditional compilation.
 
-### Non-Uniform Memory Access (NUMA)
+### NUMA
 
 Placing memory on a chosen domain is implemented on Linux via the `mbind` syscall, on FreeBSD via `domainset` policies, and on Windows via `VirtualAllocExNuma`, and degrades to a single domain elsewhere.
 The portable `domain_allocator_t` alias picks the right backend per platform - `linux_numa_allocator_t`, `freebsd_numa_allocator_t`, `windows_numa_allocator_t`, or a plain aligned fallback - each an STL-compatible allocator bound to one `memory_domain_id_t`.
@@ -814,7 +814,7 @@ For more flexibility around building higher-level low-latency systems, there are
 The manual two-vector sharding above is what the __symmetric allocators__ automate: `symmetric_memory_allocator_t` - `fu_allocate_symmetric` in C - maps one virtual range striped a slice per memory domain, and Rust, Zig, and Mojo wrap it as `ShardedArray<T>`, one shard per domain, and `ReplicatedArray<T>`, a full copy per domain for read-mostly data.
 To place and coordinate pools by hand, `spawn_on` - `fu_pool_spawn_on` in C - pins a pool to a single compute domain, while `locate_thread_in` and `threads_count_in` map a global thread index to its domain and count the workers living there.
 
-### Efficient Busy Waiting
+### Busy Waiting
 
 Here's what "busy waiting" looks like in C++:
 
@@ -845,7 +845,7 @@ The `UMWAIT`, `WFE`, `WFET`, and `WRS` wrappers go a step further than a spin hi
 `spin_mutex<fu::preferred_yield_t>` takes the same wrappers, while the default `spin_mutex_t` yields to the scheduler and Rust's `SpinMutex` spins on `core::hint::spin_loop` - a futex-free `std::mutex` alternative, and the lock used in the NUMA example above.
 On WebAssembly threads the waiter is `wasm_wait_t`: a 32- or 64-bit watch sleeps in `memory.atomic.wait` until a `wasm_atomic_ref` releasing write notifies or 1 µs passes, so pair the two; uncapped waits and 1- or 2-byte watches spin.
 
-### Rayon-style Parallel Iterators
+### Parallel Iterators
 
 For Rayon-style ergonomics, use the parallel iterator API with the `prelude`.
 Unlike Rayon, ForkUnion's parallel iterators don't depend on the global state and allow explicit control over the thread pool and scheduling strategy.
@@ -986,7 +986,7 @@ What the spread means - same binaries, same graph:
 You can rerun these benchmarks with the following commands:
 
 ```bash
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D FORKUNION_BUILD_BENCH=ON
 cmake --build build_release --config Release
 # Rust examples: plain `cargo build` grants neither flag, so parity needs both set explicitly
 RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
@@ -1083,12 +1083,12 @@ cmake --build --preset wasm64_emscripten && ctest --preset wasm64_emscripten
 
 The wasm32 module has one thread, so its pool spawns caller-inclusive and only its C test runs there; the other two shapes run the C++20 and C tests, minus the stress cases.
 
-To cross-compile for Android, point the `android` preset at the NDK's toolchain file and pick an ABI; the binaries only compile, since they need a device to run:
+To cross-compile for Android, point the `android_arm64` preset at the NDK's toolchain file and pick an ABI; the binaries only compile, since they need a device to run:
 
 ```bash
 export CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake
-cmake --preset android -D ANDROID_ABI=arm64-v8a -D ANDROID_PLATFORM=24    # or armeabi-v7a
-cmake --build --preset android
+cmake --preset android_arm64 -D ANDROID_ABI=arm64-v8a -D ANDROID_PLATFORM=24    # or armeabi-v7a
+cmake --build --preset android_arm64
 ```
 
 Android builds need __NDK r28__ or newer, the first with libc++ 19 and its `std::atomic_ref`, and CI builds with the `dockcross/android-arm64` and `dockcross/android-arm` images.
@@ -1117,8 +1117,8 @@ echo 1024 | sudo tee /sys/devices/system/node/node0/hugepages/hugepages-2048kB/n
 To build with an alternative compiler, like LLVM Clang, use the following command:
 
 ```bash
-sudo apt-get install libomp-15-dev clang-15 # OpenMP version must match Clang
-cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D CMAKE_CXX_COMPILER=clang++-15
+sudo apt-get install libomp-18-dev clang-18 # OpenMP version must match Clang
+cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D CMAKE_CXX_COMPILER=clang++-18 -D FORKUNION_BUILD_TEST=ON
 cmake --build build_debug --config Debug
 build_debug/forkunion_test_cpp20
 ```
@@ -1127,7 +1127,7 @@ Or on macOS with Homebrew's LLVM Clang:
 
 ```bash
 brew install llvm@20
-cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D CMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++
+cmake -B build_debug -D CMAKE_BUILD_TYPE=Debug -D CMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++ -D FORKUNION_BUILD_TEST=ON
 cmake --build build_debug --config Debug
 build_debug/forkunion_test_cpp20
 ```

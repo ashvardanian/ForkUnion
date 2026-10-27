@@ -1,6 +1,6 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
   "configurePresets": [
     {
       "name": "base",
@@ -45,6 +45,12 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
     },
     {
+      "name": "check",
+      "inherits": ["base", "clang"],
+      "displayName": "Clang with warnings as errors",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "FORKUNION_WERROR": "ON" }
+    },
+    {
       "name": "asan",
       "inherits": "base",
       "displayName": "AddressSanitizer + UndefinedBehaviorSanitizer",
@@ -52,9 +58,7 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "FORKUNION_BUILD_BENCH": "OFF",
         "FORKUNION_WITH_TOPOLOGY": "OFF",
-        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -g",
-        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -g",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+        "FORKUNION_BUILD_SANITIZERS": "address"
       }
     },
     {
@@ -65,12 +69,7 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "FORKUNION_BUILD_BENCH": "OFF",
         "FORKUNION_WITH_TOPOLOGY": "OFF",
-        "FORKUNION_TARGET_ARM64_LSE": "OFF",
-        "FORKUNION_TARGET_X86_CMPCCXADD": "OFF",
-        "FORKUNION_TARGET_RISC5_ATOMIC": "OFF",
-        "CMAKE_C_FLAGS": "-fsanitize=thread -g",
-        "CMAKE_CXX_FLAGS": "-fsanitize=thread -g",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+        "FORKUNION_BUILD_SANITIZERS": "thread"
       }
     },
     {
@@ -102,7 +101,7 @@
       "cacheVariables": { "CMAKE_EXE_LINKER_FLAGS": "-static" }
     },
     {
-      "name": "android",
+      "name": "android_arm64",
       "inherits": ["release", "cross"],
       "displayName": "Whichever ABI the Android NDK r28+ toolchain file names, compile only",
       "toolchainFile": "$env{CMAKE_TOOLCHAIN_FILE}"
@@ -149,6 +148,7 @@
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
+    { "name": "check", "configurePreset": "check" },
     { "name": "release", "configurePreset": "release" },
     { "name": "asan", "configurePreset": "asan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
     { "name": "tsan", "configurePreset": "tsan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
@@ -156,7 +156,11 @@
     { "name": "msvc2022_x64", "configurePreset": "msvc2022_x64", "configuration": "RelWithDebInfo" },
     { "name": "msvc2022_arm64", "configurePreset": "msvc2022_arm64", "configuration": "RelWithDebInfo" },
     { "name": "dockcross", "configurePreset": "dockcross", "targets": ["forkunion_test_cpp20", "forkunion_test_c11"] },
-    { "name": "android", "configurePreset": "android", "targets": ["forkunion_test_cpp20", "forkunion_test_c11"] },
+    {
+      "name": "android_arm64",
+      "configurePreset": "android_arm64",
+      "targets": ["forkunion_test_cpp20", "forkunion_test_c11"]
+    },
     {
       "name": "wasm32_emscripten",
       "configurePreset": "wasm32_emscripten",

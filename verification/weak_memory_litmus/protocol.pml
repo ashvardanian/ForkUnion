@@ -9,7 +9,7 @@
  *  file expects exactly the failures RC11 would produce. The locations are @c data and @c flag: a
  *  message is the data written before the flag is raised.
  */
-#include "../weak_memory.pml"
+#include <weak_memory.pml>
 
 /** The words. */
 #define data 0

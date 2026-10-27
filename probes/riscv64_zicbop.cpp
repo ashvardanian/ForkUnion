@@ -1,5 +1,5 @@
 /**
- *  @file probes/risc5_zicbop.cpp
+ *  @file probes/riscv64_zicbop.cpp
  *  @author Ash Vardanian
  *  @date October 7, 2026
  *  @brief ForkUnion probe: the raw `prefetch.r` word.

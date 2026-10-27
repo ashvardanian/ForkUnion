@@ -4,6 +4,10 @@
 //! `forN`, `forNDynamic`, `forSlices`, `forSlicesMut` - and the non-blocking generation-token API
 //! on top of the C ABI. Every dispatch takes the context before the callback and forwards it as a
 //! caller-owned pointer, so the callback sees the qualifiers the caller chose.
+//!
+//! File: zig/forkunion/scheduling.zig
+//! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 const std = @import("std");
 const topology = @import("topology.zig");

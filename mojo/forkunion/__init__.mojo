@@ -37,6 +37,10 @@ fail, so a refusal is never folded into an `Optional` a caller has to interpret.
 
 This package root re-exports every public symbol from the modules that mirror the C++ core, so
 `from forkunion import X` resolves whatever module X lives in.
+
+File: mojo/forkunion/__init__.mojo
+Author: Ash Vardanian
+Date: August 22, 2026
 """
 
 # library

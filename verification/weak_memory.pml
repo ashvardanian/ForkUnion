@@ -5,36 +5,16 @@
  *  @brief The C++ memory model as views, for Promela.
  *
  *  Every atomic location is a history of writes, and every thread carries three views over the
- *  histories: @c current, the oldest write it may still read per location; @c released, the view
- *  its last release fence captured; and @c acquired, what its relaxed loads have picked up and its
- *  next acquire fence will merge. A release write stamps the writer's view onto the write, an
- *  acquire read merges that stamp into the reader. Read-modify-writes read the newest write only
- *  and carry its stamp forward, which is the release sequence. This is the view semantics of
- *  Kaiser, Dang, Dreyer, Lahav and Vafeiadis, without promises, which makes it exactly RC11's
- *  release-acquire-relaxed fragment: load buffering is forbidden, as in RC11.
- *
- *  Three memory models share one interface, chosen by `-Dmemory=` at `spin -a` time, and named as
- *  GenMC names the same models, so one `@verify` line reads alike for a scenario and a client:
+ *  histories. A release write stamps the writer's view onto the write, an acquire read merges that
+ *  stamp into the reader. This is the view semantics of Kaiser, Dang, Dreyer, Lahav and Vafeiadis,
+ *  without promises, which makes it exactly RC11's release-acquire-relaxed fragment. Three memory
+ *  models share one interface, chosen by <tt>-Dmemory=</tt> at <tt>spin -a</tt> time, and named as GenMC names
+ *  the same models.
  *
  *  - @c sc: one copy of every location, every access a single step.
  *  - @c rc11, the default: the views above.
- *  - @c far: the views, plus a relaxed no-return add is posted rather than performed. The bit
- *    forms RAO-INT posts the same way, @c aand, @c aor and @c axor, have no inline here, since no
- *    model needs one; a model that adds one follows @c add_no_return.
- *
- *  The @c sc model is the protocol layer: fast, and the place to find logic bugs first.
- *
- *  The @c far model lands a posted add in the history at some later step, in the @c far_cache
- *  process, and until then no release by the posting thread carries it. Same-address accesses by
- *  the poster land it first. This is RAO-INT as Intel documents it: @c aadd runs under the
- *  write-combining ordering, and only SFENCE or MFENCE order it, which a C++ release fence never
- *  emits on x86.
- *
- *  Every scenario defines its own shape before including the module: @c thread_count, the threads
- *  it runs; @c location_count, one past the highest word it touches; and @c history_depth, the most
- *  writes one location receives, the initial one included. A scenario passes its thread index to
- *  every access and reads the views only through @c newest_write and @c seen_write. Orders are the
- *  four the indexes use; nothing here is sequentially consistent, since no index site asks for it.
+ *  - @c far: the views, plus a relaxed no-return add is posted rather than performed.
+ *  - Orders are the four the indexes use; nothing here is sequentially consistent.
  */
 
 #if !defined(thread_count) || !defined(location_count) || !defined(history_depth)
@@ -127,6 +107,10 @@ inline landed(t) { skip }
 int history_value[location_count * history_depth];
 byte history_view[location_count * history_depth * location_count];
 byte newest[location_count];
+
+/** Every thread's three views over the histories: @c current, the oldest write it may still read
+ *  per location; @c released, the view its last release fence captured; and @c acquired, what its
+ *  relaxed loads have picked up and its next acquire fence will merge. */
 byte current[thread_count * location_count];
 byte released[thread_count * location_count];
 byte acquired[thread_count * location_count];
@@ -271,7 +255,9 @@ inline land_if_same_word(t, l) {
 /** Blocks until the thread's posted add landed: the last line of every far-memory scenario. */
 inline landed(t) { pending_location[t] == 0 }
 
-/** The far cache: lands any thread's posted add at any step. */
+/** The far cache: lands any thread's posted add at any step. This is RAO-INT as Intel documents it:
+ *  @c aadd runs under the write-combining ordering, and only SFENCE or MFENCE order it, which a
+ *  C++ release fence never emits on x86. */
 active proctype far_cache() {
 end:
     do

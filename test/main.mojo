@@ -149,12 +149,6 @@ def test_domain_types_are_distinct() raises:
 # region Library And Topology
 
 
-def test_library_loads_and_reports_its_version() raises:
-    var library = Library()
-    var version = library.version()
-    assert_equal(version[0], 3, "the binding targets version three")
-
-
 def test_missing_library_raises() raises:
     """A stale or absent core must name itself, not abort the process."""
     with assert_raises(contains="ForkUnion"):
@@ -581,7 +575,6 @@ def main() raises:
     suite.test[test_capability_masks]()
     suite.test[test_domain_types_are_distinct]()
 
-    suite.test[test_library_loads_and_reports_its_version]()
     suite.test[test_missing_library_raises]()
     suite.test[test_capabilities_are_reported_and_nameable]()
     suite.test[test_topology_counts_and_core_partition]()

@@ -8,6 +8,10 @@ at all, so the state a callback needs travels in an explicit scratch instead.
 The scratch travels by reference. A blocking dispatch does not return until every task is done,
 so the reference is alive for the whole call; taking it here rather than asking the caller for a
 pointer is what stops a caller from handing over storage that dies first.
+
+File: mojo/forkunion/scheduling.mojo
+Author: Ash Vardanian
+Date: August 22, 2026
 """
 
 from std.ffi import c_int, c_size_t

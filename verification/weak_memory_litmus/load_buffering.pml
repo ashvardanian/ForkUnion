@@ -12,7 +12,7 @@
 #define thread_count 2
 #define location_count 2
 #define history_depth 2
-#include "protocol.pml"
+#include <weak_memory_litmus/protocol.pml>
 
 int left_seen, right_seen;
 byte finished;

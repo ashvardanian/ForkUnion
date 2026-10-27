@@ -127,7 +127,7 @@ jobs:
           set -euxo pipefail
           cmake --install build_release --prefix "$PWD/_prefix"
           mkdir -p _consumer && cd _consumer
-          printf 'cmake_minimum_required(VERSION 3.21)\nproject(c LANGUAGES CXX)\nfind_package(forkunion REQUIRED)\nadd_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE forkunion::static)\n' > CMakeLists.txt
+          printf 'cmake_minimum_required(VERSION 3.28)\nproject(c LANGUAGES CXX)\nfind_package(forkunion REQUIRED)\nadd_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE forkunion::static)\n' > CMakeLists.txt
           printf '#include <forkunion.hpp>\nint main() { return 0; }\n' > main.cpp
           cmake -B b -D forkunion_DIR="$PWD/../_prefix/lib/cmake/forkunion"
           cmake --build b
@@ -708,8 +708,8 @@ jobs:
 
       - name: Configure and build
         run: |
-          cmake --preset android
-          cmake --build --preset android
+          cmake --preset android_arm64
+          cmake --build --preset android_arm64
 
   # Only coverage of the FreeBSD cpuset_t affinity path. The VM is x86_64; aarch64 FreeBSD is cross-only.
   test_freebsd:
@@ -991,3 +991,22 @@ jobs:
           test -n "$DEVICE_ID"
           xcrun simctl boot "$DEVICE_ID"
           xcrun simctl spawn "$DEVICE_ID" "$PWD/build_ios_simulator/forkunion_test_cpp20.app/forkunion_test_cpp20"
+
+  build_docs:
+    name: Build Docs
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Doxygen
+        run: |
+          curl -sSfL https://www.doxygen.nl/files/doxygen-1.18.0.linux.bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/doxygen-1.18.0/bin" >> "$GITHUB_PATH"
+      - name: Install Sphinx
+        run: pip install -r docs/requirements.txt
+      - name: Build Docs
+        run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W

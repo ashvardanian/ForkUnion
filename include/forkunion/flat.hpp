@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date May 2, 2025
  *  @brief The portable @c flat_pool, built on @c std::thread.
- *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
+ *  @note Included by <tt>\<forkunion.hpp\></tt>; not meant to be included on its own.
  */
 #pragma once
 #include "types.hpp"
@@ -19,7 +19,7 @@ namespace forkunion {
  *  - dynamically @b resize: all threads must be stopped and re-initialized to grow/shrink.
  *  - @b re-enter: a dispatch from inside its own fork, or beside another caller's, is refused.
  *  - @b copy/move: the threads depend on the address of the parent structure.
- *  - handle @b exceptions: you must `try-catch` them yourself and return @c void.
+ *  - handle @b exceptions: you must @c try-catch them yourself and return @c void.
  *  - @b stop early: assuming the user can do it better, knowing the task granularity.
  *  - @b overflow: as all APIs are aggressively tested with smaller index types.
  *
@@ -37,7 +37,7 @@ namespace forkunion {
  *  @see https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering
  *  @see https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2055r0.pdf
  *
- *  A minimal example, similar to `#pragma omp parallel` in OpenMP:
+ *  A minimal example, similar to <tt>\#pragma omp parallel</tt> in OpenMP:
  *
  *  @code{.cpp}
  *  #include <cstdio>         // `std::printf`
@@ -154,7 +154,7 @@ class flat_pool {
 
     /**
      *  @brief Number of previous API calls, in [0, UINT_MAX).
-     *  @note At the @c fu8_t and @c fu16_t debug widths a worker stalled across exactly `2^bits`
+     *  @note At the @c fu8_t and @c fu16_t debug widths a worker stalled across exactly <tt>2^bits</tt>
      *      epochs would alias its @c last_epoch - astronomically unlikely at @c size_t.
      */
     using epoch_index_t = index_t;
@@ -210,7 +210,7 @@ class flat_pool {
     /** Pointer to the on-stack fork lambda. */
     using punned_fork_context_t = void *;
 
-    /** Wraps the lambda's `operator()`. */
+    /** Wraps the lambda's <tt>operator()</tt>. */
     using trampoline_t = void (*)(punned_fork_context_t, thread_index_t);
 
     static_assert(is_wait_functor<micro_yield_t, epoch_index_t, thread_index_t>::value,
@@ -309,9 +309,12 @@ class flat_pool {
      *  @brief Creates a thread-pool with the given number of threads.
      *  @param[in] threads The number of threads to be used.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
-     *  @return `success_k` once the pool is ready; @c unsupported_k for a caller-exclusive or
-     *      multi-thread pool without OS threads; otherwise the reason it could not start.
      *  @note This is the de-facto @b constructor - you only call it again after @c terminate.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k Zero @p threads.
+     *  - @c already_spawned_k The pool still holds workers.
+     *  - @c unsupported_k A caller-exclusive or multi-thread pool without OS threads.
      */
     status_t spawn(                   //
         thread_index_t const threads, //
@@ -384,7 +387,7 @@ class flat_pool {
     /**
      *  @brief Executes a @p fork function in parallel on all threads.
      *  @param[in] fork The callback object, receiving the thread index as an argument.
-     *  @return `broadcast_join` synchronization point that waits in the destructor.
+     *  @return @c broadcast_join synchronization point that waits in the destructor.
      *  @note Even in the @c caller_exclusive_k mode, can be called from just one thread!
      *  @sa For advanced resource management, consider @c unsafe_for_threads and @c unsafe_join.
      */
@@ -616,9 +619,9 @@ class flat_pool {
 
     /**
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
-     *  @return Same value as `threads_count()`, as we only support one compute_domain.
+     *  @return Same value as <tt>threads_count()</tt>, as we only support one compute_domain.
      *  @note Shape parity with @c distributed_pool: generic callers - the C ABI's @c visit and the
-     *      distributed invokers - call `pool.threads_count(domain)` on every pool kind.
+     *      distributed invokers - call <tt>pool.threads_count(domain)</tt> on every pool kind.
      */
     thread_index_t threads_count([[maybe_unused]] index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
@@ -627,7 +630,7 @@ class flat_pool {
 
     /**
      *  @brief Returns the first global thread index of a @b compute_domain.
-     *  @return Same value as `first_thread()`, as we only support one compute_domain.
+     *  @return Same value as <tt>first_thread()</tt>, as we only support one compute_domain.
      */
     constexpr thread_index_t first_thread([[maybe_unused]] index_t compute_domain_index) const noexcept {
         assert(compute_domain_index == 0 && "Only one compute_domain is supported");
@@ -674,7 +677,7 @@ class flat_pool {
     }
 
     /**
-     *  @brief The worker thread loop that is called by each of `this->workers_`.
+     *  @brief The worker thread loop that is called by each of @c this->workers_.
      *  @param[in] thread_index The index of the thread that is executing this function.
      */
     void worker_loop_(thread_index_t const thread_index) noexcept {

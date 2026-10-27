@@ -5,25 +5,20 @@
  *  @brief GenMC client for the fork-join words of @c flat_pool in `include/forkunion/flat.hpp`.
  *
  *  The epoch clock, the countdown, and what a completed join sees, each spelled line for line over
- *  @c std::atomic. The pool itself spawns through @c std::thread, which rides on the platform's
- *  @c pthread_create that GenMC does not intercept, so its words stand alone here.
- *
- *  A dispatcher runs one generation on a caller-inclusive pool with two workers, contributes its
- *  own slice inside the join, and after the completion step reads every worker's result. The same
- *  scenario is `plain.pml`.
+ *  @c std::atomic. A dispatcher runs one generation on a caller-inclusive pool with two workers,
+ *  contributes its own slice inside the join, and after the completion step reads every worker's
+ *  result. The same scenario is <tt>plain.pml</tt>.
  *
  *  @verify pass sc,rc11,imm plain
- *  @verify fail rc11,imm plain_decrement_order_release: the countdown's decrements are @c acq_rel,
- *      so the last contributor acquires its peers' results before its release step publishes
- *      them; with release alone, the join reads a result racing with its write, under IMM as under
- *      RC11
+ *  @verify fail rc11,imm plain_decrement_order_release: with release alone, the join reads a result
+ *      racing with its write, under IMM as under RC11
  *  @verify pass sc plain_decrement_order_release
  */
 #include <cstddef> // `std::size_t`
 
 #include <atomic> // `std::atomic` - the epoch and the countdown
 
-#include "genmc.hpp"
+#include <genmc.hpp>
 
 /** The header's choices; each mutant entry changes one. */
 struct knobs_t {

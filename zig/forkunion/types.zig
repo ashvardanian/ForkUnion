@@ -6,6 +6,10 @@
 //! layer is built from:
 //! the `IndexedSplit` fair-run splitter, the `CacheAligned` padding wrapper, and the
 //! `SyncConstPtr`/`SyncMutPtr` raw-pointer views that let disjoint slices cross the FFI boundary.
+//!
+//! File: zig/forkunion/types.zig
+//! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 const std = @import("std");
 

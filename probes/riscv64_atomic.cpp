@@ -1,5 +1,5 @@
 /**
- *  @file probes/risc5_atomic.cpp
+ *  @file probes/riscv64_atomic.cpp
  *  @author Ash Vardanian
  *  @date September 9, 2026
  *  @brief ForkUnion probe: the A extension - an `amoswap.w` and an `lr.w`/`sc.w` loop.

@@ -5,13 +5,12 @@
  *  @brief A relaxed no-return add before a release store: carried in C++, posted under far memory.
  *
  *  @verify pass sc,rc11
- *  @verify fail far: a relaxed no-return add is posted to the far cache and no release carries it;
- *      the reader acquires the flag and the data, and still sees the add unlanded
+ *  @verify fail far: the reader acquires the flag and the data, and still sees the add unlanded
  */
 #define thread_count 2
 #define location_count 2
 #define history_depth 2
-#include "protocol.pml"
+#include <weak_memory_litmus/protocol.pml>
 
 /** Adds to the data relaxed with no return, then raises the flag with a release. */
 proctype writer(byte t) {

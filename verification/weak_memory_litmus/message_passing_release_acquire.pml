@@ -9,7 +9,7 @@
 #define thread_count 2
 #define location_count 2
 #define history_depth 2
-#include "protocol.pml"
+#include <weak_memory_litmus/protocol.pml>
 
 /** Writes the data, then raises the flag with a release. */
 proctype writer(byte t) { send(t, order_release) }

@@ -8,21 +8,18 @@
  *  the poller reads both epochs with acquire until both differ from the token, and then reads every
  *  result. One round under @c rc11, and two under @c sc, where the state space allows it.
  *
- *  Completion: a poller that saw both epochs past the token reads every worker's result of that
- *  round, the acquire on each epoch carrying its colocation's contributors.
+ *  - Completion: a poller that saw both epochs past the token reads every worker's result.
  *
  *  @verify pass sc generations=2
  *  @verify pass rc11
- *  @verify fail sc dispatch_before_join=false: @c unsafe_for_threads dispatches every remote
- *      colocation before the join; joining the second colocation before dispatching to it, the
- *      join returns stale, the round ends with that colocation still running, and the poller reads
- *      its worker's result unwritten
+ *  @verify fail sc dispatch_before_join=false: the join returns stale, the round ends with that
+ *      colocation still running, and the poller reads its worker's result unwritten
  */
 #define thread_count 4
 #define location_count 7
 #define history_depth 4
 #define remote_lags false
-#include "protocol.pml"
+#include <distributed_pool/protocol.pml>
 
 /** The caller: dispatches to both colocations, joins them caller first, and checks every round. */
 proctype dispatcher(byte t) { dispatch_and_join(t) }

@@ -6,32 +6,25 @@
  *      the startup wait before a worker finds its handle.
  *
  *  The spawn stores chill with a release, starts the workers, writes their handles, and stores
- *  grind with a release. A fresh worker waits out the chill with an uncapped wait, since only the
- *  mood moves during the startup, finds its handle, and then runs the worker loop, which
- *  @c colocated_pool shares with @c flat_pool together with the dispatch and the join, so they
- *  come from `flat_pool/protocol.pml`. The dispatcher may sleep between dispatches, storing chill
- *  from the thread that spawned, joins every generation, and terminates.
+ *  grind with a release. A fresh worker waits out the chill with an uncapped wait, finds its
+ *  handle, and then runs the worker loop, which @c colocated_pool shares with @c flat_pool. The
+ *  dispatcher may sleep between dispatches, joins every generation, and terminates.
  *
- *  Every worker leaves its startup wait and reads the handles the spawn wrote.
+ *  - Every worker leaves its startup wait and reads the handles the spawn wrote.
  *
  *  @verify pass sc,rc11
- *  @verify fail rc11 chill_at_spawn=false: @c colocated_pool::spawn stores chill before it writes
- *      the handles, and grind with a release after; without the chill, a fresh worker leaves its
- *      startup wait at once and reads no handle
- *  @verify stuck sc strong_wake=false: the dispatch wakes a chilled pool with one strong exchange
- *      back to grind, the same instruction on x86; a weak one may fail spuriously on load-linked
- *      architectures, and a worker still in its startup wait after a @c sleep leaves it only once
- *      the mood stops being chill, so the join waits on that worker forever
- *  @verify stuck sc recheck=false: every monitored wait re-checks its word after arming, the
- *      startup wait the mood as the join the epoch; without it, a write that lands between a
- *      waiter's load and its arming wakes nobody, and the uncapped waiter waits forever, the
- *      worker for a grind or the join for a completion step that already happened
+ *  @verify fail rc11 chill_at_spawn=false: without the chill, a fresh worker leaves its startup
+ *      wait at once and reads no handle
+ *  @verify stuck sc strong_wake=false: a weak one may fail spuriously on load-linked
+ *      architectures, so the join waits on that worker forever
+ *  @verify stuck sc recheck=false: without it, a write that lands between a waiter's load and its
+ *      arming wakes nobody, and the uncapped waiter waits forever
  */
 #define thread_count 3
 #define location_count 10
 #define history_depth 9
 #define through_c_shim false
-#include "flat_pool/protocol.pml"
+#include <flat_pool/protocol.pml>
 
 /** The handles the spawn writes, past the words of the flat pool. */
 #define handles 9

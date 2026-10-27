@@ -4,6 +4,10 @@ An allocator here is named by the operating system's own memory-domain id, not b
 and holds nothing else. That is what lets it - and every buffer it hands out - outlive the
 topology handle that found the id. Ask the topology for a compute domain's local memory, resolve
 that index to an id, and keep the id.
+
+File: mojo/forkunion/allocators.mojo
+Author: Ash Vardanian
+Date: August 22, 2026
 """
 
 from std.ffi import c_int, c_size_t

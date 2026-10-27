@@ -6,38 +6,18 @@
  *      @c threads_to_sync that admits one dispatch and names the last contributor, and the mood.
  *
  *  The epoch is odd while a @c fork_state is in flight and even when idle, and the mood puts
- *  workers to sleep and lets them go.
+ *  workers to sleep and lets them go. A dispatcher runs @c generations generations, two by default,
+ *  on a caller-inclusive pool with two workers. Each epoch store has one writer, so neither step
+ *  needs a read-modify-write. Every wait is the @c wait_on of <tt>monitor_wait.pml</tt>.
  *
- *  A dispatcher runs @c generations generations, two by default, on a caller-inclusive pool with
- *  two workers. Each dispatch claims the @c threads_to_sync by exchanging it from zero with an
- *  acquire, and one that finds it above zero is refused with the zero token and writes nothing.
- *  An admitted dispatch writes the @c fork_state, waits until the epoch is even, which the last
- *  contributor of the previous generation makes it just after its decrement, and stores the next
- *  epoch with a release. Every contributor reads the @c fork_state, writes its result relaxed,
- *  decrements the @c threads_to_sync with @c acq_rel, and the one that took it to zero stores the
- *  epoch after its generation with a release. Each epoch store has one writer, so neither step
- *  needs a read-modify-write. The dispatcher contributes its own slice inside the join, then waits
- *  for the completion step. The workers wait on the epoch, checking the mood only while it stands
- *  still, under a capped wait. The spawn stores grind with a release and starts the workers, whose
- *  first step acquires the spawn, since a new thread's view is its creator's.
- *
- *  Every wait is the @c wait_on of `monitor_wait.pml`, and every write to the epoch or the mood
- *  wakes the threads armed on it, as any store to a monitored line does and as a notifying
- *  reference's releasing store does. Die re-releases the idle epoch after the mood, so a worker
- *  waiting on the epoch alone wakes to exit.
- *
- *  No fork is torn: a dispatch writes the @c fork_state only once every contributor of the last
- *  generation counted down, and every contributor reads the @c fork_state its generation
- *  published and runs each one exactly once. The @c threads_to_sync never goes below zero, and
- *  every token a join receives is odd. A completed join sees every contributor's result: the
- *  @c acq_rel decrements chain each contributor's writes into the last one, whose release step
- *  publishes them at once.
- *
- *  Every scenario beside this file defines its shape, @c through_c_shim for dispatches the C shim
- *  wraps, and the @c worker the spawn runs.
+ *  - No fork is torn.
+ *  - Every contributor reads the @c fork_state its generation published and runs each one exactly
+ *    once.
+ *  - The @c threads_to_sync never goes below zero, and every token a join receives is odd.
+ *  - A completed join sees every contributor's result.
  */
-#include "../weak_memory.pml"
-#include "../monitor_wait.pml"
+#include <weak_memory.pml>
+#include <monitor_wait.pml>
 
 /** The caller's thread, which plays the dispatcher and contributes without a result word of its
  *  own; the workers are threads 1 and 2. */

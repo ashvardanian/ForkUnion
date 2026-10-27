@@ -10,15 +10,14 @@
  *
  *  @verify pass sc generations=2
  *  @verify pass rc11
- *  @verify stuck sc caller_first_join=false: @c unsafe_join runs the caller's slice on its own
- *      colocation before it waits for any other; waiting for the second colocation first, the join
- *      waits on a worker that waits on the caller's slice, and the two wait on each other forever
+ *  @verify stuck sc caller_first_join=false: the join waits on a worker that waits on the caller's
+ *      slice, and the two wait on each other forever
  */
 #define thread_count 4
 #define location_count 7
 #define history_depth 4
 #define remote_lags true
-#include "protocol.pml"
+#include <distributed_pool/protocol.pml>
 
 /** The caller: dispatches to both colocations, joins them caller first, and checks every round. */
 proctype dispatcher(byte t) { dispatch_and_join(t) }

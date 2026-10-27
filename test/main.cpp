@@ -1678,13 +1678,13 @@ static void test_atomic_refs() noexcept {
 #if FORKUNION_TARGET_ARM64_RCPC
     check_atomic_ref<fu::arm64_rcpc_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
 #endif
-#if FORKUNION_TARGET_RISC5_ATOMIC
+#if FORKUNION_TARGET_RISCV64_ATOMIC
     check_atomic_ref<fu::risc5_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
-#if FORKUNION_TARGET_RISC5_ZACAS
+#if FORKUNION_TARGET_RISCV64_ZACAS
     check_atomic_ref<fu::risc5_zacas_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
-#if FORKUNION_TARGET_RISC5_ZABHA
+#if FORKUNION_TARGET_RISCV64_ZABHA
     check_atomic_ref<fu::risc5_zabha_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_WASM_WAIT

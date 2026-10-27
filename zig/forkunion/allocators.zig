@@ -3,6 +3,10 @@
 //! An `AllocationResult`/`DomainAllocator` pin buffers to a single memory domain, while
 //! `ReplicatedArray` and `ShardedArray` lay a sequence out across every domain - one full replica
 //! per domain, or one contiguous shard per domain.
+//!
+//! File: zig/forkunion/allocators.zig
+//! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 const std = @import("std");
 const topology_module = @import("topology.zig");

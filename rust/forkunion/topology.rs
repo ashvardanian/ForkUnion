@@ -4,6 +4,7 @@
 //!
 //! File: rust/forkunion/topology.rs
 //! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 use core::ffi::{c_char, c_int, c_void};
 
@@ -226,8 +227,9 @@ pub struct ComputeLevel(pub usize);
 /// [`Topology::memory_domain_id_at_index`]; `-1` when there is none.
 ///
 /// Distinct from [`MemoryDomain`]: that is a dense index for iteration, this is the sparse OS ID
-/// the kernel labels a node with. A [`DomainAllocator`] holds only this ID, so it - and every
-/// [`AllocationResult`] it hands out - is free of the topology handle and can outlive it.
+/// the kernel labels a node with. A [`DomainAllocator`](crate::DomainAllocator) holds only this
+/// ID, so it - and every [`AllocationResult`](crate::AllocationResult) it hands out - is free of
+/// the topology handle and can outlive it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryDomainId(pub i32);
 
@@ -303,7 +305,7 @@ impl Topology {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::CreationFailed`] if the C side could not allocate or populate the handle.
+    /// Returns [`Error`] if the C side could not allocate or populate the handle.
     pub fn new() -> Result<Self> {
         let mut inner: *mut c_void = core::ptr::null_mut();
         // ? An allocation failure and a machine that will not describe itself now arrive apart.
@@ -319,7 +321,8 @@ impl Topology {
     /// Returns the number of logical cores backing a given compute domain.
     ///
     /// Zero if `compute_domain` is out of range. Use it to size a per-compute-domain pool
-    /// ([`ThreadPool::spawn_on`]) or to weight work across uneven compute domains.
+    /// ([`ThreadPool::spawn_on`](crate::ThreadPool::spawn_on)) or to weight work across uneven
+    /// compute domains.
     pub fn logical_cores_count_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
@@ -389,7 +392,8 @@ impl Topology {
     /// A magnitude on the Linux `cpu_capacity` scale, where 1024 is the fastest core present.
     /// This is the number to weight work by - [`compute_level_in`](Self::compute_level_in) is a
     /// dense ordinal and must never be divided by. Platforms that rank cores without rating them
-    /// report 0 here; fall back to [`threads_count_in`](ThreadPool::threads_count_in) when they do.
+    /// report 0 here; fall back to [`threads_count_in`](crate::ThreadPool::threads_count_in) when
+    /// they do.
     pub fn compute_capacity_in(&self, compute_domain: ComputeDomain) -> Result<usize> {
         let mut answer = usize::MAX;
         Error::check(
@@ -422,7 +426,8 @@ impl Topology {
         Ok(answer)
     }
 
-    /// Resolves a memory domain's dense index to the OS ID a [`DomainAllocator`] takes.
+    /// Resolves a memory domain's dense index to the OS ID a
+    /// [`DomainAllocator`](crate::DomainAllocator) takes.
     ///
     /// A real domain may itself carry `-1` where the OS names none, so an out-of-range index is a
     /// reported failure rather than the same sentinel.

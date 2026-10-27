@@ -6,32 +6,28 @@
  *
  *  Two admitters run through the free conditional add loop, @c atomic_fetch_add_if_at_most,
  *  against a ceiling of one, and two @c fetch_max calls race. Each thread writes a payload of its
- *  own before its call, which releases. The ceiling is never crossed, every admission is counted,
- *  and the maximum is the maximum. A refused call acquires the value that refused it, so the
- *  refused admitter reads the admitted one's payload, and a raiser refused by a higher maximum
- *  reads the payload of the raiser that set it. Two of each, since every read-first loop
- *  multiplies the executions GenMC explores.
+ *  own before its call, which releases. Two claimers race @c fetch_test_and_set_bit on the same
+ *  clear bit beside a held one: exactly one sees it clear, the loser reads the winner's payload,
+ *  and one reset hands the bit back.
  *
- *  Two claimers race @c fetch_test_and_set_bit on the same clear bit beside a held one: exactly
- *  one sees it clear, the loser reads the winner's payload, and one reset hands the bit back.
+ *  - The ceiling is never crossed, every admission is counted, and the maximum is the maximum.
+ *  - A refused call acquires the value that refused it.
  *
  *  @verify pass sc,rc11,imm standard_atomic_ref
  *  @verify pass sc,rc11,imm standard_atomic_ref_bit_claim
- *  @verify fail rc11,imm standard_atomic_ref_bounded_refusal_order_relaxed: the loop of
- *      @c atomic_fetch_add_if_at_most reads the word, and re-reads it on a failed exchange, with an
- *      acquire; relaxed, the refused admitter learns the ceiling is reached without the admitted
- *      one's writes, and reads its payload racing with the write
- *  @verify fail rc11,imm standard_atomic_ref_max_refusal_order_relaxed: the loop of @c fetch_max
- *      reads the word, and re-reads it on a failed exchange, with an acquire; relaxed, the raiser
- *      refused by a higher maximum reads the payload of the raiser that set it, racing the write
+ *  @verify fail rc11,imm standard_atomic_ref_bounded_refusal_order_relaxed: relaxed, the refused
+ *      admitter learns the ceiling is reached without the admitted one's writes, and reads its
+ *      payload racing with the write
+ *  @verify fail rc11,imm standard_atomic_ref_max_refusal_order_relaxed: relaxed, the raiser refused
+ *      by a higher maximum reads the payload of the raiser that set it, racing the write
  */
 #include <cstdint> // `std::uint32_t` - the words the loops move
 
 #include <atomic> // `std::atomic_ref`, `std::memory_order`
 
-#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the portable loops under test
+#include <genmc.hpp>
 
-#include "genmc.hpp"
+#include "forkunion/atomics.hpp" // `fu::standard_atomic_ref` - the portable loops under test
 
 namespace fu = ashvardanian::forkunion;
 

@@ -10,20 +10,18 @@
  *  the other, so the next dispatch is admitted once the running one completes; once both
  *  finished, the caller lets the workers go.
  *
- *  A refused dispatch published on no colocation, the two tokens of an admitted one agree, and
- *  every contributor runs each generation once.
+ *  - A refused dispatch published on no colocation, and the two tokens of an admitted one agree.
+ *  - Every contributor runs each generation once.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc claim_first=false: @c distributed_pool::unsafe_for_threads claims every
- *      colocation before it publishes on any; claiming and publishing each in turn, the rival
- *      publishes on the remote colocation, finds the caller's still held and is refused, and
- *      leaves its fork running there with nobody to join it
+ *  @verify fail sc claim_first=false: the rival publishes on the remote colocation, finds the
+ *      caller's still held and is refused, and leaves its fork running there with nobody to join it
  */
 #define thread_count 4
 #define location_count 8
 #define history_depth 7
 #define remote_lags false
-#include "protocol.pml"
+#include <distributed_pool/protocol.pml>
 
 /** The thread that dispatches beside the caller, and the count of finished holders, past the words
  *  of the pool, whose @c acq_rel steps are the program's own hand-off before @c terminate. */

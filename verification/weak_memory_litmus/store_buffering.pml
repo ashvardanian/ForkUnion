@@ -10,13 +10,12 @@
  *  shows they find the outcome the memory model admits; the checker touches no location.
  *
  *  @verify pass sc
- *  @verify fail rc11,far: a relaxed write carries no view to a read of another location; both
- *      sides read zero, as RC11 allows and sequential consistency forbids
+ *  @verify fail rc11,far: both sides read zero, as RC11 allows and sequential consistency forbids
  */
 #define thread_count 2
 #define location_count 2
 #define history_depth 2
-#include "protocol.pml"
+#include <weak_memory_litmus/protocol.pml>
 
 int left_seen, right_seen;
 byte finished;

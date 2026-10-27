@@ -4,6 +4,7 @@
 //!
 //! File: rust/forkunion/allocators.rs
 //! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
@@ -1078,7 +1079,9 @@ unsafe impl<T: Sync> Sync for ReplicatedArray<T> {}
 /// Where a logical element lives - which memory domain, and its index within that shard.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ShardLocation {
+    /// The memory domain holding the element.
     pub memory_domain: MemoryDomain,
+    /// The element's index within that domain's shard.
     pub local_index: usize,
 }
 

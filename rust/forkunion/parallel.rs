@@ -4,6 +4,7 @@
 //!
 //! File: rust/forkunion/parallel.rs
 //! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -52,7 +53,9 @@ pub struct StaticScheduler;
 #[derive(Clone, Copy, Debug)]
 pub struct DynamicScheduler;
 
+/// How a parallel iterator's tasks are assigned to the threads of a pool.
 pub trait ParallelSchedule: Copy {
+    /// Runs `function` once per task index, each on the thread the schedule picks.
     fn dispatch<F>(&self, pool: &mut ThreadPool, tasks: usize, function: F) -> Result<()>
     where
         F: Fn(usize, ThreadInDomain) + Sync;
@@ -115,20 +118,26 @@ impl ParallelSchedule for DynamicScheduler {
 /// One thread's best candidate for an indexed search: the winning task index and its item.
 type BestCandidate<T> = CacheAligned<Option<(usize, T)>>;
 
+/// A source of items that a pool consumes in parallel.
 pub trait ParallelIterator: Sized {
+    /// What the consumer receives for every task.
     type Item;
 
+    /// Returns the number of tasks.
     fn len(&self) -> usize;
 
+    /// Returns true iff there are no tasks.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Feeds every item to `consumer` along with its task index and executing thread.
     fn drive<S, F>(self, pool: &mut ThreadPool, schedule: S, consumer: &F) -> Result<()>
     where
         S: ParallelSchedule,
         F: Fn(Self::Item, usize, ThreadInDomain) + Sync;
 
+    /// As [`drive`](Self::drive) under the static schedule.
     fn drive_static<F>(self, pool: &mut ThreadPool, consumer: F) -> Result<()>
     where
         F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
@@ -136,6 +145,7 @@ pub trait ParallelIterator: Sized {
         self.drive(pool, StaticScheduler, &consumer)
     }
 
+    /// As [`drive`](Self::drive) under the dynamic schedule.
     fn drive_dynamic<F>(self, pool: &mut ThreadPool, consumer: F) -> Result<()>
     where
         F: Fn(Self::Item, usize, ThreadInDomain) + Sync,
@@ -143,6 +153,7 @@ pub trait ParallelIterator: Sized {
         self.drive(pool, DynamicScheduler, &consumer)
     }
 
+    /// Transforms every item with `mapper` before it reaches the consumer.
     fn map<M, U>(self, mapper: M) -> Map<Self, M>
     where
         M: Fn(Self::Item) -> U + Sync,
@@ -150,6 +161,7 @@ pub trait ParallelIterator: Sized {
         Map { base: self, mapper }
     }
 
+    /// Keeps only the items for which `predicate` holds.
     fn filter<P>(self, predicate: P) -> Filter<Self, P>
     where
         P: Fn(&Self::Item) -> bool + Sync,
@@ -158,7 +170,9 @@ pub trait ParallelIterator: Sized {
     }
 }
 
+/// Binds a parallel iterator to the pool that will run it.
 pub trait ParallelIteratorExt: ParallelIterator + Sized {
+    /// Runs on `pool` under the static schedule.
     fn with_pool<'pool>(self, pool: &'pool mut ThreadPool) -> ParallelRunner<'pool, Self, StaticScheduler> {
         ParallelRunner {
             pool,
@@ -167,6 +181,7 @@ pub trait ParallelIteratorExt: ParallelIterator + Sized {
         }
     }
 
+    /// Runs on `pool` under the given schedule.
     fn with_schedule<'pool, S>(self, pool: &'pool mut ThreadPool, schedule: S) -> ParallelRunner<'pool, Self, S>
     where
         S: ParallelSchedule,
@@ -181,6 +196,7 @@ pub trait ParallelIteratorExt: ParallelIterator + Sized {
 
 impl<I: ParallelIterator> ParallelIteratorExt for I {}
 
+/// A parallel iterator paired with the pool and schedule that will run it.
 pub struct ParallelRunner<'pool, I, S> {
     pool: &'pool mut ThreadPool,
     iterator: I,
@@ -192,6 +208,7 @@ where
     I: ParallelIterator,
     S: ParallelSchedule,
 {
+    /// Replaces the schedule.
     #[must_use]
     pub fn with_schedule<S2>(self, schedule: S2) -> ParallelRunner<'pool, I, S2>
     where
@@ -205,6 +222,7 @@ where
         }
     }
 
+    /// Calls `function` for every item with its task index and executing thread.
     pub fn for_each<F>(self, function: F) -> Result<()>
     where
         F: Fn(I::Item, usize, ThreadInDomain) + Sync,
@@ -217,6 +235,7 @@ where
         iterator.drive(pool, schedule, &move |item, task, at| function(item, task, at))
     }
 
+    /// Folds every item into the per-thread slot of `scratch` that runs it.
     pub fn fold_with_scratch<T, F>(self, scratch: &mut [T], fold: F) -> Result<()>
     where
         T: Send,
@@ -833,10 +852,14 @@ where
     }
 }
 
+/// Conversion into a [`ParallelIterator`].
 pub trait IntoParallelIterator {
+    /// The item the resulting iterator yields.
     type Item;
+    /// The resulting iterator.
     type Iter: ParallelIterator<Item = Self::Item>;
 
+    /// Converts `self` into a parallel iterator.
     fn into_par_iter(self) -> Self::Iter;
 }
 
@@ -873,6 +896,7 @@ impl IntoParallelIterator for core::ops::Range<usize> {
     }
 }
 
+/// A parallel iterator that transforms every item of its base.
 pub struct Map<I, M> {
     base: I,
     mapper: M,
@@ -901,6 +925,7 @@ where
     }
 }
 
+/// A parallel iterator that keeps only the items of its base that satisfy a predicate.
 pub struct Filter<I, P> {
     base: I,
     predicate: P,
@@ -933,17 +958,20 @@ where
     }
 }
 
+/// A parallel iterator over the elements of a shared slice.
 #[derive(Clone, Copy)]
 pub struct ParallelSlice<'a, T> {
     data: &'a [T],
 }
 
 impl<'a, T> ParallelSlice<'a, T> {
+    /// Wraps a slice.
     #[must_use]
     pub fn new(data: &'a [T]) -> Self {
         Self { data }
     }
 
+    /// Calls `function` for every element under the static schedule.
     pub fn for_each_static<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Sync,
@@ -952,6 +980,7 @@ impl<'a, T> ParallelSlice<'a, T> {
         self.drive_static(pool, function)
     }
 
+    /// Calls `function` for every element under the dynamic schedule.
     pub fn for_each_dynamic<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Sync,
@@ -960,6 +989,7 @@ impl<'a, T> ParallelSlice<'a, T> {
         self.drive_dynamic(pool, function)
     }
 
+    /// Pairs the elements of two slices by position.
     #[must_use]
     pub fn zip<'b, U>(self, other: ParallelSlice<'b, U>) -> ParallelSliceZip<'a, 'b, T, U> {
         ParallelSliceZip {
@@ -996,6 +1026,7 @@ where
     }
 }
 
+/// A parallel iterator over the paired elements of two shared slices.
 pub struct ParallelSliceZip<'a, 'b, T, U> {
     left: ParallelSlice<'a, T>,
     right: ParallelSlice<'b, U>,
@@ -1035,6 +1066,7 @@ where
     }
 }
 
+/// A parallel iterator over the elements of an exclusive slice.
 pub struct ParallelSliceMut<'a, T> {
     ptr: SyncMutPtr<T>,
     len: usize,
@@ -1042,6 +1074,7 @@ pub struct ParallelSliceMut<'a, T> {
 }
 
 impl<'a, T> ParallelSliceMut<'a, T> {
+    /// Wraps a slice.
     #[must_use]
     pub fn new(data: &'a mut [T]) -> Self {
         Self {
@@ -1051,6 +1084,7 @@ impl<'a, T> ParallelSliceMut<'a, T> {
         }
     }
 
+    /// Calls `function` for every element under the static schedule.
     pub fn for_each_static<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Send,
@@ -1059,6 +1093,7 @@ impl<'a, T> ParallelSliceMut<'a, T> {
         self.drive_static(pool, function)
     }
 
+    /// Calls `function` for every element under the dynamic schedule.
     pub fn for_each_dynamic<F>(self, pool: &mut ThreadPool, function: F) -> Result<()>
     where
         T: Send,
@@ -1095,12 +1130,14 @@ where
     }
 }
 
+/// A parallel iterator over a range of indices.
 #[derive(Clone)]
 pub struct ParallelRange {
     range: core::ops::Range<usize>,
 }
 
 impl ParallelRange {
+    /// Wraps a range.
     #[must_use]
     pub fn new(range: core::ops::Range<usize>) -> Self {
         Self { range }
@@ -1132,6 +1169,7 @@ impl ParallelIterator for ParallelRange {
     }
 }
 
+/// A parallel iterator that builds each item from its task index.
 pub struct ParallelExactIter<T, I> {
     len: usize,
     indexer: I,
@@ -1142,6 +1180,7 @@ impl<T, I> ParallelExactIter<T, I>
 where
     I: Fn(usize) -> T + Sync,
 {
+    /// Builds an iterator of `len` items, each produced by `indexer` from its index.
     #[must_use]
     pub fn new(len: usize, indexer: I) -> Self {
         Self {
@@ -1181,6 +1220,7 @@ where
     }
 }
 
+/// The names a parallel loop needs, for a single glob import.
 pub mod prelude {
     pub use super::{
         DynamicScheduler, IntoParallelIterator, ParallelIterator, ParallelIteratorExt, ParallelRunner, StaticScheduler,

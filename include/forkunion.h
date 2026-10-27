@@ -117,11 +117,19 @@ typedef int fu_bool_t;
 /**
  *  @brief Why a call failed, in a vocabulary the core and every binding share.
  *
- *  Success is `0`; every failure is negative, so `status < 0` and `status != fu_success_k` agree.
+ *  Success is @c 0; every failure is negative, so <tt>status < 0</tt> and <tt>status != fu_success_k</tt> agree.
  *  Values are fixed and portable, so a binding may hard-code them.
  *
  *  Some enumerators name failures the core never returns itself: a binding that rejects a call
  *  before it crosses reports the same status the core would if it could see the same thing.
+ *
+ *  Statuses fall into four categories, with no interruptions to report. Resources:
+ *  @c fu_bad_alloc_k, @c fu_thread_refused_k, @c fu_topology_unavailable_k,
+ *  @c fu_permission_denied_k, @c fu_library_missing_k and @c fu_symbol_missing_k. Input:
+ *  @c fu_invalid_argument_k. State: @c fu_capacity_exhausted_k, @c fu_config_mismatch_k,
+ *  @c fu_already_spawned_k, @c fu_not_spawned_k, @c fu_unsupported_k and @c fu_contended_k.
+ *  Defects: @c fu_unknown_k. Any verb that allocates, binds a device or touches a file may also
+ *  return a Resources status. A verb's own block lists only what its contract adds.
  */
 typedef enum fu_status_t {
 
@@ -202,7 +210,7 @@ typedef int fu_memory_domain_id_t;
  *  @brief Callback type for thread-level operations.
  *  @param[in] context Type-punned pointer to user-defined context data.
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
+ *  @param[in] compute_domain The compute-domain index in [0, <tt>fu_compute_domains_count()</tt>).
  */
 typedef void (*fu_for_threads_t)(fu_lambda_context_t context, size_t thread, size_t compute_domain);
 
@@ -211,7 +219,7 @@ typedef void (*fu_for_threads_t)(fu_lambda_context_t context, size_t thread, siz
  *  @param[in] context Type-punned pointer to user-defined context data.
  *  @param[in] task The task index in [0, n).
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
+ *  @param[in] compute_domain The compute-domain index in [0, <tt>fu_compute_domains_count()</tt>).
  */
 typedef void (*fu_for_task_t)(fu_lambda_context_t context, size_t task, size_t thread, size_t compute_domain);
 
@@ -221,7 +229,7 @@ typedef void (*fu_for_task_t)(fu_lambda_context_t context, size_t task, size_t t
  *  @param[in] first The first task index in the slice.
  *  @param[in] count The number of tasks in the slice.
  *  @param[in] thread The thread index in [0, threads_count).
- *  @param[in] compute_domain The compute-domain index in [0, `fu_compute_domains_count()`).
+ *  @param[in] compute_domain The compute-domain index in [0, <tt>fu_compute_domains_count()</tt>).
  */
 typedef void (*fu_for_range_t)(fu_lambda_context_t context, size_t first, size_t count, size_t thread,
                                size_t compute_domain);
@@ -269,8 +277,9 @@ typedef enum fu_capabilities_t {
     fu_capability_x86_pause_k = 1 << 0,
 
     /**
-     *  @brief `TPAUSE` sleeps the core until a deadline rather than spinning - the @c WAITPKG
-     *      feature, `CPUID.(7,0):ECX[5]`, on Sapphire Rapids, Alder Lake and their successors.
+     *  @brief @c TPAUSE sleeps the core until a deadline rather than spinning - the
+     *      @c WAITPKG feature, the CPUID leaf 7, subleaf 0, ECX bit 5, on Sapphire Rapids, Alder
+     *      Lake and their successors.
      *  @sa fu_capability_x86_pause_k - the spin it replaces.
      */
     fu_capability_x86_tpause_k = 1 << 1,
@@ -280,9 +289,9 @@ typedef enum fu_capabilities_t {
     fu_capability_arm64_yield_k = 1 << 2,
 
     /**
-     *  @brief `WFET` sleeps the core until a deadline or an event on the monitored line -
+     *  @brief @c WFET sleeps the core until a deadline or an event on the monitored line -
      *      @c FEAT_WFxT, Armv8.7, read from @c ID_AA64ISAR2_EL1 on Linux and
-     *      `hw.optional.arm.FEAT_WFxT` on Apple.
+     *      <tt>hw.optional.arm.FEAT_WFxT</tt> on Apple.
      *  @sa fu_capability_arm64_yield_k - the spin it replaces.
      */
     fu_capability_arm64_wfet_k = 1 << 3,
@@ -292,7 +301,7 @@ typedef enum fu_capabilities_t {
     fu_capability_risc5_pause_k = 1 << 4,
 
     /**
-     *  @brief `WRS.STO` sleeps the hart until a reservation breaks or a short timeout - the
+     *  @brief <tt>WRS.STO</tt> sleeps the hart until a reservation breaks or a short timeout - the
      *      @c Zawrs extension, attested by the kernel's @c hwprobe.
      *  @sa fu_capability_risc5_pause_k - the spin it replaces.
      */
@@ -368,21 +377,22 @@ typedef enum fu_capabilities_t {
      *  @c FORKUNION_WITH_DEMOTE_CACHE_LINES, never dispatched. */
     fu_capability_x86_cldemote_k = 1 << 15,
 
-    /** `DC CVAC` cleans a dirty line to the coherency point, AArch64's nearest demote. Set where
-     *  EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`. */
+    /** <tt>DC CVAC</tt> cleans a dirty line to the coherency point, AArch64's nearest demote. Set where
+     *  EL0 execution is known-legal, i.e. Linux, which sets <tt>SCTLR_EL1.UCI</tt>. */
     fu_capability_arm64_dc_cvac_k = 1 << 16,
 
     /** The kernel enabled user-mode Zicbom cache-block management, attested through @c hwprobe -
-     *  the hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet. */
+     *  the hook for a future runtime-dispatched <tt>cbo.clean</tt>; nothing emits it yet. */
     fu_capability_risc5_zicbom_k = 1 << 17,
 
-    /** @c CMPCCXADD, the conditional atomic add - `CPUID.(7,1):EAX[7]`, on Sierra Forest, Diamond
-     *  Rapids and their successors: a bounded claim as one instruction instead of a
+    /** @c CMPCCXADD, the conditional atomic add - CPUID leaf 7, subleaf 1, EAX bit 7, on Sierra
+     *  Forest, Diamond Rapids and their successors: a bounded claim as one instruction instead of a
      *  compare-exchange loop. Admits @c x86_cmpccxadd_atomic_ref. */
     fu_capability_x86_cmpccxadd_k = 1 << 18,
 
     /**
-     *  @brief RAO-INT @c aadd, @c aand, @c aor and @c axor - `CPUID.(7,1):EAX[3]`, on Grand Ridge:
+     *  @brief RAO-INT @c aadd, @c aand, @c aor and @c axor - CPUID leaf 7, subleaf 1, EAX bit 3,
+     *      on Grand Ridge:
      *
      *  @verbatim
      *  no-return atomics executed at the shared cache rather than pulling the line; weakly
@@ -393,15 +403,16 @@ typedef enum fu_capabilities_t {
      */
     fu_capability_x86_raoint_k = 1 << 19,
 
-    /** Armv8.1 @c FEAT_LSE: @c swp, @c cas, @c ldadd and the no-return `st*` forms, one instruction
-     *  per read-modify-write instead of a load-exclusive loop. Read from `ID_AA64ISAR0_EL1.Atomic`
-     *  on Linux and `hw.optional.arm.FEAT_LSE` on Apple. Admits @c arm64_lse_atomic_ref. */
+    /** Armv8.1 @c FEAT_LSE: @c swp, @c cas, @c ldadd and the no-return @c st* forms, one
+     *  instruction per read-modify-write instead of a load-exclusive loop. Read from
+     *  <tt>ID_AA64ISAR0_EL1.Atomic</tt> on Linux and <tt>hw.optional.arm.FEAT_LSE</tt> on Apple. Admits
+     *  @c arm64_lse_atomic_ref. */
     fu_capability_arm64_lse_k = 1 << 20,
 
     /**
      *  @brief Armv8.3 @c FEAT_LRCPC: @c ldapr, the RCpc acquiring load that needn't wait for the
-     *      core's earlier release stores. Read from `ID_AA64ISAR1_EL1.LRCPC` on Linux and
-     *      `hw.optional.arm.FEAT_LRCPC` on Apple. Admits @c arm64_rcpc_atomic_ref.
+     *      core's earlier release stores. Read from <tt>ID_AA64ISAR1_EL1.LRCPC</tt> on Linux and
+     *      <tt>hw.optional.arm.FEAT_LRCPC</tt> on Apple. Admits @c arm64_rcpc_atomic_ref.
      *  @sa fu_capability_arm64_lse_k - which it extends.
      */
     fu_capability_arm64_rcpc_k = 1 << 21,
@@ -410,7 +421,7 @@ typedef enum fu_capabilities_t {
      *  attested by the kernel's @c hwprobe. Admits @c risc5_zacas_atomic_ref. */
     fu_capability_risc5_zacas_k = 1 << 22,
 
-    /** The A extension: @c lr, @c sc and the `amo*` read-modify-writes, RISC-V's baseline every
+    /** The A extension: @c lr, @c sc and the @c amo* read-modify-writes, RISC-V's baseline every
      *  Linux ABI guarantees. Admits @c risc5_atomic_ref, and @c fu_capability_risc5_zacas_k
      *  extends it with @c amocas. */
     fu_capability_risc5_atomic_k = 1 << 23,
@@ -456,18 +467,25 @@ fu_capabilities_t fu_runtime_capabilities(void);
 
 /**
  *  @brief Writes @p capabilities as a comma-separated name list such as "arm64_yield,arm64_wfet".
+ *  @param[in] capabilities The features to name.
  *  @param[out] name_buffer Destination, always null-terminated; the list is truncated to fit.
  *  @param[in] name_buffer_length Size of @p name_buffer in bytes.
- *  @return Bytes written, excluding the null terminator.
+ *  @param[out] written_out Receives the bytes written, excluding the null terminator.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL @p written_out, a NULL @p name_buffer or an empty one.
  */
 fu_status_t fu_name_capabilities(fu_capabilities_t capabilities, char *name_buffer, size_t name_buffer_length,
                                  size_t *written_out);
 
 /**
  *  @brief Harvests the machine topology - cores, compute and memory domains - into a handle.
- *  @return An opaque topology handle for the pool and metadata queries, or NULL on failure.
+ *  @param[out] topology_out Receives the opaque topology handle for the pool and metadata queries.
  *
  *  Build it once and thread it through @c fu_pool_spawn and the topology queries below.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL @p topology_out.
  */
 fu_status_t fu_topology_new(fu_topology_t *topology_out);
 
@@ -481,40 +499,49 @@ void fu_topology_delete(fu_topology_t topology);
 
 /**
  *  @brief Returns the number of logical cores in a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
- *  @return Number of cores backing that compute domain, or 0 if the index is out of range.
+ *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[out] cores_out Receives the number of cores backing that compute domain.
  *
  *  Use this to size a per-compute-domain pool for @ref fu_pool_spawn_on, or to weight work across
  *  compute domains of differing core counts, such as performance versus efficiency cores.
  *
  *  @sa fu_compute_domains_count, fu_pool_spawn_on.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p cores_out or an index out of range.
  */
 fu_status_t fu_logical_cores_count_in(fu_topology_t, size_t compute_domain_index, size_t *cores_out);
 
 /**
  *  @brief The number of logical cores the OS exposes - hyper-threads and every core class included.
- *  @return 0 if detection failed; else the count, fit as the thread count for @c fu_pool_spawn.
+ *  @param[out] cores_out Receives the count, fit as the thread count for @c fu_pool_spawn.
  *  @sa fu_logical_cores_count_in for the per-compute-domain count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p cores_out.
  */
 fu_status_t fu_logical_cores_count(fu_topology_t, size_t *cores_out);
 
 /**
  *  @brief The number of compute domains: bindable clusters of same-QoS, co-located cores.
- *  @return 0 if unsupported, 1 on a uniform machine, 2+ per NUMA node and QoS class, e.g. Intel P/E
- *      or Arm big.LITTLE.
+ *  @param[out] count_out Receives 0 if unsupported, 1 on a uniform machine, 2+ per NUMA node and
+ *      QoS class, e.g. Intel P/E or Arm big.LITTLE.
  *
  *  A compute domain is the unit a pool binds to and the index a worker callback receives. It is one
  *  axis of the topology; memory domains are the other, bridged by @c fu_local_memory_of.
  *
  *  @sa fu_logical_cores_count_in, fu_pool_spawn_on, fu_memory_domains_count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p count_out.
  */
 fu_status_t fu_compute_domains_count(fu_topology_t, size_t *count_out);
 
 /**
  *  @brief Returns the performance level of a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
- *  @return A level ordinal where @b higher @b is @b more @b performant, 0 being the most efficient;
- *      or 0 if the index is out of range. Homogeneous systems report level 0 everywhere.
+ *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[out] level_out Receives the level ordinal of that compute domain, where @b higher @b is
+ *      @b more @b performant and 0 is the most efficient; homogeneous systems report 0 everywhere.
  *
  *  Distinguishes performance vs efficiency cores, as in Intel P/E or ARM big.LITTLE. @note The
  *  compute ordinal grows with performance, while the memory tier from @ref
@@ -522,48 +549,62 @@ fu_status_t fu_compute_domains_count(fu_topology_t, size_t *count_out);
  *  conventions, so they run opposite ways by design.
  *
  *  @sa fu_compute_levels_count, fu_compute_domains_count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p level_out or an index out of range.
  */
 fu_status_t fu_compute_level_in(fu_topology_t, size_t compute_domain_index, size_t *level_out);
 
 /**
  *  @brief Returns the number of distinct compute performance levels across all compute domains.
- *  @return 0 if unsupported, 1 on homogeneous cores, 2-3 with heterogeneous cores, e.g. Intel P/E
- *      or Arm big.LITTLE.
- *  @note May be smaller than `fu_compute_domains_count()` - several domains can share one level, as
+ *  @param[out] count_out Receives 0 if unsupported, 1 on homogeneous cores, 2-3 with heterogeneous
+ *      cores, e.g. Intel P/E or Arm big.LITTLE.
+ *  @note May be smaller than <tt>fu_compute_domains_count()</tt> - several domains can share one level, as
  *      when equally-fast cores are split across cache clusters, or across NUMA nodes.
  *  @sa fu_compute_level_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p count_out.
  */
 fu_status_t fu_compute_levels_count(fu_topology_t, size_t *count_out);
 
 /**
  *  @brief Returns the relative throughput of @b one core in a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
- *  @return A magnitude on the Linux @c cpu_capacity scale where 1024 is the fastest core present,
- *      or 0 when the index is out of range or the platform publishes no per-core throughput rating.
+ *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[out] capacity_out Receives the relative throughput of one core in that compute domain, on
+ *      the Linux @c cpu_capacity scale where 1024 is the fastest core present, or 0 when the
+ *      platform publishes no per-core throughput rating.
  *
  *  This is the number to weight work by; @c fu_compute_level_in is a dense ordinal and must never
  *  be divided by; on 0, weigh compute domains by @c fu_logical_cores_count_in instead.
  *
  *  @sa fu_compute_level_in, fu_logical_cores_count_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p capacity_out or an index out of range.
  */
 fu_status_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index, size_t *capacity_out);
 
 /**
  *  @brief Returns each logical core's share of the deepest cache confined to a compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
- *  @return Bytes of one cache instance over the logical cores sharing it, or 0 if unknown.
+ *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[out] bytes_out Receives the bytes of one cache instance per sharing core, 0 if unknown.
  *
  *  Sizes a cache-resident chunk - a different question from how @b many chunks a domain deserves.
  *  Domains may sustain identical throughput yet back onto very differently sized caches, so neither
  *  number can be inferred from the other.
  *
  *  @sa fu_compute_capacity_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p bytes_out or an index out of range.
  */
 fu_status_t fu_compute_cache_bytes_per_core_in(fu_topology_t, size_t compute_domain_index, size_t *bytes_out);
 
 /**
  *  @brief Returns the number of memory domains - the distinct allocation targets.
- *  @return 0 if unsupported, 1 on uniform-memory systems, 2+ on NUMA / tiered-memory systems.
+ *  @param[out] count_out Receives 0 if unsupported, 1 on uniform-memory systems, 2+ on NUMA /
+ *      tiered-memory systems.
  *
  *  A @b memory @b domain is a bank of memory with its own capacity and access cost. It is the unit
  *  the allocator targets. A memory domain may be @b cpuless, as with a CXL expander or GPU-attached
@@ -572,67 +613,98 @@ fu_status_t fu_compute_cache_bytes_per_core_in(fu_topology_t, size_t compute_dom
  *  topology's to declare: a @c fu_fabric_t measures it in-process.
  *
  *  @sa fu_volume_ram_in, fu_local_memory_of, fu_allocate_on_domain_id, fu_fabric_harvest.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p count_out.
  */
 fu_status_t fu_memory_domains_count(fu_topology_t, size_t *count_out);
 
 /**
  *  @brief Returns the memory domain nearest to a given compute domain.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
- *  @return The index of that compute domain's nearest memory domain, or 0 if the compute-domain
- *      index is out of range.
+ *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[out] memory_domain_out Receives the index of that compute domain's nearest memory domain.
  *
  *  The convenience bridge for the common "run here, allocate near here" pattern: pass the result to
  *  @c fu_allocate_on_domain_id. For the full cost picture use @c fu_fabric_memory_distance.
  *
  *  @sa fu_fabric_memory_distance, fu_allocate_on_domain_id.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p memory_domain_out or a compute-domain index
+ *    out of range.
  */
 fu_status_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index, size_t *memory_domain_out);
 
 /**
  *  @brief Returns the RAM volume in bytes of a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return Bytes of RAM in that memory domain, regardless of page size; 0 if out of range.
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] bytes_out Receives the bytes of RAM in that memory domain.
+ *
+ *  The bytes count regardless of page size.
+ *
  *  @sa fu_volume_ram, fu_allocate_on_domain_id.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p bytes_out or an index out of range.
  */
 fu_status_t fu_volume_ram_in(fu_topology_t, size_t memory_domain_index, size_t *bytes_out);
 
 /**
  *  @brief Returns the total RAM volume in bytes across all memory domains.
- *  @return Number of bytes of RAM installed, regardless of page size.
+ *  @param[out] bytes_out Receives the number of bytes of RAM installed, regardless of page size.
  *  @sa fu_volume_ram_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p bytes_out.
  */
 fu_status_t fu_volume_ram(fu_topology_t, size_t *bytes_out);
 
 /**
  *  @brief Returns the huge-page volume in bytes available in a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return Bytes backed by free huge pages in that memory domain; 0 if out of range or unavailable.
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] bytes_out Receives the bytes backed by free huge pages in that memory domain.
  *
- *  Huge pages reduce TLB pressure by mapping memory in larger units than the base page.
+ *  Huge pages reduce TLB pressure by mapping memory in larger units than the base page. The bytes
+ *  are 0 if huge pages are unavailable.
  *
  *  @sa fu_huge_pages_count_in, fu_allocate_at_least_on_domain_id.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p bytes_out or an index out of range.
  */
 fu_status_t fu_volume_huge_pages_in(fu_topology_t, size_t memory_domain_index, size_t *bytes_out);
 
 /**
  *  @brief Returns the total huge-page volume in bytes across all memory domains.
- *  @return Number of bytes backed by free huge pages, or 0 if huge pages are unavailable.
+ *  @param[out] bytes_out Receives the bytes backed by free huge pages, 0 if unavailable.
  *  @sa fu_volume_huge_pages_in, fu_huge_pages_count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p bytes_out.
  */
 fu_status_t fu_volume_huge_pages(fu_topology_t, size_t *bytes_out);
 
 /**
  *  @brief Returns the number of free huge pages in a given memory domain.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return Free huge pages, all sizes, in that memory domain; 0 if out of range or unavailable.
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] pages_out Receives the free huge pages, all sizes, in that memory domain.
+ *
+ *  The count is 0 if huge pages are unavailable.
+ *
  *  @sa fu_volume_huge_pages_in, fu_huge_pages_count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p pages_out or an index out of range.
  */
 fu_status_t fu_huge_pages_count_in(fu_topology_t, size_t memory_domain_index, size_t *pages_out);
 
 /**
  *  @brief Returns the total number of free huge pages across all memory domains.
- *  @return Count of free huge pages of any size, or 0 if huge pages are unavailable.
+ *  @param[out] pages_out Receives the count of free huge pages of any size, 0 if unavailable.
  *  @sa fu_volume_huge_pages, fu_huge_pages_count_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p pages_out.
  */
 fu_status_t fu_huge_pages_count(fu_topology_t, size_t *pages_out);
 
@@ -643,15 +715,18 @@ fu_status_t fu_huge_pages_count(fu_topology_t, size_t *pages_out);
 /**
  *  @brief Resolves a memory domain's dense index to the OS id the allocators take.
  *  @param[in] topology Machine topology from @c fu_topology_new.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return The OS memory-domain id - a NUMA node - to hand to @c fu_allocate_on_domain_id, or -1 if
- *      out of range.
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] memory_domain_id_out Receives the OS memory-domain id, a NUMA node.
  *
  *  The allocators key off the OS id rather than the topology, so an allocation can outlive the
  *  handle. Look the id up once - typically near a compute domain via @c fu_local_memory_of - then
  *  allocate and free with it alone.
  *
  *  @sa fu_allocate_on_domain_id, fu_local_memory_of, fu_memory_domains_count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p memory_domain_id_out or an
+ *    index out of range.
  */
 fu_status_t fu_memory_domain_id_at_index(fu_topology_t topology, size_t memory_domain_index,
                                          fu_memory_domain_id_t *memory_domain_id_out);
@@ -663,7 +738,7 @@ fu_status_t fu_memory_domain_id_at_index(fu_topology_t topology, size_t memory_d
  *  @param[out] allocated_bytes Receives the actual allocation size - at least @p minimum_bytes -
  *      must not be NULL.
  *  @param[out] bytes_per_page Receives the page size used for the allocation, must not be NULL.
- *  @return Pointer to allocated memory, or NULL if allocation failed.
+ *  @param[out] memory_out Receives the pointer to the allocated memory.
  *
  *  @note This API is @b thread-safe and can be called from any thread.
  *  @note The pointer is aligned to at least the cache-line default, so over-aligned element types
@@ -684,6 +759,9 @@ fu_status_t fu_memory_domain_id_at_index(fu_topology_t topology, size_t memory_d
  *  @endcode
  *
  *  @sa fu_free_on_domain_id, fu_memory_domain_id_at_index.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL output pointer.
  */
 fu_status_t fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t minimum_bytes,
                                               size_t *allocated_bytes, size_t *bytes_per_page, void **memory_out);
@@ -692,12 +770,15 @@ fu_status_t fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domai
  *  @brief Allocates exactly @p bytes in @p memory_domain_id.
  *  @param[in] memory_domain_id Target memory domain, from @c fu_memory_domain_id_at_index.
  *  @param[in] bytes Number of bytes to allocate, must be > 0.
- *  @return Pointer to allocated memory, or NULL if allocation failed.
+ *  @param[out] memory_out Receives the pointer to the allocated memory.
  *  @note This API is @b thread-safe. Unlike @c fu_allocate_at_least_on_domain_id, it does not
  *      over-allocate for page optimization - use it for standard-allocator compatibility.
  *  @note The pointer is aligned to at least the cache-line default, matching
  *      @c fu_allocate_at_least_on_domain_id.
  *  @sa fu_free_on_domain_id, fu_allocate_at_least_on_domain_id.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL @p memory_out.
  */
 fu_status_t fu_allocate_on_domain_id(fu_memory_domain_id_t memory_domain_id, size_t bytes, void **memory_out);
 
@@ -721,8 +802,8 @@ void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer,
  *  @param[out] total_bytes Receives the whole mapping size to hand back to @c fu_free_symmetric,
  *      must not be NULL.
  *  @param[out] bytes_per_page Receives the page size used, may be NULL.
- *  @return Base pointer of the mapping, or NULL if allocation failed.
- *  @note This API is @b thread-safe. Slice @b d begins at `base + d * *stride_bytes` and is bound
+ *  @param[out] memory_out Receives the base pointer of the mapping.
+ *  @note This API is @b thread-safe. Slice @b d begins at <tt>base + d * *stride_bytes</tt> and is bound
  *      to its own memory domain; a machine with no NUMA API collapses the mapping to a single
  *      heap-backed memory slice.
  *
@@ -737,6 +818,9 @@ void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer,
  *  @endcode
  *
  *  @sa fu_free_symmetric, fu_local_memory_of, fu_memory_domains_count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL output pointer.
  */
 fu_status_t fu_allocate_symmetric(fu_topology_t topology, size_t bytes_per_domain, size_t *stride_bytes,
                                   size_t *memory_domains_count, size_t *total_bytes, size_t *bytes_per_page,
@@ -761,15 +845,18 @@ void fu_free_symmetric(void *base, size_t total_bytes);
  *      accepts rather than refused - the name exists to tell one pool's threads from another's in a
  *      debugger, and a shortened name still does that.
  *  @param[in] allowed Allow-mask of @c fu_capabilities_t; @c fu_capabilities_all_k skips filtering.
- *  @return An opaque pool handle, or NULL on allocation failure.
+ *  @param[out] pool_out Receives the opaque pool handle.
  *  @note Thread-safe.
  *
- *  The waiter, and whether a spawn spans domains, come from `fu_runtime_capabilities() & allowed`,
+ *  The waiter, and whether a spawn spans domains, come from <tt>fu_runtime_capabilities() & allowed</tt>,
  *  so clearing bits forces a lesser waiter or the flat non-NUMA pool - handy for benchmarking.
  *  Creation takes no topology: @b placement is decided at spawn, where you hand over the
  *  @c fu_topology_t. The pool starts empty; call @c fu_pool_spawn before use.
  *
  *  @sa fu_pool_spawn, fu_pool_capabilities, fu_pool_delete.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL @p pool_out.
  */
 fu_status_t fu_pool_new(char const *name, fu_capabilities_t allowed, fu_pool_t *pool_out);
 
@@ -784,6 +871,7 @@ void fu_pool_delete(fu_pool_t pool);
 /**
  *  @brief The capabilities an initialized pool actually uses - a subset of comptime & runtime.
  *  @param[in] pool Pool handle, must not be NULL.
+ *  @param[out] capabilities_out Receives the capabilities the pool runs with.
  */
 fu_status_t fu_pool_capabilities(fu_pool_t pool, fu_capabilities_t *capabilities_out);
 
@@ -794,18 +882,19 @@ fu_status_t fu_pool_capabilities(fu_pool_t pool, fu_capabilities_t *capabilities
  *  @param[in] pool Pool handle, must not be NULL.
  *  @param[in] threads Worker count, must be > 0; an inclusive pool counts the caller as one.
  *  @param[in] exclusivity Whether the calling thread also executes tasks.
- *  @return `fu_success_k` once every worker started; @c fu_invalid_argument_k for a NULL handle, an
- *      unnamed exclusivity, or @p threads of 0.
  *  @note Not thread-safe; call once per pool, or again after @c fu_pool_terminate.
  *
  *  Covers every compute domain. If a prior @ref fu_pool_spawn_on left the pool pinned to a single
- *  domain, this rebuilds it as a whole-machine pool before spawning. Also returns the status
- *  @c fu_already_spawned_k while the pool still holds workers, @c fu_bad_alloc_k when per-domain
- *  bookkeeping cannot be allocated, @c fu_thread_refused_k when the OS declines a thread, and
- *  @c fu_unsupported_k for a caller-exclusive or multi-thread pool when OS threads are unavailable
- *  in this build.
+ *  domain, this rebuilds it as a whole-machine pool before spawning. The call returns once every
+ *  worker has started.
  *
  *  @sa fu_pool_spawn_on to pin to one compute domain, @c fu_logical_cores_count for the count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, an unnamed exclusivity, or @p threads of 0.
+ *  - @c fu_already_spawned_k While the pool still holds workers.
+ *  - @c fu_unsupported_k A caller-exclusive or multi-thread pool when OS threads are
+ *    unavailable in this build.
  */
 fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads, fu_caller_exclusivity_t exclusivity);
 
@@ -813,24 +902,24 @@ fu_status_t fu_pool_spawn(fu_topology_t topology, fu_pool_t pool, size_t threads
  *  @brief Spawns @p threads workers pinned to a single compute domain.
  *  @param[in] topology Machine topology from @c fu_topology_new; read only during this call.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @param[in] compute_domain_index Target compute domain, in [0, `fu_compute_domains_count()`).
+ *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[in] threads Worker count, must be > 0.
  *  @param[in] exclusivity Whether the calling thread also executes tasks.
- *  @return `fu_success_k` once every worker started pinned to @p compute_domain_index;
- *      @c fu_invalid_argument_k for a NULL handle, an unnamed exclusivity, @p threads of 0, or a
- *      @p compute_domain_index at or past @c fu_compute_domains_count; @c fu_already_spawned_k
- *      while the pool still holds workers; @c fu_bad_alloc_k when the per-domain bookkeeping cannot
- *      be allocated; @c fu_thread_refused_k when the OS declines a thread; and @c fu_unsupported_k
- *      for a caller-exclusive or multi-thread pool in a build without OS threads.
  *  @note Not thread-safe; call once per pool.
  *
  *  Placement lives here, not in creation: @ref fu_pool_new allocates the handle, and this binds it
  *  to a single compute domain, so its workers and their memory-domain-local allocations stay on
  *  that domain. Spawn one pool per compute domain and coordinate them with the generation-token
  *  API; @ref fu_pool_spawn instead spans @b all compute domains. Without NUMA, only compute domain
- *  0 is valid.
+ *  0 is valid. It returns once every worker started pinned to @p compute_domain_index.
  *
  *  @sa fu_pool_spawn, fu_compute_domains_count, fu_logical_cores_count_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, an unnamed exclusivity, @p threads of 0, or a
+ *    @p compute_domain_index at or past @c fu_compute_domains_count.
+ *  - @c fu_already_spawned_k While the pool still holds workers.
+ *  - @c fu_unsupported_k A caller-exclusive or multi-thread pool in a build without OS threads.
  */
 fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t compute_domain_index, size_t threads,
                              fu_caller_exclusivity_t exclusivity);
@@ -842,14 +931,6 @@ fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comp
  *  @param[in] memory_domain_id The OS id of the memory domain whose local cores participate.
  *  @param[in] threads Worker count, must be > 0; split across the local compute domains.
  *  @param[in] exclusivity Whether the calling thread also executes tasks.
- *  @return `fu_success_k` once every worker started across the domains local to
- *      @p memory_domain_id; @c fu_invalid_argument_k for a NULL handle, an unnamed exclusivity,
- *      @p threads of 0, or a @p memory_domain_id no compute domain is local to; @c fu_unsupported_k
- *      where placement is masked off on a machine with several memory domains;
- *      @c fu_already_spawned_k while the pool still holds workers; @c fu_bad_alloc_k when the
- *      per-domain bookkeeping cannot be allocated;
- *      @c fu_thread_refused_k when the OS declines a thread; and @c fu_unsupported_k for a
- *      caller-exclusive or multi-thread pool in a build without OS threads.
  *  @note Not thread-safe; call once per pool.
  *
  *  Sits between the extremes: @ref fu_pool_spawn_on binds one compute domain and @ref fu_pool_spawn
@@ -857,9 +938,17 @@ fu_status_t fu_pool_spawn_on(fu_topology_t topology, fu_pool_t pool, size_t comp
  *  CCXs sharing one NUMA node - and this is the spawn that engages exactly those. Workers report
  *  their compute domain by its topology index, so @c fu_local_memory_of-style lookups stay valid.
  *  Where the placement capability is masked off, falls back to @ref fu_pool_spawn on single-domain
- *  machines and reports @c fu_unsupported_k on NUMA ones.
+ *  machines and reports @c fu_unsupported_k on NUMA ones. It returns once every worker started
+ *  across the domains local to @p memory_domain_id.
  *
  *  @sa fu_pool_spawn, fu_pool_spawn_on, fu_memory_domain_id_at_index.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, an unnamed exclusivity, @p threads of 0, or a
+ *    @p memory_domain_id no compute domain is local to.
+ *  - @c fu_unsupported_k Placement is masked off on a machine with several memory domains, or a
+ *    caller-exclusive or multi-thread pool in a build without OS threads.
+ *  - @c fu_already_spawned_k While the pool still holds workers.
  */
 fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t pool,
                                              fu_memory_domain_id_t memory_domain_id, size_t threads,
@@ -868,41 +957,62 @@ fu_status_t fu_pool_spawn_near_memory_domain(fu_topology_t topology, fu_pool_t p
 /**
  *  @brief Whether the calling thread executes a slice of each dispatch.
  *  @param[in] pool Pool handle, must not be NULL and initialized.
- *  @return `fu_caller_inclusive_k` if the caller runs a slice, @c fu_caller_exclusive_k if not.
+ *  @param[out] exclusivity_out Receives whether the caller runs a slice.
  *  @note Not synchronized. Reflects the most recent @c fu_pool_spawn, so it survives a re-spawn.
  *
  *  On inclusive pools the caller's slice runs only inside @c fu_pool_unsafe_join, so
  *  @c fu_pool_is_complete cannot be reached by polling alone.
  *
  *  @sa fu_pool_spawn, fu_pool_is_complete.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p exclusivity_out.
+ *  - @c fu_not_spawned_k A pool with no workers.
  */
 fu_status_t fu_pool_caller_exclusivity(fu_pool_t pool, fu_caller_exclusivity_t *exclusivity_out);
 
 /**
  *  @brief The number of compute domains the pool's workers span.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @return 0 if uninitialized, 1 without NUMA/QoS heterogeneity, 2+ across NUMA or QoS levels.
+ *  @param[out] count_out Receives the number of compute domains.
  *  @note Not synchronized.
+ *
+ *  The count is 1 without NUMA/QoS heterogeneity, 2+ across NUMA or QoS levels.
+ *
  *  @sa fu_pool_threads_count_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p count_out.
+ *  - @c fu_not_spawned_k A pool with no workers.
  */
 fu_status_t fu_pool_compute_domains_count(fu_pool_t pool, size_t *count_out);
 
 /**
  *  @brief The worker count in one compute domain of the pool.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @param[in] compute_domain_index In [0, `fu_pool_compute_domains_count(pool)`), or the call
+ *  @param[in] compute_domain_index In [0, <tt>fu_pool_compute_domains_count(pool)</tt>), or the call
  *      returns @c fu_invalid_argument_k.
- *  @return Threads in that domain, or 0 if uninitialized.
+ *  @param[out] threads_out Receives the number of threads in that domain.
  *  @note Not synchronized.
  *  @sa fu_pool_compute_domains_count.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p threads_out.
+ *  - @c fu_not_spawned_k A pool with no workers.
  */
 fu_status_t fu_pool_threads_count_in(fu_pool_t pool, size_t compute_domain_index, size_t *threads_out);
 
 /**
  *  @brief The total worker count, including the caller on an inclusive pool.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @return 0 if uninitialized, else the count from @c fu_pool_spawn.
+ *  @param[out] threads_out Receives the number of threads.
  *  @note Not synchronized.
+ *
+ *  The count is the one @c fu_pool_spawn received.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p threads_out.
+ *  - @c fu_not_spawned_k A pool with no workers.
  */
 fu_status_t fu_pool_threads_count(fu_pool_t pool, size_t *threads_out);
 
@@ -911,8 +1021,13 @@ fu_status_t fu_pool_threads_count(fu_pool_t pool, size_t *threads_out);
  *  @param[in] pool Thread pool handle, must not be NULL.
  *  @param[in] global_thread_index The global thread index to convert.
  *  @param[in] compute_domain_index Index of the compute_domain, must be <
- *      `fu_pool_compute_domains_count(pool)`, else @c fu_invalid_argument_k.
- *  @return Local thread index within the specified compute_domain.
+ *      <tt>fu_pool_compute_domains_count(pool)</tt>, else @c fu_invalid_argument_k.
+ *  @param[out] local_index_out Receives the local thread index within the specified compute_domain.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle, a NULL @p local_index_out or a compute domain out of
+ *    range.
+ *  - @c fu_not_spawned_k A pool with no workers.
  */
 fu_status_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index, size_t compute_domain_index,
                                      size_t *local_index_out);
@@ -946,13 +1061,16 @@ void fu_pool_terminate(fu_pool_t pool);
 
 /**
  *  @brief Creates an empty, unharvested memory-fabric handle.
- *  @return An opaque fabric handle, or NULL on allocation failure.
+ *  @param[out] fabric_out Receives the opaque fabric handle.
  *
  *  Completes the library's pipeline: build a @c fu_topology_t first, spawn a @c fu_pool_t on it,
  *  then harvest the fabric through that pool's workers with @ref fu_fabric_harvest. Before a
  *  harvest every query on the handle answers 0, and @c fu_fabric_memory_levels_count answers 1.
  *
  *  @sa fu_fabric_harvest, fu_fabric_delete.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL @p fabric_out.
  */
 fu_status_t fu_fabric_new(fu_fabric_t *fabric_out);
 
@@ -969,76 +1087,92 @@ void fu_fabric_delete(fu_fabric_t fabric);
  *  @param[in] pool Pool handle, must not be NULL, spawned across the machine via @c fu_pool_spawn.
  *  @param[out] fabric Receives the observations, replacing any previous harvest; must not be NULL,
  *      and a failed harvest leaves it empty, never half-written.
- *  @return `fu_success_k` once every reachable edge was walked and @p fabric holds the
- *      observations; otherwise one of the failure codes described below.
  *  @note Not thread-safe: dispatches on the pool and rebuilds the fabric, so call it between task
  *      batches and do not query @p fabric concurrently. Expect seconds of runtime on large fabrics.
- *
- *  @c fu_invalid_argument_k fires for a NULL handle. @c fu_config_mismatch_k fires when the pool
- *  cannot place pages on every domain it would walk - unspawned, terminated, or unpinned on a
- *  machine of several domains. @c fu_bad_alloc_k fires when the edge or scratch storage cannot be
- *  allocated, @c fu_unsupported_k when this build or machine cannot measure the fabric,
- *  @c fu_permission_denied_k when the OS declines a probe the walk needs, and
- *  @c fu_topology_unavailable_k when the machine cannot be described.
  *
  *  Pointer-chases every reachable edge for latency and streams it with each initiator domain's full
  *  worker set for bandwidth - in-process, with no ACPI tables or OS-specific interfaces. @b Cpuless
  *  memory domains, like CXL expanders, stay unwalked: portable first-touch cannot place pages
  *  there, so their edges answer 0 and they share one tier past the slowest observed.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle.
+ *  - @c fu_config_mismatch_k The pool cannot place pages on every domain it would walk -
+ *    unspawned, terminated, or unpinned on a machine of several domains.
+ *  - @c fu_unsupported_k This build or machine cannot measure the fabric.
  */
 fu_status_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_t fabric);
 
 /**
  *  @brief Returns the measured read latency from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return Dependent-load latency in nanoseconds - the best recording of the edge; 0 before a
- *      harvest, for an edge no worker could reach, or an out-of-range index.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] nanoseconds_out Receives the dependent-load latency in nanoseconds.
+ *
+ *  The latency is the best recording of the edge, and 0 before a harvest or for an edge no
+ *  worker could reach.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p nanoseconds_out.
  */
 fu_status_t fu_fabric_memory_latency(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index,
                                      size_t *nanoseconds_out);
 
 /**
  *  @brief Returns the measured read bandwidth from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return Saturated read bandwidth in MB/s, streamed by all the initiator domain's workers at
- *      once, the best recording of the edge; 0 before a harvest, for an edge no worker could reach,
- *      or an out-of-range index.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] megabytes_per_second_out Receives the saturated read bandwidth in MB/s.
+ *
+ *  The bandwidth is streamed by all the initiator domain's workers at once, the best recording of
+ *  the edge, 0 before a harvest or for an edge no worker could reach.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p megabytes_per_second_out.
  */
 fu_status_t fu_fabric_memory_bandwidth(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index,
                                        size_t *megabytes_per_second_out);
 
 /**
  *  @brief Returns the relative access distance from a compute domain to a memory domain.
- *  @param[in] compute_domain_index Initiator compute domain, in [0, `fu_compute_domains_count()`).
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return A relative distance where @b 10 means local per the SLIT convention; larger is farther;
- *      0 means an out-of-range index or an unharvested fabric.
+ *  @param[in] compute_domain_index Initiator compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] distance_out Receives the relative distance, @b 10 meaning local.
  *
  *  The measured latency ratio to the initiator's local domain, clamped so the local domain always
  *  carries the row's minimum; unwalked edges fall back to the 10-local / 20-remote convention.
+ *  @b 10 means local per the SLIT convention, and larger is farther.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p distance_out.
  */
 fu_status_t fu_fabric_memory_distance(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index,
                                       size_t *distance_out);
 
 /**
  *  @brief Returns the derived speed class of a given memory domain, independent of any initiator.
- *  @param[in] memory_domain_index Target memory domain, in [0, `fu_memory_domains_count()`).
- *  @return A tier ordinal where @b lower @b is @b faster, 0 being the fastest such as HBM; or 0 if
- *      the index is out of range or the fabric is unharvested.
+ *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
+ *  @param[out] level_out Receives the tier ordinal, @b lower @b is @b faster.
  *
  *  Keyed by the best bandwidth any initiator sustains to the pool, ties split by the best latency,
  *  so HBM < DDR < CXL/PMEM; boundaries are measurement-derived and can shift between harvests.
+ *  Tier 0 is the fastest, such as HBM.
  *
  *  @note Runs opposite to @c fu_compute_level_in.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p level_out.
  */
 fu_status_t fu_fabric_memory_level_in(fu_fabric_t, size_t memory_domain_index, size_t *level_out);
 
 /**
  *  @brief Returns the number of distinct derived memory tiers across all memory domains.
- *  @return 1 on single-tier systems and before a harvest, 2+ when HBM / DDR / CXL are mixed.
+ *  @param[out] levels_out Receives 1 on single-tier systems and before a harvest, 2+ when HBM / DDR
+ *      / CXL are mixed.
  *  @note Memory-axis twin of @c fu_compute_levels_count; several domains may share a tier.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL handle or a NULL @p levels_out.
  */
 fu_status_t fu_fabric_memory_levels_count(fu_fabric_t, size_t *levels_out);
 
@@ -1051,8 +1185,6 @@ fu_status_t fu_fabric_memory_levels_count(fu_fabric_t, size_t *levels_out);
  *  @param[in] pool Pool handle, must not be NULL and initialized.
  *  @param[in] callback Runs once per worker, must not be NULL.
  *  @param[in] context Shared context passed to every call, may be NULL.
- *  @return @c fu_success_k once every call returned, @c fu_not_spawned_k for a pool with no
- *      workers, or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *  @note Returns only after every worker completes; no extra synchronization is needed.
  *
  *  The callback receives @p context, its @c thread index in [0, threads_count), and the
@@ -1066,6 +1198,10 @@ fu_status_t fu_fabric_memory_levels_count(fu_fabric_t, size_t *levels_out);
  *  @endcode
  *
  *  @sa fu_pool_unsafe_for_threads for the non-blocking form.
+ *
+ *  @par Statuses:
+ *  - @c fu_not_spawned_k A pool with no workers.
+ *  - @c fu_contended_k While the pool runs another dispatch, and then nothing ran.
  */
 fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_context_t context);
 
@@ -1075,8 +1211,6 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
  *  @param[in] n Total tasks, may be 0 - a no-op.
  *  @param[in] callback Runs once per slice, must not be NULL if @p n > 0.
  *  @param[in] context Shared context, may be NULL.
- *  @return @c fu_success_k once every slice ran, @c fu_not_spawned_k for a pool with no workers,
- *      or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *
  *  One contiguous range per worker - ideal for @b vectorized or per-slice-setup work where
  *  sequential access matters, since each worker touches its data in order and only sets up once.
@@ -1092,6 +1226,10 @@ fu_status_t fu_pool_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_la
  *  @endcode
  *
  *  @sa fu_pool_for_n for per-index dispatch.
+ *
+ *  @par Statuses:
+ *  - @c fu_not_spawned_k A pool with no workers.
+ *  - @c fu_contended_k While the pool runs another dispatch, and then nothing ran.
  */
 fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback, fu_lambda_context_t context);
 
@@ -1101,8 +1239,6 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback
  *  @param[in] n Task count, may be 0 - a no-op.
  *  @param[in] callback Runs once per task, must not be NULL if @p n > 0.
  *  @param[in] context Shared context, may be NULL.
- *  @return @c fu_success_k once every task ran, @c fu_not_spawned_k for a pool with no workers,
- *      or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *
  *  Tasks split into equal @b contiguous chunks per worker, keeping coordination near zero - the
  *  right choice when tasks cost about the same, so a static split stays balanced. The callback
@@ -1117,6 +1253,10 @@ fu_status_t fu_pool_for_slices(fu_pool_t pool, size_t n, fu_for_range_t callback
  *  @endcode
  *
  *  @sa fu_pool_for_n_dynamic for uneven workloads, @c fu_pool_for_slices for range callbacks.
+ *
+ *  @par Statuses:
+ *  - @c fu_not_spawned_k A pool with no workers.
+ *  - @c fu_contended_k While the pool runs another dispatch, and then nothing ran.
  */
 fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context);
 
@@ -1126,8 +1266,6 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_l
  *  @param[in] n Task count, may be 0 - a no-op.
  *  @param[in] callback Runs once per task, must not be NULL if @p n > 0.
  *  @param[in] context Shared context, may be NULL.
- *  @return @c fu_success_k once every task ran, @c fu_not_spawned_k for a pool with no workers,
- *      or @c fu_contended_k while the pool runs another dispatch, and then nothing ran.
  *
  *  Each worker starts with one task, then claims more from a shared cursor as it finishes, so fast
  *  workers absorb the slack and one slow task never stalls the rest - the right choice when task
@@ -1142,6 +1280,10 @@ fu_status_t fu_pool_for_n(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_l
  *  @endcode
  *
  *  @sa fu_pool_for_n for balanced workloads.
+ *
+ *  @par Statuses:
+ *  - @c fu_not_spawned_k A pool with no workers.
+ *  - @c fu_contended_k While the pool runs another dispatch, and then nothing ran.
  */
 fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callback, fu_lambda_context_t context);
 
@@ -1162,8 +1304,7 @@ typedef size_t fu_generation_t;
  *  @param[in] pool Pool handle, must not be NULL and initialized.
  *  @param[in] callback Runs on each thread, must not be NULL.
  *  @param[in] context Shared context, must stay valid until the join, may be NULL.
- *  @return @c fu_success_k with a token for @c fu_pool_unsafe_join, or @c fu_contended_k with
- *      the zero token while the pool runs another dispatch, and then nothing ran.
+ *  @param[out] generation_out Receives the token for @c fu_pool_unsafe_join.
  *  @note Returns immediately. Call no other pool operation until you join this generation.
  *
  *  On @b inclusive pools the caller's own slice runs inside @c fu_pool_unsafe_join, so the pool
@@ -1177,6 +1318,10 @@ typedef size_t fu_generation_t;
  *  @endcode
  *
  *  @sa fu_pool_unsafe_join, fu_pool_for_threads for the blocking form.
+ *
+ *  @par Statuses:
+ *  - @c fu_contended_k With the zero token while the pool runs another dispatch, and
+ *    then nothing ran.
  */
 fu_status_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_context_t context,
                                        fu_generation_t *generation_out);

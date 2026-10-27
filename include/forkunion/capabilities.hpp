@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date June 9, 2025
  *  @brief CPU/RAM capability probing and the hardware-friendly busy-wait yields.
- *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
+ *  @note Included by <tt>\<forkunion.hpp\></tt>; not meant to be included on its own.
  *
  *  @section spin_and_atomic_costs Measured Cost of the Spin and Atomic Primitives
  *
@@ -100,11 +100,11 @@ inline cpuid_registers_t cpuid(std::uint32_t const leaf, std::uint32_t const sub
 }
 
 /**
- *  @brief The TSC rate in cycles per microsecond, detected once from `CPUID.15h` or by calibration.
+ *  @brief The TSC rate in cycles per microsecond, detected once from <tt>CPUID.15h</tt> or by calibration.
  *
  *  @c x86_tpause_t turns a microsecond into a TSC deadline, and the invariant TSC does @b not tick
  *  at the core's frequency - it tracks the nominal base clock, which differs from part to part.
- *  Leaf `0x15` reports it exactly as `crystal_hz * numerator / denominator`, but many CPUs leave
+ *  Leaf @c 0x15 reports it exactly as <tt>crystal_hz * numerator / denominator</tt>, but many CPUs leave
  *  the crystal field zero, so we then time a short @c RDTSC span against the steady clock.
  */
 inline std::uint64_t x86_detect_tsc_cycles_per_micro() noexcept {
@@ -193,7 +193,7 @@ inline constexpr std::uint32_t x86_umwait_deeper_c02_k = 0;
 
 /** Arms this core's address-range monitor on the line holding @p watched_address. Where inline
  *  assembly is available the @c UMONITOR opcode is hand-encoded so no header is pulled in; MSVC has
- *  no inline assembly and calls the @c _umonitor intrinsic from `<immintrin.h>` instead. */
+ *  no inline assembly and calls the @c _umonitor intrinsic from <tt>\<immintrin.h\></tt> instead. */
 inline void x86_arm_address(void const *watched_address) noexcept {
 #if FORKUNION_HAS_INLINE_ASM_
     // Hand-encoding UMONITOR r64 as `F3 0F AE /6` with the address in RAX:
@@ -236,7 +236,7 @@ inline bool x86_arm_monitor(value_type_ const *watched, value_type_ const observ
 
 /** Sleeps in @p sleep_state until @p deadline as a TSC value, an interrupt, or a store to the
  *  monitored line. Inline assembly hand-encodes the opcode to avoid an include, while MSVC calls
- *  the @c _umwait intrinsic from `<immintrin.h>` with @p sleep_state and @p deadline. */
+ *  the @c _umwait intrinsic from <tt>\<immintrin.h\></tt> with @p sleep_state and @p deadline. */
 inline void x86_umwait_until(std::uint64_t const deadline, std::uint32_t const sleep_state) noexcept {
 #if FORKUNION_HAS_INLINE_ASM_
     // Hand-encoding UMWAIT r32 as `F2 0F AE /6`, with the control in ECX and the deadline in EDX:EAX:
@@ -443,9 +443,9 @@ struct arm64_wfe_t {
  *  @c WFET clock-gates the core to save @b dynamic power. It does @b not lower voltage, so it saves
  *  no @b static leakage power, and it does @b not release the core to the OS scheduler: the thread
  *  stays runnable and no sibling can be placed on it. A real retention or power-down C-state needs
- *  firmware - `PSCI CPU_SUSPEND` via @c SMC at EL3. This is a power hint for a busy core.
+ *  firmware - <tt>PSCI CPU_SUSPEND</tt> via @c SMC at EL3. This is a power hint for a busy core.
  *
- *  @note @c WFET is hand-encoded with `.inst` because `target("arch=armv8-a+wfxt")` breaks Apple
+ *  @note @c WFET is hand-encoded with <tt>.inst</tt> because <tt>target("arch=armv8-a+wfxt")</tt> breaks Apple
  *      Clang and neither compiler defines a @c WFxT feature macro. It is reached only when
  *      @c capability_arm64_wfet_k reports @c FEAT_WFxT at runtime.
  */
@@ -498,7 +498,7 @@ struct arm64_wfet_t {
 
 #endif // FORKUNION_TARGET_ARM64_WFET
 
-#if FORKUNION_TARGET_RISC5_PAUSE
+#if FORKUNION_TARGET_RISCV64_PAUSE
 
 /** On RISC-V, the @c Zihintpause spin-wait hint. */
 struct risc5_pause_t {
@@ -513,15 +513,15 @@ struct risc5_pause_t {
         __asm__ __volatile__(".4byte 0x0100000f");
     }
 };
-#endif // FORKUNION_TARGET_RISC5_PAUSE
+#endif // FORKUNION_TARGET_RISCV64_PAUSE
 
-#if FORKUNION_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISCV64_WRS
 
 /**
- *  @brief On RISC-V @c Zawrs, a monitored wait built on @c LR + `WRS.STO`.
+ *  @brief On RISC-V @c Zawrs, a monitored wait built on @c LR + <tt>WRS.STO</tt>.
  *
- *  `LR.W` / `LR.D` arms a reservation on the watched word - the same reservation an @c LR and @c SC
- *  pair would use - and reads its current value; `WRS.STO` "Wait-for-Reservation-Set, Short
+ *  <tt>LR.W</tt> / <tt>LR.D</tt> arms a reservation on the watched word - the same reservation an @c LR and @c SC
+ *  pair would use - and reads its current value; <tt>WRS.STO</tt> "Wait-for-Reservation-Set, Short
  *  TimeOut" then parks the hart until @b any other hart's store breaks the reservation as an event,
  *  an interrupt arrives, or an implementation-bounded timeout elapses. The store @b pushes the
  *  waiter awake, exactly like AArch64's @c LDAXR and @c WFET, and the bounded timeout is the same
@@ -532,10 +532,10 @@ struct risc5_pause_t {
  *  register-width epoch.
  *
  *  @note Like ARM's @c WFE, this clock-gates and saves dynamic power only; it never releases the
- *      hart to a scheduler. Its sibling `WRS.NTO` "No TimeOut" waits unbounded for one-word loops.
+ *      hart to a scheduler. Its sibling <tt>WRS.NTO</tt> "No TimeOut" waits unbounded for one-word loops.
  *
- *  @note `WRS.STO` is @b manually encoded as `.4byte 0x01d00073` so the surrounding build needs no
- *      `-march=...+zawrs` assembler support; @c LR is plain @c A-extension, present on any core
+ *  @note <tt>WRS.STO</tt> is @b manually encoded as <tt>.4byte 0x01d00073</tt> so the surrounding build needs no
+ *      <tt>-march=...+zawrs</tt> assembler support; @c LR is plain @c A-extension, present on any core
  *      that would carry @c Zawrs.
  *
  *  @warning Hand-encoded and not exercised on @c Zawrs silicon in this tree;
@@ -600,7 +600,7 @@ struct risc5_wrs_t {
         }
     }
 };
-#endif // FORKUNION_TARGET_RISC5_WRS
+#endif // FORKUNION_TARGET_RISCV64_WRS
 
 #if FORKUNION_TARGET_WASM_WAIT
 
@@ -654,12 +654,13 @@ struct wasm_wait_t {
 /**
  *  @brief The fastest waiter this translation unit may use with @b no runtime feature probe.
  *
- *  Reads each rung's `FORKUNION_TARGET_<CAPABILITY>` alone, which in a unit that dispatches nothing
- *  is the compilation target's promise, so the pick can never be illegal there. In a unit that
- *  dispatches at runtime - one with the probe verdicts or @c FORKUNION_RUNTIME_DISPATCH - the bit
- *  is what the toolchain builds and the alias resolves to the newest buildable rung, so such a unit
- *  names its waiter per CPU class instead. AArch64 has no monitored rung here because no compiler
- *  publishes a macro for @c WFxT, so only a caller admitting it at runtime reaches @c arm64_wfet_t.
+ *  Reads each rung's <tt>FORKUNION_TARGET_\<CAPABILITY\></tt> alone, which in a unit that dispatches
+ *  nothing is the compilation target's promise, so the pick can never be illegal there. In a unit
+ *  that dispatches at runtime - one with the probe verdicts or @c FORKUNION_RUNTIME_DISPATCH - the
+ *  bit is what the toolchain builds and the alias resolves to the newest buildable rung, so such a
+ *  unit names its waiter per CPU class instead. AArch64 has no monitored rung here because no
+ *  compiler publishes a macro for @c WFxT, so only a caller admitting it at runtime reaches
+ *  @c arm64_wfet_t.
  */
 #if FORKUNION_TARGET_X86_TPAUSE
 using preferred_yield_t = x86_tpause_t;
@@ -667,9 +668,9 @@ using preferred_yield_t = x86_tpause_t;
 using preferred_yield_t = x86_pause_t;
 #elif FORKUNION_TARGET_ARM64_YIELD
 using preferred_yield_t = arm64_yield_t;
-#elif FORKUNION_TARGET_RISC5_WRS
+#elif FORKUNION_TARGET_RISCV64_WRS
 using preferred_yield_t = risc5_wrs_t;
-#elif FORKUNION_TARGET_RISC5_PAUSE
+#elif FORKUNION_TARGET_RISCV64_PAUSE
 using preferred_yield_t = risc5_pause_t;
 #elif FORKUNION_TARGET_WASM_WAIT
 using preferred_yield_t = wasm_wait_t;
@@ -684,8 +685,8 @@ using preferred_yield_t = standard_yield_t;
  *      @c PREFETCHT1 for read-intent prefetching into L2.
  *  @note Both live in hint or reserved-NOP space, so neither can fault on any x86-64 part; whether
  *      @c CLDEMOTE actually bites is reported by @c capability_x86_cldemote_k - detected, never
- *      dispatched on. Hand-assembled so stock toolchains need no `-mcldemote` / `-mprfchw`;
- *      MSVC encodes the same bytes through @c _mm_cldemote and @c _m_prefetchw, no `/arch` needed.
+ *      dispatched on. Hand-assembled so stock toolchains need no @c -mcldemote / @c -mprfchw;
+ *      MSVC encodes the same bytes through @c _mm_cldemote and @c _m_prefetchw, no @c /arch needed.
  */
 struct x86_cache_hints_t {
     static constexpr capabilities_t capability_k = capability_x86_cldemote_k;
@@ -716,13 +717,13 @@ struct x86_cache_hints_t {
 #if FORKUNION_TARGET_ARM64_DC_CVAC
 
 /**
- *  @brief AArch64 cache hints: `DC CVAC` cleans to the coherency point, `PRFM PSTL1KEEP` promotes,
- *      `PRFM PLDL2KEEP` prefetches into L2.
+ *  @brief AArch64 cache hints: <tt>DC CVAC</tt> cleans to the coherency point, <tt>PRFM PSTL1KEEP</tt> promotes,
+ *      <tt>PRFM PLDL2KEEP</tt> prefetches into L2.
  *  @note There is no demote on Arm - the clean is the nearest thing: the next claimer's snoop finds
  *      a clean line instead of forcing a dirty intervention, at the price of a memory write. The
- *      clean is EL0-legal only where the kernel sets `SCTLR_EL1.UCI`; Linux does, and the
+ *      clean is EL0-legal only where the kernel sets <tt>SCTLR_EL1.UCI</tt>; Linux does, and the
  *      @c FORKUNION_WITH_DEMOTE_CACHE_LINES gate requires @c FORKUNION_OS_LINUX_ on this
- *      architecture. The persistence-targeted `DC CVAP` and `DC CVADP` are deliberately absent:
+ *      architecture. The persistence-targeted <tt>DC CVAP</tt> and <tt>DC CVADP</tt> are deliberately absent:
  *      UNDEFINED without @c FEAT_DPB or @c FEAT_DPB2, and they buy a NUMA hand-off nothing.
  */
 struct arm64_cache_hints_t {
@@ -742,10 +743,10 @@ struct arm64_cache_hints_t {
 #if FORKUNION_TARGET_ARM64_PRFM
 
 /**
- *  @brief AArch64 promotion and prefetching only, for kernels that keep `SCTLR_EL1.UCI` clear -
- *      Windows and the BSDs do, so an EL0 `DC CVAC` traps there and the demote stays a no-op.
+ *  @brief AArch64 promotion and prefetching only, for kernels that keep <tt>SCTLR_EL1.UCI</tt> clear -
+ *      Windows and the BSDs do, so an EL0 <tt>DC CVAC</tt> traps there and the demote stays a no-op.
  *  @note Mirrors @c risc5_cache_hints_t's shape: both are @c PRFM hints that cannot fault anywhere.
- *      MSVC reaches them through @c __prefetch2, whose prfop immediates `0b10000` and `0b00010`
+ *      MSVC reaches them through @c __prefetch2, whose prfop immediates @c 0b10000 and @c 0b00010
  *      spell PST-L1-KEEP and PLD-L2-KEEP - the same encodings the asm arm emits.
  */
 struct arm64_prefetch_cache_hints_t {
@@ -768,13 +769,13 @@ struct arm64_prefetch_cache_hints_t {
 };
 #endif // FORKUNION_TARGET_ARM64_PRFM
 
-#if FORKUNION_TARGET_RISC5_ZICBOP
+#if FORKUNION_TARGET_RISCV64_ZICBOP
 
 /**
- *  @brief RISC-V promotion and prefetching only: `prefetch.w` and `prefetch.r` are `ORI x0, ...`
+ *  @brief RISC-V promotion and prefetching only: <tt>prefetch.w</tt> and <tt>prefetch.r</tt> are <tt>ORI x0, ...</tt>
  *      hints that cannot fault, with or without Zicbop silicon.
- *  @note The `cbo.clean` demote is deliberately a no-op here: it raises illegal-instruction unless
- *      the kernel set `senvcfg.CBCFE`, which only @c hwprobe can attest at runtime - so it belongs
+ *  @note The <tt>cbo.clean</tt> demote is deliberately a no-op here: it raises illegal-instruction unless
+ *      the kernel set <tt>senvcfg.CBCFE</tt>, which only @c hwprobe can attest at runtime - so it belongs
  *      to a runtime-dispatch tier behind @c capability_risc5_zicbom_k, never a compile-time policy.
  */
 struct risc5_cache_hints_t {
@@ -789,15 +790,15 @@ struct risc5_cache_hints_t {
         __asm__ __volatile__(".4byte 0x00156013" ::"r"(address_register) : "memory"); // ? `prefetch.r 0(a0)`
     }
 };
-#endif // FORKUNION_TARGET_RISC5_ZICBOP
+#endif // FORKUNION_TARGET_RISCV64_ZICBOP
 
-#if FORKUNION_TARGET_RISC5_ZICBOM
+#if FORKUNION_TARGET_RISCV64_ZICBOM
 
 /**
- *  @brief RISC-V cache hints where @c hwprobe attested Zicbom: `cbo.clean` writes the dirty block
- *      back toward another cache or memory, and `prefetch.w` promotes with write intent.
- *  @note Never selected at compile time - `cbo.clean` raises illegal-instruction unless the kernel
- *      set `senvcfg.CBCFE`, which only the @c capability_risc5_zicbom_k runtime bit can attest -
+ *  @brief RISC-V cache hints where @c hwprobe attested Zicbom: <tt>cbo.clean</tt> writes the dirty block
+ *      back toward another cache or memory, and <tt>prefetch.w</tt> promotes with write intent.
+ *  @note Never selected at compile time - <tt>cbo.clean</tt> raises illegal-instruction unless the kernel
+ *      set <tt>senvcfg.CBCFE</tt>, which only the @c capability_risc5_zicbom_k runtime bit can attest -
  *      so this functor is reachable exclusively through the C ABI's runtime cascade.
  */
 struct risc5_cbo_cache_hints_t {
@@ -815,7 +816,7 @@ struct risc5_cbo_cache_hints_t {
         __asm__ __volatile__(".4byte 0x00156013" ::"r"(address_register) : "memory"); // ? `prefetch.r 0(a0)`
     }
 };
-#endif // FORKUNION_TARGET_RISC5_ZICBOM
+#endif // FORKUNION_TARGET_RISCV64_ZICBOM
 
 /*  One deterministic cache-hints policy per build, mirroring @c preferred_yield_t: the gate is the
  *  Layer-2 tri-state, never runtime silicon - everything a selected functor emits is trap-free
@@ -826,15 +827,15 @@ struct risc5_cbo_cache_hints_t {
 using preferred_cache_hints_t = x86_cache_hints_t;
 #elif FORKUNION_WITH_DEMOTE_CACHE_LINES && FORKUNION_TARGET_ARM64_DC_CVAC
 
-/** Both directions: `DC CVAC` cleans, `PRFM PSTL1KEEP` promotes. */
+/** Both directions: <tt>DC CVAC</tt> cleans, <tt>PRFM PSTL1KEEP</tt> promotes. */
 using preferred_cache_hints_t = arm64_cache_hints_t;
 #elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_TARGET_ARM64_PRFM
 
 /** Windows/BSD: the clean traps, the hint stays. */
 using preferred_cache_hints_t = arm64_prefetch_cache_hints_t;
-#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_TARGET_RISC5_ZICBOP
+#elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_TARGET_RISCV64_ZICBOP
 
-/** RISC-V: `cbo.clean` needs a runtime probe, so only the Zicbop prefetches remain. */
+/** RISC-V: <tt>cbo.clean</tt> needs a runtime probe, so only the Zicbop prefetches remain. */
 using preferred_cache_hints_t = risc5_cache_hints_t;
 #else
 
@@ -871,7 +872,7 @@ inline capabilities_t x86_cpu_capabilities() noexcept {
 
 #if FORKUNION_OS_APPLE_
 
-/** One boolean @c sysctl of the `hw.optional.arm.FEAT_*` family, @c false for an unknown key. */
+/** One boolean @c sysctl of the <tt>hw.optional.arm.FEAT_*</tt> family, @c false for an unknown key. */
 inline bool apple_sysctl_flag(char const *name) noexcept {
     int value = 0;
     std::size_t size = sizeof(value);
@@ -879,7 +880,8 @@ inline bool apple_sysctl_flag(char const *name) noexcept {
 }
 #elif (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_) && FORKUNION_HAS_INLINE_ASM_
 
-/** A four-bit field of an `ID_AA64*` register, as the kernel's @c MRS emulation shows it to EL0. */
+/** A four-bit field of an @c ID_AA64* register, as the kernel's @c MRS emulation shows it to
+ *  EL0. */
 constexpr std::uint64_t arm64_id_field(std::uint64_t id_register, unsigned lsb) noexcept {
     return (id_register >> lsb) & 0xFu;
 }
@@ -889,11 +891,11 @@ constexpr std::uint64_t arm64_id_field(std::uint64_t id_register, unsigned lsb) 
  *  @brief The instruction-level bits this AArch64 offers: the spin hint, the monitored wait, the
  *      cache-line hint, then the atomics - each a kernel attestation, never a bare silicon probe.
  *
- *  Apple answers through @c sysctl. Linux and FreeBSD trap and emulate EL0 reads of the `ID_AA64*`
+ *  Apple answers through @c sysctl. Linux and FreeBSD trap and emulate EL0 reads of the @c ID_AA64*
  *  registers, showing only the fields they enabled for user space; Windows answers through
  *  @c IsProcessorFeaturePresent, which names the two atomic rungs and nothing else; elsewhere
- *  nothing past the hint is claimed. The generic `S<op0>_<op1>_<Cn>_<Cm>_<op2>` encodings assemble
- *  without any `-march` bump, unlike the registers' names.
+ *  nothing past the hint is claimed. The generic <tt>S\<op0\>_\<op1\>_\<Cn\>_\<Cm\>_\<op2\></tt> encodings assemble
+ *  without any @c -march bump, unlike the registers' names.
  */
 inline capabilities_t arm64_cpu_capabilities() noexcept {
     capabilities_t caps = capability_arm64_yield_k | capability_arm64_prfm_k;
@@ -945,7 +947,7 @@ inline std::uint64_t risc5_hwprobe(std::int64_t key) noexcept {
  *      every Linux ABI guarantees, then the monitored wait, the cache-line hint and @c amocas from
  *      one @c hwprobe of the @c IMA_EXT_0 key.
  *  @note U-mode has no CSR listing the extensions, so the kernel's word is the only one: a bit
- *      whose name this build's uapi headers predate is never asked for. A `-march` flag says what
+ *      whose name this build's uapi headers predate is never asked for. A @c -march flag says what
  *      the compiler was promised, not what this machine runs, so it sets nothing here.
  */
 inline capabilities_t risc5_cpu_capabilities() noexcept {
@@ -991,9 +993,9 @@ inline capabilities_t cpu_capabilities() noexcept {
 
 /**
  *  @brief Binds @p size_bytes starting at @p ptr to the single memory domain @p memory_domain_id.
- *  @param[in] mode An `MPOL_*` policy, already OR-ed with whatever mode flags the caller wants.
+ *  @param[in] mode An @c MPOL_* policy, already OR-ed with whatever mode flags the caller wants.
  *  @note Lives here, not beside its allocator callers, because this is the last header both
- *      `topology.hpp` and `allocators.hpp` see - so the @c maxnode quirk below is spelled once.
+ *      <tt>topology.hpp</tt> and <tt>allocators.hpp</tt> see - so the @c maxnode quirk below is spelled once.
  */
 inline status_t linux_bind_range_to_domain(void *ptr, std::size_t size_bytes, memory_domain_id_t memory_domain_id,
                                            int mode) noexcept {
@@ -1011,7 +1013,7 @@ inline status_t linux_bind_range_to_domain(void *ptr, std::size_t size_bytes, me
 }
 
 /** Probes whether this process may actually place memory - a kernel that offers @c mbind still
- *  lets seccomp or a cgroup `cpuset.mems` refuse it, and only the call itself can say. */
+ *  lets seccomp or a cgroup <tt>cpuset.mems</tt> refuse it, and only the call itself can say. */
 inline bool linux_can_place_memory_on_domain() noexcept {
     std::size_t const page_bytes = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
     void *probe = ::mmap(nullptr, page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1092,7 +1094,7 @@ inline capabilities_t ram_capabilities() noexcept {
 inline capabilities_t runtime_capabilities() noexcept { return cpu_capabilities() | ram_capabilities(); }
 
 /**
- *  @brief Which kernel facilities this unit was built to use, one bit per `FORKUNION_WITH_*`.
+ *  @brief Which kernel facilities this unit was built to use, one bit per @c FORKUNION_WITH_*.
  *  @sa runtime_capabilities for what the machine underneath turned out to offer.
  *
  *  Consult it before reaching for a domain-aware API. Without

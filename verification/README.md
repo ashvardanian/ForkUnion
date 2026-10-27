@@ -10,11 +10,10 @@ Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com)
 - `check.sh` is the runner, and `genmc.hpp` the threads and the assertion a client takes from GenMC.
 - `flat_pool/`, `colocated_pool.pml`, `distributed_pool/`, `for_n_dynamic.pml`, `spin_mutex.pml` and `standard_atomic_ref.cpp` check the pools and the portable atomics, each file opening with what it checks.
 
-## Conventions
+## Writing models
 
 Every model opens the same way: the file docblock, the include, then the names.
 The comments follow the C++ headers' rules, and the pre-commit hook checks `*.pml` with the same Doxygen checks.
-The file docblock opens with `@file`, `@author`, `@date` and a `@brief` of at most three lines, then the body, where each invariant and each scenario is a paragraph opening with its subject.
 Every `inline` and `proctype`, and every documented group of `#define`s, carries a `/** */` docblock directly above it whose first sentence is its summary.
 A note over a whole `#if` branch is a plain `/* */` above the `#if`, and `//` is kept for notes inside a body.
 Inside a block, a single name reads `@c name`, a parameter of the inline below reads `@p name`, and a span of several tokens stays in backticks.
@@ -23,23 +22,27 @@ Everything is lowercase snake case; pan's own `-DSAFETY`, `-DCOLLAPSE` and `-DVE
 A word carries the name of the C++ member it stands for, without the trailing underscore, or a small accessor like `row_lock(id)` when several rows share a shape.
 Field extractors read `<field>_of(word)`, transforms are past participles like `stepped(word)`, per-site orders are `<site>_order`, values made from an ID are `<state>(id)`.
 
-## Writing a model
-
 A component is one mechanism of the code under test.
 It is a flat `<name>.pml` while it has one scenario, and a directory `<name>/` once it has a second: a `protocol.pml` beside one file per scenario, and a `client.cpp` when GenMC checks the same words.
 The protocol owns the word map, the values, the knobs and the inlines; words never overlap, and the ones most scenarios touch come first.
-Scenarios whose words cannot share one map are separate components, and a protocol several components need sits flat beside them, taking words as arguments.
-
 A scenario is one cast of processes, and opens with its docblock, its `@verify` lines and its constants: `thread_count`, `location_count`, one past the highest word it touches, and `history_depth`, the most writes one word receives, the initial one included.
 Then it includes its protocol, declares its roles as `proctype <role>(byte t)`, and starts them from one `init { atomic { run <role>(<thread>); … } }`, so every thread index is fixed and no two identical processes race for one.
-The depth is the exact minimum every one of the scenario's `rc11` and `far` lines accepts, failing ones included, since a mutant may write more before it reaches its counterexample: `sc` keeps no history, and a depth too small reports `history_full` and reads as `broken`.
-
 There is no conditional compilation in protocols, scenarios or clients.
 The preprocessor names words, values and constants, gives each knob its default under `#ifndef`, and range-checks an enumerated knob with `#error`; everything that differs between memory models or knob values is a plain Promela expression, `if :: memory == sc -> … :: else fi` or `if :: back_link_fence -> fence_release(t) :: else fi`.
 Write such a guard as a bare `if`: statement merging folds the constant guard into its neighbour, while an `atomic` around it makes a step of its own.
 An inline may declare its own locals, so a role is often one line, unless that adds states: each declaration is a step of its own, and inside a loop it resets on every pass, so where a scenario's states grow the role declares them and passes them in.
 An inline's local never shares a name with its caller's.
-A wait on a word another thread moves goes through `monitor_wait.pml`, never a guard on the newest value, which cannot miss a wake-up: the waiter loads the word and calls `wait_on` until it moves, a monitor-style writer calls `wake` after every write to the word, and a futex-style writer only where the code notifies, so a dropped notify or a missing re-check comes out `stuck`.
+A wait on a word another thread moves goes through `monitor_wait.pml`, never a guard on the newest value, which cannot miss a wake-up.
+
+Every file opens with one docblock:
+
+- `@file`, `@author`, `@date` of the file's first commit, and `@brief`;
+- one context paragraph of five lines or fewer;
+- one-line property bullets;
+- an `@budget` line, only when it differs from 1024;
+- `@verify` lines with short reasons.
+
+## Knobs and verdicts
 
 A knob is a choice the code under test makes, named for the mechanism and defaulting to the code: `watermark_order=order_relaxed`, `back_link_fence=false`, `commits=2`, `waiting=parking`.
 An order knob ends in `_order`; a boolean names the step the code takes.
@@ -58,30 +61,65 @@ Spin runs `sc`, `rc11` and `far`; GenMC runs `sc`, `tso`, `rc11` and `imm`, and 
 A search cut short by the depth limit, a knob defined twice, an index or a write past the scenario's shape, or a GenMC pass that explored nothing is `broken`.
 Every scenario has a `pass` line, and every knob appears on some line; `verify_all` checks the second both ways.
 A `fail` or `stuck` line's finding states the mechanism and its counterexample in the present tense: what the code does, and what happens without it.
-
-`./check.sh` runs every `@verify` line here and one directory down, and takes files to run only those.
 Adding a scenario is one file, a knob is one `#ifndef` and its lines, a new set of words is a new component, and a finding is the line that replays it; nothing ever edits `check.sh`.
 
-## Three memory models, one interface
-
-Every model passes its own thread index to `load`, `store`, `read_modify_write`, `read_modify_write_if`, `compare_exchange`, `add_no_return`, `fence_acquire` and `fence_release`, and `-Dmemory=` picks the memory model at `spin -a` time:
+## Memory models
 
 - `-Dmemory=sc`: one copy of every location, every access one step.
   The protocol layer, and where logic bugs are found first.
 - `-Dmemory=rc11`, the default: every location is a history of writes, every thread carries a view over the histories, a release write stamps the writer's view onto the write and an acquire read merges it.
-  This is the view semantics of Kaiser, Dang, Dreyer, Lahav and Vafeiadis without promises, which is RC11's release-acquire-relaxed fragment: load buffering is forbidden, as in RC11.
 - `-Dmemory=far`: the views, plus a relaxed no-return add is posted rather than performed.
-  It lands at some later step in the `far_cache` process, and until then no release by the posting thread carries it; a same-address access by the poster lands it first.
-  This is RAO-INT as Intel documents it: `AADD` and kin are "implemented using the weakly-ordered memory consistency model of write combining (WC) memory type", and "a fencing operation implemented with LFENCE, SFENCE, or MFENCE instruction should be used in conjunction with AADD if a stronger ordering is required".
-  Nothing else is promised to order them, and a C++ release fence compiles to no instruction on x86, so a relaxed no-return add followed by a release fence or a release store is posted in the model exactly as it is in silicon.
-  The ForkUnion reference maps only relaxed no-return operations onto them, and a release order on the same call is a lock-prefixed instruction, which is how the index sites that need the order now spell it.
 
-The calibration in `weak_memory_litmus/` pins the model to RC11 on message passing with and without releases and fences, release sequences continued by a read-modify-write and broken by a store, coherence, load buffering, and the far shape: a relaxed no-return add before a release store, carried in C++ and posted under far memory.
+## Two include roots
+
+Every `#include` is an angle-bracket path from one of two roots, ForkUnion's `verification/` and the repo's own.
+Harness files are named bare, as `<weak_memory.pml>`, `<monitor_wait.pml>` and `<genmc.hpp>`; a repo's models from its root, as `<flat_pool/protocol.pml>`; library headers as `<forkunion/atomics.hpp>`.
+No include climbs with `..` or uses quotes, and the runner refuses a repo file named like a harness file, which would shadow it.
+
+## Memory budget
+
+- Each model's `@budget <MB>` caps its search, 1024 by default, and a search past it reads as `broken`.
+- `-w` is derived so the hash table takes half the budget, capped at `-w27`.
+- Verdicts pack into `VERIFY_MEMORY_MEGABYTES`, three quarters of available memory by default.
+- `@budget` is the next power of two at or above three times the run's states tally, which is its tally less the hash table the budget gave it.
+  The states then fill at most two thirds of the half the table leaves.
+- Up to 4096 MB a model runs in CI; from 4096 to 8192 its header justifies the budget in one line; above 8192 it runs only with `VERIFY_BACKGROUND=1`.
+
+## Running
+
+```sh
+./check.sh                                   # Spin only, GenMC skipped when absent
+./check.sh flat_pool/moods.pml               # one scenario
+GENMC=~/genmc/build/bin/genmc ./check.sh     # both
+```
+
+Another repo's `verification/check.sh` sources this runner from its `forkunion` submodule or from `FORKUNION_SOURCE`.
+The far model runs only on the litmus shapes, since no pool path posts a relaxed no-return add.
+`GENMC_CLANG` names the compiler GenMC was built with, `clang++` by default; `GENMC_SECONDS` caps one client, 300 by default; `GENMC_UNROLL` gives every loop that many turns, 3 by default, since GenMC treats a weak compare-exchange as one that may fail spuriously and a read-first retry loop never ends for it.
+Every verdict runs in its own directory, at most `VERIFY_JOBS` at a time, and the lines print in the order they were queued once the last one lands.
+
+GenMC ships a freestanding C library whose headers shadow the platform's, `atomic` without `std::atomic_ref` among them, and puts its include directory behind the caller's.
+The clients need the real standard library, so `genmc_ready` writes a directory of forwarders for the shadowed names and puts it first.
+The clients spawn through `__VERIFIER_thread_create`: the platform's `pthread_create` is not intercepted, and `std::thread` rides on it, which is why `flat_pool/client.cpp` spells the pool's words rather than running the pool.
+
+## When a check fails
+
+A `WRONG` line names the model, the defines it was built with, the result expected and the result seen.
+
+- A `pass` model that failed means the design admits the outcome an assertion forbids.
+  Read the counterexample: `spin -t -p flat_pool/plain.pml` replays the trail Spin left beside `pan`, one step per line, and the last steps before the assertion are the interleaving to fix.
+  Fix the design or the model, and say in the commit which one was wrong.
+- A `fail` knob that passed means the model no longer exercises what the knob breaks, usually because a parameter shrank below the shape the bug needs.
+  This is the worse failure of the two, since it silently turns the model into a check of nothing.
+- A `broken` result is Spin or the compiler refusing the model, and the first lines of the log printed underneath say why.
+
+Never relax an assertion to make a run green.
+An assertion that is wrong is a design decision to revisit in its own commit, with the reason in the message.
 
 ## What the models found
 
 The pool's three atomics are sound, and the models prove the behaviours composed on them; what they found sits at the edges.
-Where a model replays a finding, its `@verify` line links it, and the full counterexample is written out there.
+Where a model replays a finding, its `@verify` line links it.
 
 - A dispatch waking a chilled pool restores the workers' scheduling class to `SCHED_OTHER`, the class they started on, since `SCHED_FIFO | SCHED_RR` is `SCHED_BATCH` on Linux.
 - The same wake-up exchanges the mood strongly, since a spurious failure of a weak one leaves a colocated worker in its startup wait forever: [`colocated_pool.pml`](colocated_pool.pml).
@@ -99,21 +137,4 @@ Where a model replays a finding, its `@verify` line links it, and the full count
 - `invoke_for_n_dynamic::rewind` writes the cursors relaxed, since the dispatch's release on the epoch carries every cursor and end to every worker: [`for_n_dynamic.pml`](for_n_dynamic.pml).
 - Both epoch steps are plain release stores: the claim leaves the dispatcher the epoch's only writer until its contributors count down, and the next claimer waits for the last contributor's even epoch before it writes: [`flat_pool/`](flat_pool/), [`distributed_pool/`](distributed_pool/).
 - `unsafe_join` runs the caller's slice on its own colocation before it waits for any other, or the join and a worker waiting on the caller's slice wait on each other forever: [`distributed_pool/overlap.pml`](distributed_pool/overlap.pml).
-
-A `broadcast_join` kept alive across a `terminate` and a `spawn` would alias after one re-spawn rather than after `2^bits` epochs, since `terminate` resets the epoch; it asserts every dispatch joined, so nothing outlives it by contract.
-
-## Running
-
-```sh
-./check.sh                                   # Spin only, GenMC skipped when absent
-./check.sh flat_pool/moods.pml               # one scenario
-GENMC=~/genmc/build/bin/genmc ./check.sh     # both
-```
-
-The far model runs only on the litmus shapes, since no pool path posts a relaxed no-return add.
-`GENMC_CLANG` names the compiler GenMC was built with, `clang++` by default; `GENMC_SECONDS` caps one client, 300 by default; `GENMC_UNROLL` gives every loop that many turns, 3 by default, since GenMC treats a weak compare-exchange as one that may fail spuriously and a read-first retry loop never ends for it.
-Every verdict runs in its own directory, `VERIFY_JOBS` at a time, four by default since each verifier holds a hash table of its own, and the lines print in the order they were queued once the last one lands.
-
-GenMC ships a freestanding C library whose headers shadow the platform's, `atomic` without `std::atomic_ref` among them, and puts its include directory behind the caller's.
-The clients need the real standard library, so `genmc_ready` writes a directory of forwarders for the shadowed names and puts it first.
-The clients spawn through `__VERIFIER_thread_create`: the platform's `pthread_create` is not intercepted, and `std::thread` rides on it, which is why `flat_pool/client.cpp` spells the pool's words rather than running the pool.
+- A `broadcast_join` kept alive across a `terminate` and a `spawn` would alias after one re-spawn rather than after `2^bits` epochs, since `terminate` resets the epoch; it asserts every dispatch joined, so nothing outlives it by contract.

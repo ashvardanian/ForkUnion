@@ -1,7 +1,8 @@
-//! Compiles the C++ core and decides which kernel facilities it may use.
+//! Compiles the C++ core through CMake, the one place that probes which capabilities the compiler
+//! builds, and decides which kernel facilities it may use.
 //!
 //! The derivation rules live in `include/forkunion/types.hpp`, not here. By default this script
-//! defines no `FORKUNION_WITH_*` macro at all and lets the header work it out from the platform.
+//! forces no `FORKUNION_WITH_*` option at all and lets the header work it out from the platform.
 //! Cargo features only ever _override_ that.
 //!
 //! Nothing here probes the build host. The core reads its topology from sysfs and places memory by
@@ -19,110 +20,82 @@
 //!
 //! File: build.rs
 //! Author: Ash Vardanian
+//! Date: June 29, 2025
 
-use std::path::Path;
+use std::{env, path::PathBuf};
 
-/// Every optional capability, in the order `types.hpp` declares them.
-const OPTIONAL_CAPABILITIES: [&str; 6] = [
-    "FORKUNION_WITH_TOPOLOGY",
-    "FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY",
-    "FORKUNION_WITH_PLACE_THREADS_BY_CORE_CLASS",
-    "FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS",
-    "FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN",
-    "FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
+/// Each Cargo feature and the CMake cache string it forces on.
+const FEATURE_OPTIONS: [(&str, &str); 4] = [
+    ("topology", "FORKUNION_WITH_TOPOLOGY"),
+    ("place-memory-on-domain", "FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN"),
+    (
+        "place-huge-pages-on-domain",
+        "FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN",
+    ),
+    ("place-threads-by-affinity", "FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY"),
 ];
 
-fn main() -> Result<(), cc::Error> {
-    let mut build = cc::Build::new();
+fn main() {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR"));
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let enabled = |feature: &str| {
+        let variable = format!("CARGO_FEATURE_{}", feature.to_uppercase().replace('-', "_"));
+        env::var_os(variable).is_some()
+    };
 
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let portable = std::env::var("CARGO_FEATURE_PORTABLE").is_ok();
-    let force_topology = std::env::var("CARGO_FEATURE_TOPOLOGY").is_ok();
-    let force_place_memory_on_domain = std::env::var("CARGO_FEATURE_PLACE_MEMORY_ON_DOMAIN").is_ok();
-    let force_place_huge_pages_on_domain = std::env::var("CARGO_FEATURE_PLACE_HUGE_PAGES_ON_DOMAIN").is_ok();
-    let force_place_threads_by_affinity = std::env::var("CARGO_FEATURE_PLACE_THREADS_BY_AFFINITY").is_ok();
-
-    build
-        .cpp(true) // Enable C++ support
-        .std("c++20") // C++20 is preferred over 17 for better atomics
-        .file("c/forkunion.cpp")
-        .include("include")
-        .flag_if_supported("-pedantic") // Only for GCC/Clang
-        .warnings(false);
-
+    let mut library = cmake::Config::new(&manifest);
+    library
+        .profile("Release")
+        .define("FORKUNION_INSTALL", "ON")
+        .define("CMAKE_INSTALL_LIBDIR", "lib")
+        .define("FORKUNION_PORTABLE", if enabled("portable") { "ON" } else { "OFF" });
+    for (feature, option) in FEATURE_OPTIONS {
+        if enabled(feature) {
+            library.define(option, "ON");
+        }
+    }
     // The default `noeh` libc++abi has no `__cxa_throw`, so exceptions stay off.
     if target_os == "wasi" {
-        build.flag("-fno-exceptions");
+        library.cxxflag("-fno-exceptions");
     }
+    let prefix = library.build();
+    println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
+    println!("cargo:rustc-link-lib=static=forkunion_static");
 
-    if portable {
-        assert!(
-            !force_topology
-                && !force_place_memory_on_domain
-                && !force_place_huge_pages_on_domain
-                && !force_place_threads_by_affinity,
-            "`portable` turns off the very capabilities the other features turn on"
-        );
-        for capability in OPTIONAL_CAPABILITIES {
-            build.define(capability, "0");
-        }
-    } else {
-        if force_topology {
-            build.define("FORKUNION_WITH_TOPOLOGY", "1");
-        }
-        if force_place_memory_on_domain {
-            build.define("FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN", "1");
-        }
-        if force_place_huge_pages_on_domain {
-            build.define("FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN", "1");
-        }
-        if force_place_threads_by_affinity {
-            build.define("FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY", "1");
-        }
-    }
-
-    // Mirror Rust's `debug_assertions` onto the C++ `assert`s. Cargo only exports this as a `cfg`,
-    // and it tracks the profile's `debug-assertions` key - unlike `DEBUG`, which is debug-info and
-    // stays `true` under `[profile.release] debug = true`.
-    if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
-        build.define("NDEBUG", None);
-    }
-
-    if let Err(e) = build.try_compile("forkunion") {
-        print!("cargo:warning={e}");
-        return Err(e);
-    }
-
-    // The compiler names the directory of its `noeh` libc++; `WASI_SYSROOT` would make `cc` list a
-    // libc there too, shadowing Rust's own.
-    if target_os == "wasi" {
-        let print_file_name = build
-            .get_compiler()
-            .to_command()
-            .arg("-print-file-name=libc++.a")
-            .output()
-            .expect("the compiler that built the core runs");
-        let libcxx_archive = String::from_utf8_lossy(&print_file_name.stdout).into_owned();
-        let directory = Path::new(libcxx_archive.trim()).parent();
-        if let Some(directory) = directory.filter(|path| !path.as_os_str().is_empty()) {
-            println!("cargo:rustc-link-search=native={}", directory.display());
+    // The archive is C++, so the standard library it was compiled against has to come along.
+    match target_os.as_str() {
+        "windows" => {}
+        "macos" | "ios" | "freebsd" => println!("cargo:rustc-link-lib=dylib=c++"),
+        // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh`
+        // multilib.
+        "wasi" => {
+            println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
+            let target = env::var("TARGET").expect("Cargo always sets TARGET");
+            let sdk = PathBuf::from(env::var("WASI_SDK_PATH").expect("WASI builds need WASI_SDK_PATH"));
+            let sysroot = sdk.join("share/wasi-sysroot/lib").join(target).join("noeh");
+            println!("cargo:rustc-link-search=native={}", sysroot.display());
+            println!("cargo:rustc-link-lib=static=c++");
             println!("cargo:rustc-link-lib=static=c++abi");
         }
+        _ => println!("cargo:rustc-link-lib=dylib=stdc++"),
     }
 
     // Hand dependents the headers, so a crate compiling its own C against the `fu_*` ABI need not
     // vendor a copy that drifts; `links = "forkunion"` makes this their `DEP_FORKUNION_INCLUDE`.
     // Anchored to the manifest, not the cwd, so it resolves inside a published crate too.
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR");
-    println!("cargo:include={}", Path::new(&manifest).join("include").display());
+    println!("cargo:include={}", manifest.join("include").display());
     // The whole tree, so a dependent's CMake adds the checkout Cargo resolved as a subdirectory.
-    println!("cargo:source={manifest}");
+    println!("cargo:source={}", manifest.display());
 
-    println!("cargo:rerun-if-changed=c/forkunion.cpp");
-    println!("cargo:rerun-if-changed=rust/forkunion.rs");
-    println!("cargo:rerun-if-changed=include/forkunion.h");
-    println!("cargo:rerun-if-changed=include/forkunion.hpp");
-    // The umbrella only `#include`s; the implementation lives in the sub-headers beside it.
-    println!("cargo:rerun-if-changed=include/forkunion");
-    Ok(())
+    for source in [
+        "CMakeLists.txt",
+        "VERSION",
+        "cmake",
+        "probes",
+        "c",
+        "include",
+        "rust/forkunion.rs",
+    ] {
+        println!("cargo:rerun-if-changed={}", manifest.join(source).display());
+    }
 }

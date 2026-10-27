@@ -9,16 +9,14 @@
  *  so the stale join returns at once.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc generation_check=false: @c fu_pool_unsafe_join clears the callback slot only
- *      for the generation it published; on any token, the stale join clears it during the live
- *      dispatch, the live join then returns at once and reads the workers' results before they
- *      land, and a worker calls through the cleared slot
+ *  @verify fail sc generation_check=false: on any token, the stale join clears it during the live
+ *      dispatch, and a worker calls through the cleared slot
  */
 #define thread_count 3
 #define location_count 8
 #define history_depth 9
 #define through_c_shim true
-#include "protocol.pml"
+#include <flat_pool/protocol.pml>
 
 /** A worker the spawn starts: contributes to every dispatch until die. */
 proctype worker(byte t) {

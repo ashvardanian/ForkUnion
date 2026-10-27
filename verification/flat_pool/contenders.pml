@@ -10,30 +10,25 @@
  *  reads both workers' results; a refused one returns the zero token and joins nothing. Once both
  *  finished, the caller lets the workers go.
  *
- *  No fork is torn: a refused dispatch writes nothing, an admitted one writes its fork only once
- *  the other's contributors all counted down, and every contributor reads the fork of the
- *  generation it runs, and runs it once. An admitted dispatch that follows another waits out the
- *  completion step of the other, so every token is odd.
+ *  - No fork is torn: a refused dispatch writes nothing.
+ *  - Every contributor reads the fork of the generation it runs, and runs it once.
+ *  - Every token is odd.
  *
+ *  @budget 2048
  *  @verify pass sc,rc11
- *  @verify fail sc claim=false: @c unsafe_for_threads claims the countdown by exchanging it from
- *      zero, and only then writes the fork; with the plain store, the second dispatch overwrites
- *      the @c fork_state while the running generation's slices still run, and then resets the
- *      countdown under them
- *  @verify fail sc completion_wait=false: the last contributor counts down to zero one step before
- *      it steps the epoch to even, and the next dispatch waits that step out; without the wait, a
- *      dispatch admitted in between steps the still odd epoch to even and receives an even token
- *  @verify stuck rc11 claim_order=order_relaxed: the claim acquires the countdown's release
- *      sequence, which carries the running generation's odd epoch to the next dispatch; relaxed,
- *      its completion wait reads an even epoch from before that generation, and its store sends
- *      the epoch back to that generation's token, so a worker already holding the token never
- *      sees a new one, the countdown never reaches zero, and the join waits forever
+ *  @verify fail sc claim=false: with the plain store, the second dispatch overwrites the
+ *      @c fork_state while the running generation's slices still run
+ *  @verify fail sc completion_wait=false: without the wait, a dispatch admitted in between steps
+ *      the still odd epoch to even and receives an even token
+ *  @verify stuck rc11 claim_order=order_relaxed: its store sends the epoch back to that
+ *      generation's token, so a worker already holding the token never sees a new one, the
+ *      countdown never reaches zero, and the join waits forever
  */
 #define thread_count 4
 #define location_count 10
 #define history_depth 9
 #define through_c_shim false
-#include "protocol.pml"
+#include <flat_pool/protocol.pml>
 
 /** The thread that dispatches beside the caller, and the word it releases once it finished, past
  *  the words of the flat pool, as the program's own hand-off before @c terminate would. */

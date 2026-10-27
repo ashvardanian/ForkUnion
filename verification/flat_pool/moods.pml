@@ -7,15 +7,14 @@
  *  The dispatcher may sleep between dispatches, storing chill from the thread that spawned, as the
  *  header allows; the dispatch exchanges it back to grind, a worker seeing chill with the epoch
  *  still naps once and looks again, and @c terminate stores die after the last join, waits for the
- *  workers, and resets the mood and the epoch. No slice runs after die, and no worker is left
- *  waiting on the pool.
+ *  workers, and resets the mood and the epoch.
+ *
+ *  - No slice runs after die, and no worker is left waiting on the pool.
  *
  *  @verify pass sc,rc11
- *  @verify stuck sc wait_cap=false: @c terminate re-releases the epoch after die, which wakes a
- *      worker already asleep on it, but the write keeps the epoch's value; a worker that read
- *      grind before die and arms after the re-release re-checks an unmoved epoch, so waiting on
- *      the epoch alone, as an uncapped monitor would, it never notices die, and @c terminate waits
- *      on it forever; the cap bounds that window to one timeout
+ *  @verify stuck sc wait_cap=false: a worker that read grind before die and arms after the
+ *      re-release re-checks an unmoved epoch, so it never notices die, and @c terminate waits
+ *      on it forever
  *  @verify pass sc strong_wake=false: a @c flat_pool worker looks at the epoch before the mood, so
  *      a chill that a spuriously failed exchange leaves behind costs it naps and never a dispatch
  */
@@ -23,7 +22,7 @@
 #define location_count 7
 #define history_depth 9
 #define through_c_shim false
-#include "protocol.pml"
+#include <flat_pool/protocol.pml>
 
 /** A worker the spawn starts: contributes to every dispatch until die. */
 proctype worker(byte t) {

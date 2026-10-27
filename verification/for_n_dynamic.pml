@@ -7,59 +7,40 @@
  *  Behind @c flat_pool::for_n_dynamic in `flat.hpp`: one private cursor per thread, rewound by the
  *  caller once its claim admitted the dispatch. Each thread runs one static prong from the trailing
  *  tasks, drains its own slice with relaxed adds, then walks its neighbours' slices in a coprime
- *  order and drains them too, one task per claim; the join sees every task's effect.
+ *  order and drains them too, one task per claim. A dispatcher and three workers on a
+ *  caller-exclusive pool, over @c tasks tasks, four by default.
  *
- *  A dispatcher and three workers on a caller-exclusive pool, over @c tasks tasks, four by default:
- *  one dynamic one in the slice [0, 1), the other two slices empty, and three prongs, one per
- *  thread. With fewer tasks than threads every slice is empty, and only the first threads have a
- *  prong. The dispatcher claims the countdown from zero, writes each slice's end and cursor
- *  relaxed, since the epoch's release carries them, and stores the epoch with a release; each
- *  worker acquires the epoch, runs its prong, and drains its own slice and then the others: a
- *  relaxed probe of the cursor against the end, then relaxed adds until the task read is at or
- *  past the end. Every task adds one to a shared result relaxed. The countdown and the completion
- *  step are the pool's, proven in `flat_pool/`; the dispatcher waits for the completion and reads
- *  the result after an acquire.
- *  Every wait is the @c wait_on of `monitor_wait.pml`.
- *
- *  Every worker reads the ends the dispatch published, every task runs exactly once, and the
- *  result the join reads is the task count.
- *
- *  No cursor passes `max(tasks, threads)`, the bound @c invoke_for_n_dynamic documents: a visit
- *  overshoots by at most one, and the probe skips a drained slice with no add at all.
- *
- *  A prong that calls @c for_n_dynamic on its own pool is refused, since the countdown is above
- *  zero until every thread counted down, and the refused call writes nothing, since the pool
- *  rewinds the cursors only after its claim succeeds, in @c flat_pool::unsafe_for_threads.
+ *  - Every worker reads the ends the dispatch published, and every task runs exactly once.
+ *  - The result the join reads is the task count.
+ *  - No cursor passes <tt>max(tasks, threads)</tt>, the bound @c invoke_for_n_dynamic documents.
+ *  - A prong that calls @c for_n_dynamic on its own pool is refused.
  *
  *  @verify pass sc,rc11
  *  @verify pass rc11 tasks=3: the regime with no dynamic task, where every slice is empty and only
  *      the prongs run
- *  @verify pass sc,rc11 tasks=2: fewer tasks than threads, where the third thread has no prong and
- *      the cursors overshoot to @c threads, past @c tasks
- *  @verify fail rc11 dispatch_order=order_relaxed: the dispatch stores the epoch with a release;
- *      relaxed, a worker reads a slice's end from before the dispatch, which skips its tasks
- *  @verify fail rc11 completion_order=order_relaxed: the join acquires the completion step;
- *      relaxed, it reads the result after the wait and sees a stale sum
- *  @verify fail sc claim_guard=false: @c drain_claim stops at a claim at or past the slice's end;
- *      without the check, it runs the task the claim returns, and the cursor runs into the next
- *      slice and past the bound
+ *  @verify pass sc,rc11 tasks=2: fewer tasks than threads, where the third thread has no prong
+ *  @verify fail rc11 dispatch_order=order_relaxed: relaxed, a worker reads a slice's end from
+ *      before the dispatch, which skips its tasks
+ *  @verify fail rc11 completion_order=order_relaxed: relaxed, it reads the result after the wait
+ *      and sees a stale sum
+ *  @verify fail sc claim_guard=false: without the check, it runs the task the claim returns, and
+ *      the cursor runs into the next slice and past the bound
  *  @verify pass sc probe=false: without the probe, the walk still visits each slice once, which
  *      bounds the overshoot on its own
  *  @verify pass sc visits=2: walking every slice twice, the probe still skips a drained slice,
  *      which bounds the overshoot on its own
- *  @verify fail sc probe=false visits=2: the relaxed probe skips a drained slice with no add, and
- *      the walk visits each slice once, and the docblock argues either one bounds the overshoot;
- *      without both, every visit adds past the end, and a cursor passes `max(tasks, threads)`
+ *  @verify fail sc probe=false visits=2: without both, every visit adds past the end, and a cursor
+ *      passes <tt>max(tasks, threads)</tt>
  *  @verify pass sc nested=true: a nested @c for_n_dynamic is refused, and the pool rewinds the
  *      cursors only once its claim admitted a dispatch, so the refused call writes nothing
- *  @verify fail sc nested=true rewind_after_claim=false: rewinding before the claim, the refused
- *      nested call rewinds the cursors under the live dispatch, and the tasks behind them run twice
+ *  @verify fail sc nested=true rewind_after_claim=false: the refused nested call rewinds the
+ *      cursors under the live dispatch, and the tasks behind them run twice
  */
 #define thread_count 4
 #define location_count 9
 #define history_depth 6
-#include "weak_memory.pml"
-#include "monitor_wait.pml"
+#include <weak_memory.pml>
+#include <monitor_wait.pml>
 
 /** The workers beside the caller, and the generation the one dispatch runs. */
 #define threads 3

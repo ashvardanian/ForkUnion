@@ -2,7 +2,7 @@
  *  @file include/forkunion/atomics.hpp
  *  @author Ash Vardanian
  *  @date September 5, 2026
- *  @brief `std::atomic_ref` replacements that spell every access as the one instruction a CPU
+ *  @brief @c std::atomic_ref replacements that spell every access as the one instruction a CPU
  *      generation has for it, independent of the translation unit's target flags.
  *
  *  @c standard_atomic_ref is the in-house @c std::atomic_ref: the standard operations verbatim plus
@@ -18,7 +18,7 @@
  *    which Intel specifies to execute at the shared cache rather than pull the line.
  *
  *  @c arm64_lse_atomic_ref swaps in Armv8.1 @c swp, @c cas, @c ldadd, @c ldclr, @c ldset, @c ldeor,
- *  @c ldsmax & kin - one instruction per read-modify-write, and the no-return `st*` forms, which a
+ *  @c ldsmax & kin - one instruction per read-modify-write, and the no-return @c st* forms, which a
  *  core may perform near like @c ldadd or far at the interconnect, as its design and firmware pick;
  *  @c ldar and @c stlr for ordered loads & stores. Measured on an M5 Pro, where @c stadd runs near,
  *  against the exclusive loops of a baseline build: 5x uncontended, 3-4x with 18 threads on a word.
@@ -39,14 +39,14 @@
  *  spell all four widths, as LSE has byte & halfword forms of every operation, and so does the
  *  @c Zabha one. Float extrema ride the integer ones on their bits where an ISA has those. Every
  *  reference assembles in a baseline translation unit: on Arm the extension is named in the
- *  assembly text - `.arch_extension` - the RISC-V base atomics are the A-extension mnemonics every
+ *  assembly text - <tt>.arch_extension</tt> - the RISC-V base atomics are the A-extension mnemonics every
  *  @c rv64gc toolchain assembles, and the x86 and RISC-V extension instructions are raw bytes; the
  *  runtime capability bit decides whether it may run. Where inline assembly is unavailable - MSVC -
- *  the Arm64 references are spelled over @c __ldar, @c __stlr, @c __ldapr, `__swp*`, `__cas*` and
- *  the `_Interlocked*` arithmetic, which stays inline only under `/arch:armv8.1`; the x86 and
+ *  the Arm64 references are spelled over @c __ldar, @c __stlr, @c __ldapr, @c __swp*, @c __cas* and
+ *  the @c _Interlocked* arithmetic, which stays inline only under <tt>/arch:armv8.1</tt>; the x86 and
  *  RISC-V references lack intrinsics for their instructions, so those targets keep
  *  @c standard_atomic_ref. The @c preferred_atomic_ref at the bottom is the newest reference this
- *  unit may run with no runtime probe, reading `FORKUNION_TARGET_<CAPABILITY>` alone - the
+ *  unit may run with no runtime probe, reading <tt>FORKUNION_TARGET_\<CAPABILITY\></tt> alone - the
  *  compilation target's promise in a unit that dispatches nothing - for compile-time callers, not
  *  per CPU class.
  *
@@ -265,7 +265,7 @@ value_type_ atomic_fetch_sub_if_at_least(reference_type_ reference, value_type_ 
 }
 
 /**
- *  @brief `std::atomic_ref` with the operations the standard lacks, spelled portably over
+ *  @brief @c std::atomic_ref with the operations the standard lacks, spelled portably over
  *      compare-exchange loops.
  *
  *  Compare-exchange loops handle the conditional and extremal read-modify-writes; the no-return
@@ -354,7 +354,7 @@ struct standard_atomic_ref {
 
     /** Adds @p operand only if the sum stays at most @p limit - one @c cmpccxadd on Intel, a
      *  read-first compare-exchange loop elsewhere. Returns the value held before; the caller learns
-     *  the outcome from `observed + operand <= limit`. An operand past the limit, or a floor the
+     *  the outcome from <tt>observed + operand <= limit</tt>. An operand past the limit, or a floor the
      *  operand cannot be taken from, merely observes the word - nothing is required of either,
      *  beyond a signed sum or difference that stays representable. */
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
@@ -366,7 +366,7 @@ struct standard_atomic_ref {
     }
 
     /** Adds @p operand only if the sum stays at least @p floor - one @c cmpccxadd on Intel. Returns
-     *  the value held before; the outcome is `observed + operand >= floor`. A `floor - operand`
+     *  the value held before; the outcome is <tt>observed + operand >= floor</tt>. A <tt>floor - operand</tt>
      *  below the type's minimum admits every word, one past its maximum none. */
     value_type_ fetch_add_if_at_least(value_type_ operand, value_type_ floor,
                                       std::memory_order order = std::memory_order_seq_cst) const noexcept
@@ -377,7 +377,7 @@ struct standard_atomic_ref {
     }
 
     /** Subtracts @p operand only if the difference stays at least @p floor - the semaphore acquire.
-     *  Returns the value held before; the outcome is `observed >= floor + operand`. */
+     *  Returns the value held before; the outcome is <tt>observed >= floor + operand</tt>. */
     value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
                                       std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -387,7 +387,7 @@ struct standard_atomic_ref {
     }
 
     /** No-return read-modify-writes: the op is posted, nothing is waited for - @c stadd, @c stclr,
-     *  @c stset on Arm, `lock add` on x86, the remote @c aadd family with RAO-INT. Only relaxed and
+     *  @c stset on Arm, <tt>lock add</tt> on x86, the remote @c aadd family with RAO-INT. Only relaxed and
      *  release orders exist for them: with no value returned there is nothing to acquire. */
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -583,7 +583,7 @@ inline bool x86_lock_btr_u64(std::uint64_t *word, std::uint64_t bit) noexcept {
  *      operation is already the @c lock-prefixed instruction the compiler emits.
  *  @sa capability_x86_cmpccxadd_k, the admitting bit; x86_raoint_atomic_ref, the same for RAO-INT.
  *
- *  Intel cores from the 2024 E-core Xeons on; `CPUID.(7,1):EAX[7]` says so at runtime. The standard
+ *  Intel cores from the 2024 E-core Xeons on; <tt>CPUID.(7,1):EAX[7]</tt> says so at runtime. The standard
  *  reference hides its pointer, so the word's address is kept alongside.
  */
 template <typename value_type_>
@@ -842,7 +842,7 @@ inline void x86_axor_u64(std::uint64_t *word, std::uint64_t bits) noexcept {
 /**
  *  @brief The above plus RAO-INT for the relaxed no-return forms, specified to execute at the
  *      shared cache: @c aadd, @c aand, @c aor, @c axor. An ordered one keeps the @c lock-prefixed
- *      instruction, already a full fence. `CPUID.(7,1):EAX[3]` says so at runtime.
+ *      instruction, already a full fence. <tt>CPUID.(7,1):EAX[3]</tt> says so at runtime.
  *  @sa capability_x86_raoint_k - the bit admitting it, on top of @c capability_x86_cmpccxadd_k.
  */
 template <typename value_type_>
@@ -1360,7 +1360,7 @@ inline std::uint64_t arm64_ldadd_u64(std::uint64_t *word, std::uint64_t operand,
     return observed;
 }
 
-/** @c ldclr clears the operand's bits: a word's `fetch_and(mask)` is `ldclr ~mask`. */
+/** @c ldclr clears the operand's bits: a word's <tt>fetch_and(mask)</tt> is <tt>ldclr ~mask</tt>. */
 inline std::uint8_t arm64_ldclr_u8(std::uint8_t *word, std::uint8_t bits, std::memory_order order) noexcept {
     std::uint8_t observed;
     switch (order) {
@@ -3138,7 +3138,7 @@ inline void arm64_stsmin_i64(std::int64_t *word, std::int64_t operand, std::memo
 #endif // FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_
 
 /**
- *  @brief `std::atomic_ref` over Armv8.1 LSE: @c ldar and @c stlr for ordered loads & stores, one
+ *  @brief @c std::atomic_ref over Armv8.1 LSE: @c ldar and @c stlr for ordered loads & stores, one
  *      instruction per read-modify-write in the acquire/release flavor the order asks for.
  *  @sa capability_arm64_lse_k, the admitting bit; arm64_rcpc_atomic_ref, the same with RCpc loads.
  *
@@ -3770,7 +3770,7 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
 
 /*  Loads & stores carry their order as fences, per the RISC-V mapping: acquire is `fence r,rw`
  *  after the load, release `fence rw,w` before the store, sequential consistency both. */
-#if FORKUNION_TARGET_RISC5_ATOMIC
+#if FORKUNION_TARGET_RISCV64_ATOMIC
 #pragma region RISC5 A
 
 inline std::uint8_t risc5_lbu(std::uint8_t const *word) noexcept {
@@ -4075,7 +4075,7 @@ inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired)
 }
 
 /**
- *  @brief `std::atomic_ref` over the RISC-V base A extension: one `amo*` per read-modify-write,
+ *  @brief @c std::atomic_ref over the RISC-V base A extension: one @c amo* per read-modify-write,
  *      @c x0 as the destination for the no-return forms, @c lr and @c sc loops for compare-exchange
  *      and byte exchanges, fences around the ordered loads & stores.
  *  @sa capability_risc5_atomic_k, the admitting bit; risc5_zacas_atomic_ref, using @c amocas.
@@ -4397,7 +4397,7 @@ struct risc5_atomic_ref<value_type_ const> {
 
 #pragma endregion RISC5 A
 
-#endif // FORKUNION_TARGET_RISC5_ATOMIC
+#endif // FORKUNION_TARGET_RISCV64_ATOMIC
 
 /*  @c Zacas: compare-and-swap as one instruction; the comparand register receives what the word
  *  held. Assemblers disagree on how to name the extension inline - @c zacas, @c zacas1p0, or not at
@@ -4405,7 +4405,7 @@ struct risc5_atomic_ref<value_type_ const> {
  *  pinned: the AMO opcode, funct5 `00101`, both @c aq and @c rl set, @c a0 as the comparand, @c a1
  *  as the address, @c a2 as the desired value. A baseline @c rv64gc build then assembles them and
  *  the runtime bit decides. */
-#if FORKUNION_TARGET_RISC5_ZACAS
+#if FORKUNION_TARGET_RISCV64_ZACAS
 #pragma region RISC5 Zacas
 
 inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
@@ -4430,7 +4430,8 @@ inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected,
 }
 
 /**
- *  @brief `Zacas` atop the base: one @c amocas compare-exchange instead of an @c lr and @c sc loop.
+ *  @brief @c Zacas atop the base: one @c amocas compare-exchange instead of an
+ *      @c lr and @c sc loop.
  *  @sa capability_risc5_zacas_k, the admitting bit; risc5_atomic_ref, the reference it composes.
  */
 template <typename value_type_>
@@ -4612,13 +4613,13 @@ struct risc5_zacas_atomic_ref<value_type_ const> {
 
 #pragma endregion RISC5 Zacas
 
-#endif // FORKUNION_TARGET_RISC5_ZACAS
+#endif // FORKUNION_TARGET_RISCV64_ZACAS
 
 /*  @c Zabha: the byte and halfword @c amo forms - and with @c Zacas, which this rung extends, the
  *  byte and halfword @c amocas. Raw words for the reason @c amocas is one, with the same registers
  *  pinned - @c a0 the comparand and the result, @c a1 the address, @c a2 the operand - funct3
  *  @c 000 for bytes and @c 001 for halfwords, both @c aq and @c rl set. */
-#if FORKUNION_TARGET_RISC5_ZABHA
+#if FORKUNION_TARGET_RISCV64_ZABHA
 #pragma region RISC5 Zabha
 
 inline constexpr std::uint32_t risc5_amoswap_b_k = 0x0ec5852f; // ? `amoswap.b.aqrl a0, a2, (a1)`
@@ -4654,8 +4655,8 @@ inline std::uint64_t risc5_zabha_amo(void *word, std::uint64_t operand, std::uin
 }
 
 /**
- *  @brief `Zabha` atop @c Zacas: every read-modify-write of a byte or halfword as one @c amo, where
- *      the lower rungs loop over the aligned word or refuse to compile.
+ *  @brief @c Zabha atop @c Zacas: every read-modify-write of a byte or halfword as one @c amo,
+ *      where the lower rungs loop over the aligned word or refuse to compile.
  *  @sa capability_risc5_zabha_k, the admitting bit; risc5_zacas_atomic_ref, the reference it
  *      composes for 32- and 64-bit words.
  *
@@ -4895,7 +4896,7 @@ struct risc5_zabha_atomic_ref<value_type_ const> {
 
 #pragma endregion RISC5 Zabha
 
-#endif // FORKUNION_TARGET_RISC5_ZABHA
+#endif // FORKUNION_TARGET_RISCV64_ZABHA
 
 /*  @c memory.atomic.notify: wakes the threads @c memory.atomic.wait sleeps on one 4-byte-aligned
  *  address, all of them for a count of `~0u`. No store wakes a sleeper in WebAssembly, so the
@@ -5120,7 +5121,7 @@ struct wasm_atomic_ref<value_type_ const> {
 #endif // FORKUNION_TARGET_WASM_WAIT
 
 /** The newest reference this translation unit may run with no runtime probe, reading each rung's
- *  `FORKUNION_TARGET_<CAPABILITY>` alone - in a unit that dispatches nothing the compilation
+ *  <tt>FORKUNION_TARGET_\<CAPABILITY\></tt> alone - in a unit that dispatches nothing the compilation
  *  target's promise, so the pick can never be illegal there. In a unit that dispatches at runtime -
  *  one with the probe verdicts or @c FORKUNION_RUNTIME_DISPATCH - the bit is what the toolchain
  *  builds and the alias resolves to the newest buildable rung, so such a unit names its reference
@@ -5137,13 +5138,13 @@ using preferred_atomic_ref = x86_raoint_atomic_ref<value_type_>;
 #elif FORKUNION_TARGET_X86_CMPCCXADD
 template <typename value_type_>
 using preferred_atomic_ref = x86_cmpccxadd_atomic_ref<value_type_>;
-#elif FORKUNION_TARGET_RISC5_ZABHA
+#elif FORKUNION_TARGET_RISCV64_ZABHA
 template <typename value_type_>
 using preferred_atomic_ref = risc5_zabha_atomic_ref<value_type_>;
-#elif FORKUNION_TARGET_RISC5_ZACAS
+#elif FORKUNION_TARGET_RISCV64_ZACAS
 template <typename value_type_>
 using preferred_atomic_ref = risc5_zacas_atomic_ref<value_type_>;
-#elif FORKUNION_TARGET_RISC5_ATOMIC
+#elif FORKUNION_TARGET_RISCV64_ATOMIC
 template <typename value_type_>
 using preferred_atomic_ref = risc5_atomic_ref<value_type_>;
 #elif FORKUNION_TARGET_WASM_WAIT

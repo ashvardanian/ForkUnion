@@ -3,11 +3,11 @@
  *  @author Ash Vardanian
  *  @date June 6, 2025
  *  @brief NUMA-aware allocators and the domain-distributed containers built on them.
- *  @note Included by `<forkunion.hpp>`; not meant to be included on its own.
+ *  @note Included by <tt>\<forkunion.hpp\></tt>; not meant to be included on its own.
  *
  *  Everything here is about @b where bytes live: the per-platform allocators that pin a block to a
  *  memory domain, and the @c replicated_array and @c sharded_array containers spreading a sequence
- *  across domains. Execution - the pools - lives in `flat.hpp` and `distributed.hpp`.
+ *  across domains. Execution - the pools - lives in <tt>flat.hpp</tt> and <tt>distributed.hpp</tt>.
  */
 #pragma once
 #include "topology.hpp" // `machine_topology`, `ram_page_size`, `memory_domain_id_t`
@@ -133,9 +133,9 @@ struct linux_numa_allocator {
      *  @brief Allocates memory for at least @p size elements of @c value_type.
      *  @param[in] size The number of elements to allocate.
      *  @param[in] page_size_bytes The size of the memory page to allocate, must be a multiple of
-     *      `sizeof(value_type)`.
+     *      <tt>sizeof(value_type)</tt>.
      *  @return An @c allocation_result holding the pointer and the element count, empty when the
-     *      allocation fails or the size is not a multiple of `sizeof(value_type)`.
+     *      allocation fails or the size is not a multiple of <tt>sizeof(value_type)</tt>.
      */
     allocation_result<value_type *, size_type> allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
         assert(std::has_single_bit(page_size_bytes) && "A page is a power of two bytes, which rules out zero");
@@ -155,9 +155,9 @@ struct linux_numa_allocator {
      *  @brief Allocates a memory for @p size elements of @c value_type.
      *  @param[in] size The number of elements to allocate.
      *  @param[in] page_size_bytes The size of the memory page to allocate, must be a multiple of
-     *      `sizeof(value_type)`.
+     *      <tt>sizeof(value_type)</tt>.
      *  @return An @c allocation_result holding the pointer and the element count, empty when the
-     *      allocation fails or the size is not a multiple of `sizeof(value_type)`.
+     *      allocation fails or the size is not a multiple of <tt>sizeof(value_type)</tt>.
      */
     value_type *allocate(size_type size, size_type page_size_bytes) noexcept {
         size_type const size_bytes = size * sizeof(value_type);
@@ -170,7 +170,7 @@ struct linux_numa_allocator {
      *  @brief Allocates memory for at least @p size elements of @c value_type.
      *  @param[in] size The number of elements to allocate.
      *  @return An @c allocation_result holding the pointer and the element count, empty when the
-     *      allocation fails or the size is not a multiple of `sizeof(value_type)`.
+     *      allocation fails or the size is not a multiple of <tt>sizeof(value_type)</tt>.
      */
     allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
         // Go through all of the typical Linux page sizes, finding the largest one that makes sense
@@ -192,7 +192,7 @@ struct linux_numa_allocator {
      *  @brief Allocates memory for @p size elements of @c value_type.
      *  @param[in] size The number of elements to allocate.
      *  @return An @c allocation_result holding the pointer and the element count, empty when the
-     *      allocation fails or the size is not a multiple of `sizeof(value_type)`.
+     *      allocation fails or the size is not a multiple of <tt>sizeof(value_type)</tt>.
      */
     value_type *allocate(size_type size) noexcept {
         // Go through all of the typical Linux page sizes, finding the largest one that makes sense
@@ -225,7 +225,7 @@ struct linux_numa_allocator {
 using linux_numa_allocator_t = linux_numa_allocator<>;
 
 /**
- *  @brief Maps one range of `domains * stride_bytes` and binds slice @p d to `domain_ids[d]`.
+ *  @brief Maps one range of <tt>domains * stride_bytes</tt> and binds slice @p d to <tt>domain_ids[d]</tt>.
  *  @return nullptr if the mapping or any slice binding failed, or the page size is unsupported.
  *
  *  Unlike @c linux_numa_allocate, which places a block on a single node, this reserves @b one
@@ -286,7 +286,7 @@ inline void linux_symmetric_free(void *ptr, std::size_t total_bytes) noexcept {
  *
  *  A sibling of @c linux_numa_allocator, but instead of a block on a single node it returns a
  *  @c symmetric_allocation_result carrying the base pointer @b and the per-slice @c stride_bytes,
- *  so slice @c d of element @c i lives at `ptr + d * stride_bytes + i * sizeof(value_type)`. It
+ *  so slice @c d of element @c i lives at <tt>ptr + d * stride_bytes + i * sizeof(value_type)</tt>. It
  *  borrows the @ref machine_topology it stripes across; hand it the one you harvested and let it
  *  outlive the whole mapping.
  */
@@ -545,7 +545,7 @@ struct freebsd_numa_allocator {
 using freebsd_numa_allocator_t = freebsd_numa_allocator<>;
 
 /**
- *  @brief Maps `domains * stride_bytes` and PREFER-touches slice @p d on `domain_ids[d]`.
+ *  @brief Maps <tt>domains * stride_bytes</tt> and PREFER-touches slice @p d on <tt>domain_ids[d]</tt>.
  *  @return nullptr if the mapping failed or the page size is unsupported.
  *  @sa linux_symmetric_allocate is the Linux counterpart; FreeBSD places slices by thread policy.
  */
@@ -674,7 +674,7 @@ using freebsd_symmetric_allocator_t = freebsd_symmetric_allocator<>;
  *
  *  The account must first be granted "Lock pages in memory" - Local Security Policy /
  *  @c SeLockMemoryPrivilege - typically by an admin. Call once at start-up, then construct a
- *  @c windows_numa_allocator with `large_pages = true`.
+ *  @c windows_numa_allocator with <tt>large_pages = true</tt>.
  */
 inline status_t windows_enable_lock_memory_privilege() noexcept {
 #if FORKUNION_OS_WINDOWS_
@@ -696,8 +696,10 @@ inline status_t windows_enable_lock_memory_privilege() noexcept {
 
 /**
  *  @brief Allocates uninitialized memory placed on a specific NUMA @p memory_domain_id on Windows.
+ *  @param[in] size_bytes Number of bytes to allocate.
+ *  @param[in] memory_domain_id The NUMA node to place the memory on.
  *  @param[in] large_pages Request @c MEM_LARGE_PAGES; the size is rounded up to
- *      `GetLargePageMinimum()`.
+ *      <tt>GetLargePageMinimum()</tt>.
  *  @return nullptr if allocation failed, the size is zero, or NUMA memory is unavailable.
  *
  *  @c VirtualAllocExNuma reserves and commits a range whose pages the kernel will fault in on the
@@ -737,11 +739,11 @@ inline void windows_numa_free(void *ptr) noexcept {
 }
 
 /**
- *  @brief Reserves one range of `domains * stride_bytes` and commits slice @p d on its own node.
+ *  @brief Reserves one range of <tt>domains * stride_bytes</tt> and commits slice @p d on its own node.
  *  @return nullptr if the reservation or any slice commit failed.
  *
- *  The Windows analogue of @c linux_symmetric_allocate: one `VirtualAlloc(MEM_RESERVE)` for the
- *  whole range, then a per-slice `VirtualAllocExNuma(MEM_COMMIT, node)`, so each slice's pages
+ *  The Windows analogue of @c linux_symmetric_allocate: one <tt>VirtualAlloc(MEM_RESERVE)</tt> for the
+ *  whole range, then a per-slice <tt>VirtualAllocExNuma(MEM_COMMIT, node)</tt>, so each slice's pages
  *  fault in on its own node. Base pages only - large pages cannot be reserved and committed across
  *  two separate mapping steps.
  */
@@ -786,10 +788,10 @@ inline void windows_symmetric_free(void *ptr) noexcept {
  *  @sa linux_numa_allocator is the Linux counterpart; both satisfy the pool's allocator needs.
  *
  *  Deliberately plainer than the Linux allocator: it exposes only @c allocate and @c deallocate, so
- *  @c dynamic_padded_array takes its ordinary `allocate(total)` path rather than the sized
+ *  @c dynamic_padded_array takes its ordinary <tt>allocate(total)</tt> path rather than the sized
  *  @c allocate_at_least one. Large pages are opt-in per allocator instance through the
  *  @c large_pages ctor flag; they need @c SeLockMemoryPrivilege first, see @sa
- *  @c windows_enable_lock_memory_privilege, and round every request up to `GetLargePageMinimum()`.
+ *  @c windows_enable_lock_memory_privilege, and round every request up to <tt>GetLargePageMinimum()</tt>.
  *  The pool constructs the allocator without them, since its own state is small; a caller wanting
  *  large pages for bulk data opts in explicitly.
  */
@@ -965,11 +967,11 @@ using portable_aligned_allocator_t = portable_aligned_allocator<>;
  *  @brief A heap-backed stand-in for the symmetric allocators, where domains cannot be bound.
  *  @sa linux_symmetric_allocator / windows_symmetric_allocator are the domain-pinning siblings.
  *
- *  Mirrors their `allocate_at_least(size) → symmetric_allocation_result` shape so the containers
+ *  Mirrors their <tt>allocate_at_least(size) → symmetric_allocation_result</tt> shape so the containers
  *  stay uniform, but the one contiguous block is merely @c default_alignment_k-aligned - no
  *  @c mbind, no @c VirtualAllocExNuma. The slice count still comes from the @ref machine_topology,
  *  so on a machine the platform reports as single-domain the mapping is one stride wide and the
- *  same addressing `ptr + d * stride_bytes + i * sizeof(value_type)` holds everywhere. Borrows the
+ *  same addressing <tt>ptr + d * stride_bytes + i * sizeof(value_type)</tt> holds everywhere. Borrows the
  *  topology; hand it the one you harvested and let it outlive the mapping.
  */
 template <typename value_type_ = char>
@@ -994,7 +996,7 @@ struct portable_symmetric_allocator {
     explicit constexpr portable_symmetric_allocator(portable_symmetric_allocator<other_type_> const &o) noexcept
         : topology_(o.topology()), default_page_size_(o.default_page_size()) {}
 
-    /** Allocates one @c default_alignment_k-aligned block of `domains * stride_bytes`, unbound. */
+    /** Allocates one @c default_alignment_k-aligned block of <tt>domains * stride_bytes</tt>, unbound. */
     allocation_type allocate_at_least(size_type size) noexcept {
         if (!topology_) return {}; // ! No topology to size the slice count
         size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();
@@ -1052,9 +1054,9 @@ using symmetric_memory_allocator_t = portable_symmetric_allocator_t;
  *  @tparam allocator_type_ A symmetric mapping allocator - one range striped across the domains.
  *
  *  For read-shared data - graph adjacency, body positions. The logical length is @b n; the
- *  footprint is `n * memory_domains_count()`. It owns memory and hands out slices - the caller
+ *  footprint is <tt>n * memory_domains_count()</tt>. It owns memory and hands out slices - the caller
  *  fills every replica and keeps them coherent. Backed by one symmetric mapping, so replica @c d of
- *  element @c i lives at `base() + d * stride_bytes() + i * sizeof(value_type)`.
+ *  element @c i lives at <tt>base() + d * stride_bytes() + i * sizeof(value_type)</tt>.
  */
 template <typename value_type_, typename allocator_type_ = symmetric_memory_allocator_t>
 struct replicated_array {
@@ -1141,8 +1143,8 @@ struct replicated_array {
  *  @tparam allocator_type_ A symmetric mapping allocator - one range striped across the domains.
  *
  *  For datasets too large to replicate. The logical length is @b n; the footprint is @c n. Each
- *  domain owns a @b contiguous logical segment of `segment() == ceil(n / memory_domains_count())`
- *  elements, so element @b i lives at `{i / segment(), i % segment()}` - see @c location_of - and a
+ *  domain owns a @b contiguous logical segment of <tt>segment() == ceil(n / memory_domains_count())</tt>
+ *  elements, so element @b i lives at <tt>{i / segment(), i % segment()}</tt> - see @c location_of - and a
  *  sequential scan of a domain's shard is sequential in memory. It owns memory and hands out
  *  slices; the caller fills them. Backed by one symmetric mapping whose uniform stride is that
  *  segment, so a shorter trailing shard leaves slots unused.
@@ -1215,7 +1217,7 @@ struct sharded_array {
     value_type_ *base() const noexcept { return allocation_.ptr; }
     std::size_t stride_bytes() const noexcept { return allocation_.stride_bytes; }
 
-    /** The contiguous logical segment size per domain - `ceil(n / memory_domains_count())`. */
+    /** The contiguous logical segment size per domain - <tt>ceil(n / memory_domains_count())</tt>. */
     std::size_t segment() const noexcept { return allocation_.count; }
 
     /** How many elements the shard on @p memory_domain holds - a trailing shard may be shorter. */
@@ -1228,7 +1230,7 @@ struct sharded_array {
 
     /**
      *  @brief The memory domain and local index that store logical element @p logical_index.
-     *  @note Requires a non-empty array - `segment()` is the divisor and is zero when empty.
+     *  @note Requires a non-empty array - <tt>segment()</tt> is the divisor and is zero when empty.
      */
     location_t location_of(std::size_t logical_index) const noexcept {
         return {static_cast<memory_domain_index_t>(logical_index / allocation_.count),

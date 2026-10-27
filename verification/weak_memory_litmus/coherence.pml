@@ -9,7 +9,7 @@
 #define thread_count 2
 #define location_count 1
 #define history_depth 3
-#include "protocol.pml"
+#include <weak_memory_litmus/protocol.pml>
 
 /** Writes the data twice, relaxed. */
 proctype writer(byte t) {

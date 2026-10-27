@@ -8,27 +8,23 @@
  *  it stores die.
  *
  *  @verify pass sc,rc11
- *  @verify fail rc11 decrement_order=order_release: the countdown's decrements are @c acq_rel, so
- *      each contributor's writes chain into the last one, whose release step publishes them; with
- *      release alone, the last contributor acquires nothing of its peers, and the join that follows
- *      reads a stale result
- *  @verify fail rc11 dispatch_order=order_relaxed: @c unsafe_for_threads steps the epoch with a
- *      release; relaxed, a worker that picked up the dispatch reads an older @c fork_state
- *  @verify fail rc11 pickup_order=order_relaxed: @c worker_loop_ loads the epoch with an acquire;
- *      relaxed, the worker reads the @c fork_state from before the dispatch it picked up
- *  @verify fail rc11 worker_completion_order=order_relaxed: a worker that is the last contributor
- *      steps the epoch with a release; relaxed, the join that sees the step reads stale results
- *  @verify fail rc11 join_order=order_relaxed: @c unsafe_join waits for the completion step with
- *      an acquire; relaxed, it sees the step and reads a stale result
- *  @verify stuck sc recheck=false: the monitored wait re-checks the epoch after arming; without
- *      it, the completion step lands between the join's load and its arming, wakes nobody, and the
- *      uncapped join waits for it forever
+ *  @verify fail rc11 decrement_order=order_release: with release alone, the last contributor
+ *      acquires nothing of its peers
+ *  @verify fail rc11 dispatch_order=order_relaxed: relaxed, a worker that picked up the dispatch
+ *      reads an older @c fork_state
+ *  @verify fail rc11 pickup_order=order_relaxed: relaxed, the worker reads the @c fork_state from
+ *      before the dispatch it picked up
+ *  @verify fail rc11 worker_completion_order=order_relaxed: relaxed, the join that sees the step
+ *      reads stale results
+ *  @verify fail rc11 join_order=order_relaxed: relaxed, it sees the step and reads a stale result
+ *  @verify stuck sc recheck=false: the completion step lands between the join's load and its
+ *      arming, wakes nobody, and the uncapped join waits for it forever
  */
 #define thread_count 3
 #define location_count 7
 #define history_depth 9
 #define through_c_shim false
-#include "protocol.pml"
+#include <flat_pool/protocol.pml>
 
 /** A worker the spawn starts: contributes to every dispatch until die. */
 proctype worker(byte t) {

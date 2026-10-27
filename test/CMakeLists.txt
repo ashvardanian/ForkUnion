@@ -1,6 +1,6 @@
 # Shared logic for setting target properties for tests
 function (forkunion_set_test_properties target_)
-    target_link_libraries(${target_} PRIVATE forkunion_header)
+    target_link_libraries(${target_} PRIVATE forkunion_header forkunion_warnings)
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # This warning annoys us by reminding, that before GCC 4.6 the ABI for passing objects aligned to ≥32-bytes was
@@ -80,7 +80,7 @@ function (forkunion_add_c_test target_ extensions_)
                    C_EXTENSIONS ${extensions_}
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
-    target_link_libraries(${target_} PRIVATE forkunion_static)
+    target_link_libraries(${target_} PRIVATE forkunion_static forkunion_warnings)
     add_test(NAME ${target_} COMMAND ${target_})
 endfunction ()
 

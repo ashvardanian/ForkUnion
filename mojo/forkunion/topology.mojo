@@ -3,6 +3,10 @@
 A topology is read once and then only queried, so it is cheap to keep for the life of a program.
 Pools never retain it - the C API reads it during the spawn and not after - so it may be released
 as soon as the last spawn returns.
+
+File: mojo/forkunion/topology.mojo
+Author: Ash Vardanian
+Date: August 22, 2026
 """
 
 from std.ffi import c_int, c_size_t

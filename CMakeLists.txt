@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.28)
 
 # Set modern CMake policies for better compatibility
 if (POLICY CMP0077)
@@ -40,9 +40,13 @@ project(
     LANGUAGES CXX
 )
 
-# Control strict interface warnings for consumers
-option(FORKUNION_WERROR "Propagate strict warnings (including -Werror) to consumers" OFF)
+option(FORKUNION_WERROR "Treat compiler warnings as errors" OFF)
 option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL pool" OFF)
+set(FORKUNION_BUILD_SANITIZERS
+    "off"
+    CACHE STRING "Sanitizers for ForkUnion's own targets: off, address with undefined, or thread"
+)
+set_property(CACHE FORKUNION_BUILD_SANITIZERS PROPERTY STRINGS off address thread)
 
 # Each kernel facility the library can use is a tri-state: AUTO, ON, or OFF.
 #
@@ -98,71 +102,89 @@ target_compile_features(forkunion_header INTERFACE cxx_std_20)
 # One compile probe per capability under `probes/`, defining `FORKUNION_TARGET_<CAPABILITY>` as the toolchain compiles
 # it through `forkunion::cpu_capabilities_compiled`, never through `forkunion_header`, whose consumers read the
 # compilation target's promise in `types.hpp`.
-include(cmake/fu_isa_probe.cmake)
+include(cmake/forkunion_probes.cmake)
 
-# Strictest possible compilation flags with fatal warnings
-if (FORKUNION_WERROR)
-    target_compile_options(
-        forkunion_header
-        INTERFACE # GCC/Clang: Maximum warnings + treat warnings as errors + security hardening
-                  $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall
-                  -Wextra
-                  -Wpedantic
-                  -Werror
-                  -Wconversion
-                  -Wcast-qual
-                  -Wcast-align
-                  -Wunused
-                  -Wno-unused-parameter
-                  -Wno-unknown-pragmas
-                  -Wno-sign-conversion
-                  -Wno-unused-function
-                  -Wshadow
-                  -Wno-null-dereference
-                  -Wdouble-promotion>
-                  # C++ only: GCC rejects these on the C tests and on a consumer's C sources
-                  $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wnon-virtual-dtor
-                  -Wold-style-cast
-                  -Woverloaded-virtual
-                  -Wsign-promo>
-                  $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wuseless-cast>
-                  $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo>>:-Wno-unused-variable>
-                  # Additional GCC-specific warnings
-                  $<$<CXX_COMPILER_ID:GNU>:-Wmisleading-indentation
-                  -Wduplicated-cond
-                  -Wduplicated-branches
-                  -Wlogical-op
-                  -Wno-null-dereference>
-                  # Additional Clang-specific warnings
-                  $<$<CXX_COMPILER_ID:Clang>:-Wmost
-                  -Wthread-safety
-                  -Wthread-safety-negative>
-                  # MSVC: Maximum warnings + treat warnings as errors
-                  $<$<CXX_COMPILER_ID:MSVC>:/W4
-                  /WX
-                  /permissive-
-                  /w14242
-                  /w14254
-                  /w14263
-                  /w14265
-                  /w14287
-                  /we4289
-                  /w14296
-                  /w14311
-                  /w14545
-                  /w14546
-                  /w14547
-                  /w14549
-                  /w14555
-                  /w14619
-                  /w14640
-                  /w14826
-                  /w14905
-                  /w14906
-                  /w14928>
-                  $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release,RelWithDebInfo>>:/wd4101>
+# Sanitizers instrument every target this directory builds, never the probes, and never a parent project's own targets.
+if (FORKUNION_BUILD_SANITIZERS STREQUAL "address" AND MSVC)
+    add_compile_options(/fsanitize=address)
+elseif (FORKUNION_BUILD_SANITIZERS STREQUAL "address")
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
+    add_link_options(-fsanitize=address,undefined)
+elseif (FORKUNION_BUILD_SANITIZERS STREQUAL "thread" AND NOT MSVC)
+    add_compile_options(-fsanitize=thread)
+    add_link_options(-fsanitize=thread)
+elseif (NOT FORKUNION_BUILD_SANITIZERS STREQUAL "off")
+    message(FATAL_ERROR "FORKUNION_BUILD_SANITIZERS is off, address or thread, the last with Clang or GCC, "
+                        "not '${FORKUNION_BUILD_SANITIZERS}'"
     )
 endif ()
+
+# Strictest possible warnings for ForkUnion's own libraries, tests and benchmarks, never passed on to consumers.
+add_library(forkunion_warnings INTERFACE)
+if (FORKUNION_WERROR)
+    target_compile_options(
+        forkunion_warnings INTERFACE $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror> $<$<CXX_COMPILER_ID:MSVC>:/WX>
+    )
+endif ()
+target_compile_options(
+    forkunion_warnings
+    INTERFACE # GCC/Clang: Maximum warnings + security hardening
+              $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall
+              -Wextra
+              -Wpedantic
+              -Wconversion
+              -Wcast-qual
+              -Wcast-align
+              -Wunused
+              -Wno-unused-parameter
+              -Wno-unknown-pragmas
+              -Wno-sign-conversion
+              -Wno-unused-function
+              -Wshadow
+              -Wno-null-dereference
+              -Wdouble-promotion>
+              # C++ only: GCC rejects these on the C tests and on a consumer's C sources
+              $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wnon-virtual-dtor
+              -Wold-style-cast
+              -Woverloaded-virtual
+              -Wsign-promo>
+              $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wuseless-cast>
+              $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo>>:-Wno-unused-variable>
+              # Additional GCC-specific warnings
+              $<$<CXX_COMPILER_ID:GNU>:-Wmisleading-indentation
+              -Wduplicated-cond
+              -Wduplicated-branches
+              -Wlogical-op
+              -Wno-null-dereference>
+              # Additional Clang-specific warnings
+              $<$<CXX_COMPILER_ID:Clang>:-Wmost
+              -Wthread-safety
+              -Wthread-safety-negative>
+              $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wdocumentation>
+              # MSVC: Maximum warnings
+              $<$<CXX_COMPILER_ID:MSVC>:/W4
+              /permissive-
+              /w14242
+              /w14254
+              /w14263
+              /w14265
+              /w14287
+              /we4289
+              /w14296
+              /w14311
+              /w14545
+              /w14546
+              /w14547
+              /w14549
+              /w14555
+              /w14619
+              /w14640
+              /w14826
+              /w14905
+              /w14906
+              /w14928>
+              $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release,RelWithDebInfo>>:/wd4101>
+)
 
 # Pre-compiled libraries built from `c/forkunion.cpp` - the same translation unit twice, differing only in linkage.
 add_library(forkunion_shared SHARED c/forkunion.cpp)
@@ -211,8 +233,14 @@ target_link_libraries(forkunion_shared PUBLIC forkunion_header)
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
 
 # Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `c/forkunion.cpp`.
-target_link_libraries(forkunion_shared PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>)
-target_link_libraries(forkunion_static PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>)
+target_link_libraries(
+    forkunion_shared PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
+                             $<BUILD_INTERFACE:forkunion_warnings>
+)
+target_link_libraries(
+    forkunion_static PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
+                             $<BUILD_INTERFACE:forkunion_warnings>
+)
 
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
@@ -316,10 +344,10 @@ endif ()
 # Tests & benchmarks
 include(CTest)
 
-# Default ON only when ForkUnion is the top-level project, so an `add_subdirectory` consumer does not inherit the
-# `test/` and `bench/` targets - and does not have to remember to switch them off.
-option(FORKUNION_BUILD_TEST "Build the tests in test/" ${PROJECT_IS_TOP_LEVEL})
-option(FORKUNION_BUILD_BENCH "Build the benchmarks in bench/" ${PROJECT_IS_TOP_LEVEL})
+# Off unless asked for, as the presets do, so neither a binding nor an `add_subdirectory` consumer builds `test/` and
+# `bench/` or has to remember to switch them off.
+option(FORKUNION_BUILD_TEST "Build the tests in test/" OFF)
+option(FORKUNION_BUILD_BENCH "Build the benchmarks in bench/" OFF)
 option(FORKUNION_TEST_SKIP_STRESS "Run only the tests' correctness suite, skipping the slow throughput/stress cases"
        OFF
 )

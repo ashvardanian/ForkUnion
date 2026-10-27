@@ -10,16 +10,18 @@
 //! This Rust wrapper safely wraps the precompiled C library, keeping zero-allocation principles
 //! while leveraging NUMA-aware optimizations and CPU-specific busy-waiting instructions.
 //!
-//! The wrapper mirrors the C++ core's header layout: [`topology`] for the hardware view, [`types`]
-//! for portable building blocks, [`allocators`] for NUMA-aware allocation, [`scheduling`] for the
-//! thread pool, its dispatch primitives, and the measured memory fabric, and [`parallel`] for the
+//! The wrapper mirrors the C++ core's header layout: `topology` for the hardware view, `types`
+//! for portable building blocks, `allocators` for NUMA-aware allocation, `scheduling` for the
+//! thread pool, its dispatch primitives, and the measured memory fabric, and `parallel` for the
 //! Rayon-style parallel iterators. Every public symbol is re-exported here, so `use forkunion::*`
 //! resolves exactly as it did before the split.
 //!
 //! File: rust/forkunion.rs
 //! Author: Ash Vardanian
+//! Date: June 29, 2025
 
 #![no_std]
+#![warn(missing_docs)]
 
 extern crate alloc;
 #[cfg(feature = "std")]

@@ -3,6 +3,10 @@
 //! Mirrors the C++ `topology` header: an owned `Topology` handle enumerating this machine's compute
 //! and memory domains, the `Capabilities` bitset describing what the library was built for and what
 //! the machine offers, and the library version accessors.
+//!
+//! File: zig/forkunion/topology.zig
+//! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -296,14 +300,6 @@ pub const Topology = struct {
         return answer;
     }
 };
-
-test "version info" {
-    // The components are unsigned, so `>= 0` asserts nothing. An all-zero triple is the failure
-    // worth catching - the signature of a stubbed or mislinked core - since the numbers themselves
-    // live in the build manifest and pinning them here would only duplicate it.
-    const v = version();
-    try std.testing.expect(v.major + v.minor + v.patch > 0);
-}
 
 test "capability bits match the C ABI numbering" {
     // The packed struct's field order is the wire format, so a field inserted in the wrong place

@@ -4,6 +4,7 @@
 //!
 //! File: rust/forkunion/types.rs
 //! Author: Ash Vardanian
+//! Date: July 13, 2026
 
 use core::cell::UnsafeCell;
 use core::ffi::c_int;
@@ -589,6 +590,7 @@ impl<T> SyncConstPtr<T> {
 unsafe impl<T> Send for SyncConstPtr<T> {}
 unsafe impl<T> Sync for SyncConstPtr<T> {}
 
+/// A mutable raw pointer that is `Send` and `Sync`, for disjoint writes from many threads.
 #[derive(Clone, Copy)]
 pub struct SyncMutPtr<T> {
     ptr: *mut T,
@@ -596,6 +598,7 @@ pub struct SyncMutPtr<T> {
 }
 
 impl<T> SyncMutPtr<T> {
+    /// Wraps a raw pointer; every obligation is discharged at [`get`](Self::get).
     #[must_use]
     pub const fn new(ptr: *mut T) -> Self {
         Self {
@@ -619,6 +622,7 @@ impl<T> SyncMutPtr<T> {
         self.ptr.add(index)
     }
 
+    /// Returns the raw pointer.
     #[inline]
     #[must_use]
     pub fn as_ptr(&self) -> *mut T {

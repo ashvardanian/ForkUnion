@@ -1,5 +1,5 @@
 /**
- *  @file probes/risc5_wrs.cpp
+ *  @file probes/riscv64_wrs.cpp
  *  @author Ash Vardanian
  *  @date September 7, 2026
  *  @brief ForkUnion probe: the raw `WRS.STO` word.

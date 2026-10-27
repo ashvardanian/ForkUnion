@@ -60,6 +60,7 @@ comment_structure_awk='
     function is_empty_comment_line(line) { return line ~ /^[[:space:]]*\*[[:space:]]*$/ }
     function without_code_spans(text,    start, length_) {
         gsub(/`[^`]*`/, "C", text)
+        gsub(/<\/tt>/, "\001", text); gsub(/<tt>[^\001]*\001/, "C", text)
         while ((start = index(text, "<code")) && (length_ = index(substr(text, start), "</code>")))
             text = substr(text, 1, start - 1) "C" substr(text, start + length_ + 6)
         return text
@@ -70,8 +71,9 @@ comment_structure_awk='
 # word would still fit under the paragraph's own measure: its widest other line, capped at 100. The caller
 # defines `characters(text)`.
 paragraph_room_awk='
-    function first_word(text) {
+    function first_word(text,    end_) {
         if (text ~ /^`[^`]*`/) { match(text, /^`[^`]*`[^[:space:]]*/); return substr(text, 1, RLENGTH) }
+        if (text ~ /^<tt>/ && (end_ = index(text, "</tt>"))) { match(substr(text, end_ + 5), /^[^[:space:]]*/); return substr(text, 1, end_ + 4 + RLENGTH) }
         sub(/[[:space:]].*$/, "", text); return text
     }
     function hold_paragraph_line(line, body, width) { ++held; held_line[held] = line; held_body[held] = body; held_width[held] = width }
@@ -170,14 +172,14 @@ lines_outside_function_bodies() {
 
 # region Doxygen Blocks
 
-# Rejects a `@param` without an `[in]`, `[out]` or `[inout]` direction, because the direction tells a reader
+# Rejects a `@param` without an `[in]`, `[out]` or `[in,out]` direction, because the direction tells a reader
 # whether the callee reads, writes, or mutates the argument.
 check_param_has_direction() {
     local undirected
-    undirected=$(printf '%s\n' "$staged_added_text" | grep -E '@param' | grep -vE '@param\[(in|out|inout)\]' || true)
+    undirected=$(printf '%s\n' "$staged_added_text" | grep -E '@param' | grep -vE '@param\[(in|out|in,out)\]' || true)
     [ -z "$undirected" ] || reject_with_reason "$undirected" \
-        "$staged_path has a @param without an [in], [out] or [inout] direction;" \
-        "            write @param[inout] for a mutated argument, never @param[in,out]:"
+        "$staged_path has a @param without an [in], [out] or [in,out] direction;" \
+        "            write @param[in,out] for a mutated argument, never @param[inout]:"
 }
 
 # Rejects Markdown `__bold__` and `**bold**` in comments, because Doxygen prints them literally; C
@@ -191,15 +193,6 @@ check_markdown_emphasis_absent_in_comments() {
     [ -z "$emphasis" ] || reject_with_reason "$emphasis" \
         "$staged_path uses Markdown emphasis in a comment, which Doxygen prints literally;" \
         "            use @b for a 1-2 token emphasis, plain prose otherwise:"
-}
-
-# Rejects `@p`, `@b`, `@c`, `@a` or `@ref` followed by a backticked token, because the command binds the
-# next word literally and the backticks land inside the rendered name.
-check_markup_command_without_backticks() {
-    local doubled
-    doubled=$(printf '%s\n' "$staged_added_text" | grep -E '@(p|b|a|c|ref|sa|see)[[:space:]]+`' || true)
-    [ -z "$doubled" ] || reject_with_reason "$doubled" \
-        "$staged_path marks one token twice; drop the backticks and keep the command:"
 }
 
 # Rejects a Doxygen command glued to the previous character, as in `(@c foo)`, because a highlighter only
@@ -237,7 +230,7 @@ check_cross_references_start_their_line() {
 check_formula_terms_unmarked() {
     local marked_terms
     marked_terms=$(printf '%s\n' "$staged_added_text" | grep -E "$added_docblock_line_pattern" |
-        grep -E '@c[[:space:]]+[^[:space:]]+[[:space:]]*(=|\+|-|\*|/|<|>|≤|≥|×|·)[[:space:]]*[^[:space:]]*[[:space:]]*@c[[:space:]]' || true)
+        grep -E '@c[[:space:]]+[^[:space:]]+[[:space:]]+(=|\+|-|\*|<|>|≤|≥|×|·)[[:space:]]*[^[:space:]]*[[:space:]]*@c[[:space:]]' || true)
     [ -z "$marked_terms" ] || reject_with_reason "$marked_terms" \
         "$staged_path marks the terms of an equation one by one; write it as plain Unicode prose," \
         "            as in size = 1 + size(left) + size(right):"
@@ -300,37 +293,13 @@ check_tuple_spelled_bold_parenthesized() {
 }
 
 # Rejects @c or @p before a call whose arguments hold a space, because the command binds one token and
-# stops at the space; a call with arguments is a backtick span, and a formula is plain Unicode prose.
+# stops at the space; a call with arguments is a <tt> span, and a formula is plain Unicode prose.
 check_call_not_marked() {
     local calls
     calls=$(printf '%s\n' "$staged_added_text" | grep -E "$added_documentation_line_pattern" |
         grep -E '@[cp][[:space:]]+[A-Za-z_][A-Za-z0-9_:.]*\([^)`[:space:]]*[[:space:]]' || true)
     [ -z "$calls" ] || reject_with_reason "$calls" \
-        "$staged_path marks a call with arguments, but the command binds one token; write \`insert(first, last)\`:"
-}
-
-# Rejects a bullet list whose items lead some with @c or @p and others with a backtick span, because
-# parallel entries read as one table; when a sibling needs a span, as `NAME=value` does, all take one.
-check_list_leads_consistent() {
-    local mixed
-    mixed=$(scan_staged_file_marking_added_lines '
-        function report() {
-            if (marked && spanned && touched) printf "line %d: items lead with both @c and backticks\n", list_start
-            list_start = 0; marked = 0; spanned = 0; touched = 0
-        }
-        /^[[:space:]]*\*[[:space:]]+- / {
-            if (!list_start) list_start = FNR
-            item = $0; sub(/^[[:space:]]*\*[[:space:]]+- /, "", item)
-            if (item ~ /^@[cp][[:space:]]/) marked = 1
-            else if (item ~ /^`/) spanned = 1
-            if (FNR in added) touched = 1
-            next
-        }
-        list_start && /^[[:space:]]*\*[[:space:]][[:space:]][[:space:]]+[^[:space:]]/ { if (FNR in added) touched = 1; next }
-        list_start { report() }
-        END { if (list_start) report() }')
-    [ -z "$mixed" ] || reject_with_reason "$mixed" \
-        "$staged_path leads a list's items with both @c and backtick spans; give every item the same markup:"
+        "$staged_path marks a call with arguments, but the command binds one token; write <tt>insert(first, last)</tt>:"
 }
 
 # Rejects a math operator glued to an operand, as in Δ×weight(right) or P×V, because prose spaces every
@@ -352,7 +321,7 @@ check_math_operators_spaced() {
             if (gsub(/"/, "\"", before) % 2 == 0) { prose = trailing; gsub(/`[^`]*`/, "C", prose); check_glued(prose, $0) }
         }
         (inside && !in_code || /^[[:space:]]*\/\//) && (FNR in added) {
-            prose = $0; gsub(/`[^`]*`/, "C", prose); gsub(/@b[[:space:]]+[^[:space:]]+/, "B", prose)
+            prose = without_code_spans($0); gsub(/@b[[:space:]]+[^[:space:]]+/, "B", prose)
             check_glued(prose, $0)
         }
         inside && /@end(code|verbatim)/ { in_code = 0 }
@@ -361,13 +330,15 @@ check_math_operators_spaced() {
         "$staged_path glues a math operator to its operands; space it, as in P × V or Δ × weight(right):"
 }
 
-# Rejects @par, because the sibling projects never title a paragraph: a precondition is @pre, and a
-# complexity bound, an algorithm, or an example is a body paragraph whose first sentence names it.
+# Rejects @par other than `@par Statuses:`, because the sibling projects never title a paragraph: a
+# precondition is @pre, and a complexity bound, an algorithm, or an example is a body paragraph whose
+# first sentence names it. The one titled paragraph is the list of statuses a fallible function produces.
 check_par_absent() {
     local titled
-    titled=$(printf '%s\n' "$staged_added_text" | grep -E "$added_documentation_line_pattern" | grep -E '@par([[:space:]]|$)' || true)
+    titled=$(printf '%s\n' "$staged_added_text" | grep -E "$added_documentation_line_pattern" | grep -E '@par([[:space:]]|$)' | grep -vE '@par Statuses:[[:space:]]*$' || true)
     [ -z "$titled" ] || reject_with_reason "$titled" \
-        "$staged_path titles a paragraph with @par; write @pre for a precondition, prose for the rest:"
+        "$staged_path titles a paragraph with @par; write @pre for a precondition, prose for the rest," \
+        "            and keep @par for a \`@par Statuses:\` list:"
 }
 
 # Rejects a run of trailing // comments inside a @code sample that start at different columns, because
@@ -393,7 +364,7 @@ check_code_sample_comments_aligned() {
 check_formula_not_in_backticks() {
     local formulas
     formulas=$(printf '%s\n' "$staged_added_text" | grep -E "$added_documentation_line_pattern" |
-        grep -E '`[^`]*(√|Σ|·|×|²|⟨|‖|ᵢ|ⱼ|ₖ|ᵀ|[^[:space:]^]\^([0-9(]|T[^A-Za-z0-9_])|sqrt\(|\|\|[^|`]+\|\|)[^`]*`|`\[[^]`]*\*[^]`]*\]`|[@\\]f[$[]|\$[A-Za-z(][^$`]*\$' || true)
+        grep -E '`[^`]*(√|Σ|·|×|²|⟨|‖|ᵢ|ⱼ|ₖ|ᵀ|[^[:space:]^]\^([0-9(]|T[^A-Za-z0-9_])|sqrt\(|\|\|[^|`]+\|\|)[^`]*`|`\[[^]`]*\*[^]`]*\]`|[@\\]f[$[]|\$[A-Za-z(][^$`<]*\$' || true)
     [ -z "$formulas" ] || reject_with_reason "$formulas" \
         "$staged_path puts a formula in backticks or MathJax; write it as plain Unicode prose, as in aᵀ × M × b," \
         "            or as a @verbatim block when it needs more than one line:"
@@ -499,7 +470,7 @@ check_brief_absent_on_lone_paragraph() {
                 for (closing = line; closing <= last; ++closing) {
                     if (closing in added) touched = 1
                     if (lines[closing] ~ /@brief/) brief = 1
-                    if (lines[closing] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|returns|retval|sa|see|note|warning|throws|pre|post|file|author|date|section|code)([^a-z]|$)/) section = 1
+                    if (lines[closing] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|returns|retval|par|sa|see|note|warning|throws|pre|post|file|author|date|section|code)([^a-z]|$)/) section = 1
                     if (is_empty_comment_line(lines[closing])) blank = 1
                     if (lines[closing] ~ /\*\//) break
                 }
@@ -527,7 +498,7 @@ check_brief_required_before_section() {
                     text = lines[closing]
                     if (text ~ /@brief/) brief = 1
                     if (text ~ /@file/) header = 1
-                    if (text ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|returns|retval|sa|see|note|warning|throws|pre|post)([^a-z]|$)/) section = 1
+                    if (text ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|returns|retval|par|sa|see|note|warning|throws|pre|post)([^a-z]|$)/) section = 1
                     if (closing > line && is_empty_comment_line(text) && first != "") blank = 1
                     if (first == "") {
                         sub(/^[[:space:]]*(\/\*\*|\*)[[:space:]]*/, "", text); sub(/[[:space:]]*\*\/.*$/, "", text)
@@ -674,6 +645,26 @@ check_section_surrounded_by_blank_comment_lines() {
     [ -z "$cramped" ] || reject_with_reason "$cramped" \
         "$staged_path crams an @section against its neighbors; keep one empty comment line" \
         "            above and below every @section heading:"
+}
+
+# Rejects a `@par` without an empty comment line directly above (a bare `/**` opener counts), and without one
+# below its list unless the docblock ends there, because a titled list reads as one only with air around it.
+check_par_surrounded_by_blank_comment_lines() {
+    local cramped
+    cramped=$(scan_staged_file_marking_added_lines '
+        { lines[FNR] = $0; last = FNR }
+        END {
+            for (line = 1; line <= last; ++line)
+                if (lines[line] ~ /^[[:space:]]*\*[[:space:]]*@par([[:space:]]|$)/ && (line in added)) {
+                    if (!is_empty_comment_line(lines[line - 1]) && lines[line - 1] !~ /^[[:space:]]*\/\*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @par\n", line
+                    below = line + 1
+                    while (lines[below] ~ /^[[:space:]]*\*[[:space:]]+-[[:space:]]/ || lines[below] ~ /^[[:space:]]*\*[[:space:]][[:space:]][[:space:]]+[^[:space:]]/) ++below
+                    if (!is_empty_comment_line(lines[below]) && lines[below] !~ /^[[:space:]]*\*\/[[:space:]]*$/) printf "line %d: no empty comment line below the @par\n", line
+                }
+        }')
+    [ -z "$cramped" ] || reject_with_reason "$cramped" \
+        "$staged_path crams a @par against its neighbors; keep one empty comment line" \
+        "            above it, and below its list unless the docblock ends there:"
 }
 
 # Rejects an `@verbatim` or `@code` block without an empty comment line above its opener or below its closer,
@@ -835,7 +826,7 @@ check_prose_comment_width() {
             if (!prose || in_code || !(FNR in added) || text ~ /https?:\/\//) next
             characters = text
             sub(/[[:space:]]*\\$/, "", characters)
-            gsub(/[\200-\277]/, "", characters)
+            gsub(/[\200-\277]/, "", characters); gsub(/<\/?tt>/, "`", characters); gsub(/\\[\\<>#@%]|&(lt|gt|amp|quot);/, "x", characters)
             if (length(characters) > 100) printf "line %d: %d columns\n", FNR, length(characters)
         }')
     [ -z "$wide" ] || reject_with_reason "$wide" \
@@ -848,11 +839,11 @@ check_prose_comment_width() {
 check_prose_paragraph_filled() {
     local underfilled
     underfilled=$(scan_staged_file_marking_added_lines '
-        function characters(text) { gsub(/[\200-\277]/, "", text); return length(text) }
+        function characters(text) { gsub(/[\200-\277]/, "", text); gsub(/<\/?tt>/, "`", text); gsub(/\\[\\<>#@%]|&(lt|gt|amp|quot);/, "x", text); return length(text) }
         '"$paragraph_room_awk"'
         {
             text = $0
-            opens = (text ~ /^[[:space:]]*\/\*/)
+            opens =(text ~ /^[[:space:]]*\/\*/)
             if (opens) { inside = 1; in_code = 0 }
             slashed = !inside && text ~ /^[[:space:]]*\/\//
             if (inside && text ~ /@(code|verbatim)/) in_code = 1
@@ -1158,8 +1149,9 @@ function report_block(    i, text, name, declaration, count, parts, k, candidate
         if (text ~ /@(code|verbatim)/) in_code = 1
         if (text ~ /@end(code|verbatim)/) { in_code = 0; continue }
         if (in_code) continue
-        sub(/@(param|tparam)(\[[a-z]+\])?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/, "", text)
+        sub(/@(param|tparam)(\[[a-z,]+\])?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/, "", text)
         gsub(/@b[[:space:]]+\[[^]]*\]/, "", text)
+        gsub(/<\/tt>/, "\001", text); gsub(/<tt>[^\001]*\001/, "", text); gsub(/@c[[:space:]]+[^[:space:]]+/, "", text)
         for (name in params) {
             if (index(text, "`" name "`") && !index(text, "@p `" name "`")) { hits++; if (!(line_numbers[i] in added)) continue; printf "line %d: `%s` should read @p %s\n", line_numbers[i], name, name }
             else if (name ~ /[_0-9]/ && text ~ ("(^|[^@A-Za-z0-9_`p ]|[^@] |^ )" name "([^A-Za-z0-9_`]|$)") && text !~ ("@p " name "([^A-Za-z0-9_]|$)")) { hits++; if (!(line_numbers[i] in added)) continue; printf "line %d: bare %s should read @p %s\n", line_numbers[i], name, name }
@@ -1213,7 +1205,7 @@ check_comment_emphasis_lowercase() {
 }
 
 # Rejects a qualified name like `std::map` bare in docblock prose, because code tokens are marked, with `@c`
-# or backticks as the file already does.
+# or <tt> as the file already does.
 check_qualified_names_marked() {
     local bare
     bare=$(scan_staged_file_marking_added_lines '
@@ -1221,13 +1213,13 @@ check_qualified_names_marked() {
         inside && /@(code|verbatim)/ { in_code = 1 }
         inside && !in_code && (FNR in added) {
             prose = $0
-            gsub(/`[^`]*`/, "", prose); gsub(/@(c|p|ref|sa|see|copydoc|link)[[:space:]]+[^[:space:]]+/, "", prose); gsub(/https?:[^[:space:]]+/, "", prose)
+            gsub(/<\/tt>/, "\001", prose); gsub(/<tt>[^\001]*\001/, "", prose); gsub(/@(c|p|ref|sa|see|copydoc|link)[[:space:]]+[^[:space:]]+/, "", prose); gsub(/https?:[^[:space:]]+/, "", prose)
             if (prose ~ /(^|[^A-Za-z0-9_:@])[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_~][A-Za-z0-9_:]*/) printf "line %d: %s\n", FNR, $0
         }
         inside && /@end(code|verbatim)/ { in_code = 0 }
         inside && /\*\// { inside = 0 }')
     [ -z "$bare" ] || reject_with_reason "$bare" \
-        "$staged_path writes a qualified name bare in doc prose; mark it with @c or backticks:"
+        "$staged_path writes a qualified name bare in doc prose; mark it with @c or <tt>:"
 }
 
 # Rejects a bare `//` line directly above a member or type declaration, because declarations take
@@ -1470,19 +1462,20 @@ check_binding_emphasis_lowercase() {
         "$staged_path uses ALL-CAPS emphasis in a doc; lowercase it and let the wording carry the weight:"
 }
 
-# Rejects a Rust file whose leading `//!` module doc does not end with `File: <path>` and `Author:` lines.
+# Rejects a Rust file whose leading `//!` module doc does not end with `File: <path>`, `Author:` and `Date:` lines.
 check_rust_module_fields() {
     local fields
     fields=$(printf '%s\n' "$staged_file_text" | awk -v path="$staged_path" '
         NR == 1 && !/^\/\/!/ { print "line 1: no //! module doc"; exit }
-        /^\/\/!/ { before_last = last; last = $0; next }
+        /^\/\/!/ { third_last = before_last; before_last = last; last = $0; next }
         {
-            if (before_last != "//! File: " path) print "module doc must end with //! File: " path
-            else if (last !~ /^\/\/! Author: [A-Z]/) print "module doc must end with //! Author: <author>"
+            if (third_last != "//! File: " path) print "module doc must end with //! File: " path
+            else if (before_last !~ /^\/\/! Author: [A-Z]/) print "module doc must follow //! File: with //! Author: <author>"
+            else if (last !~ /^\/\/! Date: [A-Z][a-z]+ [0-9]+, [0-9][0-9][0-9][0-9]$/) print "module doc must end with //! Date: <Month D, YYYY>"
             exit
         }')
     [ -z "$fields" ] || reject_with_reason "$fields" \
-        "$staged_path opens without the module fields; end its //! doc with File: and Author: lines:"
+        "$staged_path opens without the module fields; end its //! doc with File:, Author: and Date: lines:"
 }
 
 # endregion Binding Docs
@@ -1510,7 +1503,7 @@ check_ascii_arrows() {
         /@(code|verbatim)/ { inside_code = 1 }
         /@end(code|verbatim)/ { inside_code = 0; next }
         !inside_fence && !inside_code && (FNR in added) {
-            prose = without_code_spans($0); gsub(/"(\\.|[^"\\])*"/, "\"\"", prose)
+            prose = without_code_spans($0); gsub(/"(\\.|[^"\\])*"/, "\"\"", prose); gsub(/@c[[:space:]]+[^[:space:]]+/, "C", prose)
             if (prose ~ /(('"$comment_opener"').*(<->|->|<-([^-]|$)))/) printf "line %d: %s\n", FNR, $0
         }')
     [ -z "$arrows" ] || reject_with_reason "$arrows" \
@@ -1534,21 +1527,17 @@ check_unicode_arrows_spaced() {
         "$staged_path glues a Unicode arrow to its neighbours; write a space on each side, as in FP8 → FP16:"
 }
 
-# Rejects a backtick span holding one identifier inside a C-family comment block, because Doxygen marks a
-# single name with `@c name`; backticks stay for spans of several tokens.
-check_single_token_spans_use_c() {
+# Rejects a backtick in a docblock, because Doxygen renders it literally; `//` comments keep backticks.
+check_docblock_without_backticks() {
     local spans
     spans=$(scan_staged_file_marking_added_lines '
-        /^[[:space:]]*\/\*/ { inside = 1 }
+        /^[[:space:]]*\/\*[*!]/ { inside = 1 }
         inside && /@(code|verbatim)/ { inside_code = 1 }
-        inside && !inside_code && (FNR in added) {
-            prose = $0; gsub(/@[a-z]+[[:space:]]+`[^`]*`/, "", prose)
-            if (prose ~ /`[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*`/) printf "line %d: %s\n", FNR, $0
-        }
+        (FNR in added) && /`/ && ((inside && !inside_code) || /^[[:space:]]*\/\/[\/!]/) { printf "line %d: %s\n", FNR, $0 }
         inside && /@end(code|verbatim)/ { inside_code = 0 }
         /\*\// { inside = 0; inside_code = 0 }')
     [ -z "$spans" ] || reject_with_reason "$spans" \
-        "$staged_path puts a single name in backticks inside a comment block; write @c name instead:"
+        "$staged_path puts a backtick span in a docblock; write @c name, @p parameter, <tt>span</tt> or @code{.language}:"
 }
 
 # Rejects a comment line that is only a `Usage:`, `Commands:` or `Example usage:` label, because a sentence
@@ -1644,7 +1633,7 @@ check_abbreviations_spelled_out() {
         {
             prose = ($0 ~ /^\+[[:space:]]*(\*([[:space:]]|$)|\/\*|\/\/)/)
             line = substr($0, 2)
-            if (prose) { gsub(/"[^"]*"/, "", line); gsub(/`[^`]*`/, "", line); gsub(/@[pc][[:space:]]+[^[:space:]]+/, "", line) }
+            if (prose) { gsub(/"[^"]*"/, "", line); gsub(/`[^`]*`/, "", line); gsub(/<\/tt>/, "\001", line); gsub(/<tt>[^\001]*\001/, "", line); gsub(/@[pc][[:space:]]+[^[:space:]]+/, "", line) }
             while (match(line, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(line, RSTART, RLENGTH); accessor = substr(line, 1, RSTART - 1); line = substr(line, RSTART + RLENGTH)
                 if (!has_banned_segment(token) || accessor ~ /(\.|->)$/) continue
@@ -1754,12 +1743,12 @@ check_header_date() {
 
 # `@retval` names one return value per line and binds the FIRST token as that value, so a line opening
 # with prose renders a nonsense value column - the same trap `check_section_ids` guards below. This
-# codebase says the same thing in one `@return` sentence listing the outcomes, so the tag is unused.
+# codebase lists the outcomes in a `@par Statuses:` list, so the tag is unused.
 check_retval() {
     local retval
     retval=$(printf '%s\n' "$staged_added_text" | grep -E '@retval\b' || true)
     [ -z "$retval" ] || reject_with_reason "$retval" \
-        "$staged_path uses @retval - name the outcomes in a single @return sentence instead:"
+        "$staged_path uses @retval - list the outcomes under @par Statuses: instead:"
 }
 
 # Nothing is deprecated: a symbol either exists or it was removed. Carrying a shim past a breaking
@@ -2301,7 +2290,6 @@ run_shared_checks() {
         if [[ $staged_added_text =~ $added_comment_marker_regex ]]; then
             check_param_has_direction
             check_markdown_emphasis_absent_in_comments
-            check_markup_command_without_backticks
             check_doxygen_command_not_glued
             check_sa_names_identifiers_see_names_urls
             check_cross_references_start_their_line
@@ -2311,7 +2299,6 @@ run_shared_checks() {
             check_shape_spelled_bold_bracketed
             check_tuple_spelled_bold_parenthesized
             check_call_not_marked
-            check_list_leads_consistent
             check_math_operators_spaced
             check_par_absent
             check_code_sample_comments_aligned
@@ -2325,6 +2312,7 @@ run_shared_checks() {
             check_bullet_spans_at_most_three_lines
             check_docblock_brackets_match_content
             check_section_surrounded_by_blank_comment_lines
+            check_par_surrounded_by_blank_comment_lines
             check_blocks_set_apart
             check_urls_behind_see
             check_code_block_names_language_and_closes
@@ -2343,7 +2331,7 @@ run_shared_checks() {
             check_tparams_separated_from_params
             check_tags_separated_from_body
             check_parameter_references_use_p
-            check_single_token_spans_use_c
+            check_docblock_without_backticks
         fi
         ;;
     esac

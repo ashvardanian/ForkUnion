@@ -8,13 +8,56 @@ set -u
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT
 harness=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) # `genmc.hpp` lives beside this file, wherever it is run from
-# Every verdict runs in its own directory in the background, `VERIFY_JOBS` at a time - four by
-# default, since each pan holds a hash table of its own; `finish` prints them in the order they
-# were queued, so the output reads like a serial run.
-jobs_limit=${VERIFY_JOBS:-4}
+# Every verdict runs in its own directory in the background. A model's `@budget` line names the
+# megabytes its search may take, `default_budget_megabytes` without one: pan stops itself there, so
+# a model grown too large reads as broken, and its hash table takes half of it. Verdicts start while
+# their budgets fit in `VERIFY_MEMORY_MEGABYTES` together, three quarters of the available memory
+# by default, and at most `VERIFY_JOBS` at once; a model over `background_budget_megabytes` runs
+# only when `VERIFY_BACKGROUND` is set. `finish` prints verdicts in the order they were queued.
+default_budget_megabytes=1024
+background_budget_megabytes=8192
+if [ -r /proc/meminfo ]; then available_megabytes=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)
+else available_megabytes=$(($(sysctl -n hw.memsize) / 1048576)); fi
+pool_megabytes=${VERIFY_MEMORY_MEGABYTES:-$((available_megabytes * 3 / 4))}
+jobs_limit=${VERIFY_JOBS:-$(getconf _NPROCESSORS_ONLN)}
 queued=0
+running_pids=()
+running_budgets=()
 
-throttle() { while [ "$(jobs -rp | wc -l)" -ge "$jobs_limit" ]; do sleep 0.1; done; }
+# model_budget <file>: the megabytes its `@budget` line grants, or the default
+model_budget() {
+    local budget
+    budget=$(sed -n 's/^ \*  @budget \([0-9]*\).*/\1/p' "$1" | head -1)
+    echo "${budget:-$default_budget_megabytes}"
+}
+
+# hash_bits <megabytes>: the `-w` that gives pan's hash table half the budget at eight bytes a slot,
+# but never past a gigabyte, so a large budget pays only for the states it stores
+hash_bits() {
+    local megabytes=$1 bits=16
+    while [ "$megabytes" -gt 1 ] && [ "$bits" -lt 27 ]; do megabytes=$((megabytes / 2)) bits=$((bits + 1)); done
+    echo "$bits"
+}
+
+# throttle <megabytes>: waits until a verdict of that budget fits beside the running ones; one
+# verdict alone always starts, even when its budget exceeds the pool
+throttle() {
+    local index used count
+    while :; do
+        used=0 count=0
+        for index in "${!running_pids[@]}"; do
+            if kill -0 "${running_pids[$index]}" 2>/dev/null; then
+                used=$((used + running_budgets[index])) count=$((count + 1))
+            else unset "running_pids[$index]" "running_budgets[$index]"; fi
+        done
+        [ "$count" -eq 0 ] && return
+        [ "$count" -lt "$jobs_limit" ] && [ $((used + $1)) -le "$pool_megabytes" ] && return
+        sleep 0.1
+    done
+}
+
+# admit <megabytes>: records the verdict just started in the background against the pool
+admit() { running_pids+=("$!") running_budgets+=("$1"); }
 
 # section <title>: a heading, printed in its turn
 section() {
@@ -25,20 +68,28 @@ section() {
 
 # verify <model.pml> <expected> <spin defines...>
 verify() {
-    local model=$1 expected=$2 dir=$build/$queued
+    local model=$1 expected=$2 dir=$build/$queued budget
     shift 2
     mkdir -p "$dir"
     queued=$((queued + 1))
-    throttle
+    budget=$(model_budget "$model")
+    if [ "$budget" -gt "$background_budget_megabytes" ] && [ -z "${VERIFY_BACKGROUND:-}" ]; then
+        echo "  skip  $model $* : a $budget MB background model, run with VERIFY_BACKGROUND=1" >"$dir/result"
+        return
+    fi
+    throttle "$budget"
     (
         local verdict
         # The harness's directory on the include path lets a repo sourcing this runner keep only its models.
-        if ! (cd "$dir" && spin -a -E-I"$harness" "$@" "$OLDPWD/$model" >pan.out 2>&1 &&
-            cc -O2 -DSAFETY -DCOLLAPSE -DVECTORSZ=4096 -w -o pan pan.c >>pan.out 2>&1); then verdict=broken
+        # Every include is an angle-bracket path from the harness or from this repo's verification root.
+        if ! (cd "$dir" && spin -a -E-I"$harness" -E-I"$OLDPWD" "$@" "$OLDPWD/$model" >pan.out 2>&1 &&
+            cc -O2 -DSAFETY -DCOLLAPSE -DVECTORSZ=4096 -DMEMLIM="$budget" -w -o pan pan.c >>pan.out 2>&1); then
+            verdict=broken
         else
-            (cd "$dir" && ./pan -m1000000 -w26 >>pan.out 2>&1)
-            # A cut-short search, a knob defined twice, or a write or index past a scenario's shape proves nothing
-            if grep -qE "macro redefined|max search depth too small|invalid array index|violated.*history_full" "$dir/pan.out"; then verdict=broken
+            (cd "$dir" && ./pan -m1000000 -w"$(hash_bits "$budget")" >>pan.out 2>&1)
+            # A cut-short search, a knob defined twice, a write or index past a scenario's shape, or a
+            # search out of memory proves nothing
+            if grep -qE "macro redefined|max search depth too small|invalid array index|violated.*history_full|MEMLIM|out of memory" "$dir/pan.out"; then verdict=broken
             elif grep -q "errors: 0" "$dir/pan.out"; then verdict=pass
             elif grep -q "pan:1: assertion violated" "$dir/pan.out"; then verdict=fail
             elif grep -q "pan:1: invalid end state" "$dir/pan.out"; then verdict=stuck
@@ -46,10 +97,14 @@ verify() {
         fi
         report "$verdict" "$expected" "$model $*" "$dir/pan.out" >"$dir/result"
     ) &
+    admit "$budget"
 }
 
 report() { # report <verdict> <expected> <label> <log>
-    if [ "$1" = "$2" ]; then echo "  ok    $3"
+    # Spin's own tally of the memory a search took, so a model growing toward the budget shows early
+    local megabytes
+    megabytes=$(grep -oE '^[[:space:]]*[0-9.]+[[:space:]]+total actual memory usage' "$4" | awk '{print $1}')
+    if [ "$1" = "$2" ]; then echo "  ok    $3${megabytes:+ (${megabytes} MB)}"
     else echo "  WRONG $3 : expected $2, got $1"; sed -n 1,12p "$4"; touch "$(dirname "$4")/wrong"; fi
 }
 
@@ -111,14 +166,15 @@ limited() { # limited <seconds> <command...>
 # verify_client <client.cpp> <expected> <memory model> <entry>: GenMC exits 0 when it found no
 # error and 42 when it found one; `--check-liveness` makes a wait that never ends one of them.
 verify_client() {
-    local client=$1 expected=$2 memory=$3 entry=$4 dir=$build/$queued unroll=$genmc_unroll
+    local client=$1 expected=$2 memory=$3 entry=$4 dir=$build/$queued unroll=$genmc_unroll budget
     mkdir -p "$dir"
     queued=$((queued + 1))
-    throttle
+    budget=$(model_budget "$client")
+    throttle "$budget"
     (
         local verdict
         limited "${GENMC_SECONDS:-300}" "$genmc" --"$memory" --check-liveness --disable-estimation --unroll="$unroll" \
-            --program-entry-function="$entry" -- -std=c++23 -I"$shadow" -I"$harness" -I../include -I"$harness/../include" \
+            --program-entry-function="$entry" -- -std=c++23 -I"$shadow" -I"$harness" -I"$PWD" -I"$PWD/../include" -I"$PWD/../c" -I"$harness/../include" \
             "$client" >"$dir/genmc.out" 2>&1
         case $? in
         0) if grep -q "complete executions explored: 0" "$dir/genmc.out"; then verdict=broken; else verdict=pass; fi ;;
@@ -127,6 +183,7 @@ verify_client() {
         esac
         report "$verdict" "$expected" "$client $memory $entry" "$dir/genmc.out" >"$dir/result"
     ) &
+    admit "$budget"
 }
 
 # verify_all [file...]: every `@verify` line of the given scenarios and clients, or of every one
@@ -135,12 +192,20 @@ verify_client() {
 # files declare must be set on some line, and every knob a line sets must be declared.
 verify_all() {
     local files=("$@") file expected memories rest memory declared used unmatched entries field entry
+    # Both roots share one include path, so a repo file named like a harness file would shadow it
+    if [ "$PWD" != "$harness" ]; then
+        for file in weak_memory.pml monitor_wait.pml genmc.hpp; do
+            [ ! -e "$file" ] || { echo "verification/$file shadows ForkUnion's harness file of that name; rename it" >&2; exit 1; }
+        done
+    fi
     genmc_ready
     [ ${#files[@]} -gt 0 ] || files=(*.pml */*.pml *.cpp */*.cpp)
     declared=$(sed -n 's/^#ifndef \([a-z0-9_]*\)$/\1/p' "${files[@]}" */protocol.pml *.pml 2>/dev/null | grep -vx memory | sort -u)
+    # Knobs of the harness itself, which a sourcing repo may set without declaring and need not set
+    offered=$(sed -n 's/^#ifndef \([a-z0-9_]*\)$/\1/p' "$harness/monitor_wait.pml" "$harness/weak_memory.pml" | grep -vx memory | sort -u)
     used=$(sed -n 's/^ \*  @verify [a-z]* [a-z0-9,]* \([^:]*\).*/\1/p' "${files[@]}" 2>/dev/null | tr ' ' '\n' | sed -n 's/=.*//p' | sort -u)
     [ $# -gt 0 ] && declared=$(comm -12 <(echo "$declared") <(echo "$used"))
-    unmatched=$(comm -3 <(echo "$declared") <(echo "$used") | xargs)
+    unmatched=$( (comm -23 <(echo "$declared") <(echo "$used"); comm -13 <(sort -u <(echo "$declared"; echo "$offered")) <(echo "$used")) | xargs)
     # A client's knobs are its `knobs_t` fields, each named by some entry, and every entry exists
     for file in "${files[@]}"; do
         [[ $file == *.cpp ]] && grep -qs '^ \*  @verify' "$file" || continue

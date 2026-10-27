@@ -35,7 +35,7 @@ function (forkunion_add_benchmark target_ source_)
                    CXX_EXTENSIONS OFF
                    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
-    target_link_libraries(${target_} PRIVATE forkunion_static)
+    target_link_libraries(${target_} PRIVATE forkunion_static forkunion_warnings)
 
     # `harness.hpp` reads the environment through `std::getenv`, which MSVC flags in favour of `_dupenv_s`.
     target_compile_definitions(${target_} PRIVATE $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)

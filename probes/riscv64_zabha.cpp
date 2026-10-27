@@ -1,5 +1,5 @@
 /**
- *  @file probes/risc5_zabha.cpp
+ *  @file probes/riscv64_zabha.cpp
  *  @author Ash Vardanian
  *  @date October 26, 2026
  *  @brief ForkUnion probe: an `amoadd.b` word with its registers pinned, its instruction a template

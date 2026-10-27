@@ -1,3 +1,9 @@
+//! Build script that compiles the C++ core and exposes the Zig module with its tests.
+//!
+//! File: build.zig
+//! Author: Ash Vardanian
+//! Date: October 10, 2025
+
 const std = @import("std");
 const builtin = @import("builtin");
 

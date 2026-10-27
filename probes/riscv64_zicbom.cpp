@@ -1,5 +1,5 @@
 /**
- *  @file probes/risc5_zicbom.cpp
+ *  @file probes/riscv64_zicbom.cpp
  *  @author Ash Vardanian
  *  @date September 7, 2026
  *  @brief ForkUnion probe: the raw `cbo.clean` word.

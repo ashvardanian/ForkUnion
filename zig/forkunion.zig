@@ -37,6 +37,10 @@
 //! `types`, `allocators`, `scheduling` - so `@import("forkunion").X` resolves exactly as when the
 //! binding lived in one file. Each module carries its own FFI declarations at the top and its tests
 //! at the bottom.
+//!
+//! File: zig/forkunion.zig
+//! Author: Ash Vardanian
+//! Date: October 10, 2025
 
 const topology = @import("forkunion/topology.zig");
 const types = @import("forkunion/types.zig");
