@@ -423,10 +423,17 @@ typedef enum fu_capabilities_t {
      *  hart accepts, so they are reported on every RISC-V core. */
     fu_capability_risc5_zicbop_k = 1 << 25,
 
+    /**
+     *  @brief @c Zabha: the byte and halfword @c amo forms, and with @c Zacas the byte and halfword
+     *      @c amocas, attested by the kernel's @c hwprobe. Admits @c risc5_zabha_atomic_ref.
+     *  @sa fu_capability_risc5_zacas_k - which it extends.
+     */
+    fu_capability_risc5_zabha_k = 1 << 26,
+
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers
      *  in one intersection with @c fu_runtime_capabilities. */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
-        fu_capability_arm64_wfet_k | fu_capability_risc5_pause_k | fu_capability_risc5_wrs_k,
+                                fu_capability_arm64_wfet_k | fu_capability_risc5_pause_k | fu_capability_risc5_wrs_k,
 
     /**
      *  @brief All-ones allow-mask: pass to @c fu_pool_new to disable capability filtering.

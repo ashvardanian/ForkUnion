@@ -32,7 +32,8 @@ verify() {
     throttle
     (
         local verdict
-        if ! (cd "$dir" && spin -a "$@" "$OLDPWD/$model" >pan.out 2>&1 &&
+        # The harness's directory on the include path lets a repo sourcing this runner keep only its models.
+        if ! (cd "$dir" && spin -a -E-I"$harness" "$@" "$OLDPWD/$model" >pan.out 2>&1 &&
             cc -O2 -DSAFETY -DCOLLAPSE -DVECTORSZ=4096 -w -o pan pan.c >>pan.out 2>&1); then verdict=broken
         else
             (cd "$dir" && ./pan -m1000000 -w26 >>pan.out 2>&1)

@@ -1088,6 +1088,15 @@ assert_accepts "register roles spelled out" include/numkong/probe.h <<'FIXTURE'
 static inline int probe(int sum_high) { return sum_high; }
 FIXTURE
 
+assert_accepts "a foreign macro keeps its abbreviation" include/forkunion/probe.hpp <<'FIXTURE'
+#include <asm/hwprobe.h>
+inline bool zabha(unsigned long extensions) { return extensions & RISCV_HWPROBE_EXT_ZABHA; }
+FIXTURE
+
+assert_rejects "a macro the file defines spells words out" "abbreviates a word this project spells out" include/forkunion/probe.hpp <<'FIXTURE'
+#define FORKUNION_TMP_WORDS 4
+FIXTURE
+
 assert_rejects "abbreviation in prose" "abbreviates a word this project spells out" include/numkong/probe.h <<'FIXTURE'
 /** Copies the tmp value into place. */
 static inline int probe(int value) { return value; }
@@ -1887,6 +1896,14 @@ FIXTURE
 
 assert_rejects "thread_local state" "declares a thread_local" include/numkong/probe.hpp <<'FIXTURE'
 static thread_local int probe_counter = 0;
+FIXTURE
+
+assert_rejects "filesystem include in the library" "uses std::filesystem in library code" include/forkunion/probe.hpp <<'FIXTURE'
+#include <filesystem>
+FIXTURE
+
+assert_accepts "filesystem include in a test harness" test/probe.cpp <<'FIXTURE'
+#include <filesystem>
 FIXTURE
 
 assert_rejects "retval tag" "uses @retval" include/numkong/probe.h <<'FIXTURE'

@@ -961,6 +961,9 @@ inline capabilities_t risc5_cpu_capabilities() noexcept {
 #if defined(RISCV_HWPROBE_EXT_ZACAS)
     if (extensions & RISCV_HWPROBE_EXT_ZACAS) caps |= capability_risc5_zacas_k;
 #endif
+#if defined(RISCV_HWPROBE_EXT_ZABHA)
+    if (extensions & RISCV_HWPROBE_EXT_ZABHA) caps |= capability_risc5_zabha_k;
+#endif
 #endif
     return caps;
 }

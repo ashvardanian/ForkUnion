@@ -12,7 +12,11 @@
  *  reads the payload of the raiser that set it. Two of each, since every read-first loop
  *  multiplies the executions GenMC explores.
  *
+ *  Two claimers race @c fetch_test_and_set_bit on the same clear bit beside a held one: exactly
+ *  one sees it clear, the loser reads the winner's payload, and one reset hands the bit back.
+ *
  *  @verify pass sc,rc11,imm standard_atomic_ref
+ *  @verify pass sc,rc11,imm standard_atomic_ref_bit_claim
  *  @verify fail rc11,imm standard_atomic_ref_bounded_refusal_order_relaxed: the loop of
  *      @c atomic_fetch_add_if_at_most reads the word, and re-reads it on a failed exchange, with an
  *      acquire; relaxed, the refused admitter learns the ceiling is reached without the admitted
@@ -91,6 +95,21 @@ void *raise(void *index) noexcept {
     return nullptr;
 }
 
+constexpr unsigned claimed_bit_k = 3;
+std::uint32_t claim_word = 1; // bit 0 held by someone else, the claimed bit free
+bool claimed[2] = {false, false};
+std::uint32_t claim_payloads[2] = {0, 0};
+
+/** Claims the bit after writing its payload; refused, it reads the winner's payload. */
+void *claim(void *index) noexcept {
+    std::uint32_t const self = *static_cast<std::uint32_t *>(index);
+    claim_payloads[self] = 1;
+    claimed[self] = !fu::standard_atomic_ref<std::uint32_t>(claim_word)
+                         .fetch_test_and_set_bit(claimed_bit_k, std::memory_order_acq_rel);
+    if (!claimed[self]) verify(claim_payloads[1 - self] == 1);
+    return nullptr;
+}
+
 template <knobs_t const &knobs_>
 int admit_and_raise() noexcept {
     std::uint32_t indices[2] = {0, 1};
@@ -108,6 +127,17 @@ int admit_and_raise() noexcept {
 }
 
 extern "C" int standard_atomic_ref() { return admit_and_raise<header_k>(); }
+extern "C" int standard_atomic_ref_bit_claim() {
+    std::uint32_t indices[2] = {0, 1};
+    thread_t claimers[2] = {spawn(claim, &indices[0]), spawn(claim, &indices[1])};
+    join(claimers[0]);
+    join(claimers[1]);
+    verify(claimed[0] != claimed[1]);
+    verify(fu::standard_atomic_ref<std::uint32_t>(claim_word)
+               .fetch_test_and_reset_bit(claimed_bit_k, std::memory_order_release));
+    verify(claim_word == 1);
+    return 0;
+}
 extern "C" int standard_atomic_ref_bounded_refusal_order_relaxed() {
     return admit_and_raise<bounded_refusal_order_relaxed_k>();
 }

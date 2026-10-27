@@ -1617,7 +1617,8 @@ check_proper_names_capitalized() {
 
 # Rejects an abbreviation from `abbreviations_refused`, such as `hi` or `lo` for register halves, because
 # names and prose spell words out. A bare one in a comment always fires; in code only a name new since HEAD
-# fires, so touching a line never forces a rename the commit is not about.
+# fires, so touching a line never forces a rename the commit is not about. A capitalized macro the file does
+# not define, like the kernel's `RISCV_HWPROBE_EXT_ZABHA`, belongs to another project and never fires.
 check_abbreviations_spelled_out() {
     local abbreviated
     abbreviated=$(awk -v abbreviations="$abbreviations_refused" '
@@ -1634,6 +1635,9 @@ check_abbreviations_spelled_out() {
         }
         FILENAME == ARGV[2] {
             line = $0
+            if (match(line, /^[[:space:]]*#[[:space:]]*define[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                macro = substr(line, RSTART, RLENGTH); sub(/.*define[[:space:]]+/, "", macro); defined[macro] = 1
+            }
             while (match(line, /[A-Za-z_][A-Za-z0-9_]*/)) { declared[substr(line, RSTART, RLENGTH)] = 1; line = substr(line, RSTART + RLENGTH) }
             next
         }
@@ -1644,6 +1648,7 @@ check_abbreviations_spelled_out() {
             while (match(line, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(line, RSTART, RLENGTH); accessor = substr(line, 1, RSTART - 1); line = substr(line, RSTART + RLENGTH)
                 if (!has_banned_segment(token) || accessor ~ /(\.|->)$/) continue
+                if (token == toupper(token) && !(token in defined)) continue
                 if (prose && (token in declared || token == toupper(token))) continue
                 if ((prose && token !~ /_/) || !(token in existing)) { print "    " token ": " substr($0, 2); break }
             }
@@ -1704,6 +1709,18 @@ check_thread_local() {
         grep -E '\bthread_local\b' || true)
     [ -z "$threaded" ] || reject_with_reason "$threaded" \
         "$staged_path declares a thread_local - hand the state to an object that owns it:"
+}
+
+# Rejects `std::filesystem` in the library and its bindings, because it throws, allocates paths behind the
+# caller's back, and is missing or partial on several targets the bindings ship to; only the test, benchmark
+# and tool harnesses may include `<filesystem>`.
+check_filesystem_in_harnesses_only() {
+    local reached
+    reached=$(printf '%s\n' "$staged_added_text" |
+        grep -vE "$added_comment_line_pattern" |
+        grep -E '\bstd::filesystem\b|#[[:space:]]*include[[:space:]]*<filesystem>' || true)
+    [ -z "$reached" ] || reject_with_reason "$reached" \
+        "$staged_path uses std::filesystem in library code - it is allowed only in test/, bench/ and tools/ harnesses:"
 }
 
 # `_t` marks a materialized type. A concept names a requirement rather than a type, and a class
@@ -2346,6 +2363,13 @@ run_shared_checks() {
     esac
     case "$staged_path" in
     *.hpp | *.cpp | *.cc) check_memcpy_qualified ;;
+    esac
+    case "$staged_path" in
+    include/* | c/*)
+        case "$staged_path" in
+        *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx | *.mm) check_filesystem_in_harnesses_only ;;
+        esac
+        ;;
     esac
     case "$staged_path" in
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h) check_harness_namespace_matches_directory ;;

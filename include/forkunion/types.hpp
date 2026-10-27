@@ -566,6 +566,13 @@
 #define FORKUNION_TARGET_RISC5_ZACAS 0
 #endif
 #endif
+#if !defined(FORKUNION_TARGET_RISC5_ZABHA)
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__riscv_zabha))
+#define FORKUNION_TARGET_RISC5_ZABHA 1
+#else
+#define FORKUNION_TARGET_RISC5_ZABHA 0
+#endif
+#endif
 #if !defined(FORKUNION_TARGET_WASM_WAIT)
 #if FORKUNION_ARCH_WASM_ && defined(__wasm_atomics__)
 #define FORKUNION_TARGET_WASM_WAIT 1
@@ -574,9 +581,10 @@
 #endif
 #endif
 
-/*  WFET extends WFE, RCpc extends LSE, RAO-INT extends CMPCCXADD and Zacas extends the A extension,
- *  so a rung without its parent is demoted: every `#if FORKUNION_TARGET_<CAPABILITY>` region is
- *  then complete on its own and never repeats the parent's bit. */
+/*  WFET extends WFE, RCpc extends LSE, RAO-INT extends CMPCCXADD, Zacas extends the A extension and
+ *  Zabha extends Zacas, so a rung without its parent is demoted: every
+ *  `#if FORKUNION_TARGET_<CAPABILITY>` region is then complete on its own and never repeats the bit
+ *  of its parent. */
 #if !FORKUNION_TARGET_ARM64_WFE
 #undef FORKUNION_TARGET_ARM64_WFET
 #define FORKUNION_TARGET_ARM64_WFET 0
@@ -592,6 +600,10 @@
 #if !FORKUNION_TARGET_RISC5_ATOMIC
 #undef FORKUNION_TARGET_RISC5_ZACAS
 #define FORKUNION_TARGET_RISC5_ZACAS 0
+#endif
+#if !FORKUNION_TARGET_RISC5_ZACAS
+#undef FORKUNION_TARGET_RISC5_ZABHA
+#define FORKUNION_TARGET_RISC5_ZABHA 0
 #endif
 
 /**
@@ -1045,6 +1057,13 @@ enum capabilities_t : unsigned int {
     capability_risc5_zicbop_k = 1 << 25,
 
     /**
+     *  @brief `Zabha`: the byte and halfword @c amo forms, and with @c Zacas the byte and halfword
+     *      @c amocas, attested by the kernel's @c hwprobe.
+     *  @sa risc5_zabha_atomic_ref, the admitted reference; extends @c capability_risc5_zacas_k.
+     */
+    capability_risc5_zabha_k = 1 << 26,
+
+    /**
      *  @brief Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
      *      offers in one intersection with `runtime_capabilities()`.
      *  @sa capability_name - which names single bits only, never this composite.
@@ -1106,6 +1125,7 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_risc5_atomic_k: return "risc5_atomic";
     case capability_arm64_prfm_k: return "arm64_prfm";
     case capability_risc5_zicbop_k: return "risc5_zicbop";
+    case capability_risc5_zabha_k: return "risc5_zabha";
     case capability_os_threads_k: return "os_threads";
     case capability_topology_k: return "topology";
     case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";

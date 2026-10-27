@@ -15,14 +15,25 @@ Whether the CPU has the instruction is the runtime's question, answered by `cpu_
 
 The OS-level bits - owned threads, topology, placements, transparent huge pages - have no probe: the `FORKUNION_WITH_*` tri-states and the runtime answer those.
 
-| bit                                                                                     | probe                                                                           | needs                                           |
-| :-------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------ | :---------------------------------------------- |
-| `x86_pause`, `x86_tpause`, `x86_cldemote`                                               | encodings, or `_mm_pause`, `_umonitor`/`_umwait`, `_mm_cldemote`/`_m_prefetchw` | nothing                                         |
-| `x86_cmpccxadd`, `x86_raoint`                                                           | raw bytes                                                                       | inline assembly                                 |
-| `arm64_yield`                                                                           | `yield`, or `__yield`                                                           | nothing                                         |
-| `arm64_prfm`                                                                            | `prfm pldl2keep`, or `__prefetch2`                                              | nothing                                         |
-| `arm64_wfet`, `risc5_pause`, `risc5_wrs`, `risc5_zicbom`, `risc5_zicbop`, `risc5_zacas` | raw words                                                                       | inline assembly                                 |
-| `arm64_dc_cvac`                                                                         | `dc cvac`                                                                       | inline assembly                                 |
-| `risc5_atomic`                                                                          | `amoswap`, `lr` and `sc`                                                        | inline assembly and the A extension in `-march` |
-| `arm64_rcpc`                                                                            | `.arch_extension` and a mnemonic, or `__ldapr32`                                | nothing                                         |
-| `arm64_lse`                                                                             | `.arch_extension` and a mnemonic, or `__swp32`                                  | `/arch:armv8.1` on MSVC, nothing elsewhere      |
+Where a probe cell offers a second spelling, it is the intrinsic MSVC reaches the bit through.
+
+| bit             | probe                                                  | needs                          |
+| :-------------- | :----------------------------------------------------- | :----------------------------- |
+| `x86_pause`     | `pause`, or `_mm_pause`                                | nothing                        |
+| `x86_tpause`    | `umonitor` and `umwait` bytes, or intrinsics           | nothing                        |
+| `x86_cldemote`  | `cldemote` bytes, or `_mm_cldemote` and `_m_prefetchw` | nothing                        |
+| `x86_cmpccxadd` | `cmpbexadd` bytes                                      | inline assembly                |
+| `x86_raoint`    | `aadd` bytes                                           | inline assembly                |
+| `arm64_yield`   | `yield`, or `__yield`                                  | nothing                        |
+| `arm64_prfm`    | `prfm pldl2keep`, or `__prefetch2`                     | nothing                        |
+| `arm64_rcpc`    | `.arch_extension rcpc` and `ldapr`, or `__ldapr32`     | nothing                        |
+| `arm64_lse`     | `.arch_extension lse` and `swp`, or `__swp32`          | `/arch:armv8.1` on MSVC        |
+| `arm64_wfet`    | `wfet` word                                            | inline assembly                |
+| `arm64_dc_cvac` | `dc cvac`                                              | inline assembly                |
+| `risc5_atomic`  | `amoswap`, `lr` and `sc`                               | inline assembly, A in `-march` |
+| `risc5_pause`   | `pause` word                                           | inline assembly                |
+| `risc5_wrs`     | `wrs.sto` word                                         | inline assembly                |
+| `risc5_zicbom`  | `cbo.clean` word                                       | inline assembly                |
+| `risc5_zicbop`  | `prefetch.r` word                                      | inline assembly                |
+| `risc5_zacas`   | `amocas.w` word                                        | inline assembly                |
+| `risc5_zabha`   | `amoadd.b` word                                        | inline assembly                |

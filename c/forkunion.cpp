@@ -480,6 +480,7 @@ fu_assert_same_bit_(fu_capability_risc5_zacas_k, capability_risc5_zacas_k);
 fu_assert_same_bit_(fu_capability_risc5_atomic_k, capability_risc5_atomic_k);
 fu_assert_same_bit_(fu_capability_arm64_prfm_k, capability_arm64_prfm_k);
 fu_assert_same_bit_(fu_capability_risc5_zicbop_k, capability_risc5_zicbop_k);
+fu_assert_same_bit_(fu_capability_risc5_zabha_k, capability_risc5_zabha_k);
 fu_assert_same_bit_(fu_capability_any_yield_k, capability_any_yield_k);
 fu_assert_same_bit_(fu_capability_os_threads_k, capability_os_threads_k);
 fu_assert_same_bit_(fu_capability_topology_k, capability_topology_k);
