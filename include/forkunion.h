@@ -298,14 +298,14 @@ typedef enum fu_capabilities_t {
 
     /** The @c PAUSE spin hint of the @c Zihintpause extension - encoded as a @c FENCE every hart
      *  accepts, so it is reported on every RISC-V. */
-    fu_capability_risc5_pause_k = 1 << 4,
+    fu_capability_riscv64_pause_k = 1 << 4,
 
     /**
      *  @brief <tt>WRS.STO</tt> sleeps the hart until a reservation breaks or a short timeout - the
      *      @c Zawrs extension, attested by the kernel's @c hwprobe.
-     *  @sa fu_capability_risc5_pause_k - the spin it replaces.
+     *  @sa fu_capability_riscv64_pause_k - the spin it replaces.
      */
-    fu_capability_risc5_wrs_k = 1 << 5,
+    fu_capability_riscv64_wrs_k = 1 << 5,
 
     /**
      *  @brief Own the raw OS thread handle instead of a @c std::thread - the substrate every thread
@@ -383,7 +383,7 @@ typedef enum fu_capabilities_t {
 
     /** The kernel enabled user-mode Zicbom cache-block management, attested through @c hwprobe -
      *  the hook for a future runtime-dispatched <tt>cbo.clean</tt>; nothing emits it yet. */
-    fu_capability_risc5_zicbom_k = 1 << 17,
+    fu_capability_riscv64_zicbom_k = 1 << 17,
 
     /** @c CMPCCXADD, the conditional atomic add - CPUID leaf 7, subleaf 1, EAX bit 7, on Sierra
      *  Forest, Diamond Rapids and their successors: a bounded claim as one instruction instead of a
@@ -418,13 +418,13 @@ typedef enum fu_capabilities_t {
     fu_capability_arm64_rcpc_k = 1 << 21,
 
     /** @c Zacas: @c amocas, compare-and-swap as one instruction instead of an @c lr and @c sc loop,
-     *  attested by the kernel's @c hwprobe. Admits @c risc5_zacas_atomic_ref. */
-    fu_capability_risc5_zacas_k = 1 << 22,
+     *  attested by the kernel's @c hwprobe. Admits @c riscv64_zacas_atomic_ref. */
+    fu_capability_riscv64_zacas_k = 1 << 22,
 
     /** The A extension: @c lr, @c sc and the @c amo* read-modify-writes, RISC-V's baseline every
-     *  Linux ABI guarantees. Admits @c risc5_atomic_ref, and @c fu_capability_risc5_zacas_k
+     *  Linux ABI guarantees. Admits @c riscv64_atomic_ref, and @c fu_capability_riscv64_zacas_k
      *  extends it with @c amocas. */
-    fu_capability_risc5_atomic_k = 1 << 23,
+    fu_capability_riscv64_atomic_k = 1 << 23,
 
     /** The AArch64 @c PRFM prefetch hints, base ISA that can never fault, so they are reported on
      *  every AArch64 core. */
@@ -432,19 +432,31 @@ typedef enum fu_capabilities_t {
 
     /** The @c Zicbop prefetches, @c prefetch.r and @c prefetch.w, encoded as @c ORI hints every
      *  hart accepts, so they are reported on every RISC-V core. */
-    fu_capability_risc5_zicbop_k = 1 << 25,
+    fu_capability_riscv64_zicbop_k = 1 << 25,
 
     /**
      *  @brief @c Zabha: the byte and halfword @c amo forms, and with @c Zacas the byte and halfword
-     *      @c amocas, attested by the kernel's @c hwprobe. Admits @c risc5_zabha_atomic_ref.
-     *  @sa fu_capability_risc5_zacas_k - which it extends.
+     *      @c amocas, attested by the kernel's @c hwprobe. Admits @c riscv64_zabha_atomic_ref.
+     *  @sa fu_capability_riscv64_zacas_k - which it extends.
      */
-    fu_capability_risc5_zabha_k = 1 << 26,
+    fu_capability_riscv64_zabha_k = 1 << 26,
 
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers
      *  in one intersection with @c fu_runtime_capabilities. */
-    fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_arm64_yield_k |
-                                fu_capability_arm64_wfet_k | fu_capability_risc5_pause_k | fu_capability_risc5_wrs_k,
+    fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_riscv64_pause_k |
+                                fu_capability_arm64_yield_k | fu_capability_arm64_wfet_k | fu_capability_riscv64_wrs_k,
+
+    /**
+     *  @brief Composite mask of every instruction-level bit: the waiters, cache hints and atomics
+     *      a CPU class may narrow, leaving the OS, topology, placement and NUMA bits alone.
+     *  @sa fu_capability_any_yield_k - the waiter bits it includes.
+     */
+    fu_capability_any_instruction_k =
+        (fu_capability_any_yield_k | fu_capability_x86_cldemote_k | fu_capability_arm64_dc_cvac_k |
+         fu_capability_riscv64_zicbom_k | fu_capability_x86_cmpccxadd_k | fu_capability_x86_raoint_k |
+         fu_capability_arm64_lse_k | fu_capability_arm64_rcpc_k | fu_capability_riscv64_zacas_k |
+         fu_capability_riscv64_atomic_k | fu_capability_arm64_prfm_k | fu_capability_riscv64_zicbop_k |
+         fu_capability_riscv64_zabha_k),
 
     /**
      *  @brief All-ones allow-mask: pass to @c fu_pool_new to disable capability filtering.

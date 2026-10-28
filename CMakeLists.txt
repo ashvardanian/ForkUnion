@@ -40,6 +40,16 @@ project(
     LANGUAGES CXX
 )
 
+# No target uses C++20 modules, and a Clang installed without `clang-scan-deps` would fail every C++ unit.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+# Seeded from the environment at the first configure, so `cargo` and other wrappers honour
+# `FORKUNION_TARGET_ARCH=native`.
+set(FORKUNION_TARGET_ARCH
+    "$ENV{FORKUNION_TARGET_ARCH}"
+    CACHE STRING
+          "CPU the own units are tuned for: empty for the toolchain default, native, or a CPU name like graniterapids"
+)
 option(FORKUNION_WERROR "Treat compiler warnings as errors" OFF)
 option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL pool" OFF)
 set(FORKUNION_BUILD_SANITIZERS
@@ -103,6 +113,34 @@ target_compile_features(forkunion_header INTERFACE cxx_std_20)
 # it through `forkunion::cpu_capabilities_compiled`, never through `forkunion_header`, whose consumers read the
 # compilation target's promise in `types.hpp`.
 include(cmake/forkunion_probes.cmake)
+
+# FORKUNION_TARGET_ARCH tunes ForkUnion's own units, its tests and benchmarks included, for one CPU: `native` for this
+# host, or a CPU name, also when cross-compiling. The runtime still picks each instruction-level path by detection.
+if (FORKUNION_TARGET_ARCH STREQUAL "native" AND CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "FORKUNION_TARGET_ARCH=native needs the host as the target; name a CPU instead")
+elseif (EMSCRIPTEN OR CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
+    # WebAssembly tiers like `v128` name SIMD levels that ForkUnion has no units for, so they add no flags.
+elseif (FORKUNION_TARGET_ARCH)
+    message(
+        WARNING
+            "FORKUNION_TARGET_ARCH=${FORKUNION_TARGET_ARCH}: baking specific instructions; result may not run elsewhere"
+    )
+    if (MSVC AND FORKUNION_TARGET_ARCH STREQUAL "native")
+        # MSVC has no `/arch:native`, and no capability row needs unit flags, so the toolchain default stays.
+    elseif (MSVC)
+        message(
+            FATAL_ERROR
+                "MSVC takes FORKUNION_TARGET_ARCH=native only; pass an /arch: value such as AVX2 or armv8.1 through "
+                "CMAKE_CXX_FLAGS instead of `${FORKUNION_TARGET_ARCH}`"
+        )
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|AARCH64|arm64|ARM64")
+        # AArch64 names CPUs through `-mcpu`, like `neoverse-v2`, as `-march` takes only architecture versions; Apple
+        # Clang's `-march=native` also advertises just a subset of host features.
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-mcpu=${FORKUNION_TARGET_ARCH}>")
+    else ()
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-march=${FORKUNION_TARGET_ARCH}>")
+    endif ()
+endif ()
 
 # Sanitizers instrument every target this directory builds, never the probes, and never a parent project's own targets.
 if (FORKUNION_BUILD_SANITIZERS STREQUAL "address" AND MSVC)
@@ -186,9 +224,15 @@ target_compile_options(
               $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release,RelWithDebInfo>>:/wd4101>
 )
 
-# Pre-compiled libraries built from `c/forkunion.cpp` - the same translation unit twice, differing only in linkage.
-add_library(forkunion_shared SHARED c/forkunion.cpp)
+# Pre-compiled libraries built from `c/forkunion.cpp` - the same translation unit twice, differing only in linkage. WASI
+# SDK's `libc++.a` is not position-independent, so WASI builds the static one alone.
 add_library(forkunion_static STATIC c/forkunion.cpp)
+if (CMAKE_SYSTEM_NAME STREQUAL "WASI")
+    set(forkunion_libraries_ forkunion_static)
+else ()
+    add_library(forkunion_shared SHARED c/forkunion.cpp)
+    set(forkunion_libraries_ forkunion_static forkunion_shared)
+endif ()
 
 # What a consumer picks between, spelled as what they get:
 #
@@ -203,40 +247,24 @@ add_library(forkunion_static STATIC c/forkunion.cpp)
 # installed package, while the raw target names stay prefixed - they are global, and `static` alone would not be.
 set_target_properties(forkunion_header PROPERTIES EXPORT_NAME header)
 set_target_properties(forkunion_static PROPERTIES EXPORT_NAME static)
-set_target_properties(forkunion_shared PROPERTIES EXPORT_NAME shared)
 
 # Mirror the exported spellings in-tree, so `add_subdirectory` and `find_package` consumers write the same line - and so
 # a typo fails to configure instead of quietly becoming a `-lforkunion` system lookup.
 add_library(forkunion::header ALIAS forkunion_header)
 add_library(forkunion::static ALIAS forkunion_static)
-add_library(forkunion::shared ALIAS forkunion_shared)
 
 # The pre-compiled libraries inherit C++20 from the header target; keep it strict, without GNU extensions
-set_target_properties(forkunion_shared forkunion_static PROPERTIES CXX_EXTENSIONS OFF)
-
-# `SOVERSION` carries the major alone - the only break the C ABI admits, matching `SameMajorVersion` below.
-set_target_properties(forkunion_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+set_target_properties(${forkunion_libraries_} PROPERTIES CXX_EXTENSIONS OFF)
 
 # Hide everything `forkunion.h` does not declare. On its own this exports zero symbols; the visibility pragma in
 # `c/forkunion.cpp` is the other half. Static too - same translation unit, and a consumer may link it into their own
 # shared object.
-set_target_properties(
-    forkunion_shared forkunion_static PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
-)
-
-# No `__declspec(dllexport)` in this source, so MSVC built a DLL with no import library and an unusable
-# `forkunion::shared`. Let CMake write the module definition file instead.
-set_target_properties(forkunion_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+set_target_properties(${forkunion_libraries_} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
 # Re-use the public interface of the header-only target
-target_link_libraries(forkunion_shared PUBLIC forkunion_header)
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
 
 # Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `c/forkunion.cpp`.
-target_link_libraries(
-    forkunion_shared PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
-                             $<BUILD_INTERFACE:forkunion_warnings>
-)
 target_link_libraries(
     forkunion_static PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
                              $<BUILD_INTERFACE:forkunion_warnings>
@@ -248,7 +276,7 @@ check_cxx_compiler_flag("-fcf-protection=full" forkunion_has_cf_protection_)
 
 # Security hardening flags for compiled libraries
 target_compile_options(
-    forkunion_shared
+    forkunion_static
     PRIVATE # Stack protection and buffer overflow detection
             $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
             # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_WERROR. Allowlist the
@@ -264,34 +292,52 @@ target_compile_options(
             $<$<CXX_COMPILER_ID:MSVC>:/GS
             /guard:cf>
 )
-target_compile_options(
-    forkunion_static
-    PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
-            # Same reasoning as the shared target above.
-            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
-            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
-            $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
-            $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
-            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
-            $<$<CXX_COMPILER_ID:MSVC>:/GS
-            /guard:cf>
-)
 
 # Hardened linking flags
-target_link_options(
-    forkunion_shared
-    PRIVATE
-    # Enable RELRO, stack canaries, and NX bit
-    $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
-    # MSVC hardened linking
-    $<$<CXX_COMPILER_ID:MSVC>:/DYNAMICBASE
-    /NXCOMPAT
-    /guard:cf>
-)
 target_link_options(
     forkunion_static PRIVATE $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
     $<$<CXX_COMPILER_ID:MSVC>:/guard:cf>
 )
+
+# The shared library takes the static one's settings, plus what only a linked image carries.
+if (TARGET forkunion_shared)
+    set_target_properties(forkunion_shared PROPERTIES EXPORT_NAME shared)
+    add_library(forkunion::shared ALIAS forkunion_shared)
+
+    # `SOVERSION` carries the major alone - the only break the C ABI admits, matching `SameMajorVersion` below.
+    set_target_properties(forkunion_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+
+    # No `__declspec(dllexport)` in this source, so MSVC built a DLL with no import library and an unusable
+    # `forkunion::shared`. Let CMake write the module definition file instead.
+    set_target_properties(forkunion_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
+    target_link_libraries(forkunion_shared PUBLIC forkunion_header)
+    target_link_libraries(
+        forkunion_shared PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
+                                 $<BUILD_INTERFACE:forkunion_warnings>
+    )
+    target_compile_options(
+        forkunion_shared
+        PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
+                $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
+                $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
+                $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
+                $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
+                $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
+                $<$<CXX_COMPILER_ID:MSVC>:/GS
+                /guard:cf>
+    )
+    target_link_options(
+        forkunion_shared
+        PRIVATE
+        # Enable RELRO, stack canaries, and NX bit
+        $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
+        # MSVC hardened linking
+        $<$<CXX_COMPILER_ID:MSVC>:/DYNAMICBASE
+        /NXCOMPAT
+        /guard:cf>
+    )
+endif ()
 
 # Set the output directory for all executables and libraries - on Windows requires more boilerplate:
 # https://stackoverflow.com/a/25328001
@@ -341,8 +387,10 @@ if (FORKUNION_CLANG_TIDY_EXECUTABLE)
     )
 endif ()
 
-# Tests & benchmarks
-include(CTest)
+# Tests & benchmarks; a parent project decides on CTest for itself.
+if (PROJECT_IS_TOP_LEVEL)
+    include(CTest)
+endif ()
 
 # Off unless asked for, as the presets do, so neither a binding nor an `add_subdirectory` consumer builds `test/` and
 # `bench/` or has to remember to switch them off.
@@ -375,7 +423,7 @@ if (FORKUNION_INSTALL)
     # `$<INSTALL_INTERFACE:include>`, and naming it twice exports the path twice.
     install(TARGETS forkunion_header EXPORT forkunionTargets)
     install(
-        TARGETS forkunion_shared forkunion_static
+        TARGETS ${forkunion_libraries_}
         EXPORT forkunionTargets # same export set
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} # .so / .dylib
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} # .a
@@ -421,6 +469,10 @@ endif ()
 # libraries, and a downstream `find_package` alike, none restating `-latomic`. The bare name `atomic` becomes `-latomic`
 # at link and stays relocatable, unlike the absolute path `find_library` would bake into the package.
 include(CheckCXXSourceCompiles)
+block()
+# The probe pins the standard `forkunion_header` demands, as a consumer that turns extensions off would otherwise hand
+# it the compiler's computed default, C++98 for `em++`, and a probe that fails to compile reads as needing libatomic.
+set(CMAKE_CXX_STANDARD 20)
 check_cxx_source_compiles(
     "#include <atomic>
      #include <cstdint>
@@ -443,6 +495,7 @@ check_cxx_source_compiles(
      }"
     forkunion_atomics_are_builtin_
 )
+endblock()
 if (NOT forkunion_atomics_are_builtin_)
     target_link_libraries(forkunion_header INTERFACE atomic)
 endif ()

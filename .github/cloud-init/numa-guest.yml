@@ -24,7 +24,7 @@ runcmd:
     numactl -H
 
     cd /root
-    cmake --preset release
+    cmake --preset release -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
     cmake --build --preset release --target forkunion_test_cpp20 forkunion_test_c11
 
     # `FORKUNION_VM_NODES` above is sysfs talking to itself. This is the harvest's own count, through the C

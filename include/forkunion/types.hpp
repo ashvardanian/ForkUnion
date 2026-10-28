@@ -46,9 +46,9 @@
 
 #include <forkunion.h> // `fu_status_t`, so the C++ mirror cannot drift from the ABI
 
-#define FORKUNION_VERSION_MAJOR 3
+#define FORKUNION_VERSION_MAJOR 4
 #define FORKUNION_VERSION_MINOR 0
-#define FORKUNION_VERSION_PATCH 3
+#define FORKUNION_VERSION_PATCH 0
 
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
 #define FORKUNION_HAS_EXCEPTIONS_ 1
@@ -389,30 +389,14 @@
 #define FORKUNION_ARCH_ARM64_ 0
 #endif
 #if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
-#define FORKUNION_ARCH_X86_64_ 1
+#define FORKUNION_ARCH_X8664_ 1
 #else
-#define FORKUNION_ARCH_X86_64_ 0
+#define FORKUNION_ARCH_X8664_ 0
 #endif
 #if defined(__riscv) && __riscv_xlen == 64
 #define FORKUNION_ARCH_RISCV64_ 1
 #else
 #define FORKUNION_ARCH_RISCV64_ 0
-#endif
-#if defined(__s390x__)
-#define FORKUNION_ARCH_S390X_ 1
-#else
-#define FORKUNION_ARCH_S390X_ 0
-#endif
-#if defined(__powerpc64__) || defined(__ppc64__)
-#define FORKUNION_ARCH_PPC64_ 1
-#else
-#define FORKUNION_ARCH_PPC64_ 0
-#endif
-
-#if defined(__i386__) || defined(_M_IX86)
-#define FORKUNION_ARCH_X86_32_ 1
-#else
-#define FORKUNION_ARCH_X86_32_ 0
 #endif
 
 #pragma endregion Language and Architecture
@@ -478,10 +462,10 @@
  *  @c -march the compiler reports.
  */
 #if !defined(FORKUNION_TARGET_X86_PAUSE)
-#define FORKUNION_TARGET_X86_PAUSE FORKUNION_ARCH_X86_64_
+#define FORKUNION_TARGET_X86_PAUSE FORKUNION_ARCH_X8664_
 #endif
 #if !defined(FORKUNION_TARGET_X86_TPAUSE)
-#if FORKUNION_ARCH_X86_64_ && (FORKUNION_RUNTIME_DISPATCH || defined(__WAITPKG__))
+#if FORKUNION_ARCH_X8664_ && (FORKUNION_RUNTIME_DISPATCH || defined(__WAITPKG__))
 #define FORKUNION_TARGET_X86_TPAUSE 1
 #else
 #define FORKUNION_TARGET_X86_TPAUSE 0
@@ -489,17 +473,17 @@
 #endif
 #if !defined(FORKUNION_TARGET_X86_CLDEMOTE)
 #define FORKUNION_TARGET_X86_CLDEMOTE \
-    (FORKUNION_ARCH_X86_64_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_))
+    (FORKUNION_ARCH_X8664_ && (FORKUNION_HAS_INLINE_ASM_ || FORKUNION_HAS_HINT_INTRINSICS_))
 #endif
 #if !defined(FORKUNION_TARGET_X86_CMPCCXADD)
-#if FORKUNION_ARCH_X86_64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__CMPCCXADD__))
+#if FORKUNION_ARCH_X8664_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__CMPCCXADD__))
 #define FORKUNION_TARGET_X86_CMPCCXADD 1
 #else
 #define FORKUNION_TARGET_X86_CMPCCXADD 0
 #endif
 #endif
 #if !defined(FORKUNION_TARGET_X86_RAOINT)
-#if FORKUNION_ARCH_X86_64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__RAOINT__))
+#if FORKUNION_ARCH_X8664_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__RAOINT__))
 #define FORKUNION_TARGET_X86_RAOINT 1
 #else
 #define FORKUNION_TARGET_X86_RAOINT 0
@@ -897,16 +881,16 @@ enum capabilities_t : unsigned int {
     /**
      *  @brief The @c PAUSE spin hint of the @c Zihintpause extension - encoded as a @c FENCE every
      *      hart accepts, so it is reported on every RISC-V.
-     *  @sa risc5_pause_t - the waiter emitting it.
+     *  @sa riscv64_pause_t - the waiter emitting it.
      */
-    capability_risc5_pause_k = 1 << 4,
+    capability_riscv64_pause_k = 1 << 4,
 
     /**
      *  @brief <tt>WRS.STO</tt> sleeps the hart until a reservation breaks or a short timeout - the
      *      @c Zawrs extension, attested by the kernel's @c hwprobe.
-     *  @sa risc5_wrs_t - the waiter arming it; @c capability_risc5_pause_k - the spin replaced.
+     *  @sa riscv64_wrs_t - the waiter arming it; @c capability_riscv64_pause_k - the spin replaced.
      */
-    capability_risc5_wrs_k = 1 << 5,
+    capability_riscv64_wrs_k = 1 << 5,
 
     /**
      *  @brief Own the raw OS thread handle instead of a @c std::thread - the substrate every thread
@@ -1001,9 +985,9 @@ enum capabilities_t : unsigned int {
      *
      *  No compile-time policy emits <tt>cbo.clean</tt> yet; the bit is the hook for runtime dispatch.
      *
-     *  @sa risc5_cbo_cache_hints_t - the functor that would emit it.
+     *  @sa riscv64_cbo_cache_hints_t - the functor that would emit it.
      */
-    capability_risc5_zicbom_k = 1 << 17,
+    capability_riscv64_zicbom_k = 1 << 17,
 
     /**
      *  @brief @c CMPCCXADD, the conditional atomic add - CPUID leaf 7, subleaf 1, EAX bit 7, on
@@ -1040,16 +1024,16 @@ enum capabilities_t : unsigned int {
     /**
      *  @brief @c Zacas: @c amocas, compare-and-swap as one instruction instead of an @c lr and
      *      @c sc loop, attested by the kernel's @c hwprobe.
-     *  @sa risc5_zacas_atomic_ref - the reference this admits.
+     *  @sa riscv64_zacas_atomic_ref - the reference this admits.
      */
-    capability_risc5_zacas_k = 1 << 22,
+    capability_riscv64_zacas_k = 1 << 22,
 
     /**
      *  @brief The A extension: @c lr, @c sc and the @c amo* read-modify-writes, the RISC-V baseline
      *      every Linux ABI guarantees, so the detector sets it unconditionally.
-     *  @sa risc5_atomic_ref, the admitted reference; extended by @c capability_risc5_zacas_k.
+     *  @sa riscv64_atomic_ref, the admitted reference; extended by @c capability_riscv64_zacas_k.
      */
-    capability_risc5_atomic_k = 1 << 23,
+    capability_riscv64_atomic_k = 1 << 23,
 
     /**
      *  @brief The AArch64 @c PRFM prefetch hints, base ISA that can never fault, so the detector
@@ -1061,16 +1045,16 @@ enum capabilities_t : unsigned int {
     /**
      *  @brief The @c Zicbop prefetches, @c prefetch.r and @c prefetch.w, encoded as @c ORI hints
      *      every hart accepts, so the detector reports them on every RISC-V core.
-     *  @sa risc5_cache_hints_t - the hints emitting it.
+     *  @sa riscv64_cache_hints_t - the hints emitting it.
      */
-    capability_risc5_zicbop_k = 1 << 25,
+    capability_riscv64_zicbop_k = 1 << 25,
 
     /**
      *  @brief @c Zabha: the byte and halfword @c amo forms, and with @c Zacas the byte and halfword
      *      @c amocas, attested by the kernel's @c hwprobe.
-     *  @sa risc5_zabha_atomic_ref, the admitted reference; extends @c capability_risc5_zacas_k.
+     *  @sa riscv64_zabha_atomic_ref, the admitted reference; extends @c capability_riscv64_zacas_k.
      */
-    capability_risc5_zabha_k = 1 << 26,
+    capability_riscv64_zabha_k = 1 << 26,
 
     /**
      *  @brief Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
@@ -1078,7 +1062,7 @@ enum capabilities_t : unsigned int {
      *  @sa capability_name - which names single bits only, never this composite.
      */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
-                             capability_arm64_wfet_k | capability_risc5_pause_k | capability_risc5_wrs_k,
+                             capability_arm64_wfet_k | capability_riscv64_pause_k | capability_riscv64_wrs_k,
 
 };
 
@@ -1121,20 +1105,20 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_x86_tpause_k: return "x86_tpause";
     case capability_arm64_yield_k: return "arm64_yield";
     case capability_arm64_wfet_k: return "arm64_wfet";
-    case capability_risc5_pause_k: return "risc5_pause";
-    case capability_risc5_wrs_k: return "risc5_wrs";
+    case capability_riscv64_pause_k: return "riscv64_pause";
+    case capability_riscv64_wrs_k: return "riscv64_wrs";
     case capability_x86_cldemote_k: return "x86_cldemote";
     case capability_arm64_dc_cvac_k: return "arm64_dc_cvac";
-    case capability_risc5_zicbom_k: return "risc5_zicbom";
+    case capability_riscv64_zicbom_k: return "riscv64_zicbom";
     case capability_x86_cmpccxadd_k: return "x86_cmpccxadd";
     case capability_x86_raoint_k: return "x86_raoint";
     case capability_arm64_lse_k: return "arm64_lse";
     case capability_arm64_rcpc_k: return "arm64_rcpc";
-    case capability_risc5_zacas_k: return "risc5_zacas";
-    case capability_risc5_atomic_k: return "risc5_atomic";
+    case capability_riscv64_zacas_k: return "riscv64_zacas";
+    case capability_riscv64_atomic_k: return "riscv64_atomic";
     case capability_arm64_prfm_k: return "arm64_prfm";
-    case capability_risc5_zicbop_k: return "risc5_zicbop";
-    case capability_risc5_zabha_k: return "risc5_zabha";
+    case capability_riscv64_zicbop_k: return "riscv64_zicbop";
+    case capability_riscv64_zabha_k: return "riscv64_zabha";
     case capability_os_threads_k: return "os_threads";
     case capability_topology_k: return "topology";
     case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";
@@ -1206,10 +1190,10 @@ constexpr std::size_t bytes_for_elements(std::size_t count, std::size_t element_
 /**
  *  @brief Byte-wise @c memcpy of @p from into @p to, written as an explicit loop.
  *
- *  Not @c std::memcpy: the wait monitors that call this - @c arm64_wfet_t and @c risc5_wrs_t - are
- *  pinned to a narrower <tt>target(...)</tt> than @c -march=native, where the fortified @c always_inline
- *  @c memcpy cannot inline - "target specific option mismatch". Reading and writing through
- *  <tt>unsigned char</tt> keeps it well-defined.
+ *  Not @c std::memcpy: the wait monitors that call this - @c arm64_wfet_t and @c riscv64_wrs_t -
+ *  are pinned to a narrower <tt>target(...)</tt> than @c -march=native, where the fortified
+ *  @c always_inline @c memcpy cannot inline - "target specific option mismatch". Reading and
+ *  writing through <tt>unsigned char</tt> keeps it well-defined.
  */
 template <typename value_type_>
 inline void copy_bytes(value_type_ const *from, value_type_ *to) noexcept {
@@ -1860,7 +1844,7 @@ inline constexpr wait_uncapped_t wait_uncapped_k {};
  *
  *  A spin waiter ignores the watched word - the caller's loop already re-checks its own condition,
  *  so this only needs to emit one backoff hint per turn. The monitored waiters - @c arm64_wfet_t,
- *  @c x86_tpause_t, and @c risc5_wrs_t - use the word to sleep the core until that line changes.
+ *  @c x86_tpause_t, and @c riscv64_wrs_t - use the word to sleep the core until that line changes.
  */
 struct standard_yield_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;

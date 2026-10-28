@@ -35,12 +35,22 @@
       "name": "cross",
       "hidden": true,
       "description": "Correctness only: emulators cannot run the throughput suite in time, and the benchmarks stay host-only.",
-      "cacheVariables": { "FORKUNION_TEST_SKIP_STRESS": "ON", "FORKUNION_BUILD_BENCH": "OFF" }
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FORKUNION_TEST_SKIP_STRESS": "ON",
+        "FORKUNION_BUILD_BENCH": "OFF"
+      }
     },
-    { "name": "debug", "inherits": "base", "displayName": "Debug", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    {
+      "name": "debug",
+      "inherits": ["base", "clang"],
+      "displayName": "Debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
     {
       "name": "release",
-      "inherits": "base",
+      "inherits": ["base", "clang"],
       "displayName": "Release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
     },
@@ -52,7 +62,7 @@
     },
     {
       "name": "asan",
-      "inherits": "base",
+      "inherits": ["base", "clang"],
       "displayName": "AddressSanitizer + UndefinedBehaviorSanitizer",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -63,7 +73,7 @@
     },
     {
       "name": "tsan",
-      "inherits": "base",
+      "inherits": ["base", "clang"],
       "displayName": "ThreadSanitizer",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -94,7 +104,7 @@
     },
     {
       "name": "dockcross",
-      "inherits": ["release", "cross"],
+      "inherits": "cross",
       "displayName": "Whatever target the dockcross image's toolchain names",
       "description": "Static, so the binaries QEMU runs need no shared libatomic or libstdc++ from the target.",
       "toolchainFile": "$env{CMAKE_TOOLCHAIN_FILE}",
@@ -102,25 +112,25 @@
     },
     {
       "name": "android_arm64",
-      "inherits": ["release", "cross"],
+      "inherits": "cross",
       "displayName": "Whichever ABI the Android NDK r28+ toolchain file names, compile only",
       "toolchainFile": "$env{CMAKE_TOOLCHAIN_FILE}"
     },
     {
       "name": "wasm32_emscripten",
-      "inherits": ["release", "cross"],
+      "inherits": "cross",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
       "cacheVariables": { "CMAKE_CROSSCOMPILING_EMULATOR": "node" }
     },
     {
       "name": "wasm64_emscripten",
-      "inherits": ["release", "cross"],
+      "inherits": "cross",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm64-emscripten.cmake",
       "cacheVariables": { "CMAKE_CROSSCOMPILING_EMULATOR": "node" }
     },
     {
       "name": "wasm32_wasi_threads",
-      "inherits": ["release", "cross"],
+      "inherits": "cross",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi-threads.cmake"
     },
     {
@@ -144,6 +154,47 @@
         "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "17.0"
       }
+    },
+    {
+      "name": "machine",
+      "hidden": true,
+      "inherits": ["base", "clang"],
+      "description": "Libraries for one machine: its CPU, and only the capabilities it runs.",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "FORKUNION_BUILD_TEST": "OFF", "FORKUNION_BUILD_BENCH": "OFF" }
+    },
+    {
+      "name": "xeon4_hopper",
+      "inherits": "machine",
+      "displayName": "Xeon 4 with Hopper - compile only",
+      "cacheVariables": {
+        "FORKUNION_TARGET_ARCH": "sapphirerapids",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
+      }
+    },
+    {
+      "name": "xeon6_blackwell",
+      "inherits": "machine",
+      "displayName": "Xeon 6 with Blackwell - compile only",
+      "cacheVariables": {
+        "FORKUNION_TARGET_ARCH": "graniterapids",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
+      }
+    },
+    {
+      "name": "grace_hopper",
+      "inherits": "machine",
+      "displayName": "Grace with Hopper - compile only",
+      "cacheVariables": { "FORKUNION_TARGET_ARCH": "neoverse-v2", "FORKUNION_TARGET_ARM64_WFET": "0" }
+    },
+    {
+      "name": "vera_rubin",
+      "inherits": "machine",
+      "displayName": "Vera with Rubin - compile only",
+      "description": "Olympus cores need Clang 22 or GCC 15.",
+      "cacheVariables": { "FORKUNION_TARGET_ARCH": "olympus" }
     }
   ],
   "buildPresets": [
@@ -181,7 +232,11 @@
       "name": "ios_simulator",
       "configurePreset": "ios_simulator",
       "targets": ["forkunion_test_cpp20", "forkunion_static"]
-    }
+    },
+    { "name": "xeon4_hopper", "configurePreset": "xeon4_hopper" },
+    { "name": "xeon6_blackwell", "configurePreset": "xeon6_blackwell" },
+    { "name": "grace_hopper", "configurePreset": "grace_hopper" },
+    { "name": "vera_rubin", "configurePreset": "vera_rubin" }
   ],
   "testPresets": [
     {

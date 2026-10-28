@@ -965,9 +965,9 @@ int main(void) {
         fu_capability_x86_tpause_k | fu_capability_x86_cldemote_k, /* Tremont, SPR, GNR */
         fu_capability_arm64_yield_k,
         fu_capability_arm64_wfet_k,
-        fu_capability_risc5_pause_k,
-        fu_capability_risc5_wrs_k,
-        fu_capability_risc5_wrs_k | fu_capability_risc5_zicbom_k, /* RVA23 mandates them together */
+        fu_capability_riscv64_pause_k,
+        fu_capability_riscv64_wrs_k,
+        fu_capability_riscv64_wrs_k | fu_capability_riscv64_zicbom_k, /* RVA23 mandates them together */
     };
 
     fu_capabilities_t const topology_variants[] = {

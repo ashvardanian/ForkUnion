@@ -23,11 +23,11 @@ endif ()
 
 # Emscripten's own toolchain file reads the width off these flags as it loads, so they precede the include.
 set(CMAKE_C_FLAGS
-    "-pthread -sMEMORY64"
+    "-pthread --target=wasm64"
     CACHE STRING "Flags used by the C compiler during all build types."
 )
 set(CMAKE_CXX_FLAGS
-    "-pthread -sMEMORY64"
+    "-pthread --target=wasm64"
     CACHE STRING "Flags used by the CXX compiler during all build types."
 )
 set(EMSCRIPTEN_SYSTEM_PROCESSOR wasm64)
@@ -35,5 +35,5 @@ include("$ENV{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake
 
 # The main thread is proxied to a worker, so a blocking join never stalls the host's event loop.
 set(CMAKE_EXE_LINKER_FLAGS_INIT
-    "-pthread -sMEMORY64 -sPROXY_TO_PTHREAD -sALLOW_MEMORY_GROWTH -sEXIT_RUNTIME=1 -sNODE_HOST_ENV"
+    "-pthread --target=wasm64 -sPROXY_TO_PTHREAD -sALLOW_MEMORY_GROWTH -sEXIT_RUNTIME=1 -sNODE_HOST_ENV"
 )

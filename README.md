@@ -232,11 +232,11 @@ A name without it is a public contract, either a switch you may set or a value y
 | Dispatch mode            | `FORKUNION_RUNTIME_DISPATCH`    |                              |
 | Optional feature         | `FORKUNION_WITH_<FEATURE>`      | `FORKUNION_WITH_TOPOLOGY`    |
 | Permission for a liberty | `FORKUNION_ALLOW_<LIBERTY>`     | `FORKUNION_ALLOW_UNSAFE`     |
-| Architecture fact        | `FORKUNION_ARCH_<ARCH>_`        | `FORKUNION_ARCH_X86_64_`     |
+| Architecture fact        | `FORKUNION_ARCH_<ARCH>_`        | `FORKUNION_ARCH_X8664_`      |
 | Operating-system fact    | `FORKUNION_OS_<OS>_`            | `FORKUNION_OS_LINUX_`        |
 | Toolchain fact           | `FORKUNION_HAS_<FEATURE>_`      | `FORKUNION_HAS_INLINE_ASM_`  |
 
-Architectures are spelled `X86_64`, `X86_32`, `ARM64`, `RISCV64`, `PPC64`, `S390X` and `WASM`.
+Architectures are spelled `X8664`, `ARM64`, `RISCV64` and `WASM`.
 Every name in these families is always defined, as 0 or 1, and tested with `#if`, never with `defined(...)`.
 
 ### Intro in Zig
@@ -827,15 +827,15 @@ On Linux, the `std::this_thread::yield()` translates into a `sched_yield` system
 Instead, you can replace the `standard_yield_t` wrapper with a platform-specific micro-wait instruction, which is much cheaper.
 Those instructions, like [`WFET` on Arm](https://developer.arm.com/documentation/ddi0602/2025-03/Base-Instructions/WFET--Wait-for-event-with-timeout-), generally hint the CPU to transition to a low-power state.
 
-| Wrapper         | ISA          | Instruction         | Privileges |
-| :-------------- | :----------- | :------------------ | :--------- |
-| `x86_pause_t`   | x86          | `PAUSE`             | R3         |
-| `x86_tpause_t`  | x86+WAITPKG  | `UMONITOR`+`UMWAIT` | R3         |
-| `arm64_yield_t` | AArch64      | `YIELD`             | EL0        |
-| `arm64_wfe_t`   | AArch64      | `LDAXR`+`WFE`       | EL0        |
-| `arm64_wfet_t`  | AArch64+WFXT | `WFET`              | EL0        |
-| `risc5_pause_t` | RISC-V       | `PAUSE`             | U          |
-| `risc5_wrs_t`   | RISC-V+Zawrs | `WRS.STO`/`WRS.NTO` | U          |
+| Wrapper           | ISA          | Instruction         | Privileges |
+| :---------------- | :----------- | :------------------ | :--------- |
+| `x86_pause_t`     | x86          | `PAUSE`             | R3         |
+| `x86_tpause_t`    | x86+WAITPKG  | `UMONITOR`+`UMWAIT` | R3         |
+| `arm64_yield_t`   | AArch64      | `YIELD`             | EL0        |
+| `arm64_wfe_t`     | AArch64      | `LDAXR`+`WFE`       | EL0        |
+| `arm64_wfet_t`    | AArch64+WFXT | `WFET`              | EL0        |
+| `riscv64_pause_t` | RISC-V       | `PAUSE`             | U          |
+| `riscv64_wrs_t`   | RISC-V+Zawrs | `WRS.STO`/`WRS.NTO` | U          |
 
 No kernel calls.
 No futexes.

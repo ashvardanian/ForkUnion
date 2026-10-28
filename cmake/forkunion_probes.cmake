@@ -5,7 +5,9 @@
 # `.arch_extension` for LSE and RCpc, the intrinsic where MSVC has one - into the cached
 # `forkunion_target_<capability>_compiles`, caches `forkunion_target_<capability>_flags` empty, as no unit flag is
 # needed, and defines its `FORKUNION_TARGET_<CAPABILITY>` macro on the target below. A probe fails off its own
-# architecture, so every row runs everywhere. `-D FORKUNION_TARGET_<CAPABILITY>=0` leaves a capability out.
+# architecture, so every row runs everywhere. `-D FORKUNION_TARGET_<CAPABILITY>=0` leaves a capability out, and
+# `forkunion_target_<capability>_enabled` caches the verdict after it. A native build that is not cross-compiling also
+# runs each enabled probe, caching whether this host runs the capability as `forkunion_target_<capability>_runs`.
 # `probes/README.md` has the table.
 #
 # A compiled capability is not one the unit's own flags enable, nor one the CPU runs. `forkunion_header` carries no
@@ -29,8 +31,8 @@ function (forkunion_add_cpu_capability capability_name_ capability_macro_)
         ""
         CACHE INTERNAL "Flags enabling ${capability_macro_} across a unit"
     )
+    set(CMAKE_TRY_COMPILE_CONFIGURATION "Release")
     if (NOT DEFINED forkunion_target_${capability_name_}_compiles)
-        set(CMAKE_TRY_COMPILE_CONFIGURATION "Release")
         try_compile(
             forkunion_target_${capability_name_}_compiles ${CMAKE_BINARY_DIR}/forkunion_probes
             ${PROJECT_SOURCE_DIR}/probes/${capability_name_}.cpp
@@ -46,6 +48,30 @@ function (forkunion_add_cpu_capability capability_name_ capability_macro_)
     if (arg_HIDDEN_FROM_THREAD_SANITIZER AND FORKUNION_BUILD_SANITIZERS STREQUAL "thread")
         set(capability_enabled_ FALSE)
     endif ()
+    set(forkunion_target_${capability_name_}_enabled
+        ${capability_enabled_}
+        CACHE INTERNAL "Whether ${capability_macro_} compiles and is not switched off"
+    )
+    # The host's exit code is cached per build folder, and a probe killed by a missing instruction never exits with 0.
+    set(capability_runs_ FALSE)
+    if (capability_enabled_
+        AND FORKUNION_TARGET_ARCH STREQUAL "native"
+        AND NOT CMAKE_CROSSCOMPILING
+    )
+        if (NOT DEFINED forkunion_target_${capability_name_}_exit_code)
+            try_run(forkunion_target_${capability_name_}_exit_code forkunion_target_${capability_name_}_built
+                    ${CMAKE_BINARY_DIR}/forkunion_probes ${PROJECT_SOURCE_DIR}/probes/${capability_name_}.cpp
+            )
+        endif ()
+        if (forkunion_target_${capability_name_}_exit_code STREQUAL "0")
+            set(capability_runs_ TRUE)
+        endif ()
+        message(STATUS "Performing ISA probe ${capability_macro_} - runs: ${capability_runs_}")
+    endif ()
+    set(forkunion_target_${capability_name_}_runs
+        ${capability_runs_}
+        CACHE INTERNAL "Whether ${capability_macro_} is enabled and this host runs it"
+    )
     target_compile_definitions(
         forkunion_cpu_capabilities_compiled INTERFACE "${capability_macro_}=$<BOOL:${capability_enabled_}>"
     )

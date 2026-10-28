@@ -84,13 +84,13 @@ struct pool_variants_t {
         fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
-        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cbo_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOP
-        fu::flat_pool<thread_allocator_t, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
-        fu::flat_pool<thread_allocator_t, fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
         fu::flat_pool<thread_allocator_t, fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>, //
@@ -129,16 +129,16 @@ struct pool_variants_t {
         fu::distributed_pool<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
-        fu::colocated_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>, //
+        fu::colocated_pool<fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cbo_cache_hints_t>,   //
+        fu::distributed_pool<fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cbo_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOP
-        fu::colocated_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
+        fu::colocated_pool<fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>,   //
+        fu::distributed_pool<fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
-        fu::colocated_pool<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>,   //
-        fu::distributed_pool<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>, //
+        fu::colocated_pool<fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>,   //
+        fu::distributed_pool<fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
         fu::colocated_pool<fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>,   //
@@ -259,20 +259,19 @@ static auto select_pool([[maybe_unused]] fu::capabilities_t const bits, action_t
     // promotion that can never fault. The RISC-V references emit no better code than the standard
     // one for the pool's operations, so every RISC-V pool keeps it.
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
-    if (selects<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cbo_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_wrs_t, fu::standard_atomic_ref,
-                                                      fu::risc5_cbo_cache_hints_t>::type> {});
+    if (selects<fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cbo_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::riscv64_wrs_t, fu::standard_atomic_ref,
+                                                      fu::riscv64_cbo_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOP
-    if (selects<fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>(bits))
-        return action(
-            pool_type_tag<
-                typename pool_for<kind_, fu::risc5_wrs_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>::type> {});
+    if (selects<fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::riscv64_wrs_t, fu::standard_atomic_ref,
+                                                      fu::riscv64_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
-    if (selects<fu::risc5_pause_t, fu::standard_atomic_ref, fu::risc5_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::risc5_pause_t, fu::standard_atomic_ref,
-                                                      fu::risc5_cache_hints_t>::type> {});
+    if (selects<fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::riscv64_pause_t, fu::standard_atomic_ref,
+                                                      fu::riscv64_cache_hints_t>::type> {});
 #endif
     // WebAssembly threads declare no bit, so the sleeping waiter, woken by its notifying reference,
     // stands in for the portable pair wherever the module is built with them.
@@ -380,7 +379,7 @@ struct opaque_pool_t {
     /** The one live pool - flat, colocated, or distributed - or empty before the first spawn. */
     pool_variants_t variants;
 
-    /** The capability envelope <tt>machine_capabilities() & allowed</tt>, fixed at creation. */
+    /** The capability envelope <tt>runtime_capabilities() & allowed</tt>, fixed at creation. */
     fu::capabilities_t effective {fu::capabilities_unknown_k};
 
     /** Context held across a non-blocking @c fu_pool_unsafe_for_threads until its join. */
@@ -423,12 +422,6 @@ static void destroy_variant(pool_variants_t &variants) noexcept {
     variants.kind_ = fu::pool_kind_t::unknown_k;
 }
 
-/** This machine's capabilities - CPU busy-wait waiters and memory facilities - probed once. */
-static fu::capabilities_t machine_capabilities(void) {
-    static fu::capabilities_t const capabilities = fu::cpu_capabilities() | fu::ram_capabilities();
-    return capabilities;
-}
-
 using machine_topology_t = fu::machine_topology_t;
 
 /** Recovers the @c machine_topology_t behind an opaque @c fu_topology_t handle. */
@@ -467,20 +460,20 @@ fu_assert_same_bit_(fu_capability_x86_pause_k, capability_x86_pause_k);
 fu_assert_same_bit_(fu_capability_x86_tpause_k, capability_x86_tpause_k);
 fu_assert_same_bit_(fu_capability_arm64_yield_k, capability_arm64_yield_k);
 fu_assert_same_bit_(fu_capability_arm64_wfet_k, capability_arm64_wfet_k);
-fu_assert_same_bit_(fu_capability_risc5_pause_k, capability_risc5_pause_k);
-fu_assert_same_bit_(fu_capability_risc5_wrs_k, capability_risc5_wrs_k);
+fu_assert_same_bit_(fu_capability_riscv64_pause_k, capability_riscv64_pause_k);
+fu_assert_same_bit_(fu_capability_riscv64_wrs_k, capability_riscv64_wrs_k);
 fu_assert_same_bit_(fu_capability_x86_cldemote_k, capability_x86_cldemote_k);
 fu_assert_same_bit_(fu_capability_arm64_dc_cvac_k, capability_arm64_dc_cvac_k);
-fu_assert_same_bit_(fu_capability_risc5_zicbom_k, capability_risc5_zicbom_k);
+fu_assert_same_bit_(fu_capability_riscv64_zicbom_k, capability_riscv64_zicbom_k);
 fu_assert_same_bit_(fu_capability_x86_cmpccxadd_k, capability_x86_cmpccxadd_k);
 fu_assert_same_bit_(fu_capability_x86_raoint_k, capability_x86_raoint_k);
 fu_assert_same_bit_(fu_capability_arm64_lse_k, capability_arm64_lse_k);
 fu_assert_same_bit_(fu_capability_arm64_rcpc_k, capability_arm64_rcpc_k);
-fu_assert_same_bit_(fu_capability_risc5_zacas_k, capability_risc5_zacas_k);
-fu_assert_same_bit_(fu_capability_risc5_atomic_k, capability_risc5_atomic_k);
+fu_assert_same_bit_(fu_capability_riscv64_zacas_k, capability_riscv64_zacas_k);
+fu_assert_same_bit_(fu_capability_riscv64_atomic_k, capability_riscv64_atomic_k);
 fu_assert_same_bit_(fu_capability_arm64_prfm_k, capability_arm64_prfm_k);
-fu_assert_same_bit_(fu_capability_risc5_zicbop_k, capability_risc5_zicbop_k);
-fu_assert_same_bit_(fu_capability_risc5_zabha_k, capability_risc5_zabha_k);
+fu_assert_same_bit_(fu_capability_riscv64_zicbop_k, capability_riscv64_zicbop_k);
+fu_assert_same_bit_(fu_capability_riscv64_zabha_k, capability_riscv64_zabha_k);
 fu_assert_same_bit_(fu_capability_any_yield_k, capability_any_yield_k);
 fu_assert_same_bit_(fu_capability_os_threads_k, capability_os_threads_k);
 fu_assert_same_bit_(fu_capability_topology_k, capability_topology_k);
@@ -502,7 +495,7 @@ int fu_version_patch(void) { return FORKUNION_VERSION_PATCH; }
 
 fu_capabilities_t fu_comptime_capabilities(void) { return static_cast<fu_capabilities_t>(fu::comptime_capabilities()); }
 
-fu_capabilities_t fu_runtime_capabilities(void) { return static_cast<fu_capabilities_t>(machine_capabilities()); }
+fu_capabilities_t fu_runtime_capabilities(void) { return static_cast<fu_capabilities_t>(fu::runtime_capabilities()); }
 
 fu_status_t fu_name_capabilities(fu_capabilities_t capabilities, char *name_buffer, size_t name_buffer_length,
                                  size_t *written_out) {
@@ -812,8 +805,8 @@ inline void fu_aligned_free(void *ptr, std::size_t alignment) noexcept {
 fu_status_t fu_pool_new([[maybe_unused]] char const *name, fu_capabilities_t allowed, fu_pool_t *pool_out) {
     if (!pool_out) return fu_invalid_argument_k;
     *pool_out = nullptr;
-    fu::capabilities_t const effective =
-        static_cast<fu::capabilities_t>(machine_capabilities() & static_cast<fu::capabilities_t>(allowed));
+    fu::capabilities_t const effective = static_cast<fu::capabilities_t>(
+        (fu::cpu_capabilities() | fu::ram_capabilities()) & static_cast<fu::capabilities_t>(allowed));
     opaque_pool_t *opaque =
         static_cast<opaque_pool_t *>(fu_aligned_malloc(sizeof(opaque_pool_t), alignof(opaque_pool_t)));
     if (!opaque) return fu_bad_alloc_k;

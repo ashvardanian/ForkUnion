@@ -53,9 +53,9 @@
  *
  *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
  *  exposes cheaper @b "busy-waiting" mechanisms, such as the @c tpause, @c wfet, and @c yield
- *  instructions. RISC-V is internally referred to as RISC5.
+ *  instructions, which spare the core a kernel call.
  *
- *  @sa arm64_yield_t, arm64_wfet_t, x86_pause_t, x86_tpause_t, risc5_pause_t.
+ *  @sa arm64_yield_t, arm64_wfet_t, x86_pause_t, x86_tpause_t, riscv64_pause_t.
  *
  *  The library requires @b C++20 or newer.
  */
@@ -63,9 +63,9 @@
 
 /** Kept in the umbrella, not a sub-header: this is where a reader looks for the version, and where
  *  the release workflows rewrite it. */
-#define FORKUNION_VERSION_MAJOR 3
+#define FORKUNION_VERSION_MAJOR 4
 #define FORKUNION_VERSION_MINOR 0
-#define FORKUNION_VERSION_PATCH 3
+#define FORKUNION_VERSION_PATCH 0
 
 /*  One header per concern. Include order is dependency order; none stands alone. */
 #include "forkunion/types.hpp"        // Vocabulary: task ranges, buffers, index splitting, claim cursors

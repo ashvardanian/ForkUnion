@@ -41,9 +41,7 @@ function (forkunion_add_benchmark target_ source_)
     target_compile_definitions(${target_} PRIVATE $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
 
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
-        target_compile_options(
-            ${target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
-        )
+        target_compile_options(${target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3>)
     endif ()
 
     # Strict IEEE math, deliberately: the N-body kernel hand-reassociates its reduction into the same eight lanes as the

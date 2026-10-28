@@ -79,9 +79,9 @@ impl Capabilities {
     /// AArch64 `wfet` instruction, with `FEAT_WFxT` support.
     pub const ARM64_WFET: Capabilities = Capabilities(1 << 3);
     /// RISC-V `pause` instruction.
-    pub const RISC5_PAUSE: Capabilities = Capabilities(1 << 4);
+    pub const RISCV64_PAUSE: Capabilities = Capabilities(1 << 4);
     /// RISC-V `WRS.STO` monitored wait, from the `Zawrs` extension.
-    pub const RISC5_WRS: Capabilities = Capabilities(1 << 5);
+    pub const RISCV64_WRS: Capabilities = Capabilities(1 << 5);
 
     /// Own the raw OS thread handle instead of a `std::thread`.
     pub const OS_THREADS: Capabilities = Capabilities(1 << 6);
@@ -111,7 +111,7 @@ impl Capabilities {
     pub const ARM64_DC_CVAC: Capabilities = Capabilities(1 << 16);
     /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
     /// hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
-    pub const RISC5_ZICBOM: Capabilities = Capabilities(1 << 17);
+    pub const RISCV64_ZICBOM: Capabilities = Capabilities(1 << 17);
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub const ALL: Capabilities = Capabilities(u32::MAX);

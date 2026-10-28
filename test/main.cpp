@@ -17,6 +17,7 @@
 
 #include <algorithm>   // `std::sort`
 #include <bit>         // `std::bit_floor`
+#include <compare>     // `operator<=>`
 #include <limits>      // `std::numeric_limits`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::is_integral`, `std::is_enum`
@@ -1024,6 +1025,7 @@ static void test_for_n_dynamic_refusals() noexcept {
     for (std::size_t i = 0; i < tasks_k; ++i) expect_eq(executions[i].load(), 1u); // ! A refusal rewound
 }
 
+#if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 /**
  *  @brief One dynamic dispatch of @p n tasks must run exactly-once; @p crawl stalls a whole domain.
  *
@@ -1090,6 +1092,7 @@ static void test_distributed_for_n_dynamic_exhaustive() noexcept {
         expect_dynamic_regime_covers_(pool, n, crawl);
     }
 }
+#endif // FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 
 /** Stress-tests the implementation by oversubscribing the number of threads. */
 template <typename make_pool_type_ = make_pool_t>
@@ -1540,6 +1543,54 @@ struct wrapped_f32_t {
     friend constexpr bool operator>(wrapped_f32_t left, wrapped_f32_t right) noexcept { return left.raw_ > right.raw_; }
 };
 
+/** A scalar wrapping a signed 32-bit integer, as NumKong's @c i32_t does. */
+struct wrapped_i32_t {
+    std::int32_t raw_ = 0;
+    constexpr wrapped_i32_t() noexcept = default;
+    constexpr wrapped_i32_t(std::int32_t value) noexcept : raw_(value) {}
+    friend constexpr auto operator<=>(wrapped_i32_t, wrapped_i32_t) noexcept = default;
+    friend constexpr wrapped_i32_t operator+(wrapped_i32_t left, wrapped_i32_t right) noexcept {
+        return left.raw_ + right.raw_;
+    }
+    friend constexpr wrapped_i32_t operator-(wrapped_i32_t left, wrapped_i32_t right) noexcept {
+        return left.raw_ - right.raw_;
+    }
+};
+
+/** A byte-wide minifloat with no @c std::numeric_limits, which the references refuse. */
+struct wrapped_e4m3_t {
+    std::uint8_t raw_ = 0;
+};
+
+template <>
+struct std::numeric_limits<wrapped_f32_t> : std::numeric_limits<float> {};
+template <>
+struct std::numeric_limits<wrapped_i32_t> : std::numeric_limits<std::int32_t> {};
+
+/*  The references admit a scalar by its limits alone, never by its spelling. */
+static_assert(fu::atomic_integer<wrapped_i32_t> && !fu::atomic_float<wrapped_i32_t>);
+static_assert(fu::atomic_float<wrapped_f32_t> && !fu::atomic_integer<wrapped_f32_t>);
+static_assert(!fu::atomic_scalar<wrapped_e4m3_t> && !fu::atomic_integer<bool>);
+
+/** An integer wrapper takes the instructions of the word it wraps, the signed ones included. */
+template <template <typename> class atomic_ref_>
+static void check_atomic_ref_wrapped() noexcept {
+    check_atomic_ref_words<atomic_ref_, wrapped_i32_t>();
+    wrapped_i32_t word = -5;
+    atomic_ref_<wrapped_i32_t> reference(word);
+    expect_eq(reference.fetch_max(wrapped_i32_t(2), std::memory_order_acq_rel),
+              wrapped_i32_t(-5)); // ? Wins only under a signed compare
+    reference.min(wrapped_i32_t(-7), std::memory_order_relaxed);
+    reference.max(wrapped_i32_t(1), std::memory_order_release);
+    expect_eq(reference.fetch_add_if_at_most(wrapped_i32_t(3), wrapped_i32_t(4), std::memory_order_acq_rel),
+              wrapped_i32_t(1)); // 1 + 3 <= 4: adds
+    expect_eq(reference.fetch_add_if_at_least(wrapped_i32_t(-6), wrapped_i32_t(-1), std::memory_order_acq_rel),
+              wrapped_i32_t(4)); // 4 - 6 < -1: refuses
+    expect_eq(reference.fetch_sub_if_at_least(wrapped_i32_t(5), wrapped_i32_t(-1), std::memory_order_acq_rel),
+              wrapped_i32_t(4)); // 4 - 5 >= -1: subtracts
+    expect_eq(word, wrapped_i32_t(-1));
+}
+
 /** The extrema over floats, across the sign where the integer instructions change roles. */
 template <template <typename> class atomic_ref_, typename float_type_>
 static void check_atomic_ref_floats() noexcept {
@@ -1658,6 +1709,7 @@ static void check_atomic_ref() noexcept {
     check_atomic_ref_floats<atomic_ref_, float>();
     check_atomic_ref_floats<atomic_ref_, double>();
     check_atomic_ref_floats<atomic_ref_, wrapped_f32_t>();
+    check_atomic_ref_wrapped<atomic_ref_>();
     check_atomic_ref_under_contention<atomic_ref_>();
 }
 
@@ -1679,13 +1731,13 @@ static void test_atomic_refs() noexcept {
     check_atomic_ref<fu::arm64_rcpc_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_RISCV64_ATOMIC
-    check_atomic_ref<fu::risc5_atomic_ref, std::uint32_t, std::uint64_t>();
+    check_atomic_ref<fu::riscv64_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_RISCV64_ZACAS
-    check_atomic_ref<fu::risc5_zacas_atomic_ref, std::uint32_t, std::uint64_t>();
+    check_atomic_ref<fu::riscv64_zacas_atomic_ref, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_RISCV64_ZABHA
-    check_atomic_ref<fu::risc5_zabha_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
+    check_atomic_ref<fu::riscv64_zabha_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
     check_atomic_ref<fu::wasm_atomic_ref, std::uint32_t, std::uint64_t>();
@@ -1819,13 +1871,15 @@ int main(void) {
     }
     std::printf("All %zu unit tests passed\n", total_unit_tests);
 
-#if FORKUNION_TEST_SKIP_STRESS_
-    // The stress suite hammers the dispatch/join race window for millions of epochs. A qemu-user
-    // emulator neither reproduces the guest memory model this probes nor runs it in tolerable time,
-    // so the cross builds define it away and lean on the native Arm64 job, where the weak memory
-    // model is actually exercised.
-    std::printf("Skipping stress tests: built with FORKUNION_TEST_SKIP_STRESS_\n");
-#else
+    if (FORKUNION_TEST_SKIP_STRESS_) {
+        // The stress suite hammers the dispatch/join race window for millions of epochs. A
+        // qemu-user emulator neither reproduces the guest memory model this probes nor runs it
+        // in tolerable time, so the cross builds define it away and lean on the native Arm64
+        // job, where the weak memory model is actually exercised.
+        std::printf("Skipping stress tests: built with FORKUNION_TEST_SKIP_STRESS_\n");
+        return EXIT_SUCCESS;
+    }
+
     // Start stress-testing the implementation
     std::printf("Starting stress tests...\n");
     std::size_t const max_cores = fu::allowed_cores_count();
@@ -1871,7 +1925,6 @@ int main(void) {
         std::printf("PASS\n");
     }
     std::printf("All %zu stress tests passed\n", total_stress_tests);
-#endif
 
     return EXIT_SUCCESS;
 }

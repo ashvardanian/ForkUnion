@@ -32,12 +32,12 @@
 #pragma once
 #include "types.hpp"
 
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
 #include <chrono> // `std::chrono::steady_clock` for the one-shot TSC calibration
 #endif
 
 /*  Where inline assembly is unavailable, as on MSVC, intrinsics reach the same instructions. */
-#if !FORKUNION_HAS_INLINE_ASM_ && FORKUNION_ARCH_X86_64_
+#if !FORKUNION_HAS_INLINE_ASM_ && FORKUNION_ARCH_X8664_
 #include <intrin.h>    // `__rdtsc`, `__cpuidex`
 #include <immintrin.h> // `_mm_pause`, `_umonitor`, `_umwait`
 #elif !FORKUNION_HAS_INLINE_ASM_ && FORKUNION_ARCH_ARM64_
@@ -72,7 +72,7 @@ inline void const *watched_address(value_type_ const *watched) noexcept {
     return watched;
 }
 
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
 
 /**
  *  @brief All four registers of one @c CPUID invocation.
@@ -160,7 +160,7 @@ inline std::uint64_t x86_now_tsc() noexcept {
 #endif
 }
 
-#endif // FORKUNION_ARCH_X86_64_
+#endif // FORKUNION_ARCH_X8664_
 
 #if FORKUNION_TARGET_X86_PAUSE
 
@@ -501,8 +501,8 @@ struct arm64_wfet_t {
 #if FORKUNION_TARGET_RISCV64_PAUSE
 
 /** On RISC-V, the @c Zihintpause spin-wait hint. */
-struct risc5_pause_t {
-    static constexpr capabilities_t capability_k = capability_risc5_pause_k;
+struct riscv64_pause_t {
+    static constexpr capabilities_t capability_k = capability_riscv64_pause_k;
 
     /** Any waited word - a @c std::atomic object or a bare address - the hint watches nothing. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_,
@@ -539,10 +539,10 @@ struct risc5_pause_t {
  *      that would carry @c Zawrs.
  *
  *  @warning Hand-encoded and not exercised on @c Zawrs silicon in this tree;
- *      @c capability_risc5_wrs_k, the kernel's @c hwprobe word, gates its selection at runtime.
+ *      @c capability_riscv64_wrs_k, the kernel's @c hwprobe word, gates its selection at runtime.
  */
-struct risc5_wrs_t {
-    static constexpr capabilities_t capability_k = capability_risc5_wrs_k;
+struct riscv64_wrs_t {
+    static constexpr capabilities_t capability_k = capability_riscv64_wrs_k;
 
     /** Waits with the implementation-bounded short timeout, for a loop that also guards another
      *  line. Accepts a @c std::atomic object or a bare @c std::atomic_ref-owned word alike. */
@@ -594,7 +594,7 @@ struct risc5_wrs_t {
         }
         else {
             // No sub-word LR exists, so fall back to the pause hint and skip the `WRS`. Same fixed
-            // Zihintpause encoding as `risc5_pause_t` - the mnemonic needs `+zihintpause` to assemble.
+            // Zihintpause encoding as `riscv64_pause_t` - the mnemonic needs `+zihintpause`.
             __asm__ __volatile__(".4byte 0x0100000f");
             return false;
         }
@@ -669,9 +669,9 @@ using preferred_yield_t = x86_pause_t;
 #elif FORKUNION_TARGET_ARM64_YIELD
 using preferred_yield_t = arm64_yield_t;
 #elif FORKUNION_TARGET_RISCV64_WRS
-using preferred_yield_t = risc5_wrs_t;
+using preferred_yield_t = riscv64_wrs_t;
 #elif FORKUNION_TARGET_RISCV64_PAUSE
-using preferred_yield_t = risc5_pause_t;
+using preferred_yield_t = riscv64_pause_t;
 #elif FORKUNION_TARGET_WASM_WAIT
 using preferred_yield_t = wasm_wait_t;
 #else
@@ -745,9 +745,10 @@ struct arm64_cache_hints_t {
 /**
  *  @brief AArch64 promotion and prefetching only, for kernels that keep <tt>SCTLR_EL1.UCI</tt> clear -
  *      Windows and the BSDs do, so an EL0 <tt>DC CVAC</tt> traps there and the demote stays a no-op.
- *  @note Mirrors @c risc5_cache_hints_t's shape: both are @c PRFM hints that cannot fault anywhere.
- *      MSVC reaches them through @c __prefetch2, whose prfop immediates @c 0b10000 and @c 0b00010
- *      spell PST-L1-KEEP and PLD-L2-KEEP - the same encodings the asm arm emits.
+ *  @note Mirrors @c riscv64_cache_hints_t: both are @c PRFM hints that cannot fault anywhere.
+ *
+ *  MSVC reaches them through @c __prefetch2, whose prfop immediates @c 0b10000 and @c 0b00010
+ *  spell PST-L1-KEEP and PLD-L2-KEEP - the same encodings the asm arm emits.
  */
 struct arm64_prefetch_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
@@ -776,9 +777,9 @@ struct arm64_prefetch_cache_hints_t {
  *      hints that cannot fault, with or without Zicbop silicon.
  *  @note The <tt>cbo.clean</tt> demote is deliberately a no-op here: it raises illegal-instruction unless
  *      the kernel set <tt>senvcfg.CBCFE</tt>, which only @c hwprobe can attest at runtime - so it belongs
- *      to a runtime-dispatch tier behind @c capability_risc5_zicbom_k, never a compile-time policy.
+ *      to a runtime-dispatch tier behind @c capability_riscv64_zicbom_k, not a compile-time policy.
  */
-struct risc5_cache_hints_t {
+struct riscv64_cache_hints_t {
     static constexpr capabilities_t capability_k = capabilities_unknown_k;
     inline void operator()(void const *, demote_line_t) const noexcept {}
     inline void operator()(void const *address, promote_line_t) const noexcept {
@@ -798,11 +799,11 @@ struct risc5_cache_hints_t {
  *  @brief RISC-V cache hints where @c hwprobe attested Zicbom: <tt>cbo.clean</tt> writes the dirty block
  *      back toward another cache or memory, and <tt>prefetch.w</tt> promotes with write intent.
  *  @note Never selected at compile time - <tt>cbo.clean</tt> raises illegal-instruction unless the kernel
- *      set <tt>senvcfg.CBCFE</tt>, which only the @c capability_risc5_zicbom_k runtime bit can attest -
+ *      set <tt>senvcfg.CBCFE</tt>, which only the @c capability_riscv64_zicbom_k runtime bit can attest -
  *      so this functor is reachable exclusively through the C ABI's runtime cascade.
  */
-struct risc5_cbo_cache_hints_t {
-    static constexpr capabilities_t capability_k = capability_risc5_zicbom_k;
+struct riscv64_cbo_cache_hints_t {
+    static constexpr capabilities_t capability_k = capability_riscv64_zicbom_k;
     inline void operator()(void const *address, demote_line_t) const noexcept {
         register void const *address_register __asm__("a0") = address;
         __asm__ __volatile__(".4byte 0x0015200f" ::"r"(address_register) : "memory"); // ? `cbo.clean (a0)`
@@ -836,14 +837,14 @@ using preferred_cache_hints_t = arm64_prefetch_cache_hints_t;
 #elif FORKUNION_WITH_PROMOTE_CACHE_LINES && FORKUNION_TARGET_RISCV64_ZICBOP
 
 /** RISC-V: <tt>cbo.clean</tt> needs a runtime probe, so only the Zicbop prefetches remain. */
-using preferred_cache_hints_t = risc5_cache_hints_t;
+using preferred_cache_hints_t = riscv64_cache_hints_t;
 #else
 
 /** Neither gate holds, or the ISA has no trap-free hint: both directions are no-ops. */
 using preferred_cache_hints_t = standard_cache_hints_t;
 #endif
 
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
 
 /**
  *  @brief The instruction-level bits this x86 offers, read from @c CPUID in leaf order: the spin
@@ -932,7 +933,7 @@ inline capabilities_t arm64_cpu_capabilities() noexcept {
 
 /** One @c hwprobe answer for @p key, the AND across every online hart, or zero if the kernel
  *  refuses to answer. */
-inline std::uint64_t risc5_hwprobe(std::int64_t key) noexcept {
+inline std::uint64_t riscv64_hwprobe(std::int64_t key) noexcept {
     riscv_hwprobe probe;
     probe.key = key;
     probe.value = 0;
@@ -950,21 +951,22 @@ inline std::uint64_t risc5_hwprobe(std::int64_t key) noexcept {
  *      whose name this build's uapi headers predate is never asked for. A @c -march flag says what
  *      the compiler was promised, not what this machine runs, so it sets nothing here.
  */
-inline capabilities_t risc5_cpu_capabilities() noexcept {
-    capabilities_t caps = capability_risc5_pause_k | capability_risc5_zicbop_k | capability_risc5_atomic_k;
+inline capabilities_t riscv64_cpu_capabilities() noexcept {
+    capabilities_t caps = capability_riscv64_pause_k | capability_riscv64_zicbop_k | capability_riscv64_atomic_k;
 #if FORKUNION_HAS_RISCV_HWPROBE_
-    std::uint64_t const extensions = risc5_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0);
+    std::uint64_t const extensions = riscv64_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0);
 #if defined(RISCV_HWPROBE_EXT_ZAWRS)
-    if (extensions & RISCV_HWPROBE_EXT_ZAWRS) caps |= capability_risc5_wrs_k;
+    if (extensions & RISCV_HWPROBE_EXT_ZAWRS) caps |= capability_riscv64_wrs_k;
 #endif
 #if defined(RISCV_HWPROBE_EXT_ZICBOM)
-    if (extensions & RISCV_HWPROBE_EXT_ZICBOM) caps |= capability_risc5_zicbom_k; // ? Only where `senvcfg.CBCFE` is set
+    if (extensions & RISCV_HWPROBE_EXT_ZICBOM)
+        caps |= capability_riscv64_zicbom_k; // ? Only where `senvcfg.CBCFE` is set
 #endif
 #if defined(RISCV_HWPROBE_EXT_ZACAS)
-    if (extensions & RISCV_HWPROBE_EXT_ZACAS) caps |= capability_risc5_zacas_k;
+    if (extensions & RISCV_HWPROBE_EXT_ZACAS) caps |= capability_riscv64_zacas_k;
 #endif
 #if defined(RISCV_HWPROBE_EXT_ZABHA)
-    if (extensions & RISCV_HWPROBE_EXT_ZABHA) caps |= capability_risc5_zabha_k;
+    if (extensions & RISCV_HWPROBE_EXT_ZABHA) caps |= capability_riscv64_zabha_k;
 #endif
 #endif
     return caps;
@@ -978,12 +980,12 @@ inline capabilities_t risc5_cpu_capabilities() noexcept {
  *  @sa ram_capabilities for the memory side; together they form @c runtime_capabilities.
  */
 inline capabilities_t cpu_capabilities() noexcept {
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
     return x86_cpu_capabilities();
 #elif FORKUNION_ARCH_ARM64_
     return arm64_cpu_capabilities();
 #elif FORKUNION_ARCH_RISCV64_
-    return risc5_cpu_capabilities();
+    return riscv64_cpu_capabilities();
 #else
     return capabilities_unknown_k;
 #endif

@@ -300,9 +300,9 @@ struct Capabilities(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """The `YIELD` hint, on every AArch64."""
     comptime ARM64_WFET = Self(1 << 3)
     """`WFET` sleeps the core until a deadline or an event. Needs `FEAT_WFxT`."""
-    comptime RISC5_PAUSE = Self(1 << 4)
+    comptime RISCV64_PAUSE = Self(1 << 4)
     """The `PAUSE` spin hint, from the `Zihintpause` extension."""
-    comptime RISC5_WRS = Self(1 << 5)
+    comptime RISCV64_WRS = Self(1 << 5)
     """`WRS.STO` sleeps the hart until a reservation breaks. Needs the `Zawrs` extension."""
     comptime OS_THREADS = Self(1 << 6)
     """Own the raw OS thread handle instead of a `std::thread`."""
@@ -326,7 +326,7 @@ struct Capabilities(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """`CLDEMOTE` moves a just-written line toward the shared LLC. Reporting only."""
     comptime ARM64_DC_CVAC = Self(1 << 16)
     """`DC CVAC` cleans a dirty line to the coherency point."""
-    comptime RISC5_ZICBOM = Self(1 << 17)
+    comptime RISCV64_ZICBOM = Self(1 << 17)
     """User-mode Zicbom cache-block management, attested through `hwprobe`."""
 
     comptime ANY_YIELD = Self(0x3F)

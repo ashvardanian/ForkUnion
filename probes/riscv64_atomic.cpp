@@ -22,5 +22,5 @@ int main() {
                          : [observed] "=&r"(observed), [failed] "=&r"(failed)
                          : [word] "r"(&word), [wanted] "r"(wanted), [desired] "r"(desired)
                          : "memory");
-    return static_cast<int>(swapped + observed);
+    return static_cast<int>(swapped) | static_cast<int>(observed != wanted);
 }

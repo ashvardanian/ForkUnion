@@ -131,7 +131,7 @@ def test_capability_masks() raises:
     # The three bits neither the Rust nor the Zig binding names.
     assert_true(Capabilities.X86_CLDEMOTE in Capabilities.ALL, "cldemote is nameable")
     assert_true(Capabilities.ARM64_DC_CVAC in Capabilities.ALL, "dc cvac is nameable")
-    assert_true(Capabilities.RISC5_ZICBOM in Capabilities.ALL, "zicbom is nameable")
+    assert_true(Capabilities.RISCV64_ZICBOM in Capabilities.ALL, "zicbom is nameable")
 
 
 def test_domain_types_are_distinct() raises:

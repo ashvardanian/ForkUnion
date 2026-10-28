@@ -65,7 +65,7 @@ comptime LIBRARY_FILE = StaticString("libforkunion.so")
 the environment's library directory, because `mojo build` bakes it into the binary's runpath, so an
 unqualified name is enough for a library installed there."""
 
-comptime BINDING_MAJOR = 3
+comptime BINDING_MAJOR = 4
 """The major version this binding was written against; a mismatch is refused at load."""
 
 # region Signatures

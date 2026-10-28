@@ -81,9 +81,9 @@ pub const Capabilities = packed struct(u32) {
     /// AArch64 `wfet` instruction, with `FEAT_WFxT` support
     arm64_wfet: bool = false,
     /// RISC-V `pause` instruction
-    risc5_pause: bool = false,
+    riscv64_pause: bool = false,
     /// RISC-V `WRS.STO` monitored wait, from the `Zawrs` extension
-    risc5_wrs: bool = false,
+    riscv64_wrs: bool = false,
 
     /// Own the raw OS thread handle instead of a `std::thread`
     os_threads: bool = false,
@@ -113,7 +113,7 @@ pub const Capabilities = packed struct(u32) {
     arm64_dc_cvac: bool = false,
     /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
     /// hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
-    risc5_zicbom: bool = false,
+    riscv64_zicbom: bool = false,
 
     _unused: u14 = 0,
 
@@ -311,12 +311,12 @@ test "capability bits match the C ABI numbering" {
         }
     }.at;
     try std.testing.expect(bit(0).x86_pause);
-    try std.testing.expect(bit(5).risc5_wrs);
+    try std.testing.expect(bit(5).riscv64_wrs);
     try std.testing.expect(bit(6).os_threads);
     try std.testing.expect(bit(14).colocate_pools_on_domain);
     try std.testing.expect(bit(15).x86_cldemote);
     try std.testing.expect(bit(16).arm64_dc_cvac);
-    try std.testing.expect(bit(17).risc5_zicbom);
+    try std.testing.expect(bit(17).riscv64_zicbom);
 
     // Every bit the core defines must have a field; none may fall through to `_unused`.
     const all_defined: Capabilities = @bitCast(@as(u32, (1 << 18) - 1));

@@ -11,7 +11,8 @@ MSVC has no inline assembly and spells both rungs as intrinsics instead, so thos
 `__ldapr32` needs no flag, while the LSE arithmetic goes through `_Interlocked*`, which stays inline only under `/arch:armv8.1`, so the LSE probe asks for that flag through `__ARM_FEATURE_ATOMICS`, the same macro `FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_` keys the header's definitions on.
 A baseline MSVC therefore answers LSE 0 and RCpc 1, and the demotion in `types.hpp` takes the child rung down with its parent.
 The RISC-V base atomics are the A extension's own mnemonics, so that probe also needs the extension in `-march`, as every `rv64gc` build has.
-Whether the CPU has the instruction is the runtime's question, answered by `cpu_capabilities()`, never by a probe.
+Whether the CPU has the instruction is the runtime's question, answered by `cpu_capabilities()`.
+A `FORKUNION_TARGET_ARCH=native` build that is not cross-compiling also runs each enabled probe into `forkunion_target_<capability>_runs`, so every probe exits with 0 once its instruction ran.
 
 The OS-level bits - owned threads, topology, placements, transparent huge pages - have no probe: the `FORKUNION_WITH_*` tri-states and the runtime answer those.
 

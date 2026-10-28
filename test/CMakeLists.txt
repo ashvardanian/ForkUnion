@@ -12,7 +12,7 @@ function (forkunion_set_test_properties target_)
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         message(STATUS "Enabling optimizations for ${target_}")
         target_compile_options(
-            ${target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native -mtune=native>
+            ${target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3>
                                $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
         )
     endif ()
@@ -95,8 +95,10 @@ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
     forkunion_add_c_test(forkunion_test_c_gcc_nested ON)
 endif ()
 
-# Clang blocks extension test
-if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+# Clang blocks extension test, where the toolchain ships the Blocks runtime header; Emscripten has none.
+include(CheckIncludeFile)
+check_include_file(Block.h forkunion_has_block_header_)
+if ((CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "AppleClang") AND forkunion_has_block_header_)
     forkunion_add_c_test(forkunion_test_c_clang_blocks ON)
     target_compile_options(forkunion_test_c_clang_blocks PRIVATE -fblocks)
     # Apple's `libSystem` ships the Blocks runtime; other UNIX needs it linked explicitly. The bare name resolves like

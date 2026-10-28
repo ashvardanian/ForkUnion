@@ -1009,7 +1009,7 @@ inline cache_instance_t deepest_cache_of_core([[maybe_unused]] core_id_t core_id
     if (deepest.bytes) return deepest;
 #endif
 
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
     // CPUID reports the executing core's caches: exact on homogeneous parts, and only a fallback
     // where the per-core sysfs above is absent, so hybrid mislabeling never reaches Linux.
     // ? AMD mirrors Intel's deterministic leaf 0x4 at 0x8000001D
@@ -1098,7 +1098,7 @@ inline std::size_t cache_line_bytes() noexcept {
             if (widest >= 16 && widest <= 1024 && std::has_single_bit(widest)) return widest;
         }
 #endif
-#if FORKUNION_ARCH_X86_64_
+#if FORKUNION_ARCH_X8664_
     // EBX[11:0] of the deterministic leaf holds the line size less one; AMD mirrors leaf 0x4 at
     // 0x8000001D. Subleaf 0 is L1D, whose line every other level shares on every x86 part.
     std::uint32_t const line_deterministic_leaf = 0x8000'001Du;
@@ -1125,7 +1125,7 @@ inline std::size_t cache_line_bytes() noexcept {
 inline std::size_t destructive_interference_bytes() noexcept {
     std::size_t const line = cache_line_bytes();
     if (line == 0) return 0;
-    return FORKUNION_ARCH_X86_64_ ? line * 2 : line;
+    return FORKUNION_ARCH_X8664_ ? line * 2 : line;
 }
 
 #pragma endregion Cache Hierarchy

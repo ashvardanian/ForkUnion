@@ -25,12 +25,12 @@
  *
  *  - @c arm64_rcpc_atomic_ref: the above with Armv8.3 @c ldapr for acquiring loads - RCpc, which
  *    needn't wait for the core's earlier release stores the way RCsc @c ldar may.
- *  - @c risc5_atomic_ref: the base A extension - @c amoswap, @c amoadd, @c amoand, @c amoor,
+ *  - @c riscv64_atomic_ref: the base A extension - @c amoswap, @c amoadd, @c amoand, @c amoor,
  *    @c amomax, @c amomin & the unsigned twins, with @c x0 as the destination for the no-return
  *    forms - and @c lr and @c sc loops for compare-exchange and byte exchanges; fences around loads
  *    & stores.
- *  - @c risc5_zacas_atomic_ref: compare-exchange as one @c amocas.
- *  - @c risc5_zabha_atomic_ref: the byte and halfword @c amo forms, @c amocas among them.
+ *  - @c riscv64_zacas_atomic_ref: compare-exchange as one @c amocas.
+ *  - @c riscv64_zabha_atomic_ref: the byte and halfword @c amo forms, @c amocas among them.
  *  - @c wasm_atomic_ref: the standard operations, with @c memory.atomic.notify after each releasing
  *    write to a 32- or 64-bit word, as no WebAssembly store wakes a @c memory.atomic.wait sleeper.
  *
@@ -56,11 +56,11 @@
 #pragma once
 #include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::uint32_t`, `std::uint64_t`, their signed twins
 
-#include <atomic>      // `std::memory_order`
-#include <bit>         // `std::bit_cast`
-#include <concepts>    // `std::integral`, `std::signed_integral`, `std::same_as`
-#include <limits>      // `std::numeric_limits`
-#include <type_traits> // `std::conditional_t`, `std::is_trivially_copyable_v`, `std::make_signed_t`
+#include <atomic>   // `std::memory_order`
+#include <bit>      // `std::bit_cast`
+#include <concepts> // `std::same_as`
+#include <limits>   // `std::numeric_limits`
+#include <type_traits> // `std::conditional_t`, `std::is_arithmetic_v`, `std::is_trivially_copyable_v`, `std::make_signed_t`
 
 #include "types.hpp" // `capabilities_t`, the bits a reference needs admitted, and the target macros
 
@@ -74,20 +74,25 @@ namespace forkunion {
 
 #if defined(__cpp_lib_atomic_ref) && defined(__cpp_lib_bit_cast)
 
-/** The words arithmetic read-modify-writes apply to: integers other than @c bool, as the standard's
- *  integral @c atomic_ref specialization draws the line - the instructions add bits. */
+/** A word the instructions move: trivially copyable, one of the four widths, and described by a
+ *  @c std::numeric_limits specialization, built-ins and wrappers alike. */
 template <typename value_type_>
-concept atomic_integer = std::integral<value_type_> && !std::same_as<value_type_, bool>;
+concept atomic_scalar =
+    std::numeric_limits<value_type_>::is_specialized && std::is_trivially_copyable_v<value_type_> &&
+    (sizeof(value_type_) == 1 || sizeof(value_type_) == 2 || sizeof(value_type_) == 4 || sizeof(value_type_) == 8);
 
-/** The floats the extremal read-modify-writes also apply to: @c float, @c double, and a scalar
- *  wrapping one bit for bit behind a @c raw_t, as NumKong's @c f32_t and @c f64_t do. A NaN on
- *  either side leaves the winner unspecified. */
+/** The words arithmetic read-modify-writes apply to: integers other than @c bool, as the standard's
+ *  integral @c atomic_ref specialization draws the line, and wrappers whose limits say integer. */
 template <typename value_type_>
-concept atomic_float =
-    std::same_as<value_type_, float> || std::same_as<value_type_, double> ||
-    (requires { typename value_type_::raw_t; } &&
-     (std::same_as<typename value_type_::raw_t, float> || std::same_as<typename value_type_::raw_t, double>) &&
-     sizeof(value_type_) == sizeof(typename value_type_::raw_t) && std::is_trivially_copyable_v<value_type_>);
+concept atomic_integer =
+    atomic_scalar<value_type_> && std::numeric_limits<value_type_>::is_integer && !std::same_as<value_type_, bool>;
+
+/** The floats the extremal read-modify-writes also apply to, where a NaN on either side leaves the
+ *  winner unspecified: IEC 559 words of 32 or 64 bits, such as @c float, @c double and NumKong's
+ *  @c f32_t and @c f64_t. */
+template <typename value_type_>
+concept atomic_float = atomic_scalar<value_type_> && std::numeric_limits<value_type_>::is_iec559 &&
+                       (sizeof(value_type_) == 4 || sizeof(value_type_) == 8);
 
 /** The unsigned word a value of one width travels through the instructions as. */
 template <typename value_type_>
@@ -210,12 +215,13 @@ void atomic_min(reference_type_ reference, value_type_ operand, std::memory_orde
 template <typename value_type_>
 constexpr bool fetch_add_if_at_least_bound(value_type_ operand, value_type_ floor, value_type_ &bound) noexcept {
     using limits_t = std::numeric_limits<value_type_>;
-    if constexpr (std::signed_integral<value_type_>) {
-        if (operand < 0 && floor > limits_t::max() + operand) return false;
-        bound = operand > 0 && floor < limits_t::min() + operand ? limits_t::min()
-                                                                 : static_cast<value_type_>(floor - operand);
+    if constexpr (limits_t::is_signed) {
+        if (operand < value_type_ {} && floor > limits_t::max() + operand) return false;
+        bound = operand > value_type_ {} && floor < limits_t::min() + operand
+                    ? limits_t::min()
+                    : static_cast<value_type_>(floor - operand);
     }
-    else bound = floor < operand ? value_type_ {0} : static_cast<value_type_>(floor - operand);
+    else bound = floor < operand ? value_type_ {} : static_cast<value_type_>(floor - operand);
     return true;
 }
 
@@ -280,6 +286,7 @@ value_type_ atomic_fetch_sub_if_at_least(reference_type_ reference, value_type_ 
 template <typename value_type_>
 struct standard_atomic_ref {
     using value_t = value_type_;
+    using word_t = atomic_word<value_type_>;
 
     /** The runtime bits a reference needs admitted before it may run - none here. */
     static constexpr capabilities_t capabilities_k = capabilities_unknown_k;
@@ -316,20 +323,26 @@ struct standard_atomic_ref {
         return reference_().compare_exchange_weak(expected, desired, order);
     }
 
+    /** Built-ins use the standard's arithmetic, integer wrappers a loop over their bits. */
     value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return reference_().fetch_add(operand, order);
+        if constexpr (std::is_arithmetic_v<value_type_>) return reference_().fetch_add(operand, order);
+        else return fetch_update_bits_(operand, order, [](word_t observed, word_t bits) { return observed + bits; });
     }
     value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return reference_().fetch_sub(operand, order);
+        if constexpr (std::is_arithmetic_v<value_type_>) return reference_().fetch_sub(operand, order);
+        else return fetch_update_bits_(operand, order, [](word_t observed, word_t bits) { return observed - bits; });
     }
     value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return reference_().fetch_and(mask, order);
+        if constexpr (std::is_arithmetic_v<value_type_>) return reference_().fetch_and(mask, order);
+        else return fetch_update_bits_(mask, order, [](word_t observed, word_t bits) { return observed & bits; });
     }
     value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return reference_().fetch_or(bits, order);
+        if constexpr (std::is_arithmetic_v<value_type_>) return reference_().fetch_or(bits, order);
+        else return fetch_update_bits_(bits, order, [](word_t observed, word_t set) { return observed | set; });
     }
     value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        return reference_().fetch_xor(bits, order);
+        if constexpr (std::is_arithmetic_v<value_type_>) return reference_().fetch_xor(bits, order);
+        else return fetch_update_bits_(bits, order, [](word_t observed, word_t flipped) { return observed ^ flipped; });
     }
 
     /** C++26's @c fetch_max: the value held before, whether or not the operand replaced it. */
@@ -392,27 +405,27 @@ struct standard_atomic_ref {
     void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        reference_().fetch_add(operand, order);
+        fetch_add(operand, order);
     }
     void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        reference_().fetch_sub(operand, order);
+        fetch_sub(operand, order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        reference_().fetch_or(bits, order);
+        fetch_or(bits, order);
     }
     void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        reference_().fetch_and(static_cast<value_type_>(~bits), order);
+        fetch_and(std::bit_cast<value_type_>(static_cast<word_t>(~std::bit_cast<word_t>(bits))), order);
     }
     void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        reference_().fetch_xor(bits, order);
+        fetch_xor(bits, order);
     }
 
     /** Sets or clears bit @p bit, below the word's width, returning whether it was set before: a
@@ -421,12 +434,14 @@ struct standard_atomic_ref {
     bool fetch_test_and_set_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_or(static_cast<value_type_>(value_type_ {1} << bit), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(word_t {1} << bit);
+        return (std::bit_cast<word_t>(fetch_or(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_and(static_cast<value_type_>(~(value_type_ {1} << bit)), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
+        return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
@@ -444,6 +459,22 @@ struct standard_atomic_ref {
 
     /** A @c std::atomic_ref wraps just a pointer, so one per operation costs nothing. */
     std::atomic_ref<value_type_> reference_() const noexcept { return std::atomic_ref<value_type_>(*word_); }
+
+    /** An integer wrapper's read-modify-write, which @c std::atomic_ref spells only for built-ins:
+     *  @p combine applied to the bits in a compare-exchange loop, so no storage is punned. */
+    template <typename combine_type_>
+    value_type_ fetch_update_bits_(value_type_ operand, std::memory_order order, combine_type_ combine) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        std::atomic_ref<value_type_> const reference = reference_();
+        word_t const operand_bits = std::bit_cast<word_t>(operand);
+        value_type_ observed = reference.load(std::memory_order_relaxed);
+        while (!reference.compare_exchange_weak(
+            observed,
+            std::bit_cast<value_type_>(static_cast<word_t>(combine(std::bit_cast<word_t>(observed), operand_bits))),
+            order, std::memory_order_relaxed)) {}
+        return observed;
+    }
 };
 
 /**
@@ -590,6 +621,8 @@ template <typename value_type_>
 struct x86_cmpccxadd_atomic_ref {
     using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
+    using signed_word_t = std::make_signed_t<word_t>;
+    static constexpr signed_word_t signed_bits_(word_t bits) noexcept { return std::bit_cast<signed_word_t>(bits); }
     static constexpr capabilities_t capabilities_k = capability_x86_cmpccxadd_k;
 
     explicit x86_cmpccxadd_atomic_ref(value_type_ &word) noexcept : word_(&word) {
@@ -706,47 +739,66 @@ struct x86_cmpccxadd_atomic_ref {
     {
         // Adds while `word <= limit - operand`: below-or-equal unsigned, less-or-equal signed.
         if (operand > limit) return portable_().load(std::memory_order_acquire); // ? Nothing could be admitted
-        value_type_ const bound = static_cast<value_type_>(limit - operand);
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return x86_cmplexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, operand);
-        else if constexpr (std::signed_integral<value_type_>)
-            return x86_cmplexadd_i64(reinterpret_cast<std::int64_t *>(word_), bound, operand);
+        word_t const bound = std::bit_cast<word_t>(static_cast<value_type_>(limit - operand));
+        word_t const addend = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(
+                x86_cmplexadd_i32(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bound), signed_bits_(addend)));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return std::bit_cast<value_type_>(
+                x86_cmplexadd_i64(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bound), signed_bits_(addend)));
         else if constexpr (sizeof(value_type_) == 4)
-            return x86_cmpbexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, operand);
-        else return x86_cmpbexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, operand);
+            return std::bit_cast<value_type_>(
+                x86_cmpbexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, addend));
+        else
+            return std::bit_cast<value_type_>(
+                x86_cmpbexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, addend));
     }
     value_type_ fetch_add_if_at_least(value_type_ operand, value_type_ floor,
                                       std::memory_order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
         // Adds while `word >= floor - operand`: above-or-equal unsigned, at-least signed.
-        value_type_ bound;
-        if (!fetch_add_if_at_least_bound(operand, floor, bound))
+        value_type_ floor_bound;
+        if (!fetch_add_if_at_least_bound(operand, floor, floor_bound))
             return portable_().load(std::memory_order_acquire); // ? No word could reach the floor
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, operand);
-        else if constexpr (std::signed_integral<value_type_>)
-            return x86_cmpgexadd_i64(reinterpret_cast<std::int64_t *>(word_), bound, operand);
+        word_t const bound = std::bit_cast<word_t>(floor_bound);
+        word_t const addend = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(
+                x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bound), signed_bits_(addend)));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return std::bit_cast<value_type_>(
+                x86_cmpgexadd_i64(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bound), signed_bits_(addend)));
         else if constexpr (sizeof(value_type_) == 4)
-            return x86_cmpaexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, operand);
-        else return x86_cmpaexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, operand);
+            return std::bit_cast<value_type_>(
+                x86_cmpaexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, addend));
+        else
+            return std::bit_cast<value_type_>(
+                x86_cmpaexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, addend));
     }
     value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
                                       std::memory_order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
         // Subtracts while `word >= floor + operand`: above-or-equal unsigned, at-least signed.
-        value_type_ const bound = static_cast<value_type_>(floor + operand);
-        if (bound < floor)
+        value_type_ const sum = static_cast<value_type_>(floor + operand);
+        if (sum < floor)
             return portable_().load(std::memory_order_acquire); // ? The bound wrapped: nothing could be taken
-        value_type_ const negated = static_cast<value_type_>(value_type_ {0} - operand);
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), bound, negated);
-        else if constexpr (std::signed_integral<value_type_>)
-            return x86_cmpgexadd_i64(reinterpret_cast<std::int64_t *>(word_), bound, negated);
+        word_t const bound = std::bit_cast<word_t>(sum);
+        word_t const negated = static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand));
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(
+                x86_cmpgexadd_i32(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bound), signed_bits_(negated)));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return std::bit_cast<value_type_>(
+                x86_cmpgexadd_i64(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bound), signed_bits_(negated)));
         else if constexpr (sizeof(value_type_) == 4)
-            return x86_cmpaexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, negated);
-        else return x86_cmpaexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, negated);
+            return std::bit_cast<value_type_>(
+                x86_cmpaexadd_u32(reinterpret_cast<std::uint32_t *>(word_), bound, negated));
+        else
+            return std::bit_cast<value_type_>(
+                x86_cmpaexadd_u64(reinterpret_cast<std::uint64_t *>(word_), bound, negated));
     }
 
   private:
@@ -950,7 +1002,7 @@ struct x86_raoint_atomic_ref {
     void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        add(static_cast<value_type_>(value_type_ {0} - operand), order);
+        add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
@@ -3154,6 +3206,8 @@ struct arm64_lse_atomic_ref {
                   "Only 8-, 16-, 32- and 64-bit words are spelled");
     using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
+    using signed_word_t = std::make_signed_t<word_t>;
+    static constexpr signed_word_t signed_bits_(word_t bits) noexcept { return std::bit_cast<signed_word_t>(bits); }
     static constexpr capabilities_t capabilities_k = capability_arm64_lse_k;
 
     explicit arm64_lse_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
@@ -3284,40 +3338,50 @@ struct arm64_lse_atomic_ref {
     value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 1)
-            return static_cast<value_type_>(arm64_ldsmax_i8(reinterpret_cast<std::int8_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 2)
-            return static_cast<value_type_>(arm64_ldsmax_i16(reinterpret_cast<std::int16_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return static_cast<value_type_>(arm64_ldsmax_i32(reinterpret_cast<std::int32_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_>)
-            return static_cast<value_type_>(arm64_ldsmax_i64(reinterpret_cast<std::int64_t *>(word_), operand, order));
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 1)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmax_i8(reinterpret_cast<std::int8_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 2)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmax_i16(reinterpret_cast<std::int16_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmax_i32(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmax_i64(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order));
         else if constexpr (sizeof(value_type_) == 1)
-            return static_cast<value_type_>(arm64_ldumax_u8(word_, operand, order));
+            return std::bit_cast<value_type_>(arm64_ldumax_u8(word_, bits, order));
         else if constexpr (sizeof(value_type_) == 2)
-            return static_cast<value_type_>(arm64_ldumax_u16(word_, operand, order));
+            return std::bit_cast<value_type_>(arm64_ldumax_u16(word_, bits, order));
         else if constexpr (sizeof(value_type_) == 4)
-            return static_cast<value_type_>(arm64_ldumax_u32(word_, operand, order));
-        else return static_cast<value_type_>(arm64_ldumax_u64(word_, operand, order));
+            return std::bit_cast<value_type_>(arm64_ldumax_u32(word_, bits, order));
+        else return std::bit_cast<value_type_>(arm64_ldumax_u64(word_, bits, order));
     }
     value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 1)
-            return static_cast<value_type_>(arm64_ldsmin_i8(reinterpret_cast<std::int8_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 2)
-            return static_cast<value_type_>(arm64_ldsmin_i16(reinterpret_cast<std::int16_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return static_cast<value_type_>(arm64_ldsmin_i32(reinterpret_cast<std::int32_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_>)
-            return static_cast<value_type_>(arm64_ldsmin_i64(reinterpret_cast<std::int64_t *>(word_), operand, order));
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 1)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmin_i8(reinterpret_cast<std::int8_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 2)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmin_i16(reinterpret_cast<std::int16_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmin_i32(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return std::bit_cast<value_type_>(
+                arm64_ldsmin_i64(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order));
         else if constexpr (sizeof(value_type_) == 1)
-            return static_cast<value_type_>(arm64_ldumin_u8(word_, operand, order));
+            return std::bit_cast<value_type_>(arm64_ldumin_u8(word_, bits, order));
         else if constexpr (sizeof(value_type_) == 2)
-            return static_cast<value_type_>(arm64_ldumin_u16(word_, operand, order));
+            return std::bit_cast<value_type_>(arm64_ldumin_u16(word_, bits, order));
         else if constexpr (sizeof(value_type_) == 4)
-            return static_cast<value_type_>(arm64_ldumin_u32(word_, operand, order));
-        else return static_cast<value_type_>(arm64_ldumin_u64(word_, operand, order));
+            return std::bit_cast<value_type_>(arm64_ldumin_u32(word_, bits, order));
+        else return std::bit_cast<value_type_>(arm64_ldumin_u64(word_, bits, order));
     }
 
     /** Floats through the integer forms on their bits: a non-negative operand orders like a signed
@@ -3384,44 +3448,48 @@ struct arm64_lse_atomic_ref {
     bool fetch_test_and_set_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_or(static_cast<value_type_>(value_type_ {1} << bit), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(word_t {1} << bit);
+        return (std::bit_cast<word_t>(fetch_or(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_and(static_cast<value_type_>(~(value_type_ {1} << bit)), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
+        return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 1)
-            arm64_stsmax_i8(reinterpret_cast<std::int8_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 2)
-            arm64_stsmax_i16(reinterpret_cast<std::int16_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            arm64_stsmax_i32(reinterpret_cast<std::int32_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_>)
-            arm64_stsmax_i64(reinterpret_cast<std::int64_t *>(word_), operand, order);
-        else if constexpr (sizeof(value_type_) == 1) arm64_stumax_u8(word_, operand, order);
-        else if constexpr (sizeof(value_type_) == 2) arm64_stumax_u16(word_, operand, order);
-        else if constexpr (sizeof(value_type_) == 4) arm64_stumax_u32(word_, operand, order);
-        else arm64_stumax_u64(word_, operand, order);
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 1)
+            arm64_stsmax_i8(reinterpret_cast<std::int8_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 2)
+            arm64_stsmax_i16(reinterpret_cast<std::int16_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            arm64_stsmax_i32(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            arm64_stsmax_i64(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (sizeof(value_type_) == 1) arm64_stumax_u8(word_, bits, order);
+        else if constexpr (sizeof(value_type_) == 2) arm64_stumax_u16(word_, bits, order);
+        else if constexpr (sizeof(value_type_) == 4) arm64_stumax_u32(word_, bits, order);
+        else arm64_stumax_u64(word_, bits, order);
     }
     void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 1)
-            arm64_stsmin_i8(reinterpret_cast<std::int8_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 2)
-            arm64_stsmin_i16(reinterpret_cast<std::int16_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            arm64_stsmin_i32(reinterpret_cast<std::int32_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_>)
-            arm64_stsmin_i64(reinterpret_cast<std::int64_t *>(word_), operand, order);
-        else if constexpr (sizeof(value_type_) == 1) arm64_stumin_u8(word_, operand, order);
-        else if constexpr (sizeof(value_type_) == 2) arm64_stumin_u16(word_, operand, order);
-        else if constexpr (sizeof(value_type_) == 4) arm64_stumin_u32(word_, operand, order);
-        else arm64_stumin_u64(word_, operand, order);
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 1)
+            arm64_stsmin_i8(reinterpret_cast<std::int8_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 2)
+            arm64_stsmin_i16(reinterpret_cast<std::int16_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            arm64_stsmin_i32(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            arm64_stsmin_i64(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (sizeof(value_type_) == 1) arm64_stumin_u8(word_, bits, order);
+        else if constexpr (sizeof(value_type_) == 2) arm64_stumin_u16(word_, bits, order);
+        else if constexpr (sizeof(value_type_) == 4) arm64_stumin_u32(word_, bits, order);
+        else arm64_stumin_u64(word_, bits, order);
     }
     void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_float<value_type_>
@@ -3472,9 +3540,6 @@ struct arm64_lse_atomic_ref {
 
   private:
     word_t *word_;
-
-    using signed_word_t = std::make_signed_t<word_t>;
-    static constexpr signed_word_t signed_bits_(word_t bits) noexcept { return std::bit_cast<signed_word_t>(bits); }
 
     /** The same word as integers, for floats ordered through their bits. */
     arm64_lse_atomic_ref<signed_word_t> signed_word_() const noexcept {
@@ -3771,167 +3836,167 @@ struct arm64_rcpc_atomic_ref<value_type_ const> {
 /*  Loads & stores carry their order as fences, per the RISC-V mapping: acquire is `fence r,rw`
  *  after the load, release `fence rw,w` before the store, sequential consistency both. */
 #if FORKUNION_TARGET_RISCV64_ATOMIC
-#pragma region RISC5 A
+#pragma region RISCV64 A
 
-inline std::uint8_t risc5_lbu(std::uint8_t const *word) noexcept {
+inline std::uint8_t riscv64_lbu(std::uint8_t const *word) noexcept {
     std::uint8_t value;
     __asm__ __volatile__("lbu %0, 0(%1)" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
-inline std::uint16_t risc5_lhu(std::uint16_t const *word) noexcept {
+inline std::uint16_t riscv64_lhu(std::uint16_t const *word) noexcept {
     std::uint16_t value;
     __asm__ __volatile__("lhu %0, 0(%1)" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
-inline std::uint32_t risc5_lw(std::uint32_t const *word) noexcept {
+inline std::uint32_t riscv64_lw(std::uint32_t const *word) noexcept {
     std::uint32_t value;
     __asm__ __volatile__("lw %0, 0(%1)" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
-inline std::uint64_t risc5_ld(std::uint64_t const *word) noexcept {
+inline std::uint64_t riscv64_ld(std::uint64_t const *word) noexcept {
     std::uint64_t value;
     __asm__ __volatile__("ld %0, 0(%1)" : "=r"(value) : "r"(word) : "memory");
     return value;
 }
-inline void risc5_sb(std::uint8_t *word, std::uint8_t value) noexcept {
+inline void riscv64_sb(std::uint8_t *word, std::uint8_t value) noexcept {
     __asm__ __volatile__("sb %0, 0(%1)" : : "r"(value), "r"(word) : "memory");
 }
-inline void risc5_sh(std::uint16_t *word, std::uint16_t value) noexcept {
+inline void riscv64_sh(std::uint16_t *word, std::uint16_t value) noexcept {
     __asm__ __volatile__("sh %0, 0(%1)" : : "r"(value), "r"(word) : "memory");
 }
-inline void risc5_sw(std::uint32_t *word, std::uint32_t value) noexcept {
+inline void riscv64_sw(std::uint32_t *word, std::uint32_t value) noexcept {
     __asm__ __volatile__("sw %0, 0(%1)" : : "r"(value), "r"(word) : "memory");
 }
-inline void risc5_sd(std::uint64_t *word, std::uint64_t value) noexcept {
+inline void riscv64_sd(std::uint64_t *word, std::uint64_t value) noexcept {
     __asm__ __volatile__("sd %0, 0(%1)" : : "r"(value), "r"(word) : "memory");
 }
-inline void risc5_fence_r_rw() noexcept { __asm__ __volatile__("fence r, rw" : : : "memory"); }
-inline void risc5_fence_rw_w() noexcept { __asm__ __volatile__("fence rw, w" : : : "memory"); }
-inline void risc5_fence_rw_rw() noexcept { __asm__ __volatile__("fence rw, rw" : : : "memory"); }
+inline void riscv64_fence_r_rw() noexcept { __asm__ __volatile__("fence r, rw" : : : "memory"); }
+inline void riscv64_fence_rw_w() noexcept { __asm__ __volatile__("fence rw, w" : : : "memory"); }
+inline void riscv64_fence_rw_rw() noexcept { __asm__ __volatile__("fence rw, rw" : : : "memory"); }
 
 /*  Atomic memory operations of the base A extension: @c rd receives what the word held; `.aqrl`
  *  serves every order but relaxed - a strengthening the ISA prices at nothing on the fast path. */
 
-inline std::uint32_t risc5_amoswap_w(std::uint32_t *word, std::uint32_t desired, std::memory_order order) noexcept {
+inline std::uint32_t riscv64_amoswap_w(std::uint32_t *word, std::uint32_t desired, std::memory_order order) noexcept {
     std::uint32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoswap.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(desired) : "memory");
     else __asm__ __volatile__("amoswap.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(desired) : "memory");
     return observed;
 }
-inline std::uint64_t risc5_amoswap_d(std::uint64_t *word, std::uint64_t desired, std::memory_order order) noexcept {
+inline std::uint64_t riscv64_amoswap_d(std::uint64_t *word, std::uint64_t desired, std::memory_order order) noexcept {
     std::uint64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoswap.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(desired) : "memory");
     else __asm__ __volatile__("amoswap.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(desired) : "memory");
     return observed;
 }
-inline std::uint32_t risc5_amoadd_w(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+inline std::uint32_t riscv64_amoadd_w(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoadd.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amoadd.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::uint64_t risc5_amoadd_d(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+inline std::uint64_t riscv64_amoadd_d(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
     std::uint64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoadd.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amoadd.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::uint32_t risc5_amoand_w(std::uint32_t *word, std::uint32_t mask, std::memory_order order) noexcept {
+inline std::uint32_t riscv64_amoand_w(std::uint32_t *word, std::uint32_t mask, std::memory_order order) noexcept {
     std::uint32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoand.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(mask) : "memory");
     else __asm__ __volatile__("amoand.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(mask) : "memory");
     return observed;
 }
-inline std::uint64_t risc5_amoand_d(std::uint64_t *word, std::uint64_t mask, std::memory_order order) noexcept {
+inline std::uint64_t riscv64_amoand_d(std::uint64_t *word, std::uint64_t mask, std::memory_order order) noexcept {
     std::uint64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoand.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(mask) : "memory");
     else __asm__ __volatile__("amoand.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(mask) : "memory");
     return observed;
 }
-inline std::uint32_t risc5_amoor_w(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+inline std::uint32_t riscv64_amoor_w(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     std::uint32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoor.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoor.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     return observed;
 }
-inline std::uint64_t risc5_amoor_d(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+inline std::uint64_t riscv64_amoor_d(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     std::uint64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoor.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoor.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     return observed;
 }
-inline std::uint32_t risc5_amoxor_w(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+inline std::uint32_t riscv64_amoxor_w(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     std::uint32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoxor.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoxor.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     return observed;
 }
-inline std::uint64_t risc5_amoxor_d(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+inline std::uint64_t riscv64_amoxor_d(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     std::uint64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoxor.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoxor.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(bits) : "memory");
     return observed;
 }
-inline std::uint32_t risc5_amomaxu_w(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+inline std::uint32_t riscv64_amomaxu_w(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomaxu.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomaxu.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::uint64_t risc5_amomaxu_d(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+inline std::uint64_t riscv64_amomaxu_d(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
     std::uint64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomaxu.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomaxu.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::int32_t risc5_amomax_w(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
+inline std::int32_t riscv64_amomax_w(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
     std::int32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomax.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomax.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::int64_t risc5_amomax_d(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
+inline std::int64_t riscv64_amomax_d(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
     std::int64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomax.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomax.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::uint32_t risc5_amominu_w(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+inline std::uint32_t riscv64_amominu_w(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     std::uint32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amominu.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amominu.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::uint64_t risc5_amominu_d(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+inline std::uint64_t riscv64_amominu_d(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
     std::uint64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amominu.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amominu.d.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::int32_t risc5_amomin_w(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
+inline std::int32_t riscv64_amomin_w(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
     std::int32_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomin.w %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomin.w.aqrl %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
     return observed;
 }
-inline std::int64_t risc5_amomin_d(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
+inline std::int64_t riscv64_amomin_d(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
     std::int64_t observed;
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomin.d %0, %2, (%1)" : "=r"(observed) : "r"(word), "r"(operand) : "memory");
@@ -3942,82 +4007,82 @@ inline std::int64_t risc5_amomin_d(std::int64_t *word, std::int64_t operand, std
 /*  No-return forms are the same operations with @c x0 as the destination - the ISA's own hint that
  *  nothing waits for the value; release is `.rl`, nothing to acquire. */
 
-inline void risc5_amoadd_w_x0(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+inline void riscv64_amoadd_w_x0(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoadd.w zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amoadd.w.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amoadd_d_x0(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+inline void riscv64_amoadd_d_x0(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoadd.d zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amoadd.d.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amoand_w_x0(std::uint32_t *word, std::uint32_t mask, std::memory_order order) noexcept {
+inline void riscv64_amoand_w_x0(std::uint32_t *word, std::uint32_t mask, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoand.w zero, %1, (%0)" : : "r"(word), "r"(mask) : "memory");
     else __asm__ __volatile__("amoand.w.rl zero, %1, (%0)" : : "r"(word), "r"(mask) : "memory");
 }
-inline void risc5_amoand_d_x0(std::uint64_t *word, std::uint64_t mask, std::memory_order order) noexcept {
+inline void riscv64_amoand_d_x0(std::uint64_t *word, std::uint64_t mask, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoand.d zero, %1, (%0)" : : "r"(word), "r"(mask) : "memory");
     else __asm__ __volatile__("amoand.d.rl zero, %1, (%0)" : : "r"(word), "r"(mask) : "memory");
 }
-inline void risc5_amoor_w_x0(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+inline void riscv64_amoor_w_x0(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoor.w zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoor.w.rl zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
 }
-inline void risc5_amoor_d_x0(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+inline void riscv64_amoor_d_x0(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoor.d zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoor.d.rl zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
 }
-inline void risc5_amoxor_w_x0(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
+inline void riscv64_amoxor_w_x0(std::uint32_t *word, std::uint32_t bits, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoxor.w zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoxor.w.rl zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
 }
-inline void risc5_amoxor_d_x0(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
+inline void riscv64_amoxor_d_x0(std::uint64_t *word, std::uint64_t bits, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amoxor.d zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
     else __asm__ __volatile__("amoxor.d.rl zero, %1, (%0)" : : "r"(word), "r"(bits) : "memory");
 }
-inline void risc5_amomaxu_w_x0(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+inline void riscv64_amomaxu_w_x0(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomaxu.w zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomaxu.w.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amomaxu_d_x0(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+inline void riscv64_amomaxu_d_x0(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomaxu.d zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomaxu.d.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amomax_w_x0(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
+inline void riscv64_amomax_w_x0(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomax.w zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomax.w.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amomax_d_x0(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
+inline void riscv64_amomax_d_x0(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomax.d zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomax.d.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amominu_w_x0(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
+inline void riscv64_amominu_w_x0(std::uint32_t *word, std::uint32_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amominu.w zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amominu.w.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amominu_d_x0(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
+inline void riscv64_amominu_d_x0(std::uint64_t *word, std::uint64_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amominu.d zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amominu.d.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amomin_w_x0(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
+inline void riscv64_amomin_w_x0(std::int32_t *word, std::int32_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomin.w zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomin.w.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
 }
-inline void risc5_amomin_d_x0(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
+inline void riscv64_amomin_d_x0(std::int64_t *word, std::int64_t operand, std::memory_order order) noexcept {
     if (order == std::memory_order_relaxed)
         __asm__ __volatile__("amomin.d zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
     else __asm__ __volatile__("amomin.d.rl zero, %1, (%0)" : : "r"(word), "r"(operand) : "memory");
@@ -4026,7 +4091,7 @@ inline void risc5_amomin_d_x0(std::int64_t *word, std::int64_t operand, std::mem
 /*  Load-reserved / store-conditional loops: the reservation must live inside one assembly block.
  *  `lr.w` sign-extends, so the 32-bit comparands travel sign-extended too. */
 
-inline std::uint32_t risc5_lr_sc_cas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
+inline std::uint32_t riscv64_lr_sc_cas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
     std::int64_t const wanted = static_cast<std::int32_t>(expected);
     std::int64_t observed, failed;
     __asm__ __volatile__("1:\n\t"                                       //
@@ -4040,7 +4105,7 @@ inline std::uint32_t risc5_lr_sc_cas_w(std::uint32_t *word, std::uint32_t expect
                          : "memory");
     return static_cast<std::uint32_t>(observed);
 }
-inline std::uint64_t risc5_lr_sc_cas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
+inline std::uint64_t riscv64_lr_sc_cas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
     std::uint64_t observed, failed;
     __asm__ __volatile__("1:\n\t"                                       //
                          "lr.d.aqrl %[observed], (%[word])\n\t"         //
@@ -4055,7 +4120,7 @@ inline std::uint64_t risc5_lr_sc_cas_d(std::uint64_t *word, std::uint64_t expect
 }
 
 /** A byte exchange without @c Zabha: the aligned word is reserved, the byte masked in. */
-inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired) noexcept {
+inline std::uint8_t riscv64_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired) noexcept {
     std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(byte);
     std::uint32_t *word = reinterpret_cast<std::uint32_t *>(address & ~std::uintptr_t {3});
     unsigned const shift = static_cast<unsigned>(address & 3) * 8;
@@ -4078,50 +4143,52 @@ inline std::uint8_t risc5_lr_sc_swap_b(std::uint8_t *byte, std::uint8_t desired)
  *  @brief @c std::atomic_ref over the RISC-V base A extension: one @c amo* per read-modify-write,
  *      @c x0 as the destination for the no-return forms, @c lr and @c sc loops for compare-exchange
  *      and byte exchanges, fences around the ordered loads & stores.
- *  @sa capability_risc5_atomic_k, the admitting bit; risc5_zacas_atomic_ref, using @c amocas.
+ *  @sa capability_riscv64_atomic_k, the admitting bit; riscv64_zacas_atomic_ref, using @c amocas.
  */
 template <typename value_type_>
-struct risc5_atomic_ref {
+struct riscv64_atomic_ref {
     static_assert(std::is_trivially_copyable_v<value_type_>, "Only trivially-copyable words are atomic");
     static_assert(sizeof(value_type_) == 1 || sizeof(value_type_) == 2 || sizeof(value_type_) == 4 ||
                       sizeof(value_type_) == 8,
                   "Only 8-, 16-, 32- and 64-bit words are spelled");
     using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
-    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k;
+    using signed_word_t = std::make_signed_t<word_t>;
+    static constexpr signed_word_t signed_bits_(word_t bits) noexcept { return std::bit_cast<signed_word_t>(bits); }
+    static constexpr capabilities_t capabilities_k = capability_riscv64_atomic_k;
 
-    explicit risc5_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
+    explicit riscv64_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
         assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
                "Atomics need a naturally aligned word");
     }
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        if (order == std::memory_order_seq_cst) risc5_fence_rw_rw();
+        if (order == std::memory_order_seq_cst) riscv64_fence_rw_rw();
         word_t word;
-        if constexpr (sizeof(value_type_) == 1) word = risc5_lbu(word_);
-        else if constexpr (sizeof(value_type_) == 2) word = risc5_lhu(word_);
-        else if constexpr (sizeof(value_type_) == 4) word = risc5_lw(word_);
-        else word = risc5_ld(word_);
-        if (acquires(order)) risc5_fence_r_rw();
+        if constexpr (sizeof(value_type_) == 1) word = riscv64_lbu(word_);
+        else if constexpr (sizeof(value_type_) == 2) word = riscv64_lhu(word_);
+        else if constexpr (sizeof(value_type_) == 4) word = riscv64_lw(word_);
+        else word = riscv64_ld(word_);
+        if (acquires(order)) riscv64_fence_r_rw();
         return std::bit_cast<value_type_>(word);
     }
     void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        if (releases(order)) risc5_fence_rw_w();
+        if (releases(order)) riscv64_fence_rw_w();
         word_t const word = std::bit_cast<word_t>(desired);
-        if constexpr (sizeof(value_type_) == 1) risc5_sb(word_, word);
-        else if constexpr (sizeof(value_type_) == 2) risc5_sh(word_, word);
-        else if constexpr (sizeof(value_type_) == 4) risc5_sw(word_, word);
-        else risc5_sd(word_, word);
-        if (order == std::memory_order_seq_cst) risc5_fence_rw_rw();
+        if constexpr (sizeof(value_type_) == 1) riscv64_sb(word_, word);
+        else if constexpr (sizeof(value_type_) == 2) riscv64_sh(word_, word);
+        else if constexpr (sizeof(value_type_) == 4) riscv64_sw(word_, word);
+        else riscv64_sd(word_, word);
+        if (order == std::memory_order_seq_cst) riscv64_fence_rw_rw();
     }
 
     value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         static_assert(sizeof(value_type_) != 2, "Zabha spells 16-bit exchange");
         word_t const word = std::bit_cast<word_t>(desired);
-        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(risc5_lr_sc_swap_b(word_, word));
+        if constexpr (sizeof(value_type_) == 1) return std::bit_cast<value_type_>(riscv64_lr_sc_swap_b(word_, word));
         else if constexpr (sizeof(value_type_) == 4)
-            return std::bit_cast<value_type_>(risc5_amoswap_w(word_, word, order));
-        else return std::bit_cast<value_type_>(risc5_amoswap_d(word_, word, order));
+            return std::bit_cast<value_type_>(riscv64_amoswap_w(word_, word, order));
+        else return std::bit_cast<value_type_>(riscv64_amoswap_d(word_, word, order));
     }
 
     bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order,
@@ -4130,8 +4197,8 @@ struct risc5_atomic_ref {
         word_t const wanted = std::bit_cast<word_t>(expected);
         word_t observed;
         if constexpr (sizeof(value_type_) == 4)
-            observed = risc5_lr_sc_cas_w(word_, wanted, std::bit_cast<word_t>(desired));
-        else observed = risc5_lr_sc_cas_d(word_, wanted, std::bit_cast<word_t>(desired));
+            observed = riscv64_lr_sc_cas_w(word_, wanted, std::bit_cast<word_t>(desired));
+        else observed = riscv64_lr_sc_cas_d(word_, wanted, std::bit_cast<word_t>(desired));
         expected = std::bit_cast<value_type_>(observed);
         return observed == wanted;
     }
@@ -4153,8 +4220,8 @@ struct risc5_atomic_ref {
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word fetch-add");
         word_t const word = std::bit_cast<word_t>(operand);
-        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(risc5_amoadd_w(word_, word, order));
-        else return std::bit_cast<value_type_>(risc5_amoadd_d(word_, word, order));
+        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(riscv64_amoadd_w(word_, word, order));
+        else return std::bit_cast<value_type_>(riscv64_amoadd_d(word_, word, order));
     }
     value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -4167,24 +4234,24 @@ struct risc5_atomic_ref {
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word fetch-and");
         word_t const word = std::bit_cast<word_t>(mask);
-        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(risc5_amoand_w(word_, word, order));
-        else return std::bit_cast<value_type_>(risc5_amoand_d(word_, word, order));
+        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(riscv64_amoand_w(word_, word, order));
+        else return std::bit_cast<value_type_>(riscv64_amoand_d(word_, word, order));
     }
     value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word fetch-or");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(risc5_amoor_w(word_, word, order));
-        else return std::bit_cast<value_type_>(risc5_amoor_d(word_, word, order));
+        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(riscv64_amoor_w(word_, word, order));
+        else return std::bit_cast<value_type_>(riscv64_amoor_d(word_, word, order));
     }
     value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word fetch-xor");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(risc5_amoxor_w(word_, word, order));
-        else return std::bit_cast<value_type_>(risc5_amoxor_d(word_, word, order));
+        if constexpr (sizeof(value_type_) == 4) return std::bit_cast<value_type_>(riscv64_amoxor_w(word_, word, order));
+        else return std::bit_cast<value_type_>(riscv64_amoxor_d(word_, word, order));
     }
 
     /** Native in the base A extension: @c amomax and @c amomaxu, @c amomin and @c amominu. */
@@ -4192,25 +4259,31 @@ struct risc5_atomic_ref {
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word maxima");
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return static_cast<value_type_>(risc5_amomax_w(reinterpret_cast<std::int32_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_>)
-            return static_cast<value_type_>(risc5_amomax_d(reinterpret_cast<std::int64_t *>(word_), operand, order));
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(
+                riscv64_amomax_w(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return std::bit_cast<value_type_>(
+                riscv64_amomax_d(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order));
         else if constexpr (sizeof(value_type_) == 4)
-            return static_cast<value_type_>(risc5_amomaxu_w(word_, operand, order));
-        else return static_cast<value_type_>(risc5_amomaxu_d(word_, operand, order));
+            return std::bit_cast<value_type_>(riscv64_amomaxu_w(word_, bits, order));
+        else return std::bit_cast<value_type_>(riscv64_amomaxu_d(word_, bits, order));
     }
     value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word minima");
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            return static_cast<value_type_>(risc5_amomin_w(reinterpret_cast<std::int32_t *>(word_), operand, order));
-        else if constexpr (std::signed_integral<value_type_>)
-            return static_cast<value_type_>(risc5_amomin_d(reinterpret_cast<std::int64_t *>(word_), operand, order));
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            return std::bit_cast<value_type_>(
+                riscv64_amomin_w(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order));
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return std::bit_cast<value_type_>(
+                riscv64_amomin_d(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order));
         else if constexpr (sizeof(value_type_) == 4)
-            return static_cast<value_type_>(risc5_amominu_w(word_, operand, order));
-        else return static_cast<value_type_>(risc5_amominu_d(word_, operand, order));
+            return std::bit_cast<value_type_>(riscv64_amominu_w(word_, bits, order));
+        else return std::bit_cast<value_type_>(riscv64_amominu_d(word_, bits, order));
     }
 
     /** Floats through the integer forms on their bits: a non-negative operand orders like a signed
@@ -4238,8 +4311,8 @@ struct risc5_atomic_ref {
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return add");
         word_t const word = std::bit_cast<word_t>(operand);
-        if constexpr (sizeof(value_type_) == 4) risc5_amoadd_w_x0(word_, word, order);
-        else risc5_amoadd_d_x0(word_, word, order);
+        if constexpr (sizeof(value_type_) == 4) riscv64_amoadd_w_x0(word_, word, order);
+        else riscv64_amoadd_d_x0(word_, word, order);
     }
     void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -4251,56 +4324,60 @@ struct risc5_atomic_ref {
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return set");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) risc5_amoor_w_x0(word_, word, order);
-        else risc5_amoor_d_x0(word_, word, order);
+        if constexpr (sizeof(value_type_) == 4) riscv64_amoor_w_x0(word_, word, order);
+        else riscv64_amoor_d_x0(word_, word, order);
     }
     void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return clear");
         word_t const mask = static_cast<word_t>(~std::bit_cast<word_t>(bits));
-        if constexpr (sizeof(value_type_) == 4) risc5_amoand_w_x0(word_, mask, order);
-        else risc5_amoand_d_x0(word_, mask, order);
+        if constexpr (sizeof(value_type_) == 4) riscv64_amoand_w_x0(word_, mask, order);
+        else riscv64_amoand_d_x0(word_, mask, order);
     }
     void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return flip");
         word_t const word = std::bit_cast<word_t>(bits);
-        if constexpr (sizeof(value_type_) == 4) risc5_amoxor_w_x0(word_, word, order);
-        else risc5_amoxor_d_x0(word_, word, order);
+        if constexpr (sizeof(value_type_) == 4) riscv64_amoxor_w_x0(word_, word, order);
+        else riscv64_amoxor_d_x0(word_, word, order);
     }
     bool fetch_test_and_set_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_or(static_cast<value_type_>(value_type_ {1} << bit), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(word_t {1} << bit);
+        return (std::bit_cast<word_t>(fetch_or(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_and(static_cast<value_type_>(~(value_type_ {1} << bit)), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
+        return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return maxima");
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            risc5_amomax_w_x0(reinterpret_cast<std::int32_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_>)
-            risc5_amomax_d_x0(reinterpret_cast<std::int64_t *>(word_), operand, order);
-        else if constexpr (sizeof(value_type_) == 4) risc5_amomaxu_w_x0(word_, operand, order);
-        else risc5_amomaxu_d_x0(word_, operand, order);
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            riscv64_amomax_w_x0(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            riscv64_amomax_d_x0(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (sizeof(value_type_) == 4) riscv64_amomaxu_w_x0(word_, bits, order);
+        else riscv64_amomaxu_d_x0(word_, bits, order);
     }
     void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return minima");
-        if constexpr (std::signed_integral<value_type_> && sizeof(value_type_) == 4)
-            risc5_amomin_w_x0(reinterpret_cast<std::int32_t *>(word_), operand, order);
-        else if constexpr (std::signed_integral<value_type_>)
-            risc5_amomin_d_x0(reinterpret_cast<std::int64_t *>(word_), operand, order);
-        else if constexpr (sizeof(value_type_) == 4) risc5_amominu_w_x0(word_, operand, order);
-        else risc5_amominu_d_x0(word_, operand, order);
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed && sizeof(value_type_) == 4)
+            riscv64_amomin_w_x0(reinterpret_cast<std::int32_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            riscv64_amomin_d_x0(reinterpret_cast<std::int64_t *>(word_), signed_bits_(bits), order);
+        else if constexpr (sizeof(value_type_) == 4) riscv64_amominu_w_x0(word_, bits, order);
+        else riscv64_amominu_d_x0(word_, bits, order);
     }
     void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_float<value_type_>
@@ -4351,43 +4428,40 @@ struct risc5_atomic_ref {
   private:
     word_t *word_;
 
-    using signed_word_t = std::make_signed_t<word_t>;
-    static constexpr signed_word_t signed_bits_(word_t bits) noexcept { return std::bit_cast<signed_word_t>(bits); }
-
     /** The same word as integers, for floats ordered through their bits. */
-    risc5_atomic_ref<signed_word_t> signed_word_() const noexcept {
-        return risc5_atomic_ref<signed_word_t>(*reinterpret_cast<signed_word_t *>(word_));
+    riscv64_atomic_ref<signed_word_t> signed_word_() const noexcept {
+        return riscv64_atomic_ref<signed_word_t>(*reinterpret_cast<signed_word_t *>(word_));
     }
-    risc5_atomic_ref<word_t> unsigned_word_() const noexcept { return risc5_atomic_ref<word_t>(*word_); }
+    riscv64_atomic_ref<word_t> unsigned_word_() const noexcept { return riscv64_atomic_ref<word_t>(*word_); }
 };
 
 /**
- *  @brief Read-only access through @ref risc5_atomic_ref: the same loads over a const pointer, so
+ *  @brief Read-only access through @ref riscv64_atomic_ref: the same loads over a const pointer, so
  *      no cast exists.
  *  @sa standard_atomic_ref<value_type_ const>
  */
 template <typename value_type_>
-struct risc5_atomic_ref<value_type_ const> {
+struct riscv64_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
     using word_t = atomic_word<value_type_>;
-    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k;
+    static constexpr capabilities_t capabilities_k = capability_riscv64_atomic_k;
 
-    explicit risc5_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {
+    explicit riscv64_atomic_ref(value_type_ const &word) noexcept : word_(reinterpret_cast<word_t const *>(&word)) {
         assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
                "Atomics need a naturally aligned word");
     }
 
     /** A temporary would die before the reference does. */
-    risc5_atomic_ref(value_type_ const &&) = delete;
+    riscv64_atomic_ref(value_type_ const &&) = delete;
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
-        if (order == std::memory_order_seq_cst) risc5_fence_rw_rw();
+        if (order == std::memory_order_seq_cst) riscv64_fence_rw_rw();
         word_t word;
-        if constexpr (sizeof(value_type_) == 1) word = risc5_lbu(word_);
-        else if constexpr (sizeof(value_type_) == 2) word = risc5_lhu(word_);
-        else if constexpr (sizeof(value_type_) == 4) word = risc5_lw(word_);
-        else word = risc5_ld(word_);
-        if (acquires(order)) risc5_fence_r_rw();
+        if constexpr (sizeof(value_type_) == 1) word = riscv64_lbu(word_);
+        else if constexpr (sizeof(value_type_) == 2) word = riscv64_lhu(word_);
+        else if constexpr (sizeof(value_type_) == 4) word = riscv64_lw(word_);
+        else word = riscv64_ld(word_);
+        if (acquires(order)) riscv64_fence_r_rw();
         return std::bit_cast<value_type_>(word);
     }
 
@@ -4395,7 +4469,7 @@ struct risc5_atomic_ref<value_type_ const> {
     word_t const *word_;
 };
 
-#pragma endregion RISC5 A
+#pragma endregion RISCV64 A
 
 #endif // FORKUNION_TARGET_RISCV64_ATOMIC
 
@@ -4406,9 +4480,9 @@ struct risc5_atomic_ref<value_type_ const> {
  *  as the address, @c a2 as the desired value. A baseline @c rv64gc build then assembles them and
  *  the runtime bit decides. */
 #if FORKUNION_TARGET_RISCV64_ZACAS
-#pragma region RISC5 Zacas
+#pragma region RISCV64 Zacas
 
-inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
+inline std::uint32_t riscv64_amocas_w(std::uint32_t *word, std::uint32_t expected, std::uint32_t desired) noexcept {
     register std::int64_t observed __asm__("a0") = static_cast<std::int32_t>(expected);
     register std::uint32_t *address __asm__("a1") = word;
     register std::uint32_t value __asm__("a2") = desired;
@@ -4418,7 +4492,7 @@ inline std::uint32_t risc5_amocas_w(std::uint32_t *word, std::uint32_t expected,
                          : "memory"); // ? `amocas.w.aqrl a0, a2, (a1)`
     return static_cast<std::uint32_t>(observed);
 }
-inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
+inline std::uint64_t riscv64_amocas_d(std::uint64_t *word, std::uint64_t expected, std::uint64_t desired) noexcept {
     register std::uint64_t observed __asm__("a0") = expected;
     register std::uint64_t *address __asm__("a1") = word;
     register std::uint64_t value __asm__("a2") = desired;
@@ -4432,15 +4506,16 @@ inline std::uint64_t risc5_amocas_d(std::uint64_t *word, std::uint64_t expected,
 /**
  *  @brief @c Zacas atop the base: one @c amocas compare-exchange instead of an
  *      @c lr and @c sc loop.
- *  @sa capability_risc5_zacas_k, the admitting bit; risc5_atomic_ref, the reference it composes.
+ *  @sa capability_riscv64_zacas_k, the admitting bit;
+ *      riscv64_atomic_ref, the reference it composes.
  */
 template <typename value_type_>
-struct risc5_zacas_atomic_ref {
+struct riscv64_zacas_atomic_ref {
     using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
-    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k | capability_risc5_zacas_k;
+    static constexpr capabilities_t capabilities_k = capability_riscv64_atomic_k | capability_riscv64_zacas_k;
 
-    explicit risc5_zacas_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
+    explicit riscv64_zacas_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
         assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
                "Atomics need a naturally aligned word");
     }
@@ -4461,8 +4536,8 @@ struct risc5_zacas_atomic_ref {
         word_t const wanted = std::bit_cast<word_t>(expected);
         word_t observed;
         if constexpr (sizeof(value_type_) == 4)
-            observed = risc5_amocas_w(word_, wanted, std::bit_cast<word_t>(desired));
-        else observed = risc5_amocas_d(word_, wanted, std::bit_cast<word_t>(desired));
+            observed = riscv64_amocas_w(word_, wanted, std::bit_cast<word_t>(desired));
+        else observed = riscv64_amocas_d(word_, wanted, std::bit_cast<word_t>(desired));
         expected = std::bit_cast<value_type_>(observed);
         return observed == wanted;
     }
@@ -4582,36 +4657,36 @@ struct risc5_zacas_atomic_ref {
 
   private:
     /** The previous rung, built on demand: it holds this same pointer and nothing else. */
-    risc5_atomic_ref<value_type_> weaker_() const noexcept {
-        return risc5_atomic_ref<value_type_>(*reinterpret_cast<value_type_ *>(word_));
+    riscv64_atomic_ref<value_type_> weaker_() const noexcept {
+        return riscv64_atomic_ref<value_type_>(*reinterpret_cast<value_type_ *>(word_));
     }
 
     word_t *word_;
 };
 
 /**
- *  @brief Read-only access through @ref risc5_zacas_atomic_ref, which specializes no load.
+ *  @brief Read-only access through @ref riscv64_zacas_atomic_ref, which specializes no load.
  *  @sa standard_atomic_ref<value_type_ const>
  */
 template <typename value_type_>
-struct risc5_zacas_atomic_ref<value_type_ const> {
+struct riscv64_zacas_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
-    static constexpr capabilities_t capabilities_k = capability_risc5_atomic_k | capability_risc5_zacas_k;
+    static constexpr capabilities_t capabilities_k = capability_riscv64_atomic_k | capability_riscv64_zacas_k;
 
-    explicit risc5_zacas_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+    explicit riscv64_zacas_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
 
     /** A temporary would die before the reference does. */
-    risc5_zacas_atomic_ref(value_type_ const &&) = delete;
+    riscv64_zacas_atomic_ref(value_type_ const &&) = delete;
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return portable_.load(order);
     }
 
   private:
-    risc5_atomic_ref<value_type_ const> portable_;
+    riscv64_atomic_ref<value_type_ const> portable_;
 };
 
-#pragma endregion RISC5 Zacas
+#pragma endregion RISCV64 Zacas
 
 #endif // FORKUNION_TARGET_RISCV64_ZACAS
 
@@ -4620,33 +4695,33 @@ struct risc5_zacas_atomic_ref<value_type_ const> {
  *  pinned - @c a0 the comparand and the result, @c a1 the address, @c a2 the operand - funct3
  *  @c 000 for bytes and @c 001 for halfwords, both @c aq and @c rl set. */
 #if FORKUNION_TARGET_RISCV64_ZABHA
-#pragma region RISC5 Zabha
+#pragma region RISCV64 Zabha
 
-inline constexpr std::uint32_t risc5_amoswap_b_k = 0x0ec5852f; // ? `amoswap.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoswap_h_k = 0x0ec5952f; // ? `amoswap.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amocas_b_k = 0x2ec5852f;  // ? `amocas.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amocas_h_k = 0x2ec5952f;  // ? `amocas.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoadd_b_k = 0x06c5852f;  // ? `amoadd.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoadd_h_k = 0x06c5952f;  // ? `amoadd.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoand_b_k = 0x66c5852f;  // ? `amoand.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoand_h_k = 0x66c5952f;  // ? `amoand.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoor_b_k = 0x46c5852f;   // ? `amoor.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoor_h_k = 0x46c5952f;   // ? `amoor.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoxor_b_k = 0x26c5852f;  // ? `amoxor.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amoxor_h_k = 0x26c5952f;  // ? `amoxor.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amomax_b_k = 0xa6c5852f;  // ? `amomax.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amomax_h_k = 0xa6c5952f;  // ? `amomax.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amomaxu_b_k = 0xe6c5852f; // ? `amomaxu.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amomaxu_h_k = 0xe6c5952f; // ? `amomaxu.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amomin_b_k = 0x86c5852f;  // ? `amomin.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amomin_h_k = 0x86c5952f;  // ? `amomin.h.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amominu_b_k = 0xc6c5852f; // ? `amominu.b.aqrl a0, a2, (a1)`
-inline constexpr std::uint32_t risc5_amominu_h_k = 0xc6c5952f; // ? `amominu.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoswap_b_k = 0x0ec5852f; // ? `amoswap.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoswap_h_k = 0x0ec5952f; // ? `amoswap.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amocas_b_k = 0x2ec5852f;  // ? `amocas.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amocas_h_k = 0x2ec5952f;  // ? `amocas.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoadd_b_k = 0x06c5852f;  // ? `amoadd.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoadd_h_k = 0x06c5952f;  // ? `amoadd.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoand_b_k = 0x66c5852f;  // ? `amoand.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoand_h_k = 0x66c5952f;  // ? `amoand.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoor_b_k = 0x46c5852f;   // ? `amoor.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoor_h_k = 0x46c5952f;   // ? `amoor.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoxor_b_k = 0x26c5852f;  // ? `amoxor.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amoxor_h_k = 0x26c5952f;  // ? `amoxor.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amomax_b_k = 0xa6c5852f;  // ? `amomax.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amomax_h_k = 0xa6c5952f;  // ? `amomax.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amomaxu_b_k = 0xe6c5852f; // ? `amomaxu.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amomaxu_h_k = 0xe6c5952f; // ? `amomaxu.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amomin_b_k = 0x86c5852f;  // ? `amomin.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amomin_h_k = 0x86c5952f;  // ? `amomin.h.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amominu_b_k = 0xc6c5852f; // ? `amominu.b.aqrl a0, a2, (a1)`
+inline constexpr std::uint32_t riscv64_amominu_h_k = 0xc6c5952f; // ? `amominu.h.aqrl a0, a2, (a1)`
 
 /** One pinned @c amo word from the table above: @c a0 carries the comparand in and what the word
  *  held out, sign-extended. */
 template <std::uint32_t instruction_>
-inline std::uint64_t risc5_zabha_amo(void *word, std::uint64_t operand, std::uint64_t comparand) noexcept {
+inline std::uint64_t riscv64_zabha_amo(void *word, std::uint64_t operand, std::uint64_t comparand) noexcept {
     register std::uint64_t observed __asm__("a0") = comparand;
     register void *address __asm__("a1") = word;
     register std::uint64_t value __asm__("a2") = operand;
@@ -4657,23 +4732,25 @@ inline std::uint64_t risc5_zabha_amo(void *word, std::uint64_t operand, std::uin
 /**
  *  @brief @c Zabha atop @c Zacas: every read-modify-write of a byte or halfword as one @c amo,
  *      where the lower rungs loop over the aligned word or refuse to compile.
- *  @sa capability_risc5_zabha_k, the admitting bit; risc5_zacas_atomic_ref, the reference it
+ *  @sa capability_riscv64_zabha_k, the admitting bit; riscv64_zacas_atomic_ref, the reference it
  *      composes for 32- and 64-bit words.
  *
  *  Every byte and halfword @c amo runs @c aqrl whatever the order, as the @c amocas words do.
  */
 template <typename value_type_>
-struct risc5_zabha_atomic_ref {
+struct riscv64_zabha_atomic_ref {
     static_assert(std::is_trivially_copyable_v<value_type_>, "Only trivially-copyable words are atomic");
     static_assert(sizeof(value_type_) == 1 || sizeof(value_type_) == 2 || sizeof(value_type_) == 4 ||
                       sizeof(value_type_) == 8,
                   "Only 8-, 16-, 32- and 64-bit words are spelled");
     using value_t = value_type_;
     using word_t = atomic_word<value_type_>;
+    using signed_word_t = std::make_signed_t<word_t>;
+    static constexpr signed_word_t signed_bits_(word_t bits) noexcept { return std::bit_cast<signed_word_t>(bits); }
     static constexpr capabilities_t capabilities_k =
-        capability_risc5_atomic_k | capability_risc5_zacas_k | capability_risc5_zabha_k;
+        capability_riscv64_atomic_k | capability_riscv64_zacas_k | capability_riscv64_zabha_k;
 
-    explicit risc5_zabha_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
+    explicit riscv64_zabha_atomic_ref(value_type_ &word) noexcept : word_(reinterpret_cast<word_t *>(&word)) {
         assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
                "Atomics need a naturally aligned word");
     }
@@ -4686,7 +4763,7 @@ struct risc5_zabha_atomic_ref {
     }
     value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         if constexpr (sizeof(value_type_) >= 4) return weaker_().exchange(desired, order);
-        else return amo_<risc5_amoswap_b_k, risc5_amoswap_h_k>(desired);
+        else return amo_<riscv64_amoswap_b_k, riscv64_amoswap_h_k>(desired);
     }
 
     bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
@@ -4695,10 +4772,9 @@ struct risc5_zabha_atomic_ref {
             return weaker_().compare_exchange_strong(expected, desired, success, failure);
         else {
             word_t const wanted = std::bit_cast<word_t>(expected);
-            using signed_word_t = std::make_signed_t<word_t>;
-            std::uint64_t const comparand = static_cast<std::uint64_t>(std::bit_cast<signed_word_t>(wanted));
-            word_t const observed =
-                static_cast<word_t>(risc5_zabha_amo<sizeof(value_type_) == 1 ? risc5_amocas_b_k : risc5_amocas_h_k>(
+            std::uint64_t const comparand = static_cast<std::uint64_t>(signed_bits_(wanted));
+            word_t const observed = static_cast<word_t>(
+                riscv64_zabha_amo<sizeof(value_type_) == 1 ? riscv64_amocas_b_k : riscv64_amocas_h_k>(
                     word_, std::bit_cast<word_t>(desired), comparand));
             expected = std::bit_cast<value_type_>(observed);
             return observed == wanted;
@@ -4721,7 +4797,7 @@ struct risc5_zabha_atomic_ref {
         requires atomic_integer<value_type_>
     {
         if constexpr (sizeof(value_type_) >= 4) return weaker_().fetch_add(operand, order);
-        else return amo_<risc5_amoadd_b_k, risc5_amoadd_h_k>(operand);
+        else return amo_<riscv64_amoadd_b_k, riscv64_amoadd_h_k>(operand);
     }
     value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -4733,33 +4809,35 @@ struct risc5_zabha_atomic_ref {
         requires atomic_integer<value_type_>
     {
         if constexpr (sizeof(value_type_) >= 4) return weaker_().fetch_and(mask, order);
-        else return amo_<risc5_amoand_b_k, risc5_amoand_h_k>(mask);
+        else return amo_<riscv64_amoand_b_k, riscv64_amoand_h_k>(mask);
     }
     value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         if constexpr (sizeof(value_type_) >= 4) return weaker_().fetch_or(bits, order);
-        else return amo_<risc5_amoor_b_k, risc5_amoor_h_k>(bits);
+        else return amo_<riscv64_amoor_b_k, riscv64_amoor_h_k>(bits);
     }
     value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         if constexpr (sizeof(value_type_) >= 4) return weaker_().fetch_xor(bits, order);
-        else return amo_<risc5_amoxor_b_k, risc5_amoxor_h_k>(bits);
+        else return amo_<riscv64_amoxor_b_k, riscv64_amoxor_h_k>(bits);
     }
     value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
         if constexpr (sizeof(value_type_) >= 4) return weaker_().fetch_max(operand, order);
-        else if constexpr (std::signed_integral<value_type_>) return amo_<risc5_amomax_b_k, risc5_amomax_h_k>(operand);
-        else return amo_<risc5_amomaxu_b_k, risc5_amomaxu_h_k>(operand);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return amo_<riscv64_amomax_b_k, riscv64_amomax_h_k>(operand);
+        else return amo_<riscv64_amomaxu_b_k, riscv64_amomaxu_h_k>(operand);
     }
     value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
         if constexpr (sizeof(value_type_) >= 4) return weaker_().fetch_min(operand, order);
-        else if constexpr (std::signed_integral<value_type_>) return amo_<risc5_amomin_b_k, risc5_amomin_h_k>(operand);
-        else return amo_<risc5_amominu_b_k, risc5_amominu_h_k>(operand);
+        else if constexpr (std::numeric_limits<value_type_>::is_signed)
+            return amo_<riscv64_amomin_b_k, riscv64_amomin_h_k>(operand);
+        else return amo_<riscv64_amominu_b_k, riscv64_amominu_h_k>(operand);
     }
 
     /** No-return forms: the @c x0 words for 32 and 64 bits, the returning ones for the rest. */
@@ -4785,7 +4863,7 @@ struct risc5_zabha_atomic_ref {
         requires atomic_integer<value_type_>
     {
         if constexpr (sizeof(value_type_) >= 4) weaker_().clear_bits(bits, order);
-        else fetch_and(static_cast<value_type_>(~bits), order);
+        else fetch_and(std::bit_cast<value_type_>(static_cast<word_t>(~std::bit_cast<word_t>(bits))), order);
     }
     void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
@@ -4796,12 +4874,14 @@ struct risc5_zabha_atomic_ref {
     bool fetch_test_and_set_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_or(static_cast<value_type_>(value_type_ {1} << bit), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(word_t {1} << bit);
+        return (std::bit_cast<word_t>(fetch_or(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_and(static_cast<value_type_>(~(value_type_ {1} << bit)), order) >> bit) & 1;
+        word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
+        return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
     void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
@@ -4851,8 +4931,8 @@ struct risc5_zabha_atomic_ref {
 
   private:
     /** The previous rung, built on demand: it holds this same pointer and nothing else. */
-    risc5_zacas_atomic_ref<value_type_> weaker_() const noexcept {
-        return risc5_zacas_atomic_ref<value_type_>(*reinterpret_cast<value_type_ *>(word_));
+    riscv64_zacas_atomic_ref<value_type_> weaker_() const noexcept {
+        return riscv64_zacas_atomic_ref<value_type_>(*reinterpret_cast<value_type_ *>(word_));
     }
 
     /** One byte or halfword @c amo: signed operands travel sign-extended, the answer comes back
@@ -4860,41 +4940,42 @@ struct risc5_zabha_atomic_ref {
     template <std::uint32_t byte_instruction_, std::uint32_t halfword_instruction_>
     value_type_ amo_(value_type_ operand) const noexcept {
         std::uint64_t register_operand;
-        if constexpr (std::signed_integral<value_type_>)
-            register_operand = static_cast<std::uint64_t>(static_cast<std::int64_t>(operand));
-        else register_operand = std::bit_cast<word_t>(operand);
+        word_t const bits = std::bit_cast<word_t>(operand);
+        if constexpr (std::numeric_limits<value_type_>::is_signed)
+            register_operand = static_cast<std::uint64_t>(static_cast<std::int64_t>(signed_bits_(bits)));
+        else register_operand = bits;
         constexpr std::uint32_t instruction_k = sizeof(value_type_) == 1 ? byte_instruction_ : halfword_instruction_;
         return std::bit_cast<value_type_>(
-            static_cast<word_t>(risc5_zabha_amo<instruction_k>(word_, register_operand, std::uint64_t {0})));
+            static_cast<word_t>(riscv64_zabha_amo<instruction_k>(word_, register_operand, std::uint64_t {0})));
     }
 
     word_t *word_;
 };
 
 /**
- *  @brief Read-only access through @ref risc5_zabha_atomic_ref, which specializes no load.
+ *  @brief Read-only access through @ref riscv64_zabha_atomic_ref, which specializes no load.
  *  @sa standard_atomic_ref<value_type_ const>
  */
 template <typename value_type_>
-struct risc5_zabha_atomic_ref<value_type_ const> {
+struct riscv64_zabha_atomic_ref<value_type_ const> {
     using value_t = value_type_ const;
     static constexpr capabilities_t capabilities_k =
-        capability_risc5_atomic_k | capability_risc5_zacas_k | capability_risc5_zabha_k;
+        capability_riscv64_atomic_k | capability_riscv64_zacas_k | capability_riscv64_zabha_k;
 
-    explicit risc5_zabha_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+    explicit riscv64_zabha_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
 
     /** A temporary would die before the reference does. */
-    risc5_zabha_atomic_ref(value_type_ const &&) = delete;
+    riscv64_zabha_atomic_ref(value_type_ const &&) = delete;
 
     value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return portable_.load(order);
     }
 
   private:
-    risc5_atomic_ref<value_type_ const> portable_;
+    riscv64_atomic_ref<value_type_ const> portable_;
 };
 
-#pragma endregion RISC5 Zabha
+#pragma endregion RISCV64 Zabha
 
 #endif // FORKUNION_TARGET_RISCV64_ZABHA
 
@@ -5062,12 +5143,16 @@ struct wasm_atomic_ref {
     bool fetch_test_and_set_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_or(static_cast<value_type_>(value_type_ {1} << bit), order) >> bit) & 1;
+        bool const was_set = weaker_().fetch_test_and_set_bit(bit, order);
+        notify_(order);
+        return was_set;
     }
     bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
-        return (fetch_and(static_cast<value_type_>(~(value_type_ {1} << bit)), order) >> bit) & 1;
+        bool const was_set = weaker_().fetch_test_and_reset_bit(bit, order);
+        notify_(order);
+        return was_set;
     }
     void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
@@ -5140,13 +5225,13 @@ template <typename value_type_>
 using preferred_atomic_ref = x86_cmpccxadd_atomic_ref<value_type_>;
 #elif FORKUNION_TARGET_RISCV64_ZABHA
 template <typename value_type_>
-using preferred_atomic_ref = risc5_zabha_atomic_ref<value_type_>;
+using preferred_atomic_ref = riscv64_zabha_atomic_ref<value_type_>;
 #elif FORKUNION_TARGET_RISCV64_ZACAS
 template <typename value_type_>
-using preferred_atomic_ref = risc5_zacas_atomic_ref<value_type_>;
+using preferred_atomic_ref = riscv64_zacas_atomic_ref<value_type_>;
 #elif FORKUNION_TARGET_RISCV64_ATOMIC
 template <typename value_type_>
-using preferred_atomic_ref = risc5_atomic_ref<value_type_>;
+using preferred_atomic_ref = riscv64_atomic_ref<value_type_>;
 #elif FORKUNION_TARGET_WASM_WAIT
 template <typename value_type_>
 using preferred_atomic_ref = wasm_atomic_ref<value_type_>;

@@ -110,7 +110,7 @@ jobs:
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libomp-dev
-          cmake --preset release
+          cmake --preset release -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
           cmake --build --preset release
 
       # CMake registers every test it builds - compiler-extension ones included - so `ctest` is the
@@ -225,7 +225,7 @@ jobs:
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libomp-dev
-          cmake --preset debug
+          cmake --preset debug -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
           cmake --build --preset debug
 
       - name: Test C & C++
@@ -263,7 +263,7 @@ jobs:
 
       - name: Build under the sanitizer
         run: |
-          cmake --preset ${{ matrix.preset }}
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
           cmake --build --preset ${{ matrix.preset }}
 
       - name: Test under the sanitizer
@@ -347,7 +347,7 @@ jobs:
           echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libomp-dev
-          cmake --preset release -D FORKUNION_WITH_TOPOLOGY=ON
+          cmake --preset release -D FORKUNION_WITH_TOPOLOGY=ON -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
           cmake --build --preset release
 
       - name: Test C & C++
@@ -683,7 +683,7 @@ jobs:
       - name: Build & test
         run: |
           set -eux
-          cmake --preset release
+          cmake --preset release -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
           cmake --build --preset release --target forkunion_test_cpp20 forkunion_test_c11
           build_release/forkunion_test_cpp20
           build_release/forkunion_test_c11
@@ -862,7 +862,7 @@ jobs:
       - name: Build & test C++ and the C shim with ${{ matrix.name }}
         run: |
           set -euxo pipefail
-          cmake --preset release -D CMAKE_CXX_COMPILER=g++ ${{ matrix.options }}
+          cmake --preset release -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++ ${{ matrix.options }}
           cmake --build --preset release --target forkunion_test_cpp20 forkunion_static
           ctest --preset release -R '^forkunion_test_cpp20$'
           # The artifact must name no library but the C one: a `numa_*` here is a build host's packages
@@ -991,6 +991,32 @@ jobs:
           test -n "$DEVICE_ID"
           xcrun simctl boot "$DEVICE_ID"
           xcrun simctl spawn "$DEVICE_ID" "$PWD/build_ios_simulator/forkunion_test_cpp20.app/forkunion_test_cpp20"
+
+  # Each machine profile builds the libraries for one CPU, compile only; the Arm ones build natively on Arm runners, and
+  # Clang 22 is the first to know Olympus.
+  build_machine_profile:
+    name: Build Machine Profile ${{ matrix.preset }}
+    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [xeon4_hopper, xeon6_blackwell, grace_hopper, vera_rubin]
+    steps:
+      - name: Install Clang 22
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update && sudo apt-get install -y clang-22
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22
+          cmake --build --preset ${{ matrix.preset }}
 
   build_docs:
     name: Build Docs

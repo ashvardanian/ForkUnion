@@ -14,5 +14,5 @@ int main() {
                          :
                          : "c"(operand), "a"(&word)
                          : "memory"); // ? `aadd %ecx, (%rax)`
-    return static_cast<int>(word);
+    return static_cast<int>(word != operand);
 }
