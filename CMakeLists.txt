@@ -109,120 +109,14 @@ target_include_directories(
 # none, so it would be a no-op that reads like a cap.
 target_compile_features(forkunion_header INTERFACE cxx_std_20)
 
+include(cmake/forkunion_platform.cmake)
+
 # One compile probe per capability under `probes/`, defining `FORKUNION_TARGET_<CAPABILITY>` as the toolchain compiles
 # it through `forkunion::cpu_capabilities_compiled`, never through `forkunion_header`, whose consumers read the
 # compilation target's promise in `types.hpp`.
 include(cmake/forkunion_probes.cmake)
 
-# FORKUNION_TARGET_ARCH tunes ForkUnion's own units, its tests and benchmarks included, for one CPU: `native` for this
-# host, or a CPU name, also when cross-compiling. The runtime still picks each instruction-level path by detection.
-if (FORKUNION_TARGET_ARCH STREQUAL "native" AND CMAKE_CROSSCOMPILING)
-    message(FATAL_ERROR "FORKUNION_TARGET_ARCH=native needs the host as the target; name a CPU instead")
-elseif (EMSCRIPTEN OR CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
-    # WebAssembly tiers like `v128` name SIMD levels that ForkUnion has no units for, so they add no flags.
-elseif (FORKUNION_TARGET_ARCH)
-    message(
-        WARNING
-            "FORKUNION_TARGET_ARCH=${FORKUNION_TARGET_ARCH}: baking specific instructions; result may not run elsewhere"
-    )
-    if (MSVC AND FORKUNION_TARGET_ARCH STREQUAL "native")
-        # MSVC has no `/arch:native`, and no capability row needs unit flags, so the toolchain default stays.
-    elseif (MSVC)
-        message(
-            FATAL_ERROR
-                "MSVC takes FORKUNION_TARGET_ARCH=native only; pass an /arch: value such as AVX2 or armv8.1 through "
-                "CMAKE_CXX_FLAGS instead of `${FORKUNION_TARGET_ARCH}`"
-        )
-    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|AARCH64|arm64|ARM64")
-        # AArch64 names CPUs through `-mcpu`, like `neoverse-v2`, as `-march` takes only architecture versions; Apple
-        # Clang's `-march=native` also advertises just a subset of host features.
-        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-mcpu=${FORKUNION_TARGET_ARCH}>")
-    else ()
-        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-march=${FORKUNION_TARGET_ARCH}>")
-    endif ()
-endif ()
-
-# Sanitizers instrument every target this directory builds, never the probes, and never a parent project's own targets.
-if (FORKUNION_BUILD_SANITIZERS STREQUAL "address" AND MSVC)
-    add_compile_options(/fsanitize=address)
-elseif (FORKUNION_BUILD_SANITIZERS STREQUAL "address")
-    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
-    add_link_options(-fsanitize=address,undefined)
-elseif (FORKUNION_BUILD_SANITIZERS STREQUAL "thread" AND NOT MSVC)
-    add_compile_options(-fsanitize=thread)
-    add_link_options(-fsanitize=thread)
-elseif (NOT FORKUNION_BUILD_SANITIZERS STREQUAL "off")
-    message(FATAL_ERROR "FORKUNION_BUILD_SANITIZERS is off, address or thread, the last with Clang or GCC, "
-                        "not '${FORKUNION_BUILD_SANITIZERS}'"
-    )
-endif ()
-
-# Strictest possible warnings for ForkUnion's own libraries, tests and benchmarks, never passed on to consumers.
-add_library(forkunion_warnings INTERFACE)
-if (FORKUNION_WERROR)
-    target_compile_options(
-        forkunion_warnings INTERFACE $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror> $<$<CXX_COMPILER_ID:MSVC>:/WX>
-    )
-endif ()
-target_compile_options(
-    forkunion_warnings
-    INTERFACE # GCC/Clang: Maximum warnings + security hardening
-              $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall
-              -Wextra
-              -Wpedantic
-              -Wconversion
-              -Wcast-qual
-              -Wcast-align
-              -Wunused
-              -Wno-unused-parameter
-              -Wno-unknown-pragmas
-              -Wno-sign-conversion
-              -Wno-unused-function
-              -Wshadow
-              -Wno-null-dereference
-              -Wdouble-promotion>
-              # C++ only: GCC rejects these on the C tests and on a consumer's C sources
-              $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wnon-virtual-dtor
-              -Wold-style-cast
-              -Woverloaded-virtual
-              -Wsign-promo>
-              $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wuseless-cast>
-              $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo>>:-Wno-unused-variable>
-              # Additional GCC-specific warnings
-              $<$<CXX_COMPILER_ID:GNU>:-Wmisleading-indentation
-              -Wduplicated-cond
-              -Wduplicated-branches
-              -Wlogical-op
-              -Wno-null-dereference>
-              # Additional Clang-specific warnings
-              $<$<CXX_COMPILER_ID:Clang>:-Wmost
-              -Wthread-safety
-              -Wthread-safety-negative>
-              $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wdocumentation>
-              # MSVC: Maximum warnings
-              $<$<CXX_COMPILER_ID:MSVC>:/W4
-              /permissive-
-              /w14242
-              /w14254
-              /w14263
-              /w14265
-              /w14287
-              /we4289
-              /w14296
-              /w14311
-              /w14545
-              /w14546
-              /w14547
-              /w14549
-              /w14555
-              /w14619
-              /w14640
-              /w14826
-              /w14905
-              /w14906
-              /w14928>
-              $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release,RelWithDebInfo>>:/wd4101>
-)
+include(cmake/forkunion_flags.cmake)
 
 # Pre-compiled libraries built from `c/forkunion.cpp` - the same translation unit twice, differing only in linkage. WASI
 # SDK's `libc++.a` is not position-independent, so WASI builds the static one alone.
@@ -408,53 +302,6 @@ if (FORKUNION_BUILD_BENCH)
     add_subdirectory(bench)
 endif ()
 
-# Install rules. Default ON only when ForkUnion is the top-level project: an `add_subdirectory` consumer installing
-# itself would otherwise drop ForkUnion's headers, libraries, and CMake package into *its* prefix, colliding with a real
-# `forkunion` package. That is the documented path - `FetchContent_MakeAvailable` adds the subdirectory plainly, without
-# the `EXCLUDE_FROM_ALL` that would suppress these on newer CMake. A parent that does want ForkUnion packaged alongside
-# it sets `FORKUNION_INSTALL` first; `CMP0077` above lets that normal variable win.
-option(FORKUNION_INSTALL "Install ForkUnion's headers, libraries, and CMake package" ${PROJECT_IS_TOP_LEVEL})
-
-if (FORKUNION_INSTALL)
-    include(GNUInstallDirs)
-    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-
-    # No `INCLUDES DESTINATION` here: `target_include_directories` above already declares the same
-    # `$<INSTALL_INTERFACE:include>`, and naming it twice exports the path twice.
-    install(TARGETS forkunion_header EXPORT forkunionTargets)
-    install(
-        TARGETS ${forkunion_libraries_}
-        EXPORT forkunionTargets # same export set
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} # .so / .dylib
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} # .a
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} # .dll on Windows
-    )
-
-    # Export config files for find_package
-    include(CMakePackageConfigHelpers)
-    write_basic_package_version_file(
-        "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfigVersion.cmake"
-        VERSION ${PROJECT_VERSION}
-        COMPATIBILITY SameMajorVersion
-    )
-
-    configure_package_config_file(
-        cmake/forkunionConfig.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfig.cmake"
-        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
-    )
-
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfig.cmake"
-                  "${CMAKE_CURRENT_BINARY_DIR}/forkunionConfigVersion.cmake"
-            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
-    )
-
-    install(
-        EXPORT forkunionTargets
-        NAMESPACE forkunion::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/forkunion
-    )
-endif ()
-
 # Turn the tri-states into compile definitions. Nothing left to link for them: the topology comes from sysfs and the
 # placement calls `mbind` by syscall number, so the C library is the only dependency. `find_library(numa)` also baked
 # this host's absolute `libnuma.so` path into the installed package, where another host's loader cannot follow it.
@@ -500,50 +347,6 @@ if (NOT forkunion_atomics_are_builtin_)
     target_link_libraries(forkunion_header INTERFACE atomic)
 endif ()
 
-# A `.pc` for the consumers CMake never reaches. Must follow the two probes above: `configure_file` substitutes now,
-# unlike `install(EXPORT)`, which writes at generate time and so tolerates a link interface declared later. Spelling the
-# prefix against `${pcfiledir}` keeps it correct after `cmake --install --prefix` moves the tree. Under the same option
-# as the rules above, which is also what brought `GNUInstallDirs` in - without it these paths resolve empty.
-if (FORKUNION_INSTALL)
-    file(RELATIVE_PATH forkunion_pc_relative_prefix_ "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
-    string(REGEX REPLACE "/+$" "" forkunion_pc_trimmed_prefix_ "${forkunion_pc_relative_prefix_}")
-    set(forkunion_pc_prefix_ "\${pcfiledir}/${forkunion_pc_trimmed_prefix_}")
-
-    # `GNUInstallDirs` returns a relative path unless a distro forced an absolute one; only the former may follow a
-    # prefix.
-    if (IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
-        set(forkunion_pc_libdir_ "${CMAKE_INSTALL_LIBDIR}")
-    else ()
-        set(forkunion_pc_libdir_ "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
-    endif ()
-    if (IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
-        set(forkunion_pc_includedir_ "${CMAKE_INSTALL_INCLUDEDIR}")
-    else ()
-        set(forkunion_pc_includedir_ "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
-    endif ()
-
-    # A C caller linking the archive has to name the C++ runtime itself, so read it off the compiler rather than the
-    # platform. These go in `Libs.private`, emitted only for `--static`; `Requires.private` would name pkg-config
-    # modules, and none of the three ship one.
-    set(forkunion_pc_runtime_libraries_ "")
-    foreach (implicit_library_ IN LISTS CMAKE_CXX_IMPLICIT_LINK_LIBRARIES)
-        if (implicit_library_ MATCHES "^(stdc\\+\\+|c\\+\\+)$")
-            list(APPEND forkunion_pc_runtime_libraries_ "-l${implicit_library_}")
-        endif ()
-    endforeach ()
-    if (forkunion_atomics_are_builtin_)
-        set(forkunion_pc_atomic_library_ "")
-    else ()
-        set(forkunion_pc_atomic_library_ "-latomic")
-    endif ()
-    string(JOIN " " forkunion_pc_private_ ${forkunion_pc_runtime_libraries_} ${CMAKE_THREAD_LIBS_INIT}
-           ${forkunion_pc_atomic_library_}
-    )
-
-    configure_file(cmake/forkunion.pc.in "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
-endif ()
-
 # Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
 # 0. Knows nothing of the environment: there is no longer an environment to know.
 function (forkunion_apply_tri_state mode_ macro_)
@@ -579,3 +382,5 @@ else ()
     forkunion_apply_tri_state("${FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN}" FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN)
     forkunion_apply_tri_state("${FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY}" FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY)
 endif ()
+
+include(cmake/forkunion_install.cmake)
