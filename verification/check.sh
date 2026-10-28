@@ -113,9 +113,11 @@ finish() {
     wait
     local index failed=0
     for ((index = 0; index < queued; index++)); do
-        cat "$build/$index/result"
+        cat "$build/$index/result" >>"$build/results"
         [ -e "$build/$index/wrong" ] && failed=$((failed + 1))
     done
+    cat "$build/results"
+    [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf '```\n%s\n```\n' "$(cat "$build/results")" >>"$GITHUB_STEP_SUMMARY"
     exit $failed
 }
 

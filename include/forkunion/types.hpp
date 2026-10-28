@@ -452,10 +452,10 @@
  *  without them derives the bits a compile-time default can pick from what the compilation target
  *  promises through the compiler's macro for the extension, since @c preferred_yield_t runs its
  *  pick unchecked. The trap-free hints - PAUSE, YIELD, WFE, PRFM, Zihintpause, the Zicbop
- *  prefetches, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture; WFET and
- *  Zicbom, which no default ever picks and a caller admits at runtime, stay on the toolchain's
- *  verdict, WFET having no compiler macro at all. The wasm wait and notify need the threads
- *  feature the module is built with, which @c __wasm_atomics__ reports.
+ *  prefetches, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture. Zicbom follows
+ *  @c __riscv_zicbom, and WFET, which no compiler macro reports, stays off unless the build vouches
+ *  for it with <tt>FORKUNION_TARGET_ARM64_WFET=1</tt>. The wasm wait and notify need the threads feature
+ *  the module is built with, which @c __wasm_atomics__ reports.
  *
  *  The LSE and RCpc mnemonics ride <tt>.arch_extension</tt>, MSVC reaches the two through intrinsics whose
  *  arithmetic tail asks for <tt>/arch:armv8.1</tt>, and the RISC-V A extension's mnemonics need the
@@ -496,7 +496,7 @@
 #define FORKUNION_TARGET_ARM64_WFE (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
 #endif
 #if !defined(FORKUNION_TARGET_ARM64_WFET)
-#define FORKUNION_TARGET_ARM64_WFET (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
+#define FORKUNION_TARGET_ARM64_WFET (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_ && FORKUNION_RUNTIME_DISPATCH)
 #endif
 #if !defined(FORKUNION_TARGET_ARM64_DC_CVAC)
 #define FORKUNION_TARGET_ARM64_DC_CVAC (FORKUNION_ARCH_ARM64_ && FORKUNION_HAS_INLINE_ASM_)
@@ -532,7 +532,11 @@
 #endif
 #endif
 #if !defined(FORKUNION_TARGET_RISCV64_ZICBOM)
-#define FORKUNION_TARGET_RISCV64_ZICBOM (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(__riscv_zicbom))
+#define FORKUNION_TARGET_RISCV64_ZICBOM 1
+#else
+#define FORKUNION_TARGET_RISCV64_ZICBOM 0
+#endif
 #endif
 #if !defined(FORKUNION_TARGET_RISCV64_ZICBOP)
 #define FORKUNION_TARGET_RISCV64_ZICBOP (FORKUNION_ARCH_RISCV64_ && FORKUNION_HAS_INLINE_ASM_)

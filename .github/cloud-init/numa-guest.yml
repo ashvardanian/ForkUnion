@@ -17,7 +17,6 @@ runcmd:
     tar xzf /mnt/repo/repo.tgz -C /root
 
     export DEBIAN_FRONTEND=noninteractive
-    echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/99-retries
     apt-get update -q && apt-get install -yq cmake ninja-build git g++ numactl
 
     echo "FORKUNION_VM_NODES=$(ls -d /sys/devices/system/node/node* | wc -l) nodes"

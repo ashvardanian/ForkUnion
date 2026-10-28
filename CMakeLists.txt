@@ -43,12 +43,14 @@ project(
 # No target uses C++20 modules, and a Clang installed without `clang-scan-deps` would fail every C++ unit.
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
-# Seeded from the environment at the first configure, so `cargo` and other wrappers honour
-# `FORKUNION_TARGET_ARCH=native`.
-set(FORKUNION_TARGET_ARCH
-    "$ENV{FORKUNION_TARGET_ARCH}"
+# Seeded from the environment at the first configure, so `cargo` and other wrappers honour `FORKUNION_MARCH=native`.
+set(FORKUNION_MARCH
+    "$ENV{FORKUNION_MARCH}"
     CACHE STRING
-          "CPU the own units are tuned for: empty for the toolchain default, native, or a CPU name like graniterapids"
+          "The `-march` floor: empty for the toolchain default, an ISA level, native, or a CPU like graniterapids"
+)
+option(FORKUNION_MULTIVERSIONED "Keep every capability the toolchain compiles, or only those FORKUNION_MARCH implies"
+       ON
 )
 option(FORKUNION_WERROR "Treat compiler warnings as errors" OFF)
 option(FORKUNION_PORTABLE "Force every optional capability off, leaving the STL pool" OFF)
@@ -115,6 +117,19 @@ include(cmake/forkunion_platform.cmake)
 # it through `forkunion::cpu_capabilities_compiled`, never through `forkunion_header`, whose consumers read the
 # compilation target's promise in `types.hpp`.
 include(cmake/forkunion_probes.cmake)
+
+if (FORKUNION_MARCH)
+    set(forkunion_floor_ "${FORKUNION_MARCH}")
+else ()
+    set(forkunion_floor_ "the portable floor")
+endif ()
+get_property(forkunion_capabilities_enabled_ GLOBAL PROPERTY forkunion_capabilities_enabled)
+list(JOIN forkunion_capabilities_enabled_ " " forkunion_capabilities_summary_)
+if (FORKUNION_MULTIVERSIONED)
+    message(STATUS "ForkUnion: multiversioned above ${forkunion_floor_}")
+else ()
+    message(STATUS "ForkUnion: monoversioned for ${forkunion_floor_}: ${forkunion_capabilities_summary_}")
+endif ()
 
 include(cmake/forkunion_flags.cmake)
 

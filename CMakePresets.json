@@ -58,7 +58,12 @@
       "name": "check",
       "inherits": ["base", "clang"],
       "displayName": "Clang with warnings as errors",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "FORKUNION_WERROR": "ON" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
+        "FORKUNION_WERROR": "ON"
+      }
     },
     {
       "name": "asan",
@@ -159,16 +164,24 @@
       "name": "machine",
       "hidden": true,
       "inherits": ["base", "clang"],
-      "description": "Libraries for one machine: its CPU, and only the capabilities it runs.",
+      "description": "Libraries for one machine: its CPU floor, every kernel-library capability spelled as 1 or 0, and its one GPU code.",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "FORKUNION_BUILD_TEST": "OFF", "FORKUNION_BUILD_BENCH": "OFF" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FORKUNION_BUILD_TEST": "OFF",
+        "FORKUNION_BUILD_BENCH": "OFF",
+        "FORKUNION_MULTIVERSIONED": "OFF"
+      }
     },
     {
       "name": "xeon4_hopper",
       "inherits": "machine",
       "displayName": "Xeon 4 with Hopper - compile only",
       "cacheVariables": {
-        "FORKUNION_TARGET_ARCH": "sapphirerapids",
+        "FORKUNION_MARCH": "sapphirerapids",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "1",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
         "FORKUNION_TARGET_X86_CMPCCXADD": "0",
         "FORKUNION_TARGET_X86_RAOINT": "0"
       }
@@ -178,7 +191,10 @@
       "inherits": "machine",
       "displayName": "Xeon 6 with Blackwell - compile only",
       "cacheVariables": {
-        "FORKUNION_TARGET_ARCH": "graniterapids",
+        "FORKUNION_MARCH": "graniterapids",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "1",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
         "FORKUNION_TARGET_X86_CMPCCXADD": "0",
         "FORKUNION_TARGET_X86_RAOINT": "0"
       }
@@ -187,14 +203,45 @@
       "name": "grace_hopper",
       "inherits": "machine",
       "displayName": "Grace with Hopper - compile only",
-      "cacheVariables": { "FORKUNION_TARGET_ARCH": "neoverse-v2", "FORKUNION_TARGET_ARM64_WFET": "0" }
+      "description": "Grace's 128-bit SVE gains nothing over NEON, so every SVE capability is off.",
+      "cacheVariables": {
+        "FORKUNION_MARCH": "grace",
+        "FORKUNION_TARGET_ARM64_YIELD": "1",
+        "FORKUNION_TARGET_ARM64_WFET": "0",
+        "FORKUNION_TARGET_ARM64_DC_CVAC": "1",
+        "FORKUNION_TARGET_ARM64_PRFM": "1",
+        "FORKUNION_TARGET_ARM64_LSE": "1",
+        "FORKUNION_TARGET_ARM64_RCPC": "1"
+      }
     },
     {
       "name": "vera_rubin",
       "inherits": "machine",
       "displayName": "Vera with Rubin - compile only",
-      "description": "Olympus cores need Clang 22 or GCC 15.",
-      "cacheVariables": { "FORKUNION_TARGET_ARCH": "olympus" }
+      "description": "Olympus cores need Clang 22 or GCC 15 and CUDA 13.4 names no Rubin code, so it compiles 100f; WFET is on, as no compiler macro reports it, and SVE off, as on Grace.",
+      "cacheVariables": {
+        "FORKUNION_MARCH": "olympus",
+        "FORKUNION_TARGET_ARM64_YIELD": "1",
+        "FORKUNION_TARGET_ARM64_WFET": "1",
+        "FORKUNION_TARGET_ARM64_DC_CVAC": "1",
+        "FORKUNION_TARGET_ARM64_PRFM": "1",
+        "FORKUNION_TARGET_ARM64_LSE": "1",
+        "FORKUNION_TARGET_ARM64_RCPC": "1"
+      }
+    },
+    {
+      "name": "venice_mi450",
+      "inherits": "machine",
+      "displayName": "EPYC Venice with MI450 - compile only",
+      "description": "Clang 22 names no Zen 6 core, so it compiles at znver5 and spells the rows GCC 16's znver6 implies; gfx1250 covers MI450X and MI455X.",
+      "cacheVariables": {
+        "FORKUNION_MARCH": "znver5",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "0",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
+      }
     }
   ],
   "buildPresets": [
@@ -236,7 +283,8 @@
     { "name": "xeon4_hopper", "configurePreset": "xeon4_hopper" },
     { "name": "xeon6_blackwell", "configurePreset": "xeon6_blackwell" },
     { "name": "grace_hopper", "configurePreset": "grace_hopper" },
-    { "name": "vera_rubin", "configurePreset": "vera_rubin" }
+    { "name": "vera_rubin", "configurePreset": "vera_rubin" },
+    { "name": "venice_mi450", "configurePreset": "venice_mi450" }
   ],
   "testPresets": [
     {

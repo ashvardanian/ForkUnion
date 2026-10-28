@@ -658,14 +658,15 @@ struct wasm_wait_t {
  *  nothing is the compilation target's promise, so the pick can never be illegal there. In a unit
  *  that dispatches at runtime - one with the probe verdicts or @c FORKUNION_RUNTIME_DISPATCH - the
  *  bit is what the toolchain builds and the alias resolves to the newest buildable rung, so such a
- *  unit names its waiter per CPU class instead. AArch64 has no monitored rung here because no
- *  compiler publishes a macro for @c WFxT, so only a caller admitting it at runtime reaches
- *  @c arm64_wfet_t.
+ *  unit names its waiter per CPU class instead. No compiler publishes a macro for @c WFxT, so the
+ *  AArch64 monitored rung is reached only where the build vouches for it.
  */
 #if FORKUNION_TARGET_X86_TPAUSE
 using preferred_yield_t = x86_tpause_t;
 #elif FORKUNION_TARGET_X86_PAUSE
 using preferred_yield_t = x86_pause_t;
+#elif FORKUNION_TARGET_ARM64_WFET
+using preferred_yield_t = arm64_wfet_t;
 #elif FORKUNION_TARGET_ARM64_YIELD
 using preferred_yield_t = arm64_yield_t;
 #elif FORKUNION_TARGET_RISCV64_WRS

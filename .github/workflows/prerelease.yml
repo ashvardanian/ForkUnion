@@ -107,7 +107,6 @@ jobs:
       - name: Build C/C++
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libomp-dev
           cmake --preset release -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
@@ -140,7 +139,6 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustc -vV
       - name: Build Rust
         run: cargo build
       - name: Test Rust
@@ -165,7 +163,7 @@ jobs:
           set -euo pipefail
           cargo package --locked 2>&1 | tee package.log
           if grep -q 'warning: ignoring' package.log; then
-            echo "cargo package dropped a declared target - check the include list in Cargo.toml"
+            echo "::error::cargo package dropped a declared target - check the include list in Cargo.toml"
             exit 1
           fi
 
@@ -222,7 +220,6 @@ jobs:
       - name: Build C/C++
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libomp-dev
           cmake --preset debug -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
@@ -257,7 +254,6 @@ jobs:
       - name: Install toolchain
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y ${{ matrix.packages }}
 
@@ -295,7 +291,6 @@ jobs:
           LDFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential clang libclang-rt-dev libblocksruntime-dev
           if [ "${{ matrix.stdlib }}" = "libc++" ]; then sudo apt install -y libc++-dev libc++abi-dev; fi
@@ -311,7 +306,6 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustc -vV
       - name: Build Rust
         if: matrix.stdlib == 'libstdc++'
         run: cargo build
@@ -344,7 +338,6 @@ jobs:
       - name: Build C/C++
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y build-essential libomp-dev
           cmake --preset release -D FORKUNION_WITH_TOPOLOGY=ON -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
@@ -357,7 +350,6 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustc -vV
       - name: Build Rust
         run: cargo build --features place-memory-on-domain
       - name: Test Rust
@@ -399,7 +391,6 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustc -vV
       - name: Build Rust
         run: cargo build
       - name: Test Rust
@@ -452,8 +443,6 @@ jobs:
         run: |
           cmake --preset msvc2026_x64
           cmake --build --preset msvc2026_x64
-      - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_msvc2026_x64
       - name: Test C++
         run: ctest --preset msvc2026_x64
 
@@ -489,7 +478,6 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustc -vV
       - name: Build Rust
         run: cargo build
       - name: Test Rust
@@ -525,8 +513,6 @@ jobs:
         run: |
           cmake --preset msvc2022_arm64
           cmake --build --preset msvc2022_arm64
-      - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_msvc2022_arm64
       - name: Test C++
         run: ctest --preset msvc2022_arm64
 
@@ -550,8 +536,6 @@ jobs:
         run: |
           cmake --preset msvc2026_x64 -T ${{ matrix.toolset }}
           cmake --build --preset msvc2026_x64 --config ${{ matrix.config }}
-      - name: List build artifacts
-        run: Get-ChildItem -Recurse .\build_msvc2026_x64
       - name: Test C++
         run: ctest --preset msvc2026_x64 -C ${{ matrix.config }}
 
@@ -771,7 +755,6 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
           sudo apt update
           sudo apt install -y qemu-system-x86 cloud-image-utils genisoimage
 
@@ -806,13 +789,14 @@ jobs:
             -drive if=virtio,format=raw,file=repo.iso \
             -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
             ${{ matrix.numa }} \
-            -nographic -serial file:serial.log -monitor none &
+            -display none -serial file:serial.log -monitor none -daemonize
 
       # The node-count check guards the harness itself: a typo in the `-numa` arguments would
       # otherwise degrade every multi-domain test into a silent skip.
       - name: Await the verdict
         run: |
-          timeout 1800 sh -c 'until grep -q FORKUNION_VM_DONE serial.log 2>/dev/null; do sleep 10; done' || true
+          timeout 1800 sh -c 'until grep -q FORKUNION_VM_DONE serial.log 2>/dev/null; do sleep 10; done' ||
+            echo "::error::Guest printed no FORKUNION_VM_DONE within 30 minutes"
           echo "guest serial tail"
           tail -n 100 serial.log || true
           grep -q "FORKUNION_VM_NODES=${{ matrix.expect }} nodes" serial.log
@@ -825,7 +809,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: numa-serial-${{ strategy.job-index }}
+          name: numa-serial-${{ matrix.name }}
           path: serial.log
 
   # Each `FORKUNION_WITH_*` capability is a switch a downstream build may flip; the combinations do not
@@ -851,13 +835,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Install toolchain
-        run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
-          sudo apt update
-          sudo apt install -y build-essential
 
       - name: Build & test C++ and the C shim with ${{ matrix.name }}
         run: |
@@ -888,13 +865,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install toolchain
-        run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
-          sudo apt update
-          sudo apt install -y build-essential
-
       - name: The contradiction must fail to compile
         run: |
           if g++ -std=c++20 ${{ matrix.flags }} -Iinclude -fsyntax-only test/main.cpp 2>/dev/null; then
@@ -923,24 +893,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install toolchain
-        run: |
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
-          echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/99-retries > /dev/null
-          sudo apt update
-          sudo apt install -y build-essential
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Test Rust with auto capabilities
-        run: cargo test --lib
+        run: cargo test --lib -- --nocapture
 
       - name: Test Rust portable
-        run: cargo test --lib --no-default-features --features portable,std
+        run: cargo test --lib --no-default-features --features portable,std -- --nocapture
 
       - name: Test Rust with forced NUMA memory
-        run: cargo test --lib --features place-memory-on-domain
+        run: cargo test --lib --features place-memory-on-domain -- --nocapture
 
       - name: Reject Rust `portable` alongside a capability it disables
         run: |

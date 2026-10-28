@@ -6,9 +6,11 @@
 # `forkunion_target_<capability>_compiles`, caches `forkunion_target_<capability>_flags` empty, as no unit flag is
 # needed, and defines its `FORKUNION_TARGET_<CAPABILITY>` macro on the target below. A probe fails off its own
 # architecture, so every row runs everywhere. `-D FORKUNION_TARGET_<CAPABILITY>=0` leaves a capability out, and
-# `forkunion_target_<capability>_enabled` caches the verdict after it. A native build that is not cross-compiling also
-# runs each enabled probe, caching whether this host runs the capability as `forkunion_target_<capability>_runs`.
-# `probes/README.md` has the table.
+# `forkunion_target_<capability>_enabled` caches the verdict after it. A monoversioned build also compiles
+# `probes/implied.cpp` at the floor into the cached `forkunion_target_<capability>_implied`, and keeps only the
+# capabilities `types.hpp` derives from the floor's predefined macros. MSVC's native build instead runs each enabled
+# probe, caching whether this host runs the capability as `forkunion_target_<capability>_runs`, and a monoversioned one
+# keeps those. `probes/README.md` has the table.
 #
 # A compiled capability is not one the unit's own flags enable, nor one the CPU runs. `forkunion_header` carries no
 # macro, so its consumers read the compilation target's promise in `types.hpp`, and the runtime picks among the compiled
@@ -20,6 +22,8 @@ include_guard(GLOBAL)
 # in their own tree, like USearch, and never installed, as an installed header meets other toolchains.
 add_library(forkunion_cpu_capabilities_compiled INTERFACE)
 add_library(forkunion::cpu_capabilities_compiled ALIAS forkunion_cpu_capabilities_compiled)
+# Each capability row's name as its verdict enables it, for the configure summary.
+set_property(GLOBAL PROPERTY forkunion_capabilities_enabled)
 
 # Probes one capability, named `capability_name_` in its probe and cache variable, and defines `capability_macro_` from
 # the verdict. Tried as Release, without any target's flags, so a sanitized configuration does not fail the probes for
@@ -48,15 +52,11 @@ function (forkunion_add_cpu_capability capability_name_ capability_macro_)
     if (arg_HIDDEN_FROM_THREAD_SANITIZER AND FORKUNION_BUILD_SANITIZERS STREQUAL "thread")
         set(capability_enabled_ FALSE)
     endif ()
-    set(forkunion_target_${capability_name_}_enabled
-        ${capability_enabled_}
-        CACHE INTERNAL "Whether ${capability_macro_} compiles and is not switched off"
-    )
     # The host's exit code is cached per build folder, and a probe killed by a missing instruction never exits with 0.
     set(capability_runs_ FALSE)
     if (capability_enabled_
-        AND FORKUNION_TARGET_ARCH STREQUAL "native"
-        AND NOT CMAKE_CROSSCOMPILING
+        AND MSVC
+        AND FORKUNION_MARCH STREQUAL "native"
     )
         if (NOT DEFINED forkunion_target_${capability_name_}_exit_code)
             try_run(forkunion_target_${capability_name_}_exit_code forkunion_target_${capability_name_}_built
@@ -66,11 +66,39 @@ function (forkunion_add_cpu_capability capability_name_ capability_macro_)
         if (forkunion_target_${capability_name_}_exit_code STREQUAL "0")
             set(capability_runs_ TRUE)
         endif ()
+        set(capability_implied_ ${capability_runs_})
         message(STATUS "Performing ISA probe ${capability_macro_} - runs: ${capability_runs_}")
+    elseif (capability_enabled_ AND NOT FORKUNION_MULTIVERSIONED)
+        if (NOT DEFINED forkunion_target_${capability_name_}_implied)
+            # The probe holds no `main`, as it only asks the preprocessor.
+            set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+            try_compile(
+                forkunion_target_${capability_name_}_implied ${CMAKE_BINARY_DIR}/forkunion_probes
+                ${PROJECT_SOURCE_DIR}/probes/implied.cpp
+                CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${PROJECT_SOURCE_DIR}/include" CXX_STANDARD 20
+                COMPILE_DEFINITIONS ${forkunion_unit_arch_flags_} -DFORKUNION_PROBE_MACRO=${capability_macro_}
+            )
+        endif ()
+        set(capability_implied_ ${forkunion_target_${capability_name_}_implied})
+        message(STATUS "Performing ISA probe ${capability_macro_} - implied: ${capability_implied_}")
+    endif ()
+    # `-D FORKUNION_TARGET_<CAP>=1` vouches for what no compiler macro reports, like WFET or MSVC's AVX-512 subsets.
+    if (NOT FORKUNION_MULTIVERSIONED
+        AND NOT capability_implied_
+        AND NOT ${capability_macro_}
+    )
+        set(capability_enabled_ FALSE)
+    endif ()
+    set(forkunion_target_${capability_name_}_enabled
+        ${capability_enabled_}
+        CACHE INTERNAL "Whether ${capability_macro_} compiles, is not switched off, and the build kind keeps it"
+    )
+    if (capability_enabled_)
+        set_property(GLOBAL APPEND PROPERTY forkunion_capabilities_enabled ${capability_name_})
     endif ()
     set(forkunion_target_${capability_name_}_runs
         ${capability_runs_}
-        CACHE INTERNAL "Whether ${capability_macro_} is enabled and this host runs it"
+        CACHE INTERNAL "Whether ${capability_macro_} is enabled and this host runs it, for MSVC's native build"
     )
     target_compile_definitions(
         forkunion_cpu_capabilities_compiled INTERFACE "${capability_macro_}=$<BOOL:${capability_enabled_}>"
