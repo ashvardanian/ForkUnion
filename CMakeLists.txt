@@ -19,8 +19,9 @@ endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
 # execute code), so point `core.hooksPath` at `.githooks` here - configuring the build arms the `pre-commit` checks.
-# Skipped when there is no `.git` (tarball / export builds).
-if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+# Skipped when built as a subproject, as a consumer's submodule keeps its own Git config, or without `.git` (tarball /
+# export builds).
+if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git config core.hooksPath .githooks
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -103,7 +104,8 @@ set(forkunion_optional_macros_
 # Header-only interface library
 add_library(forkunion_header INTERFACE)
 target_include_directories(
-    forkunion_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
+    forkunion_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/c>
+                               $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
 )
 
 # C++20 is the floor consumers must clear, not a ceiling: `cxx_std_20` raises a consumer below it and leaves one at 23
@@ -133,13 +135,13 @@ endif ()
 
 include(cmake/forkunion_flags.cmake)
 
-# Pre-compiled libraries built from `c/forkunion.cpp` - the same translation unit twice, differing only in linkage. WASI
-# SDK's `libc++.a` is not position-independent, so WASI builds the static one alone.
-add_library(forkunion_static STATIC c/forkunion.cpp)
+# Pre-compiled libraries built from `src/forkunion.cpp` - the same translation unit twice, differing only in linkage.
+# WASI SDK's `libc++.a` is not position-independent, so WASI builds the static one alone.
+add_library(forkunion_static STATIC src/forkunion.cpp)
 if (CMAKE_SYSTEM_NAME STREQUAL "WASI")
     set(forkunion_libraries_ forkunion_static)
 else ()
-    add_library(forkunion_shared SHARED c/forkunion.cpp)
+    add_library(forkunion_shared SHARED src/forkunion.cpp)
     set(forkunion_libraries_ forkunion_static forkunion_shared)
 endif ()
 
@@ -165,15 +167,15 @@ add_library(forkunion::static ALIAS forkunion_static)
 # The pre-compiled libraries inherit C++20 from the header target; keep it strict, without GNU extensions
 set_target_properties(${forkunion_libraries_} PROPERTIES CXX_EXTENSIONS OFF)
 
-# Hide everything `forkunion.h` does not declare. On its own this exports zero symbols; the visibility pragma in
-# `c/forkunion.cpp` is the other half. Static too - same translation unit, and a consumer may link it into their own
-# shared object.
+# Hide everything `forkunion/forkunion.h` does not declare. On its own this exports zero symbols; the visibility pragma
+# in `src/forkunion.cpp` is the other half. Static too - same translation unit, and a consumer may link it into their
+# own shared object.
 set_target_properties(${forkunion_libraries_} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
 # Re-use the public interface of the header-only target
 target_link_libraries(forkunion_static PUBLIC forkunion_header)
 
-# Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `c/forkunion.cpp`.
+# Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `src/forkunion.cpp`.
 target_link_libraries(
     forkunion_static PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
                              $<BUILD_INTERFACE:forkunion_warnings>
@@ -279,7 +281,8 @@ if (FORKUNION_CPPCHECK_EXECUTABLE)
             --suppress=missingIncludeSystem --suppress=unusedFunction --suppress=unmatchedSuppression
             --suppress=ConfigurationNotChecked --suppress=knownConditionTrueFalse --suppress=shadowFunction
             --suppress=shadowVariable --suppress=useStlAlgorithm --suppress=noExplicitConstructor
-            -I${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/c
+            -I${CMAKE_CURRENT_SOURCE_DIR}/c -I${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/c
+            ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src
         COMMENT "Running cppcheck static analysis"
     )
 endif ()
@@ -290,8 +293,8 @@ if (FORKUNION_CLANG_TIDY_EXECUTABLE)
         clang-tidy
         COMMAND
             ${FORKUNION_CLANG_TIDY_EXECUTABLE} --config-file=${CMAKE_CURRENT_SOURCE_DIR}/.clang-tidy --quiet
-            ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp ${CMAKE_CURRENT_SOURCE_DIR}/c/*.cpp --
-            -I${CMAKE_CURRENT_SOURCE_DIR}/include -std=c++20
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp --
+            -I${CMAKE_CURRENT_SOURCE_DIR}/c -I${CMAKE_CURRENT_SOURCE_DIR}/include -std=c++20
         COMMENT "Running clang-tidy static analysis"
     )
 endif ()

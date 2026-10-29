@@ -867,7 +867,7 @@ jobs:
 
       - name: The contradiction must fail to compile
         run: |
-          if g++ -std=c++20 ${{ matrix.flags }} -Iinclude -fsyntax-only test/main.cpp 2>/dev/null; then
+          if g++ -std=c++20 ${{ matrix.flags }} -Ic -Iinclude -fsyntax-only test/main.cpp 2>/dev/null; then
             echo "::error::'${{ matrix.flags }}' compiled, but describes a build that cannot exist"
             exit 1
           fi
@@ -964,7 +964,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: [xeon4_hopper, xeon6_blackwell, grace_hopper, vera_rubin]
+        preset: [xeon4_hopper, xeon6_blackwell, venice_mi450, grace_hopper, vera_rubin]
     steps:
       - name: Install Clang 22
         run: |

@@ -176,7 +176,7 @@ verify_client() {
     (
         local verdict
         limited "${GENMC_SECONDS:-300}" "$genmc" --"$memory" --check-liveness --disable-estimation --unroll="$unroll" \
-            --program-entry-function="$entry" -- -std=c++23 -I"$shadow" -I"$harness" -I"$PWD" -I"$PWD/../include" -I"$PWD/../c" -I"$harness/../include" \
+            --program-entry-function="$entry" -- -std=c++23 -I"$shadow" -I"$harness" -I"$PWD" -I"$PWD/../include" -I"$PWD/../c" -I"$harness/../include" -I"$harness/../c" \
             "$client" >"$dir/genmc.out" 2>&1
         case $? in
         0) if grep -q "complete executions explored: 0" "$dir/genmc.out"; then verdict=broken; else verdict=pass; fi ;;

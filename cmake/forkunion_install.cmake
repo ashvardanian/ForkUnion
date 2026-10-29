@@ -9,7 +9,7 @@ option(FORKUNION_INSTALL "Install ForkUnion's headers, libraries, and CMake pack
 
 if (FORKUNION_INSTALL)
     include(GNUInstallDirs)
-    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(DIRECTORY c/ include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
     # No `INCLUDES DESTINATION` here: `target_include_directories` above already declares the same
     # `$<INSTALL_INTERFACE:include>`, and naming it twice exports the path twice.
@@ -87,6 +87,11 @@ if (FORKUNION_INSTALL)
            ${forkunion_pc_atomic_library_}
     )
 
+    # WASI builds the archive alone, so its consumers link that.
+    set(forkunion_pc_library_ forkunion_shared)
+    if (CMAKE_SYSTEM_NAME STREQUAL "WASI")
+        set(forkunion_pc_library_ forkunion_static)
+    endif ()
     configure_file(cmake/forkunion.pc.in "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" @ONLY)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/forkunion.pc" DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 endif ()

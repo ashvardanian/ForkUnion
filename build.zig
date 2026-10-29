@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     const with_place_threads_by_affinity = b.option(bool, "place-threads-by-affinity", "Bind worker threads to cores");
     const portable = b.option(bool, "portable", "Force every optional capability off") orelse false;
 
-    // Compile the C++ library from c/forkunion.cpp, the way Rust's build.rs does.
+    // Compile the C++ library from src/forkunion.cpp, the way Rust's build.rs does.
     const lib = b.addLibrary(.{
         .name = "forkunion",
         .linkage = .static,
@@ -64,10 +64,11 @@ pub fn build(b: *std.Build) void {
     }
 
     lib.root_module.addCSourceFile(.{
-        .file = b.path("c/forkunion.cpp"),
+        .file = b.path("src/forkunion.cpp"),
         .flags = cpp_flags.items,
     });
 
+    lib.root_module.addIncludePath(b.path("c"));
     lib.root_module.addIncludePath(b.path("include"));
     lib.root_module.link_libcpp = true; // Use Zig's bundled `libc++` instead of system `libstdc++`
 
@@ -93,6 +94,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    lib_tests.root_module.addIncludePath(b.path("c"));
     lib_tests.root_module.addIncludePath(b.path("include"));
     lib_tests.root_module.linkLibrary(lib);
     if (target.result.os.tag == .linux) lib_tests.root_module.linkSystemLibrary("pthread", .{});

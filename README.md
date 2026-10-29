@@ -149,7 +149,7 @@ For Rayon-style parallel iterators, import the `prelude` module and [check out r
 
 ### Intro in C++
 
-To integrate into your C++ project, either copy the `include/` directory into your project, add a Git submodule, or CMake.
+To integrate into your C++ project, either copy the `c/` and `include/` directories into your project and add both to the include path, add a Git submodule, or CMake.
 The `forkunion.hpp` umbrella is a list of `#include`s; the implementation lives beside it in `include/forkunion/`, one header per concern, so a platform backend can be read or replaced on its own.
 For a Git submodule, run:
 
@@ -393,7 +393,7 @@ On a machine you are sharing, that is the difference between a speedup and a slo
 
 ### Intro in C
 
-ForkUnion provides a pure C99 API via `forkunion.h`, wrapping the C++ implementation in pre-compiled libraries: `libforkunion_static.a` or `libforkunion_shared.so`.
+ForkUnion provides a pure C99 API via `forkunion/forkunion.h`, wrapping the C++ implementation in pre-compiled libraries: `libforkunion_static.a` or `libforkunion_shared.so`.
 Installing also drops a `forkunion.pc`, so `pkg-config --cflags --libs forkunion` works outside CMake.
 The C API uses opaque `fu_pool_t` handles and function pointers for callbacks, making it compatible with any C99+ compiler.
 
@@ -412,8 +412,8 @@ target_link_libraries(your_target PRIVATE forkunion::static)
 A minimal C example:
 
 ```c
-#include <stdio.h>      // printf
-#include <forkunion.h>  // fu_pool_t, fu_pool_new, fu_pool_spawn
+#include <stdio.h>                // printf
+#include <forkunion/forkunion.h>  // fu_pool_t, fu_pool_new, fu_pool_spawn
 
 void hello_callback(void *context, size_t thread, size_t compute_domain) {
     (void)context;
@@ -491,7 +491,7 @@ GCC supports [nested functions](https://gcc.gnu.org/onlinedocs/gcc/Nested-Functi
 ```c
 #include <stdio.h>
 #include <stdatomic.h>
-#include <forkunion.h>
+#include <forkunion/forkunion.h>
 
 int main(void) {
     fu_topology_t topology;
@@ -528,7 +528,7 @@ Clang provides [blocks](https://clang.llvm.org/docs/BlockLanguageSpec.html) with
 #include <stdio.h>
 #include <stdatomic.h>
 #include <Block.h>
-#include <forkunion.h>
+#include <forkunion/forkunion.h>
 
 typedef void (^task_block_t)(void *, size_t, size_t, size_t);
 

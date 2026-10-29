@@ -1,6 +1,6 @@
 PROJECT_NAME           = ForkUnion
 OUTPUT_DIRECTORY       = ../build/
-INPUT                  = ../include/forkunion.h ../include/forkunion.hpp ../include/forkunion
+INPUT                  = ../c/forkunion/forkunion.h ../include/forkunion.hpp ../include/forkunion
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.hpp
 EXTENSION_MAPPING      = cuh=C++

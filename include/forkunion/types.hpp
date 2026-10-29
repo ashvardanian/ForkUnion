@@ -44,7 +44,7 @@
 #include <type_traits> // `std::is_nothrow_invocable_r_v`
 #include <utility>     // `std::exchange`, `std::addressof`
 
-#include <forkunion.h> // `fu_status_t`, so the C++ mirror cannot drift from the ABI
+#include "forkunion/forkunion.h" // `fu_status_t`, so the C++ mirror cannot drift from the ABI
 
 #define FORKUNION_VERSION_MAJOR 4
 #define FORKUNION_VERSION_MINOR 0
@@ -704,8 +704,8 @@ enum compute_level_t : std::size_t {};
 /**
  *  @brief Why a call failed. Success is @c 0; every failure is negative.
  *
- *  Every enumerator takes its value from @c fu_status_t in <tt>forkunion.h</tt>, so the C++ mirror and the
- *  ABI cannot drift - there is nothing to keep in step and nothing to assert.
+ *  Every enumerator takes its value from @c fu_status_t in <tt>forkunion/forkunion.h</tt>, so the C++
+ *  mirror and the ABI cannot drift - there is nothing to keep in step and nothing to assert.
  *
  *  Causes are collapsed on purpose where the remedy is the same, and split where it differs.
  *

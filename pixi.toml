@@ -37,7 +37,7 @@ pkg = { name = "forkunion", path = "mojo/forkunion" }
 # The binding reaches the library through `dlopen`, and `mojo build` bakes the environment's library
 # directory into the runpath, so installing here is what makes a consumer's build need no linker
 # flags at all. `FORKUNION_CXXFLAGS` is unset by default and overridden by the feature environments.
-build-native = { cmd = "c++ -O3 -std=c++20 -fPIC -shared -Iinclude c/forkunion.cpp -o $CONDA_PREFIX/lib/libforkunion.so -pthread $FORKUNION_CXXFLAGS" }
+build-native = { cmd = "c++ -O3 -std=c++20 -fPIC -shared -Ic -Iinclude src/forkunion.cpp -o $CONDA_PREFIX/lib/libforkunion.so -pthread $FORKUNION_CXXFLAGS" }
 test = { cmd = "mojo run -I mojo test/main.mojo", depends-on = ["build-native"] }
 
 # The demo benchmarks measure against a baseline the library itself never needs, so it is scoped

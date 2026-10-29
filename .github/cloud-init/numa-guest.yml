@@ -30,7 +30,7 @@ runcmd:
     # ABI a downstream would use, and the host holds both to the same number.
     cat > domains.c <<'PROBE'
     #include <stdio.h>
-    #include <forkunion.h>
+    #include <forkunion/forkunion.h>
     int main(void) {
         fu_topology_t topology = NULL;
         size_t domains = 0;
@@ -41,7 +41,7 @@ runcmd:
         return 0;
     }
     PROBE
-    gcc -std=c11 -Iinclude domains.c build_release/libforkunion_static.a -lstdc++ -lpthread -latomic -o domains
+    gcc -std=c11 -Ic domains.c build_release/libforkunion_static.a -lstdc++ -lpthread -latomic -o domains
     ./domains
 
     ctest --preset release -R '^forkunion_test_(cpp20|c11)$'

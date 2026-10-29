@@ -82,8 +82,11 @@ fn main() {
 
     // Hand dependents the headers, so a crate compiling its own C against the `fu_*` ABI need not
     // vendor a copy that drifts; `links = "forkunion"` makes this their `DEP_FORKUNION_INCLUDE`.
-    // Anchored to the manifest, not the cwd, so it resolves inside a published crate too.
-    println!("cargo:include={}", manifest.join("include").display());
+    // Anchored to the manifest, not the cwd, so it resolves inside a published crate too. The
+    // header roots are joined like `PATH`, for a dependent to split with `env::split_paths`.
+    let roots = env::join_paths(["c", "include"].map(|root| manifest.join(root)))
+        .expect("the manifest path holds no `PATH` separator");
+    println!("cargo:include={}", roots.to_string_lossy());
     // The whole tree, so a dependent's CMake adds the checkout Cargo resolved as a subdirectory.
     println!("cargo:source={}", manifest.display());
 
@@ -94,6 +97,7 @@ fn main() {
         "probes",
         "c",
         "include",
+        "src",
         "rust/forkunion.rs",
     ] {
         println!("cargo:rerun-if-changed={}", manifest.join(source).display());

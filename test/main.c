@@ -10,7 +10,7 @@
 #include <stdbool.h>   // `bool`, `true`, `false`
 #include <string.h>    // `memset`
 
-#include <forkunion.h>
+#include "forkunion/forkunion.h"
 
 static const size_t default_parallel_tasks_k = 10000; // 10K
 

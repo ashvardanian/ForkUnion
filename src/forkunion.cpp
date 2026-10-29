@@ -1,5 +1,5 @@
 /**
- *  @file c/forkunion.cpp
+ *  @file src/forkunion.cpp
  *  @author Ash Vardanian
  *  @date June 27, 2025
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
@@ -14,8 +14,8 @@
 #include <type_traits> // `std::aligned_storage`
 #include <utility>     // `std::in_place_type_t`
 
-#include <forkunion.h>   // C type aliases
-#include <forkunion.hpp> // C++ core implementation
+#include "forkunion/forkunion.h" // C type aliases
+#include "forkunion.hpp"         // C++ core implementation
 
 namespace fu = ashvardanian::forkunion;
 

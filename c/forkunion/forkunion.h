@@ -1,5 +1,5 @@
 /**
- *  @file include/forkunion.h
+ *  @file c/forkunion/forkunion.h
  *  @author Ash Vardanian
  *  @date June 11, 2025
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
@@ -12,9 +12,9 @@
  *  types, is safe to use even with the maximal @c size_t values, and compiles as C 99 and later.
  *
  *  @code{.c}
- *  #include <stdio.h>      // `printf`
- *  #include <stdlib.h>     // `EXIT_FAILURE`, `EXIT_SUCCESS`
- *  #include <forkunion.h>  // `fu_pool_t`
+ *  #include <stdio.h>                // `printf`
+ *  #include <stdlib.h>               // `EXIT_FAILURE`, `EXIT_SUCCESS`
+ *  #include <forkunion/forkunion.h>  // `fu_pool_t`
  *
  *  struct print_args_context_t {
  *      size_t argc; // ? Number of arguments

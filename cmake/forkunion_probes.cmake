@@ -69,16 +69,24 @@ function (forkunion_add_cpu_capability capability_name_ capability_macro_)
         set(capability_implied_ ${capability_runs_})
         message(STATUS "Performing ISA probe ${capability_macro_} - runs: ${capability_runs_}")
     elseif (capability_enabled_ AND NOT FORKUNION_MULTIVERSIONED)
+        # A verdict holds for the floor it was probed at, so a build tree whose floor changed probes again.
+        if (NOT "${forkunion_unit_arch_flags_}" STREQUAL "${forkunion_target_${capability_name_}_implied_floor}")
+            unset(forkunion_target_${capability_name_}_implied CACHE)
+        endif ()
         if (NOT DEFINED forkunion_target_${capability_name_}_implied)
             # The probe holds no `main`, as it only asks the preprocessor.
             set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
             try_compile(
                 forkunion_target_${capability_name_}_implied ${CMAKE_BINARY_DIR}/forkunion_probes
-                ${PROJECT_SOURCE_DIR}/probes/implied.cpp
-                CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${PROJECT_SOURCE_DIR}/include" CXX_STANDARD 20
+                ${PROJECT_SOURCE_DIR}/probes/implied.cpp CXX_STANDARD 20
+                CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${PROJECT_SOURCE_DIR}/c;${PROJECT_SOURCE_DIR}/include"
                 COMPILE_DEFINITIONS ${forkunion_unit_arch_flags_} -DFORKUNION_PROBE_MACRO=${capability_macro_}
             )
         endif ()
+        set(forkunion_target_${capability_name_}_implied_floor
+            "${forkunion_unit_arch_flags_}"
+            CACHE INTERNAL "The floor ${capability_macro_} was last probed at"
+        )
         set(capability_implied_ ${forkunion_target_${capability_name_}_implied})
         message(STATUS "Performing ISA probe ${capability_macro_} - implied: ${capability_implied_}")
     endif ()

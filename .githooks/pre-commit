@@ -1003,7 +1003,7 @@ check_include_comment_above() {
 # Includes form groups in a fixed order with a blank line between them: the C library, the platform's own
 # headers, the C++ standard library, external libraries, sibling projects, then this project's own headers.
 # Only headers in this repository are quoted, found beside the including file or anywhere in the index, and
-# public ones under `include/` always with the `project_include_prefix`. Includes under an `#if` keep their
+# public ones under `c/` and `include/` always with the `project_include_prefix`. Includes under an `#if` keep their
 # quoting but sit outside the grouping; an include guard is not such an `#if`.
 check_include_groups() {
     local misgrouped
@@ -1049,8 +1049,8 @@ check_include_groups() {
                     else if (touched) { search | getline found; close(search) }
                     if (touched && found == "")
                         printf "line %d: \"%s\" is not in this repository - write <%s>\n", FNR, header, header
-                    if (index(found, "include/" project "/") == 1)
-                        printf "line %d: \"%s\" is a public header - write \"%s\"\n", FNR, header, substr(found, 9)
+                    if (match(found, "^(c|include)/" project "/"))
+                        printf "line %d: \"%s\" is a public header - write \"%s\"\n", FNR, header, substr(found, RLENGTH - length(project))
                     rank = 6
                 }
                 if (touched && quoted && rank != 6)
@@ -2353,7 +2353,7 @@ run_shared_checks() {
     *.hpp | *.cpp | *.cc) check_memcpy_qualified ;;
     esac
     case "$staged_path" in
-    include/* | c/*)
+    c/* | include/* | src/*)
         case "$staged_path" in
         *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx | *.mm) check_filesystem_in_harnesses_only ;;
         esac

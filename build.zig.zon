@@ -9,6 +9,7 @@
         "zig/",
         "include/",
         "c/",
+        "src/",
         "test/",
         "bench/",
         "README.md",

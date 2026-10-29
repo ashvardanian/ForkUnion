@@ -8,5 +8,5 @@ Description: @PROJECT_DESCRIPTION@
 URL: https://github.com/ashvardanian/ForkUnion
 Version: @PROJECT_VERSION@
 Cflags: -I${includedir}
-Libs: -L${libdir} -lforkunion_shared
+Libs: -L${libdir} -l@forkunion_pc_library_@
 Libs.private: @forkunion_pc_private_@

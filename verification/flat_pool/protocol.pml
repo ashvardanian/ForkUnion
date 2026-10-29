@@ -111,7 +111,7 @@ inline contribute(t, generation, by_worker, completion, seen_fork, seen_callback
     load(t, fork_state, order_relaxed, seen_fork);
     assert(seen_fork == forked[round_of(generation)]);
     // The trampoline reads the slot on every contributor, and fork r went out as callback r:
-    // `opaque_pool_t::operator()` in `c/forkunion.cpp`
+    // `opaque_pool_t::operator()` in `src/forkunion.cpp`
     if
     :: through_c_shim ->
         load(t, current_callback, order_relaxed, seen_callback);
@@ -246,7 +246,7 @@ inline join(t, joined, seen_epoch, seen_fork, seen_callback, before, observed) {
 }
 
 /** The slot claimed from empty before the pool, handed back if the pool refuses, as
- *  @c fu_pool_unsafe_for_threads in `c/forkunion.cpp` does, over the dispatch's scratch. */
+ *  @c fu_pool_unsafe_for_threads in <tt>src/forkunion.cpp</tt> does, over the dispatch's scratch. */
 inline c_dispatch(t, round, generation, observed, exchanged) {
     observed = 0;
     compare_exchange(t, current_callback, order_acquire, observed, round, exchanged);
@@ -261,8 +261,9 @@ inline c_dispatch(t, round, generation, observed, exchanged) {
     fi
 }
 
-/** An empty slot or another generation's token returns at once, else the pool's join and then the
- *  clear, released last, as @c fu_pool_unsafe_join in `c/forkunion.cpp` does, over its scratch. */
+/** An empty slot or another generation's token returns at once, else the pool's join and
+ *  then the clear, released last, as @c fu_pool_unsafe_join in <tt>src/forkunion.cpp</tt> does,
+ *  over its scratch. */
 inline c_join(t, joined, seen_epoch, seen_fork, seen_callback, before, observed) {
     load(t, current_callback, order_relaxed, seen_callback);
     if
