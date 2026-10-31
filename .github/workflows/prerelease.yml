@@ -1,12 +1,10 @@
 name: Pre-Release
 
 on:
-  push:
-    branches: ["main-dev"]
   pull_request:
-    branches: ["main-dev"]
+    branches: ["main", "main-dev"]
 
-# A superseded push needs no verdict; cancel its jobs and spend the runners on the new head.
+# A superseded run needs no verdict; cancel its jobs and spend the runners on the new head.
 concurrency:
   group: pre-release-${{ github.ref }}
   cancel-in-progress: true
@@ -16,45 +14,24 @@ permissions:
   contents: read
 
 jobs:
-  versioning:
-    name: Update Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }} # ? Scoped here; no other job may see it
+  hooks:
+    name: Run Git Hooks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3
-        with:
-          verbose: "true"
-          version-file: "VERSION"
-          update-version-in: |
-            CMakeLists.txt:^\s*VERSION (\d+\.\d+\.\d+)
-            Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            CITATION.cff:^version: (\d+\.\d+\.\d+)
-            README.md:^\s*GIT_TAG v(\d+\.\d+\.\d+)
-            README.md:^\s*forkunion\s*=\s*"(\d+\.\d+\.\d+)"
-            README.md:^\s*forkunion\s*=\s*\{\s*version\s*=\s*"(\d+\.\d+\.\d+)"
-            README.md:archive/refs/tags/v(\d+\.\d+\.\d+)\.tar\.gz
-            build.zig.zon:^\s*\.version = "(\d+\.\d+\.\d+)"
-          update-major-version-in: |
-            include/forkunion.hpp:^#define FORKUNION_VERSION_MAJOR (\d+)
-          update-minor-version-in: |
-            include/forkunion.hpp:^#define FORKUNION_VERSION_MINOR (\d+)
-          update-patch-version-in: |
-            include/forkunion.hpp:^#define FORKUNION_VERSION_PATCH (\d+)
-          dry-run: "true"
+      - name: Run the Hooks Over New Commits
+        run: .github/scripts/check-commits.sh "${{ github.event.pull_request.base.sha }}"
 
   # CI for the CI: `actionlint` catches expression typos, bad shell quoting, and matrix drift in
   # these workflows before a broken job silently stops guarding anything.
   lint_workflows:
     name: Lint Workflows
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -66,7 +43,8 @@ jobs:
 
   test_ubuntu_gcc:
     name: Ubuntu (GCC)
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       CC: gcc
@@ -158,7 +136,8 @@ jobs:
   # each. Restricted to the NUMA-free basic_pool, whose pinned NUMA path stalls under TSan.
   test_ubuntu_sanitizers:
     name: Ubuntu (${{ matrix.cc }}, ${{ matrix.sanitizer }})
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -201,7 +180,8 @@ jobs:
 
   test_ubuntu_clang:
     name: Ubuntu (Clang, ${{ matrix.stdlib }})
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     # libc++ is the second row because it is a different standard library, not a different flag on the same one: it
     # catches a C++20 language mode over an incomplete C++20 library - `std::atomic_ref` absent - that libstdc++ hides.
@@ -259,9 +239,10 @@ jobs:
 
   test_ubuntu_arm:
     name: Ubuntu (Arm64, NUMA)
+    needs: hooks
     # Native Arm64 is the only faithful test of the weak memory model the
     # library targets - qemu-user does not reproduce guest memory ordering.
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     env:
       CC: gcc
@@ -302,6 +283,7 @@ jobs:
 
   test_macos:
     name: macOS (${{ matrix.arch }})
+    needs: hooks
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -310,7 +292,7 @@ jobs:
           # ! macos-13 retired in late 2025 and macos-14 follows in 2026; macos-26 keeps the arm64 row
           # ! off the chopping block and adds Xcode 26 coverage the macos-15 jobs below don't have.
           - { arch: arm64, runner: macos-26 }
-          - { arch: x86_64, runner: macos-15-intel }
+          - { arch: x86_64, runner: macos-26-intel }
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -344,7 +326,8 @@ jobs:
 
   test_macos_llvm_versions:
     name: macOS LLVM Versions
-    runs-on: macos-15
+    needs: hooks
+    runs-on: macos-26
     strategy:
       fail-fast: false
       matrix:
@@ -371,6 +354,7 @@ jobs:
 
   test_windows:
     name: Windows
+    needs: hooks
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
@@ -423,6 +407,7 @@ jobs:
 
   test_windows_msvc_matrix:
     name: Windows MSVC Versions
+    needs: hooks
     # Pinned to windows-2022: this matrix exists to prove the v142 (VS 2019)
     # toolset still compiles, and that toolset isn't guaranteed on windows-2025.
     runs-on: windows-2022
@@ -450,7 +435,8 @@ jobs:
   # `ctest` runs the binaries through its `CMAKE_CROSSCOMPILING_EMULATOR`. s390x is the big-endian guard.
   test_cross:
     name: Cross-compile (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     container: ${{ matrix.image }}
     strategy:
@@ -495,7 +481,8 @@ jobs:
   # install precedes checkout because Alpine ships no git.
   test_containers:
     name: Container (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
@@ -528,7 +515,8 @@ jobs:
   # compile proves the threaded build survives it. Compile-only - device binaries can't run here.
   test_android:
     name: Android (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
@@ -549,7 +537,8 @@ jobs:
   # Only coverage of the FreeBSD cpuset_t affinity path. The VM is x86_64; aarch64 FreeBSD is cross-only.
   test_freebsd:
     name: FreeBSD (x86_64)
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -573,7 +562,8 @@ jobs:
   # GitHub's x64 Linux runners expose /dev/kvm, so the guest boots hardware-accelerated.
   test_numa_shapes:
     name: Linux NUMA (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -667,7 +657,8 @@ jobs:
   # collapse - a box with no memory placement can still pin threads. Each row builds under `-Werror`.
   test_ubuntu_capabilities:
     name: Ubuntu (Capability Matrix)
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -708,7 +699,8 @@ jobs:
   # `#include`, by an `#error` naming the contradiction - never at link time, with missing symbols.
   test_ubuntu_bad_capabilities:
     name: Ubuntu (Impossible Capabilities, ${{ strategy.job-index }})
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -749,7 +741,8 @@ jobs:
   # what a caller on an unsupported platform gets, and nothing may depend on a capability it lacks.
   test_bindings_capabilities:
     name: Bindings (Capability Overrides)
-    runs-on: ubuntu-24.04
+    needs: hooks
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -799,7 +792,8 @@ jobs:
   # the Apple path under the iOS ABI, not any particular phone's layout.
   build_ios:
     name: iOS (${{ matrix.sdk }}, ${{ matrix.std }})
-    runs-on: macos-15
+    needs: hooks
+    runs-on: macos-26
     timeout-minutes: 30
     strategy:
       fail-fast: false

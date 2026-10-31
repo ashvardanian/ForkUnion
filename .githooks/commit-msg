@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ForkUnion commit-msg: enforce the commit-message contract.
 #
-#   1. The subject starts with an approved verb prefix - Add / Break / Build / Chore / Docs / Fix /
-#      Improve / Make - followed by a capitalized summary, so the history reads as a consistent
-#      changelog. `Merge:` and `Release:` are exempt: Git writes the first, TinySemVer the second,
-#      and neither capitalizes what follows.
+#   1. The subject starts with an approved verb prefix - Add / Break / Chore / Docs / Fix / Improve /
+#      Make - followed by a capitalized summary, so the history reads as a consistent changelog.
+#      Merge commits are exempt, since Git writes their subject. A release is exactly `Release: vX.Y.Z`
+#      or `Release: vX.Y.Z-rc.N`, every staged version site must carry that version, and no other
+#      commit may change `VERSION`.
 #   2. No AI-assistant attribution: no `Co-authored-by` bot trailer, no "Generated with/by <assistant>",
 #      no assistant name / vendor URL, no robot emoji. Authorship is the human who committed.
 #
@@ -21,14 +22,49 @@ subject=$(printf '%s\n' "$payload" | grep -vE '^[[:space:]]*$' | head -1)
 
 failed=0
 
-# 1. Verb prefix. `Merge:` and `Release:` subjects are written by Git and by TinySemVer.
+# 1. Verb prefix. Git writes `Merge` subjects itself.
 case "$subject" in
-Merge* | Release:*) ;;
+Merge*) ;;
+# Releases are cut by hand, so this check is all that stands between a typo and a published package.
+Release:*)
+    version=$(printf '%s\n' "$subject" | sed -nE 's/^Release: v([0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$/\1/p')
+    if [ -z "$version" ]; then
+        echo "commit-msg: a release subject is exactly 'Release: vX.Y.Z' or 'Release: vX.Y.Z-rc.N'."
+        echo "            Got: $subject"
+        failed=1
+    else
+        core=${version%%-*} stale=""
+        IFS=. read -r major minor patch <<< "$core"
+        [ "$(git show :VERSION 2>/dev/null)" = "$version" ] || stale="$stale VERSION"
+        git show :Cargo.toml 2>/dev/null | grep -qxF "version = \"$version\"" || stale="$stale Cargo.toml"
+        git show :Cargo.lock 2>/dev/null | grep -A1 -xF 'name = "forkunion"' | grep -qxF "version = \"$version\"" || stale="$stale Cargo.lock"
+        git show :CITATION.cff 2>/dev/null | grep -qxF "version: $version" || stale="$stale CITATION.cff"
+        git show :build.zig.zon 2>/dev/null | grep -qxF "    .version = \"$version\"," || stale="$stale build.zig.zon"
+        # Every install snippet in the README must name this version and no other.
+        [ "$(git show :README.md 2>/dev/null | sed -nE 's/^[[:space:]]*GIT_TAG v([^[:space:]]+)$/\1/p; s/^forkunion = (\{ version = )?"([^"]+)".*/\2/p; s/.*ForkUnion\/archive\/refs\/tags\/v(.+)\.tar\.gz.*/\1/p' | sort -u)" = "$version" ] ||
+            stale="$stale README.md"
+        # CMake's `project(VERSION)` and the C macros take numbers only, so a candidate keeps its core there.
+        git show :CMakeLists.txt 2>/dev/null | grep -qE "^[[:space:]]+VERSION ${core//./\\.}$" || stale="$stale CMakeLists.txt"
+        for header in include/forkunion.hpp include/forkunion/types.hpp; do
+            for field in "MAJOR $major" "MINOR $minor" "PATCH $patch"; do
+                git show ":$header" 2>/dev/null | grep -qxF "#define FORKUNION_VERSION_$field" || stale="$stale $header:${field% *}"
+            done
+        done
+        if [ -n "$stale" ]; then
+            echo "commit-msg: these staged files don't carry $version:$stale"
+            failed=1
+        fi
+    fi
+    ;;
 *)
+    if git diff --cached --name-only | grep -qx VERSION; then
+        echo "commit-msg: VERSION only changes in a 'Release: vX.Y.Z' commit."
+        failed=1
+    fi
     if ! printf '%s\n' "$subject" |
-        grep -qE '^(Add|Break|Build|Chore|Docs|Fix|Improve|Make): [A-Z]'; then
+        grep -qE '^(Add|Break|Chore|Docs|Fix|Improve|Make): [A-Z]'; then
         echo "commit-msg: the subject must be '<Verb>: <Capitalized summary>' with an approved verb -"
-        echo "            Add Break Build Chore Docs Fix Improve Make."
+        echo "            Add Break Chore Docs Fix Improve Make."
         echo "            Got: ${subject:-<empty>}"
         failed=1
     fi

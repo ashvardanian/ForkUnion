@@ -60,8 +60,7 @@
  */
 #pragma once
 
-/*  Kept in the umbrella, not a sub-header: this is where a reader looks for the version,
- *  and where the release workflows rewrite it.  */
+/*  Kept in the umbrella, not a sub-header: this is where a reader looks for the version.  */
 #define FORKUNION_VERSION_MAJOR 3
 #define FORKUNION_VERSION_MINOR 0
 #define FORKUNION_VERSION_PATCH 4
