@@ -1,74 +1,64 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# Build directories
+# Build trees and CMake
 /build*/
 /Testing/
 
 # Per-developer preset overrides: toolchain paths that are true of one machine, not of the project
 CMakeUserPresets.json
 
-# Rust build artifacts. `Cargo.lock` is tracked - this package ships `[[bin]]` targets, and CI needs `--locked`.
-target/
-.cache/
+# C and C++
+*.d
+*.slo
+*.lo
+*.o
+*.obj
+*.gch
+*.pch
+*.so
+*.dylib
+*.dll
+*.lai
+*.la
+*.a
+*.lib
+*.exe
+*.out
+*.app
+*.exp
+*.pdb
+*.ilk
 
-# Zig build artifacts
+# Python
+__pycache__/
+.venv/
+/.venv*/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Rust
+# `Cargo.lock` is tracked: this package ships `[[bin]]` targets, and CI needs `--locked`
+target/
+
+# Zig
 .zig-cache/
 zig-out/
 zig-cache/
 zig-pkg/
 
+# Mojo
 # Pixi environments, created in the repository root by `pixi run`
 .pixi/
 .magic/
 
-# Python and macOS
-__pycache__/
+# Editors, assistants, language servers and tool caches
+/compile_commands.json
+.cache/
+.claude/
+/.vs/
+
+# macOS
 .DS_Store
 
-# Editors, assistants, language servers and tool caches
-.claude/
-/compile_commands.json
-.venv/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-
-# Windows compiler, build-runner, and local validation artifacts
-/.vs/
-*.exp
-*.pdb
-*.ilk
+# Local scratch
 /.tmp/
 /tmp/
-/.venv*/

@@ -1,0 +1,147 @@
+name: Test Rust
+
+on:
+  workflow_call:
+
+env:
+  WASI_SDK_VERSION: "34"
+
+permissions:
+  contents: read
+
+jobs:
+  test_rust:
+    name: Test Rust on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Ubuntu with GCC, runner: ubuntu-26.04, cc: gcc, cxx: g++ }
+          - { name: Ubuntu with Clang, runner: ubuntu-26.04, cc: clang, cxx: clang++ }
+          # Native Arm64 is the only faithful test of the weak memory model the
+          # library targets - qemu-user does not reproduce guest memory ordering.
+          - name: Ubuntu Arm64 with NUMA
+            runner: ubuntu-26.04-arm
+            cc: gcc
+            cxx: g++
+            features: --features place-memory-on-domain
+          - { name: macOS arm64, runner: macos-26 }
+          - { name: macOS x86_64, runner: macos-26-intel }
+          - { name: Windows, runner: windows-2025 }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install Clang
+        if: matrix.cc == 'clang'
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          sudo apt update
+          sudo apt install -y clang libclang-rt-dev
+
+      - name: Set Up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - name: Build Rust
+        run: cargo build ${{ matrix.features }}
+      - name: Test Rust
+        run: cargo test ${{ matrix.features }}
+
+  check_rust:
+    name: Check the Rust Crate on Ubuntu
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Set Up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      # Every other Rust step runs the newest toolchain, so a post-MSRV API would silently raise the floor.
+      # Unlocked on purpose: it is also the check on `resolver = "3"` holding dependencies to it.
+      # ? 1.100 is the beta channel until 2026-11-12; pin `1.100` here once it ships.
+      - name: Test Rust at the MSRV
+        run: |
+          rustup toolchain install beta --profile minimal
+          cargo +beta test --lib
+
+      # Nothing else builds `benchmarks`, so both `[[bin]]` targets went uncompiled.
+      - name: Build the Rust benchmarks
+        run: cargo build --features benchmarks
+
+      # Otherwise `cargo publish` on `main` is the first read of `include` and the `[[bin]]` paths.
+      # `cargo package` only warns when it drops a target, so promote that.
+      - name: Package the crate
+        run: |
+          set -euo pipefail
+          cargo package --locked 2>&1 | tee package.log
+          if grep -q 'warning: ignoring' package.log; then
+            echo "::error::cargo package dropped a declared target - check the include list in Cargo.toml"
+            exit 1
+          fi
+
+      # Miri can't call the C shim; `--lib` skips the FFI doctests, keeping the pure-Rust unit tests.
+      - name: Test Rust under Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          cargo +nightly miri setup
+          cargo +nightly miri test --lib
+
+  # Cargo features express the same tri-state as CMake's `-D` options, and both must land on the same
+  # `fu_comptime_capabilities()`. `portable` is the one that has to hold: it is what a caller on an
+  # unsupported platform gets, and nothing may depend on a capability it lacks.
+  test_rust_capabilities:
+    name: Test Capability Overrides in Rust
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Set Up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test Rust with auto capabilities
+        run: cargo test --lib -- --nocapture
+
+      - name: Test Rust portable
+        run: cargo test --lib --no-default-features --features portable,std -- --nocapture
+
+      - name: Test Rust with forced NUMA memory
+        run: cargo test --lib --features place-memory-on-domain -- --nocapture
+
+  build_rust_wasi:
+    name: Build Rust for WebAssembly wasm32-wasip1-threads
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      WASI_SDK_PATH: ${{ github.workspace }}/wasi-sdk
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install the WASI SDK
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "${{ github.workspace }}"
+          mv "${{ github.workspace }}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" "$WASI_SDK_PATH"
+
+      - name: Build and link the Rust crate for wasm32-wasip1-threads
+        env:
+          CC_wasm32_wasip1_threads: ${{ github.workspace }}/wasi-sdk/bin/clang
+          CXX_wasm32_wasip1_threads: ${{ github.workspace }}/wasi-sdk/bin/clang++
+          AR_wasm32_wasip1_threads: ${{ github.workspace }}/wasi-sdk/bin/llvm-ar
+        run: |
+          rustup update stable
+          rustup target add wasm32-wasip1-threads
+          cargo test --target wasm32-wasip1-threads --no-run

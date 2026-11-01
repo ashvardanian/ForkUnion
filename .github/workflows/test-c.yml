@@ -1,0 +1,720 @@
+name: Test C
+
+on:
+  workflow_call:
+
+env:
+  EMSCRIPTEN_VERSION: 6.0.9
+  WASI_SDK_VERSION: "34"
+  WASMER_VERSION: v7.5.0
+  # wasi-threads runs on Wasmtime 46 and older, so the threaded rows take the 36 LTS line.
+  WASMTIME_THREADS_VERSION: v36.0.20
+
+permissions:
+  contents: read
+
+jobs:
+  test_ubuntu_gcc:
+    name: Test on Ubuntu with GCC
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build C/C++
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          sudo apt update
+          sudo apt install -y build-essential libomp-dev
+          cmake --preset release -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
+          cmake --build --preset release
+
+      # CMake registers every test it builds - compiler-extension ones included - so `ctest` is the
+      # single source of truth and a new test target joins CI without a workflow edit.
+      - name: Test C & C++
+        run: ctest --preset release
+
+      # `find_package` is the one consumption mode the tests above never touch: they build in-tree, so
+      # the install rules, the exported target set, and `forkunionConfig.cmake` went unexercised - and
+      # a config that named `Threads::Threads` without re-finding it shipped in v3.0.0. Both spellings
+      # are checked because both are documented, and both `add_subdirectory` and `find_package` promise them.
+      - name: Test the installed package
+        run: |
+          set -euxo pipefail
+          cmake --install build_release --prefix "$PWD/_prefix"
+          mkdir -p _consumer && cd _consumer
+          printf 'cmake_minimum_required(VERSION 3.28)\nproject(c LANGUAGES CXX)\nfind_package(forkunion REQUIRED)\nadd_executable(app main.cpp)\ntarget_link_libraries(app PRIVATE forkunion::static)\n' > CMakeLists.txt
+          printf '#include <forkunion.hpp>\nint main() { return 0; }\n' > main.cpp
+          cmake -B b -D forkunion_DIR="$PWD/../_prefix/lib/cmake/forkunion"
+          cmake --build b
+          # The un-namespaced spelling the config's own comment promises.
+          sed -i 's/forkunion::static/forkunion_static/' CMakeLists.txt
+          cmake -B b2 -D forkunion_DIR="$PWD/../_prefix/lib/cmake/forkunion"
+          cmake --build b2
+
+  # The same build as `test_ubuntu_gcc` at `-O0` with `NDEBUG` unset, so the library's asserts run on
+  # the Linux NUMA paths, which no other Debug job reaches.
+  test_ubuntu_debug:
+    name: Test Debug Build on Ubuntu
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build C/C++
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          sudo apt update
+          sudo apt install -y build-essential libomp-dev
+          cmake --preset debug -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
+          cmake --build --preset debug
+
+      - name: Test C & C++
+        run: ctest --preset debug
+
+  # Sanitizers get their own rows so the platform jobs stay on the critical path with one build
+  # each. Restricted to the NUMA-free basic_pool, whose pinned NUMA path stalls under TSan.
+  test_ubuntu_sanitizers:
+    name: Test ${{ matrix.sanitizer }} on Ubuntu with ${{ matrix.cc }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+        sanitizer: [TSan, ASan+UBSan]
+        include:
+          - { cc: gcc, cxx: g++, packages: build-essential }
+          - { cc: clang, cxx: clang++, packages: clang libclang-rt-dev }
+          - { sanitizer: TSan, preset: tsan }
+          - { sanitizer: ASan+UBSan, preset: asan }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install toolchain
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          sudo apt update
+          sudo apt install -y ${{ matrix.packages }}
+
+      - name: Build under the sanitizer
+        run: |
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
+          cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test under the sanitizer
+        run: ctest --preset ${{ matrix.preset }}
+
+  test_ubuntu_clang:
+    name: Test on Ubuntu with Clang and ${{ matrix.stdlib }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    # libc++ is the second row because it is a different standard library, not a different flag on the same one: it
+    # catches a C++20 language mode over an incomplete C++20 library - `std::atomic_ref` absent - that libstdc++ hides.
+    strategy:
+      fail-fast: false
+      matrix:
+        stdlib: [libstdc++, libc++]
+    env:
+      CC: clang
+      CXX: clang++
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install Build Tools
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          sudo apt update
+          sudo apt install -y build-essential clang libclang-rt-dev libblocksruntime-dev
+
+      - name: Install libc++
+        if: matrix.stdlib == 'libc++'
+        run: sudo apt install -y libc++-dev libc++abi-dev
+
+      - name: Build C/C++
+        # CMake reads CXXFLAGS into the compile flags and LDFLAGS into the link flags, so `-stdlib` lands on both
+        # without naming a CMake variable. The libstdc++ row sets neither and builds exactly as before.
+        env:
+          CXXFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
+          LDFLAGS: ${{ matrix.stdlib == 'libc++' && '-stdlib=libc++' || '' }}
+        run: |
+          cmake --preset release
+          cmake --build --preset release
+
+      - name: Test C & C++
+        run: ctest --preset release
+
+  test_ubuntu_arm:
+    name: Test on Ubuntu Arm64 with NUMA
+    # Native Arm64 is the only faithful test of the weak memory model the
+    # library targets - qemu-user does not reproduce guest memory ordering.
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 30
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build C/C++
+        run: |
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          sudo apt update
+          sudo apt install -y build-essential libomp-dev
+          cmake --preset release -D FORKUNION_WITH_TOPOLOGY=ON -D CMAKE_C_COMPILER="$CC" -D CMAKE_CXX_COMPILER="$CXX"
+          cmake --build --preset release
+
+      - name: Test C & C++
+        run: ctest --preset release
+
+  test_macos:
+    name: Test on macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ! macos-13 retired in late 2025 and macos-14 follows in 2026; macos-26 keeps the arm64 row
+          # ! off the chopping block and adds Xcode 26 coverage the macos-15 jobs below don't have.
+          - { arch: arm64, runner: macos-26 }
+          - { arch: x86_64, runner: macos-26-intel }
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      # ? The runner image preships CMake; reinstalling it added minutes of flaky network for nothing.
+      - name: Build C/C++
+        run: |
+          cmake --preset release
+          cmake --build --preset release
+
+      - name: Test C & C++
+        run: ctest --preset release
+
+  test_macos_llvm_versions:
+    name: Test on macOS with LLVM ${{ matrix.llvm }} in ${{ matrix.config }}
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: [17, 18, 19, 20, 21, 22]
+        config: [Debug, Release]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      # ? `brew update` stays: the image's formula index may predate the newest llvm@N bottles.
+      - name: Install LLVM ${{ matrix.llvm }}
+        run: |
+          brew update
+          brew install llvm@${{ matrix.llvm }}
+
+      - name: Build C/C++
+        run: |
+          cmake --preset release -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D CMAKE_CXX_COMPILER="$(brew --prefix llvm@${{ matrix.llvm }})/bin/clang++"
+          cmake --build --preset release
+
+      - name: Test C & C++
+        run: ctest --preset release
+
+  test_windows:
+    name: Test on Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
+      - name: Build C/C++
+        run: |
+          cmake --preset msvc2026_x64
+          cmake --build --preset msvc2026_x64
+      - name: Test C++
+        run: ctest --preset msvc2026_x64
+
+      # Guard the Windows port's headline capability: with topology/NUMA forced ON, a regression that
+      # silently drops Windows out of FORKUNION_WITH_TOPOLOGY fails to compile here instead of quietly
+      # reverting to a basic_pool-only build. Exercises try_harvest_windows and the domain-aware pools.
+      - name: Test C++ with topology forced ON
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --preset msvc2026_x64 -B build_topo -D FORKUNION_WITH_TOPOLOGY=ON -D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=ON
+          cmake --build build_topo --config RelWithDebInfo
+          ctest --test-dir build_topo -C RelWithDebInfo -R '^forkunion_test_cpp20$' --output-on-failure
+
+      # Windows ARM64 cross-compiles on the x64 host; the binary can't run here, so it is compile-only.
+      # At the default `/arch` the LSE probe answers 0 and every reference falls back to `standard_atomic_ref`.
+      - name: Build C++ for ARM64
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --preset msvc2022_arm64
+          cmake --build --preset msvc2022_arm64
+
+      # `/arch:armv8.1` defines `__ARM_FEATURE_ATOMICS`, the macro that admits the MSVC spelling of
+      # `arm64_lse_atomic_ref` and `arm64_rcpc_atomic_ref`. Without this leg that path never compiles.
+      - name: Build C++ for ARM64 with LSE
+        env:
+          CXXFLAGS: /arch:armv8.1
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --preset msvc2022_arm64 -B build_msvc2022_arm64_lse
+          cmake --build build_msvc2022_arm64_lse --config RelWithDebInfo
+
+  # The only leg where the Arm64 references execute rather than merely compile: the cross-compile above
+  # proves MSVC emits them, and this proves they are correct under contention. The default `/arch` row
+  # keeps the fallback honest on the same silicon, and `cpu_capabilities` decides per rung what runs.
+  test_windows_arm64:
+    name: Test on Windows Arm64 with ${{ matrix.variant }}
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: baseline, cxxflags: "" }
+          - { variant: armv8.1, cxxflags: "/arch:armv8.1" }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build C/C++
+        env:
+          CXXFLAGS: ${{ matrix.cxxflags }}
+        run: |
+          cmake --preset msvc2022_arm64
+          cmake --build --preset msvc2022_arm64
+      - name: Test C++
+        run: ctest --preset msvc2022_arm64
+
+  test_windows_msvc_matrix:
+    name: Test on Windows with MSVC ${{ matrix.toolset }} in ${{ matrix.config }}
+    # Pinned to windows-2022: this matrix exists to prove the v142 (VS 2019)
+    # toolset still compiles, and that toolset isn't guaranteed on windows-2025.
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        toolset: [v143, v142] # VS 2022 and VS 2019
+        config: [Debug, Release]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      # ? The runner image preships CMake; MSVC still lacks <stdatomic.h>, so no C tests register here.
+      - name: Build C/C++ with MSVC ${{ matrix.toolset }} in ${{ matrix.config }}
+        run: |
+          cmake --preset msvc2026_x64 -T ${{ matrix.toolset }}
+          cmake --build --preset msvc2026_x64 --config ${{ matrix.config }}
+      - name: Test C++
+        run: ctest --preset msvc2026_x64 -C ${{ matrix.config }}
+
+  # Each row is a prebuilt `dockcross` image carrying the toolchain, qemu, and a CMake toolchain file;
+  # `ctest` runs the binaries through its `CMAKE_CROSSCOMPILING_EMULATOR`. s390x is the big-endian guard.
+  test_qemu:
+    name: Test on Linux ${{ matrix.name }} under QEMU
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: i686, image: dockcross/linux-x86 }
+          - { name: armv7, image: dockcross/linux-armv7 }
+          - { name: s390x, image: dockcross/linux-s390x }
+          - { name: riscv64, image: dockcross/linux-riscv64 }
+          - { name: ppc64le, image: dockcross/linux-ppc64le }
+          - { name: ppc, image: dockcross/linux-ppc }
+          - { name: riscv32, image: dockcross/linux-riscv32 }
+          - { name: loong64, image: dockcross/linux-loongarch64 }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Configure, build, and test
+        # Correctness only under emulation: the stress suite hammers a race window qemu-user cannot
+        # faithfully model and emulates far too slowly, so it only times the job out. The native Arm64
+        # job is where the weak memory model is actually exercised.
+        run: |
+          cmake --preset dockcross
+          cmake --build --preset dockcross
+          ctest --preset dockcross
+
+  # One row per WebAssembly shape; wasm32 Emscripten has one thread, so only its C suite runs.
+  test_wasm:
+    name: Test on WebAssembly ${{ matrix.name }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: wasm32-emscripten, sdk: emscripten, preset: wasm32_emscripten, node: 22 }
+          - { name: wasm64-emscripten, sdk: emscripten, preset: wasm64_emscripten, node: 24 }
+          - { name: wasm32-wasi-threads under Wasmtime and Wasmer, sdk: wasi, preset: wasm32_wasi_threads }
+    env:
+      WASI_SDK_PATH: ${{ github.workspace }}/wasi-sdk
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install Emscripten
+        if: matrix.sdk == 'emscripten'
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+
+      - name: Install Node.js
+        if: matrix.sdk == 'emscripten'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install the WASI SDK and Wasmtime
+        if: matrix.sdk == 'wasi'
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "${{ github.workspace }}"
+          mv "${{ github.workspace }}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" "$WASI_SDK_PATH"
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_THREADS_VERSION"
+          "$HOME/.wasmtime/bin/wasmtime" --version
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Configure and build
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: Install Wasmer
+        if: matrix.sdk == 'wasi'
+        run: curl https://get.wasmer.io -sSfL | sh -s "$WASMER_VERSION"
+
+      - name: Test on Wasmer
+        if: matrix.sdk == 'wasi'
+        run: |
+          for test in build_${{ matrix.preset }}/forkunion_test_*; do
+            "$HOME/.wasmer/bin/wasmer" run --enable-threads --forward-host-env "$test"
+          done
+
+  # The two libc floors the downstream wheels must clear: musl and manylinux2014's glibc 2.17. Toolchain
+  # install precedes checkout because Alpine ships no git.
+  test_containers:
+    name: Test in ${{ matrix.name }} Container
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: musl on Alpine
+            image: alpine:3.22
+            setup: apk add --no-cache git build-base cmake samurai
+          - name: glibc 2.28 on manylinux_2_28
+            image: quay.io/pypa/manylinux_2_28_x86_64
+            setup: dnf install -y git gcc gcc-c++ make && pipx install cmake && pipx install ninja
+    steps:
+      - name: Install toolchain
+        run: ${{ matrix.setup }}
+
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build & test
+        run: |
+          set -eux
+          cmake --preset release -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
+          cmake --build --preset release --target forkunion_test_cpp20 forkunion_test_c11
+          build_release/forkunion_test_cpp20
+          build_release/forkunion_test_c11
+
+  # Bionic shares the kernel ABI but not every GLibC extension; the toolchain defines __ANDROID__, so this
+  # compile proves the threaded build survives it. Compile-only - device binaries can't run here.
+  # The images ship NDK r28b, whose libc++ 19 is the first with the `std::atomic_ref` the pools need.
+  build_android:
+    name: Build for Android ${{ matrix.name }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: arm64-v8a, image: dockcross/android-arm64 }
+          - { name: armeabi-v7a, image: dockcross/android-arm }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Configure and build
+        run: |
+          cmake --preset android_arm64
+          cmake --build --preset android_arm64
+
+  # Only coverage of the FreeBSD cpuset_t affinity path. The VM is x86_64; aarch64 FreeBSD is cross-only.
+  test_freebsd:
+    name: Test on FreeBSD x86_64
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build & test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          usesh: true
+          # `git` is needed for the Taskflow benchmark baseline that `FetchContent` clones at configure time.
+          prepare: pkg install -y cmake ninja git
+          run: |
+            cmake --preset release
+            cmake --build --preset release --target forkunion_test_cpp20 forkunion_test_c11
+            ctest --preset release -R '^forkunion_test_(cpp20|c11)$'
+
+  # QEMU's `-numa node`/`-numa dist` flags are the one tool that makes a guest kernel genuinely
+  # believe in memory domains the host lacks - including cpuless HBM/CXL-style nodes - so the
+  # topology harvest, domain allocators, and distributed pools run against shapes no runner offers.
+  # GitHub's x64 Linux runners expose /dev/kvm, so the guest boots hardware-accelerated.
+  test_numa_shapes:
+    name: Test Linux NUMA with ${{ matrix.name }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 2 symmetric domains
+            expect: 2
+            numa: >-
+              -object memory-backend-ram,size=2G,id=m0 -object memory-backend-ram,size=2G,id=m1
+              -numa node,nodeid=0,cpus=0-1,memdev=m0 -numa node,nodeid=1,cpus=2-3,memdev=m1
+              -numa dist,src=0,dst=1,val=20
+          - name: cpuless memory domain
+            expect: 2
+            numa: >-
+              -object memory-backend-ram,size=3G,id=m0 -object memory-backend-ram,size=1G,id=m1
+              -numa node,nodeid=0,cpus=0-3,memdev=m0 -numa node,nodeid=1,memdev=m1
+          - name: 4 skewed domains
+            expect: 4
+            numa: >-
+              -object memory-backend-ram,size=1G,id=m0 -object memory-backend-ram,size=1G,id=m1
+              -object memory-backend-ram,size=1G,id=m2 -object memory-backend-ram,size=1G,id=m3
+              -numa node,nodeid=0,cpus=0,memdev=m0 -numa node,nodeid=1,cpus=1,memdev=m1
+              -numa node,nodeid=2,cpus=2-3,memdev=m2 -numa node,nodeid=3,memdev=m3
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Install QEMU and enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete # Third-party mirrors flake; Ubuntu keeps its own deb822 list here
+          sudo apt update
+          sudo apt install -y qemu-system-x86 cloud-image-utils genisoimage
+
+      - name: Fetch the cloud image
+        run: |
+          curl -sSLo image.qcow2 \
+            https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+          qemu-img resize image.qcow2 16G
+
+      # The sources travel on a second ISO, so the guest needs no network beyond `apt`.
+      - name: Pack the sources onto an ISO
+        run: |
+          # The tarball must land OUTSIDE the tree being read, or tar meets its own output mid-scan.
+          tar czf /tmp/repo.tgz --exclude=.git --exclude='build*' --exclude=target --exclude='*.qcow2' .
+          mkdir repoiso && mv /tmp/repo.tgz repoiso/repo.tgz
+          genisoimage -quiet -o repo.iso -volid FUREPO -joliet -rock repoiso
+
+      # The node-count check guards the harness itself: a typo in the `-numa` arguments would
+      # otherwise degrade every multi-domain test into a silent skip.
+      # The guest side is the version-controlled `.github/cloud-init/numa-guest.yml`, not a heredoc.
+      # Nothing is templated - the host asserts the node count back from the serial log.
+      - name: Write the cloud-init seed
+        run: |
+          echo "instance-id: fu-numa-${{ github.run_id }}" > meta-data
+          cloud-localds seed.iso .github/cloud-init/numa-guest.yml meta-data
+
+      - name: Boot the shaped VM
+        run: |
+          qemu-system-x86_64 -machine q35,accel=kvm:tcg -cpu max -smp 4 -m 4096 \
+            -drive if=virtio,format=qcow2,file=image.qcow2 \
+            -drive if=virtio,format=raw,file=seed.iso \
+            -drive if=virtio,format=raw,file=repo.iso \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            ${{ matrix.numa }} \
+            -display none -serial file:serial.log -monitor none -daemonize
+
+      # The node-count check guards the harness itself: a typo in the `-numa` arguments would
+      # otherwise degrade every multi-domain test into a silent skip.
+      - name: Await the verdict
+        run: |
+          timeout 1800 sh -c 'until grep -q FORKUNION_VM_DONE serial.log 2>/dev/null; do sleep 10; done' ||
+            echo "::error::Guest printed no FORKUNION_VM_DONE within 30 minutes"
+          echo "guest serial tail"
+          tail -n 100 serial.log || true
+          grep -q "FORKUNION_VM_NODES=${{ matrix.expect }} nodes" serial.log
+          # ? The harvest's own count, not sysfs's: a collapsed enumeration would otherwise pass every
+          # ? test above, since a one-domain machine is indistinguishable from a degraded reading of a four.
+          grep -q "FORKUNION_VM_HARVESTED=${{ matrix.expect }} nodes" serial.log
+          grep -q "FORKUNION_VM_DONE rc=0" serial.log
+
+      - name: Upload the guest serial log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: numa-serial-${{ matrix.name }}
+          path: serial.log
+
+  # Each `FORKUNION_WITH_*` capability is a switch a downstream build may flip; the combinations do not
+  # collapse - a box with no memory placement can still pin threads. Each row builds under `-Werror`.
+  test_ubuntu_capabilities:
+    name: Test Capabilities on Ubuntu with ${{ matrix.name }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: auto
+            options: ""
+          - name: no topology
+            options: "-D FORKUNION_WITH_TOPOLOGY=OFF"
+          - name: no memory placement, but still pinning
+            options: "-D FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN=OFF"
+          - name: no huge pages
+            options: "-D FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN=OFF"
+          - name: no pinning
+            options: "-D FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY=OFF"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build & test C++ and the C shim with ${{ matrix.name }}
+        run: |
+          set -euxo pipefail
+          cmake --preset release -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++ ${{ matrix.options }}
+          cmake --build --preset release --target forkunion_test_cpp20 forkunion_static
+          ctest --preset release -R '^forkunion_test_cpp20$'
+          # The artifact must name no library but the C one: a `numa_*` here is a build host's packages
+          # leaking into a binary that has to load on hosts without them.
+          ! nm -u build_release/libforkunion_static.a | grep -E 'numa_|mbind'
+
+  # iOS shares Darwin's QoS scheduling and `hw.perflevel*` topology, and shares its refusal to pin.
+  # The device SDK is compile-only - a phone can't run on the CI host - but the simulator binary is
+  # linked and run on a booted simulator. A simulator reads the *host* Mac's topology, so this proves
+  # the Apple path under the iOS ABI, not any particular phone's layout.
+  test_ios:
+    name: Test on ${{ matrix.preset }}
+    runs-on: macos-26
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [ios, ios_simulator]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Compile the C++ test and the C shim
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
+
+      # GitHub's macOS images pre-create simulators for their Xcode; boot the first iPhone, don't mint one.
+      - name: Run the C++ test on the iOS Simulator
+        if: matrix.preset == 'ios_simulator'
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available iPhone \
+            | grep -oE "[0-9A-F-]{36}" | head -1)
+          test -n "$DEVICE_ID"
+          xcrun simctl boot "$DEVICE_ID"
+          xcrun simctl spawn "$DEVICE_ID" "$PWD/build_ios_simulator/forkunion_test_cpp20.app/forkunion_test_cpp20"
+
+  # Each machine profile builds the libraries for one CPU, compile only; the Arm ones build natively on Arm runners, and
+  # Clang 22 is the first to know Olympus.
+  build_machine_profile:
+    name: Build Machine Profile ${{ matrix.preset }}
+    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [xeon4_hopper, xeon6_blackwell, venice_mi450, grace_hopper, vera_rubin]
+    steps:
+      - name: Install Clang 22
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update && sudo apt-get install -y clang-22
+
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22
+          cmake --build --preset ${{ matrix.preset }}
+
+  verify_models:
+    name: Check Promela Models and GenMC Clients
+    runs-on: ubuntu-26.04
+    # A cache miss builds GenMC from source, which the cached runs never time.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Spin, Clang and the GenMC Build Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y spin cmake clang-20 llvm-20-dev libffi-dev zlib1g-dev libedit-dev
+      - name: Checkout GenMC
+        uses: actions/checkout@v7
+        with:
+          repository: MPI-SWS/genmc
+          ref: 9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7
+          path: genmc
+      - name: Restore the GenMC Build
+        id: genmc
+        uses: actions/cache@v6
+        with:
+          path: genmc/build
+          key: genmc-9f6c4c0-clang-20
+      - name: Build GenMC
+        if: steps.genmc.outputs.cache-hit != 'true'
+        run: |
+          cmake -S genmc -B genmc/build -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm
+          cmake --build genmc/build --parallel
+      - name: Check the Models and the Clients
+        run: verification/check.sh
+        env:
+          GENMC: ${{ github.workspace }}/genmc/build/bin/genmc
+          GENMC_CLANG: clang++-20

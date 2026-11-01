@@ -12,27 +12,37 @@
 
 set -u
 export LC_ALL=C # Byte-wise regexes, immune to the committer's locale
+unset FORCE_COLOR CLICOLOR_FORCE # Plain tool output, since the checks parse it by its colons
 
 rejection_count=0
 
 # region Project Settings
 
-# The only lines that differ between the NumKong, ForkUnion, SmashTable, StringZilla and USearch hooks
-# outside their own project region: whose hook this is, which prefix its own headers sit under, which
-# sibling names a comment may not cite as a justification, and which abbreviations this codebase refuses.
+# The only lines that differ between the NumKong, StringZilla, USearch, ForkUnion, SmashTable, UCall, UStore
+# and UForm hooks outside their own project region: whose hook this is, which prefix its own headers sit
+# under, which namespace its harnesses open, which sibling names a comment may not cite as a justification,
+# which abbreviations this codebase refuses, which library files are standard-container baselines, and
+# which prefix names its code-generation macros.
 project_name="ForkUnion"
 project_namespace="ashvardanian::forkunion"
 project_include_prefix="forkunion"
-sibling_projects='stringzilla|usearch|numkong|smashtable|simsimd|smallfield|stringtape'
+sibling_projects='numkong|stringzilla|usearch|smashtable|ucall|ustore|uform'
 abbreviations_refused="hi lo bot acc accum tmp temp res bcast ext idx cnt ptr buf len str val obj elem iter"
+# Name prefixes of third-party APIs the code calls, whose abbreviations are not this project's to spell out.
+third_party_identifier_prefixes=''
 rustfmt_command="cargo fmt"
+std_collections_baseline_paths=''
 # Uppercase non-cache CMake names this project publishes, and the third-party and toolchain inputs it sets.
 cmake_published_variables=''
 cmake_third_party_variables='EMSCRIPTEN_SYSTEM_PROCESSOR WASI_SDK_PREFIX'
+codegen_macro_prefix=''
 
 # endregion Project Settings
 
 # region Shared Helpers
+
+# mawk runs these programs fastest, then gawk; each program keeps to what gawk, mawk and BWK awk accept.
+fastest_awk=$(command -v mawk || command -v gawk || echo awk)
 
 # Prints the reason and the first offending lines. Counts rather than latches, because the selftest
 # asserts that a bad fixture trips exactly one rule.
@@ -72,6 +82,7 @@ comment_structure_awk='
 # defines `characters(text)`.
 paragraph_room_awk='
     function first_word(text,    end_) {
+        if (match(text, /^@(a|b|c|e|p|ref)[[:space:]]+[^[:space:]]+/)) return substr(text, 1, RLENGTH)
         if (text ~ /^`[^`]*`/) { match(text, /^`[^`]*`[^[:space:]]*/); return substr(text, 1, RLENGTH) }
         if (text ~ /^<tt>/ && (end_ = index(text, "</tt>"))) { match(substr(text, end_ + 5), /^[^[:space:]]*/); return substr(text, 1, end_ + 4 + RLENGTH) }
         sub(/[[:space:]].*$/, "", text); return text
@@ -92,38 +103,52 @@ paragraph_room_awk='
 '
 
 # Runs an awk program over the staged file with `added[line]` preloaded, so a structural check sees the
-# whole file as context and still reports only what this commit added.
-scan_staged_file_marking_added_lines() { # scan_staged_file_marking_added_lines <awk-program>
-    awk "$comment_structure_awk"'NR == FNR { added[$1 + 0]; next } '"$1" "$staged_lines_path" "$staged_text_path"
+# whole file as context and still reports only what this commit added; code checks use the comment-free copy.
+scan_staged_file_marking_added_lines() { # scan_staged_file_marking_added_lines <awk-program> [source]
+    "$fastest_awk" "$comment_structure_awk"'FILENAME == ARGV[1] { added[$1 + 0]; next } '"$1" "$staged_lines_path" "${2:-$staged_text_path}"
 }
 
 # Blanks C-family comments to spaces, keeping every line and column in place, so a code check never fires
-# on a comment that merely names the construct it bans. String and character literals pass through.
-blank_c_comments_preserving_columns() { # blank_c_comments_preserving_columns < source
-    awk '
+# on a comment that merely names the construct it bans. String, character and raw string literals pass
+# through; with `literals`, their contents blank instead and comments pass through, so prose checks skip data.
+blank_c_comments_preserving_columns() { # blank_c_comments_preserving_columns [literals] < source
+    "$fastest_awk" -v blanked="${1:-comments}" '
+        function emit(span, kind) { if (kind == blanked) gsub(/./, " ", span); output = output span }
         {
             output = ""
             for (position = 1; position <= length($0); ++position) {
                 character = substr($0, position, 1)
                 pair = substr($0, position, 2)
+                if (state == "raw") {
+                    if (!(closing = index(substr($0, position), closer))) { emit(substr($0, position), "literals"); break }
+                    emit(substr($0, position, closing - 1), "literals"); output = output closer
+                    position += closing + length(closer) - 2; state = ""
+                    continue
+                }
                 if (state == "block") {
-                    if (pair == "*/") { state = ""; output = output "  "; ++position }
-                    else output = output " "
+                    if (!(closing = index(substr($0, position), "*/"))) { emit(substr($0, position), "comments"); break }
+                    emit(substr($0, position, closing + 1), "comments"); position += closing; state = ""
                     continue
                 }
                 if (state == "string" || state == "character") {
-                    output = output character
-                    if (character == "\\") { output = output substr($0, position + 1, 1); ++position }
-                    else if ((state == "string" && character == "\"") || (state == "character" && character == "\047")) state = ""
+                    if (character == "\\") { emit(substr($0, position, 2), "literals"); ++position }
+                    else if ((state == "string" && character == "\"") || (state == "character" && character == "\047")) { state = ""; output = output character }
+                    else emit(character, "literals")
                     continue
                 }
-                if (pair == "//") { tail = substr($0, position); gsub(/./, " ", tail); output = output tail; break }
-                if (pair == "/*") { state = "block"; output = output "  "; ++position; continue }
+                if (pair == "//") { emit(substr($0, position), "comments"); break }
+                if (pair == "/*") { state = "block"; emit(pair, "comments"); ++position; continue }
+                if (character == "\"" && substr($0, 1, position - 1) ~ /(^|[^A-Za-z0-9_])(u8|[uUL])?R$/ &&
+                    match(substr($0, position + 1), /^[^()\\[:space:]]*\(/)) {
+                    closer = ")" substr($0, position + 1, RLENGTH - 1) "\""
+                    output = output substr($0, position, RLENGTH + 1); position += RLENGTH; state = "raw"
+                    continue
+                }
                 if (character == "\"") state = "string"
                 else if (character == "\047") state = "character"
                 output = output character
             }
-            if (state != "block") state = ""
+            if (state != "block" && state != "raw") state = ""
             print output
         }'
 }
@@ -132,8 +157,8 @@ blank_c_comments_preserving_columns() { # blank_c_comments_preserving_columns < 
 # mode judges the documentation around code, not the working notes inside it.
 lines_outside_function_bodies() {
     case "$staged_path" in
-    *.h | *.hpp | *.c | *.cpp | *.cc | *.cu | *.cuh | *.rs | *.pml)
-        printf '%s\n' "$staged_file_text" | blank_c_comments_preserving_columns | awk '
+    *.h | *.hpp | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal | *.pml | *.rs | *.go | *.swift | *.ts | *.mts | *.js | *.mjs | *.cjs)
+        printf '%s\n' "$staged_file_text" | blank_c_comments_preserving_columns | "$fastest_awk" '
             {
                 text = $0
                 gsub(/"(\\.|[^"\\])*"/, "\"\"", text); gsub(/\047(\\.|[^\047\\])\047/, "\047\047", text)
@@ -164,7 +189,21 @@ lines_outside_function_bodies() {
                 if (!(inside_at_start && body_depth > 0)) print NR
             }'
         ;;
-    *) printf '%s\n' "$staged_file_text" | awk '{ print NR }' ;;
+    *.py | *.pyi)
+        printf '%s\n' "$staged_file_text" | "$fastest_awk" '
+            {
+                indent = match($0, /[^[:space:]]/) - 1; blank = (indent < 0)
+                if (!blank && !awaiting_colon) while (open_defs > 0 && indent <= def_indent[open_defs]) --open_defs
+                inside = (open_defs > 0 && !awaiting_colon && (blank || indent > def_indent[open_defs]))
+                if (awaiting_colon) { if ($0 ~ /:[[:space:]]*(#.*)?$/) { def_indent[++open_defs] = awaiting_indent; awaiting_colon = 0 } print NR; next }
+                if ($0 ~ /^[[:space:]]*(async[[:space:]]+)?def[[:space:]]/) {
+                    inside = 0; awaiting_indent = indent
+                    if ($0 ~ /:[[:space:]]*(#.*)?$/) def_indent[++open_defs] = indent; else awaiting_colon = 1
+                }
+                if (!inside) print NR
+            }'
+        ;;
+    *) printf '%s\n' "$staged_file_text" | "$fastest_awk" '{ print NR }' ;;
     esac
 }
 
@@ -204,6 +243,18 @@ check_doxygen_command_not_glued() {
     [ -z "$glued" ] || reject_with_reason "$glued" \
         "$staged_path glues a Doxygen command to the previous character;" \
         "            write \`as @c foo does\`, never \`(@c foo)\`:"
+}
+
+# Rejects Doxygen text aligned into columns by hand, as in `@brief  Text` or `@param[in] a     Text`, because
+# such columns drift with the first edit; `check_tag_continuation_hanging_indent` covers continuation lines.
+check_doxygen_columns_unaligned() {
+    local aligned
+    aligned=$(printf '%s\n' "$staged_added_text" | grep -E "$added_documentation_line_pattern" | grep -E \
+        '@(brief|param|tparam|returns?|retval|note|warning|details|pre|post|sa|see|ref|c|p|b)(\[[a-z,]+\])?  +[^[:space:]]|@(t?param(\[[a-z,]+\])?|retval) +[A-Za-z_][A-Za-z0-9_.]*  +[^[:space:]]' ||
+        true)
+    [ -z "$aligned" ] || reject_with_reason "$aligned" \
+        "$staged_path aligns Doxygen text into columns by hand;" \
+        "            put one space after a command and after the name it documents:"
 }
 
 # Rejects `@sa` pointing at a URL and `@see` without one, because Doxygen treats the two alike and only this
@@ -252,24 +303,76 @@ check_section_has_snake_case_identifier() {
 check_section_anchor_unique() {
     local anchor duplicated=""
     for anchor in $(printf '%s\n' "$staged_added_text" |
-        grep -oE '@(section|subsection|subsubsection|page)[[:space:]]+[a-z][a-z0-9_]*' | awk '{print $2}'); do
+        grep -oE '@(section|subsection|subsubsection|page)[[:space:]]+[a-z][a-z0-9_]*' | "$fastest_awk" '{print $2}'); do
         [ "$(git grep --cached -hoE "@(section|subsection|subsubsection|page)[[:space:]]+$anchor([[:space:]]|$)" -- \
-            '*.c' '*.h' '*.hpp' '*.cpp' '*.cu' '*.cuh' | wc -l)" -gt 1 ] && duplicated="$duplicated$anchor"$'\n'
+            '*.c' '*.h' '*.hpp' '*.cpp' '*.cc' '*.cu' '*.cuh' '*.hip' '*.metal' | wc -l)" -gt 1 ] && duplicated="$duplicated$anchor"$'\n'
     done
     [ -z "$duplicated" ] || reject_with_reason "$duplicated" \
         "$staged_path reuses a Doxygen section anchor another file already defines; prefix it with this file's" \
         "            domain, as in dots_haswell_instructions:"
 }
 
-# Rejects `///<`, `//!<` and `/**<` trailing a member, because the column drifts on every rename; the
-# member gets its own `/** ... */` above it, or the type's docblock explains all of them.
+# Rejects `//<`, `///`, `//!<`, `/*<`, `/**<` and `/*!<` trailing code, because no editor shows them on
+# hover and the column drifts on every rename; a member gets its own `/** ... */` above it, or the
+# type's docblock explains all.
 check_member_docs_not_trailing() {
     local trailing
     trailing=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+[[:space:]]*(\*([[:space:]]|$)|/\*|//)' |
-        grep -E '(//!<|///<|/\*\*<)' || true)
+        grep -E '(//[/!]?<|///|/\*[*!]?<)' || true)
     [ -z "$trailing" ] || reject_with_reason "$trailing" \
         "$staged_path documents a member with a trailing marker;" \
         "            put a /** ... */ above the member, or fold the explanation into the type's docblock:"
+}
+
+# Rejects a plain `//` or `/* */` comment trailing a field or enumerator, because hover shows only a
+# comment above the declaration; inside a struct, union or enum body, each gets its own `/** ... */`.
+# Type alias tables keep their aligned trailing comments.
+check_member_comments_above() {
+    local trailing
+    trailing=$(scan_staged_file_marking_added_lines '
+        depth == 0 && /^[[:space:]]*(typedef[[:space:]]+)?(struct|union|enum)([[:space:]]+[A-Za-z_][A-Za-z0-9_:]*)?([[:space:]]*:[^{;(]*)?[[:space:]]*\{[[:space:]]*$/ {
+            depth = 1; next
+        }
+        depth > 0 {
+            code = $0
+            gsub(/"([^"\\]|\\.)*"/, "\"\"", code)
+            depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+            if (depth <= 0) { depth = 0; next }
+            if (code ~ /\\[[:space:]]*$/ || code ~ /^[[:space:]]*(\/\/|\/\*|\*|using[[:space:]])/) next
+            if ((FNR in added) && code ~ /[]A-Za-z0-9_);,][[:space:]]*(\/\/([^\/!]|$)|\/\*[^*])/) print "+" $0
+        }' || true)
+    [ -z "$trailing" ] || reject_with_reason "$trailing" \
+        "$staged_path comments a field or enumerator on its own line's tail, which hover never shows;" \
+        "            put a /** ... */ above it, or fold the explanation into the type's docblock:"
+}
+
+# Rejects indexing through a cast, `((T *)pointer)[index]`, because the element type and the offset hide inside
+# one expression; name a typed pointer first and index that.
+check_no_cast_indexing() {
+    local chains
+    chains=$(scan_staged_file_marking_added_lines '
+        (FNR in added) && /\(\([[:space:]]*[A-Za-z_][A-Za-z0-9_ ]*\*+[[:space:]]*\)[^()]*(\([^()]*\))?[^()]*\)[[:space:]]*\[/ {
+            print "line " FNR ": " $0
+        }' "$staged_code_path")
+    [ -z "$chains" ] || reject_with_reason "$chains" \
+        "$staged_path indexes through a cast;" \
+        "            bind a typed pointer to a named local and index it:"
+}
+
+# Rejects an added `#define <codegen_macro_prefix><name>(` missing from .clang-format's `StatementMacros`,
+# because every new code-generation macro family goes through review, and the list in the same commit shows it.
+check_codegen_macros_are_approved() {
+    [ -n "$codegen_macro_prefix" ] || return 0
+    case "$staged_path" in c/* | cpp/* | include/*) ;; *) return 0 ;; esac
+    local macro_name unapproved=""
+    for macro_name in $(printf '%s\n' "$staged_added_text" |
+        grep -oE "^\+[[:space:]]*#[[:space:]]*define[[:space:]]+$codegen_macro_prefix[A-Za-z0-9_]+\(" |
+        grep -oE "$codegen_macro_prefix[A-Za-z0-9_]+"); do
+        case " $approved_codegen_macros " in *[[:space:]]"$macro_name"[[:space:]]*) ;; *) unapproved="$unapproved$macro_name"$'\n' ;; esac
+    done
+    [ -z "$unapproved" ] || reject_with_reason "$unapproved" \
+        "$staged_path defines a code-generation macro family nobody approved;" \
+        "            a new one needs Ash's approval, so list it in .clang-format's StatementMacros in the same commit:"
 }
 
 # Rejects a tensor shape spelled `[rows x cols]`, `[rows × cols]`, or backticked `rows × cols`, because a
@@ -368,6 +471,28 @@ check_formula_not_in_backticks() {
     [ -z "$formulas" ] || reject_with_reason "$formulas" \
         "$staged_path puts a formula in backticks or MathJax; write it as plain Unicode prose, as in aᵀ × M × b," \
         "            or as a @verbatim block when it needs more than one line:"
+}
+
+# Rejects TeX inside a Markdown code span, like `4 \cdot h` or `n_{kv}`, because a code span renders its
+# backslashes and braces literally, while TeX between $ signs renders as math on GitHub.
+check_markdown_tex_not_in_code_spans() {
+    local spans
+    spans=$(scan_staged_file_marking_added_lines '
+        /^[[:space:]]*```/ { fenced = !fenced; next }
+        fenced || !(FNR in added) { next }
+        {
+            line = $0
+            while (match(line, /`[^`]+`/)) {
+                span = substr(line, RSTART, RLENGTH); line = substr(line, RSTART + RLENGTH)
+                if (span ~ /\\(cdot|times|frac|sum|prod|sqrt|log|ln|exp|text|mathrm|mathbf|left|right|leq?|geq?|neq?|approx|infty|varepsilon|epsilon|alpha|beta|gamma|delta|sigma|lambda|theta|top|circ|bar|hat|ldots|cdots|lfloor|rfloor|lceil|rceil)([^A-Za-z]|$)/ ||
+                    span ~ /(^|[^A-Za-z0-9_])[A-Za-z][_^]\{/) {
+                    printf "line %d: %s\n", FNR, span
+                    break
+                }
+            }
+        }')
+    [ -z "$spans" ] || reject_with_reason "$spans" \
+        "$staged_path puts TeX inside a Markdown code span, which renders it literally; write it between \$ signs:"
 }
 
 # Rejects a `/**` with no empty line above it, because a docblock reads as the start of something only with
@@ -608,7 +733,7 @@ check_docblock_brackets_match_content() {
                 for (closing = line; closing <= last; ++closing) {
                     if (closing in added) touched = 1
                     if (lines[closing] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(brief|param|tparam|return|returns|retval|sa|see|note|warning|throws|pre|post|file|author|date|section|subsection|code|verbatim|par|details|deprecated|warning|li)([^a-z{]|\{|$)/) tagged = 1
-                    if (lines[closing] ~ /^[[:space:]]*\*[[:space:]]+[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: /) tagged = 1
+                    if (lines[closing] ~ /^[[:space:]]*\*[[:space:]]+[A-Z][A-Za-z]*( [A-Za-z]+)?( [A-Za-z]+)?: /) tagged = 1
                     if (lines[closing] ~ /^[[:space:]]*\*[[:space:]]*(```|@example)/) tagged = 1
                     if (lines[closing] ~ /\*\//) break
                 }
@@ -647,8 +772,8 @@ check_section_surrounded_by_blank_comment_lines() {
         "            above and below every @section heading:"
 }
 
-# Rejects a `@par` without an empty comment line directly above (a bare `/**` opener counts), and without one
-# below its list unless the docblock ends there, because a titled list reads as one only with air around it.
+# Rejects a `@par` without an empty comment line directly above, and without one below its list unless the
+# docblock ends there, because a titled list reads as one only with air around it.
 check_par_surrounded_by_blank_comment_lines() {
     local cramped
     cramped=$(scan_staged_file_marking_added_lines '
@@ -656,7 +781,7 @@ check_par_surrounded_by_blank_comment_lines() {
         END {
             for (line = 1; line <= last; ++line)
                 if (lines[line] ~ /^[[:space:]]*\*[[:space:]]*@par([[:space:]]|$)/ && (line in added)) {
-                    if (!is_empty_comment_line(lines[line - 1]) && lines[line - 1] !~ /^[[:space:]]*\/\*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @par\n", line
+                    if (!is_empty_comment_line(lines[line - 1])) printf "line %d: no empty comment line above the @par\n", line
                     below = line + 1
                     while (lines[below] ~ /^[[:space:]]*\*[[:space:]]+-[[:space:]]/ || lines[below] ~ /^[[:space:]]*\*[[:space:]][[:space:]][[:space:]]+[^[:space:]]/) ++below
                     if (!is_empty_comment_line(lines[below]) && lines[below] !~ /^[[:space:]]*\*\/[[:space:]]*$/) printf "line %d: no empty comment line below the @par\n", line
@@ -853,7 +978,8 @@ check_prose_paragraph_filled() {
             note_marker = ""; if (match(body, /^[?!][[:space:]]+/)) { note_marker = substr(body, 1, 1); body = substr(body, RLENGTH + 1) }
             flowing = (inside || slashed) && !in_code && body != "" && body !~ /^\||https?:\/\// &&
                 body !~ /[^[:space:]]   *[^[:space:]]/ && text !~ /@end(code|verbatim)/ && text !~ /^[[:space:]]*\/\/[[:space:]]{4,}/
-            continues = flowing && body !~ /^(@|- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: )/ && !opens
+            # An inline tag like `@c name` mid-sentence wraps like a word; only block tags open a paragraph.
+            continues = flowing && (body !~ /^(@|- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+)?( [A-Za-z]+)?: )/ || body ~ /^@(a|b|c|e|p|ref)[[:space:]]/) && !opens
             if (!(continues && previous_flowing && previous_kind == (slashed ? "slashed" : "block") && previous_marker == note_marker))
                 report_paragraph_room()
             if (flowing) hold_paragraph_line(FNR, body, characters(text))
@@ -980,7 +1106,7 @@ check_region_note_above_pragma() {
         opener_line && !indented_allowed && /^[[:space:]]*#[[:space:]]*endif/ { if (--depth == 0) { opener_line = 0; next } }
         opener_line && (/^[[:space:]]*$/ || /^[[:space:]]*#/) { guard = ""; next }
         opener_line && (indented_allowed ? /^[[:space:]]*\/\*([^*]|$)/ : /^\/\*([^*]|$)/) &&
-            $0 !~ /^[[:space:]]*\/\*[[:space:]]+[A-Z][A-Za-z-]*( [A-Za-z-]+){0,3}:[[:space:]]/ {
+            $0 !~ /^[[:space:]]*\/\*[[:space:]]+[A-Z][A-Za-z-]*( [A-Za-z-]+)?( [A-Za-z-]+)?( [A-Za-z-]+)?:[[:space:]]/ {
             pending_line = FNR; pending_opener = opener_line; note_closed = ($0 ~ /\*\//); opener_line = 0; next
         }
         { opener_line = 0 }')
@@ -1003,11 +1129,11 @@ check_include_comment_above() {
 # Includes form groups in a fixed order with a blank line between them: the C library, the platform's own
 # headers, the C++ standard library, external libraries, sibling projects, then this project's own headers.
 # Only headers in this repository are quoted, found beside the including file or anywhere in the index, and
-# public ones under `c/` and `include/` always with the `project_include_prefix`. Includes under an `#if` keep their
+# public ones under `c/`, `cpp/` and `include/` always with the `project_include_prefix`. Includes under an `#if` keep their
 # quoting but sit outside the grouping; an include guard is not such an `#if`.
 check_include_groups() {
     local misgrouped
-    misgrouped=$(awk -v project="$project_include_prefix" -v file="$staged_path" '
+    misgrouped=$("$fastest_awk" -v project="$project_include_prefix" -v siblings="$sibling_projects" -v file="$staged_path" '
         BEGIN {
             split("cassert cctype cerrno cfenv cfloat cinttypes climits clocale cmath csetjmp csignal cstdarg " \
                   "cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar cwctype", names, " ")
@@ -1015,7 +1141,7 @@ check_include_groups() {
             split("dirent.h dlfcn.h errno.h fcntl.h ftw.h poll.h pthread.h sched.h signal.h stdio.h stdlib.h " \
                   "string.h time.h unistd.h io.h windows.h bcrypt.h malloc.h", names, " ")
             for (n in names) platform[names[n]] = 1
-            split("forkunion numkong smashtable stringzilla uform usearch ustore", names, " ")
+            split(siblings, names, "|")
             for (n in names) sibling[names[n]] = 1
             split("C-library platform C++-standard external sibling own", labels, " ")
         }
@@ -1041,7 +1167,7 @@ check_include_groups() {
                 else rank = 4
                 if (quoted && rank != 5 && rank != 6) {
                     directory = file; sub(/[^\/]*$/, "", directory); found = ""
-                    # `dir/../` collapses, so a model one directory down finds a header beside its parent
+                    # `dir/../` collapses, so a file one directory down finds a header beside its parent.
                     beside = directory header
                     while (sub(/[^\/.][^\/]*\/\.\.\//, "", beside)) {}
                     search = "git ls-files \":(glob)**/" header "\""
@@ -1049,7 +1175,7 @@ check_include_groups() {
                     else if (touched) { search | getline found; close(search) }
                     if (touched && found == "")
                         printf "line %d: \"%s\" is not in this repository - write <%s>\n", FNR, header, header
-                    if (match(found, "^(c|include)/" project "/"))
+                    if (match(found, "^(c|cpp|include)/" project "/"))
                         printf "line %d: \"%s\" is a public header - write \"%s\"\n", FNR, header, substr(found, RLENGTH - length(project))
                     rank = 6
                 }
@@ -1129,7 +1255,7 @@ check_tparams_separated_from_params() {
 check_parameter_references_use_p() {
     local references
     references=$(scan_staged_file_marking_added_lines '
-function report_block(    i, text, name, declaration, count, parts, k, candidate, pattern) {
+function report_block(    i, text, name, declaration, count, parts, k, candidate, pattern, named) {
     declaration = decl
     gsub(/\/\*[^*]*\*\//, " ", declaration); gsub(/\/\/[^\n]*/, " ", declaration)
     if (declaration ~ /(^|[^A-Za-z0-9_])concept[[:space:]]/) return
@@ -1142,7 +1268,7 @@ function report_block(    i, text, name, declaration, count, parts, k, candidate
     delete params
     for (k = 1; k <= count; ++k) {
         candidate = parts[k]; sub(/[[:space:]]*(\[[^]]*\])?[[:space:]]*$/, "", candidate)
-        if (match(candidate, /[A-Za-z_][A-Za-z0-9_]*$/)) { name = substr(candidate, RSTART, RLENGTH); if (name !~ /^(void|const|int|float|double|char|bool|auto)$/) params[name] = 1 }
+        if (match(candidate, /[A-Za-z_][A-Za-z0-9_]*$/)) { name = substr(candidate, RSTART, RLENGTH); if (name !~ /^(void|const|int|float|double|char|bool|auto)$/ && !(name in params)) { params[name]; ordered_params[++named] = name } }
     }
     for (i = 1; i <= lines_count; ++i) {
         text = lines[i]
@@ -1152,7 +1278,8 @@ function report_block(    i, text, name, declaration, count, parts, k, candidate
         sub(/@(param|tparam)(\[[a-z,]+\])?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/, "", text)
         gsub(/@b[[:space:]]+\[[^]]*\]/, "", text)
         gsub(/<\/tt>/, "\001", text); gsub(/<tt>[^\001]*\001/, "", text); gsub(/@c[[:space:]]+[^[:space:]]+/, "", text)
-        for (name in params) {
+        for (k = 1; k <= named; ++k) {
+            name = ordered_params[k]
             if (index(text, "`" name "`") && !index(text, "@p `" name "`")) { hits++; if (!(line_numbers[i] in added)) continue; printf "line %d: `%s` should read @p %s\n", line_numbers[i], name, name }
             else if (name ~ /[_0-9]/ && text ~ ("(^|[^@A-Za-z0-9_`p ]|[^@] |^ )" name "([^A-Za-z0-9_`]|$)") && text !~ ("@p " name "([^A-Za-z0-9_]|$)")) { hits++; if (!(line_numbers[i] in added)) continue; printf "line %d: bare %s should read @p %s\n", line_numbers[i], name, name }
         }
@@ -1180,14 +1307,15 @@ check_no_orphan_last_line() {
             is_comment = ($0 ~ /^[[:space:]]*(\*|\/\/)/ && $0 !~ /^[[:space:]]*\*\//)
             if ($0 ~ /@(code|verbatim)/) in_code = 1
             current_body = is_comment ? body($0) : ""
-            ends_paragraph = !is_comment || current_body ~ /^[[:space:]]*$/ || current_body ~ /^[[:space:]]*@/ || $0 ~ /\*\//
+            inline_tag = (current_body ~ /^[[:space:]]*@(a|b|c|e|p|ref)[[:space:]]/)
+            ends_paragraph = !is_comment || current_body ~ /^[[:space:]]*$/ || (current_body ~ /^[[:space:]]*@/ && !inline_tag) || $0 ~ /\*\//
             if (previous_continues && ends_paragraph && (previous_line in added)) {
                 words = previous_body; gsub(/^[[:space:]]+/, "", words)
                 if (split(words, parts, /[[:space:]]+/) <= 2 && length(words) < 20) printf "line %d: orphan `%s`\n", previous_line, words
             }
             previous_continues = is_comment && !in_code && previous_comment && previous_body != "" && current_body != "" &&
                 $0 !~ /^[[:space:]]*\/\/[[:space:]]{4,}/ &&
-                current_body !~ /^[[:space:]]*(@|- |[0-9]+\. |\||[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: )/ && current_body !~ /[^[:space:]]   *[^[:space:]]/
+                (current_body !~ /^[[:space:]]*(@|- |[0-9]+\. |\||[A-Z][A-Za-z]*( [A-Za-z]+)?( [A-Za-z]+)?: )/ || inline_tag) && current_body !~ /[^[:space:]]   *[^[:space:]]/
             previous_comment = is_comment; previous_body = current_body; previous_line = FNR
             if ($0 ~ /@end(code|verbatim)/) in_code = 0
         }')
@@ -1267,12 +1395,36 @@ check_declaration_docs_not_line_comments() {
 binding_comment_marker() { # binding_comment_marker <path>
     case "$1" in
     *.rs | *.zig) printf '%s' '^[[:space:]]*//[/!]?' ;;
-    *.mojo) printf '%s' '^[[:space:]]*#' ;;
+    *.go) printf '%s' '^[[:space:]]*//' ;;
+    *.swift) printf '%s' '^[[:space:]]*///?' ;;
+    *.ts | *.mts | *.js | *.mjs | *.cjs) printf '%s' '^[[:space:]]*(/\\*\\*|\\*|//)' ;;
+    *.py | *.pyi | *.mojo | python/*.c) printf '%s' '^[[:space:]]*#' ;;
     esac
 }
 
-# The staged text whose comments the binding checks read.
-binding_prose_text() { printf '%s\n' "$staged_file_text"; }
+# The staged text whose comments the binding checks read: the file itself, or for the CPython glue, one
+# `# `-prefixed line per `doc_*[]` literal line, blank elsewhere, so line numbers still match the file.
+binding_prose_text() {
+    case "$staged_path" in
+    python/*.c)
+        printf '%s\n' "$staged_file_text" | "$fastest_awk" '
+            /^[[:space:]]*(static[[:space:]]+)?char const doc_[A-Za-z0-9_]*\[\][[:space:]]*=/ { inside = 1; print ""; next }
+            inside {
+                line = $0
+                if (match(line, /"([^"\\]|\\.)*"/)) {
+                    text = substr(line, RSTART + 1, RLENGTH - 2)
+                    paragraph_end = (text ~ /\\n\\n$/)
+                    sub(/(\\n)+$/, "", text); gsub(/\\"/, "\"", text); gsub(/\\\\/, "\\", text)
+                    print "# " text (paragraph_end ? "\t" : "")
+                } else print ""
+                if (line ~ /;[[:space:]]*(\/\/.*)?$/) inside = 0
+                next
+            }
+            { print "" }'
+        ;;
+    *) printf '%s\n' "$staged_file_text" ;;
+    esac
+}
 
 # Runs an awk program over the binding prose text with `added[line]` preloaded and `marker` set, and with
 # helpers for the comment body, fenced code, and character width shared by every binding check.
@@ -1287,7 +1439,7 @@ scan_binding_prose() { # scan_binding_prose <awk-program>
     esac
     marker=$(binding_comment_marker "$staged_path")
     [ -n "$marker" ] || return 0
-    awk -v marker="$marker" '
+    "$fastest_awk" -v marker="$marker" '
         function characters(text) { sub(/\t$/, "", text); gsub(/[\200-\277]/, "", text); return length(text) }
         function comment_body(text) { if (!match(text, marker)) return ""; text = substr(text, RLENGTH + 1); sub(/^[[:space:]]/, "", text); return text }
         function is_comment(text) { return text ~ marker && text !~ /^[[:space:]]*\*\// }
@@ -1328,7 +1480,7 @@ check_binding_prose_filled() {
         '"$paragraph_room_awk"'
         {
             note_marker = ""; if (match(body, /^[?!][[:space:]]+/)) { note_marker = substr(body, 1, 1); body = substr(body, RLENGTH + 1) }
-            starts_entry = (body ~ /^([-*+] |[0-9]+\. |@|#|\||[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: )/) || note_marker != previous_marker
+            starts_entry = (body ~ /^([-*+] |[0-9]+\. |@|#|\||[A-Z][A-Za-z]*( [A-Za-z]+)?( [A-Za-z]+)?: )/) || note_marker != previous_marker
             flowing = commented && !in_fence && !fence_edge && body != "" && body !~ /[^[:space:]]   *[^[:space:]]/ &&
                       body !~ /https?:\/\// && body !~ /^[[:space:]]/ && body !~ /^[A-Za-z0-9_.-]+\/[^[:space:]]*$/ &&
                       body !~ /^(swift-tools-version|go:|\+build|@ts-|eslint|nolint|noqa|type: ?ignore|region |endregion|MARK:|-\*-)/
@@ -1390,10 +1542,10 @@ check_binding_shapes_bracketed() {
         "$staged_path spells a shape as a product or a tuple; write [rows,columns]:"
 }
 
-# Rejects a Rust doc bullet whose continuation does not align under its text, because anything else reads
-# as a new paragraph.
+# Rejects a tag-like continuation not hanging 4 past its marker, and a bullet continuation not aligned under
+# its text. Tag-like means Swift `- Parameter:` and its siblings, and TSDoc `@param` and its siblings.
 check_binding_continuation_indent() {
-    case "$staged_path" in *.rs) ;; *) return 0 ;; esac
+    case "$staged_path" in *.swift | *.ts | *.mts | *.js | *.mjs | *.cjs | *.rs) ;; *) return 0 ;; esac
     local ragged
     ragged=$(scan_binding_prose '
         {
@@ -1401,6 +1553,7 @@ check_binding_continuation_indent() {
             if (!commented || in_fence || fence_edge) { anchor = 0; next }
             match(raw, marker); raw = substr(raw, RLENGTH + 1); sub(/^[[:space:]]/, "", raw)
             if (raw ~ /^[[:space:]]*$/) { anchor = 0; next }
+            if (raw ~ /^@(param|returns|throws|remarks|typeParam|deprecated)[[:space:]]/) { anchor = 5; next }
             if (raw ~ /^ *([-*+]|[0-9]+\.) /) { match(raw, /^ *([-*+]|[0-9]+\.) +/); anchor = RLENGTH + 1; next }
             if (raw ~ /^(@|#)/) { anchor = 0; next }
             if (anchor && (FNR in added)) {
@@ -1409,12 +1562,12 @@ check_binding_continuation_indent() {
             }
         }')
     [ -z "$ragged" ] || reject_with_reason "$ragged" \
-        "$staged_path misaligns a doc continuation; a tag-like entry hangs 4 past its marker, a bullet" \
-        "            continuation aligns under the bullet text:"
+        "$staged_path misaligns a doc continuation; a TSDoc tag hangs 4 past its @, and a bullet, Swift's" \
+        "            - Parameter: and - Note: included, aligns its continuation under the bullet text:"
 }
 
-# Rejects a tag-like binding entry running past three lines, such as a Mojo `Args:` item, because an entry
-# stays short and the rest belongs in the doc body.
+# Rejects a tag-like binding entry running past three lines, such as a Swift `- Warning:`, a TSDoc `@param`, or
+# a Google `Args:` item, because an entry stays short and the rest belongs in the doc body.
 check_binding_tag_entries_span_at_most_three_lines() {
     local sprawling
     sprawling=$(scan_binding_prose '
@@ -1423,7 +1576,9 @@ check_binding_tag_entries_span_at_most_three_lines() {
             if (!commented || in_fence || fence_edge) { report(); next }
             match(raw, marker); raw = substr(raw, RLENGTH + 1); sub(/^[[:space:]]/, "", raw)
             if (raw ~ /^[[:space:]]*$/) { report(); next }
-            if (raw ~ /^    [A-Za-z_][A-Za-z0-9_]* \([^)]*\): /) { report(); entry = FNR; span = 1; touched = (FNR in added); next }
+            if (raw ~ /^- (Parameter|Parameters|Returns|Throws|Warning|Note|Important|Precondition|Postcondition|Complexity|Attention)[ :]/ ||
+                raw ~ /^@(param|returns|throws|remarks|typeParam|deprecated)[[:space:]]/ ||
+                raw ~ /^    [A-Za-z_][A-Za-z0-9_]* \([^)]*\): /) { report(); entry = FNR; span = 1; touched = (FNR in added); next }
             if (entry && raw ~ /^[[:space:]]{2,}[^[:space:]]/ && raw !~ /^    [A-Za-z_][A-Za-z0-9_]* \(/) { ++span; if (FNR in added) touched = 1; next }
             report()
         }
@@ -1433,10 +1588,10 @@ check_binding_tag_entries_span_at_most_three_lines() {
         "$staged_path lets a doc entry run past three lines; keep it short and move the rest into the body:"
 }
 
-# Rejects Markdown `**strong**`, `*emphasis*` and `* item` bullets in Rust docs, because
+# Rejects Markdown `**strong**`, `*emphasis*` and `* item` bullets in Rust, Swift and TypeScript docs, because
 # the house Markdown spells them `__strong__`, `_emphasis_` and `- item`. Code spans and fences are exempt.
 check_binding_markdown_underscored() {
-    case "$staged_path" in *.rs) ;; *) return 0 ;; esac
+    case "$staged_path" in *.rs | *.swift | *.ts | *.mts | *.js | *.mjs | *.cjs) ;; *) return 0 ;; esac
     local asterisks
     asterisks=$(scan_binding_prose '
         commented && !in_fence && !fence_edge && (FNR in added) {
@@ -1453,6 +1608,8 @@ check_binding_markdown_underscored() {
 check_binding_emphasis_lowercase() {
     local capitals
     case "$staged_path" in
+    *.py | *.pyi)
+        capitals=$(printf '%s\n' "$staged_added_text" | grep -nE '(^|[^A-Za-z_])(ONLY|NEVER|ALWAYS|EVERY|WHOLE|MUST|NOT)([^A-Za-z_]|$)' || true) ;;
     *)
         capitals=$(scan_binding_prose '
             commented && !in_fence && (FNR in added) && body ~ /(^|[^A-Za-z_])(ONLY|NEVER|ALWAYS|EVERY|WHOLE|INVALIDAT[A-Z]*|MUST|NOT)([^A-Za-z_]|$)/ {
@@ -1462,10 +1619,76 @@ check_binding_emphasis_lowercase() {
         "$staged_path uses ALL-CAPS emphasis in a doc; lowercase it and let the wording carry the weight:"
 }
 
+# Rejects a Google-style docstring section named `Parameters:` in the CPython glue, because ruff'"'"'s
+# google convention and the rest of the ecosystem read `Args:`.
+check_python_docstring_sections() {
+    local sections
+    sections=$(binding_prose_text | grep -nE '^# (Parameters|Arguments|Return|Raise):$' || true)
+    [ -z "$sections" ] || reject_with_reason "$sections" \
+        "$staged_path names a docstring section outside Google style; use Args:, Returns:, Raises:"
+}
+
+# Rejects docstring arguments aligned into a column by hand, as in `    name:     Text`, because such columns
+# drift with the first edit; an inline comment keeps its two spaces after a colon.
+check_python_arguments_unaligned() {
+    local aligned
+    aligned=$(printf '%s\n' "$staged_added_text" |
+        grep -E '^\+[[:space:]]+[A-Za-z_][A-Za-z0-9_]*( \([^)]*\))?:  +[^[:space:]#]' || true)
+    [ -z "$aligned" ] || reject_with_reason "$aligned" \
+        "$staged_path aligns docstring arguments into a column by hand; put one space after the colon:"
+}
+
+# Rejects a Go method referenced as a call, such as `b.Depth()`, because doc links are `[Type.Method]`;
+# a tab-indented line is a code example, which calls as code does.
+check_go_method_links_bracketed() {
+    local calls
+    calls=$(printf '%s\n' "$staged_added_text" | grep -E '^\+[[:space:]]*//' | grep -vE $'^\\+[[:space:]]*//\t' |
+        grep -nE '[A-Za-z_]+\.[A-Z][A-Za-z0-9_]*\(\)' || true)
+    [ -z "$calls" ] || reject_with_reason "$calls" \
+        "$staged_path references a Go method as a call; link it as [Type.Method]:"
+}
+
+# Rejects a Go file whose comment directly above `package` sits outside the file named after the package,
+# because Go takes one package comment, and the file carrying the package's name is where readers look.
+check_go_package_comment_in_package_file() {
+    local package_comments
+    package_comments=$("$fastest_awk" -v file="${staged_path##*/}" '
+        /^\/\// { comment = FNR; next }
+        /^package / { if (comment && comment == FNR - 1 && file != $2 ".go") print "line " FNR ": package comment outside " $2 ".go"; exit }
+        { comment = 0 }' <<<"$staged_file_text")
+    [ -z "$package_comments" ] || reject_with_reason "$package_comments" \
+        "$staged_path documents the package outside the file named after it; move the package comment there:"
+}
+
+# Rejects a Go file without its `// File: <path>`, `// Author: <author>` and `// Date: <date>` fields, as the
+# Python and Rust modules carry them. The package comment ends with them after an empty `//` line, so it
+# still opens with "Package <name>"; any other file opens with them, after an optional summary line and
+# `//`, then an empty line.
+check_go_file_header() {
+    local header
+    header=$(printf '%s\n' "$staged_file_text" | "$fastest_awk" -v path="$staged_path" '
+        { lines[NR] = $0 }
+        /^package / && !package_line { package_line = NR }
+        END {
+            author = "^// Author: [A-Z][^.]*$"
+            date = "^// Date: [A-Z][a-z]+ [0-9]+, [0-9][0-9][0-9][0-9]$"
+            if (package_line > 1 && lines[package_line - 1] ~ /^\/\//) {
+                if (lines[package_line - 3] != "// File: " path || lines[package_line - 2] !~ author || lines[package_line - 1] !~ date || lines[package_line - 4] != "//")
+                    print "line " package_line ": the package comment must end with //, // File: " path ", // Author: <author>, // Date: <date>"
+            } else {
+                first = (lines[1] ~ /^\/\/ [^ ]/ && lines[2] == "//") ? 3 : 1
+                if (lines[first] != "// File: " path || lines[first + 1] !~ author || lines[first + 2] !~ date || lines[first + 3] != "")
+                    print "line 1: the file must open with an optional summary and //, then // File: " path ", // Author: <author>, // Date: <date>, an empty line"
+            }
+        }')
+    [ -z "$header" ] || reject_with_reason "$header" \
+        "$staged_path opens without its file header, the // File:, // Author: and // Date: fields:"
+}
+
 # Rejects a Rust file whose leading `//!` module doc does not end with `File: <path>`, `Author:` and `Date:` lines.
 check_rust_module_fields() {
     local fields
-    fields=$(printf '%s\n' "$staged_file_text" | awk -v path="$staged_path" '
+    fields=$("$fastest_awk" -v path="$staged_path" '
         NR == 1 && !/^\/\/!/ { print "line 1: no //! module doc"; exit }
         /^\/\/!/ { third_last = before_last; before_last = last; last = $0; next }
         {
@@ -1473,9 +1696,163 @@ check_rust_module_fields() {
             else if (before_last !~ /^\/\/! Author: [A-Z]/) print "module doc must follow //! File: with //! Author: <author>"
             else if (last !~ /^\/\/! Date: [A-Z][a-z]+ [0-9]+, [0-9][0-9][0-9][0-9]$/) print "module doc must end with //! Date: <Month D, YYYY>"
             exit
-        }')
+        }' <<<"$staged_file_text")
     [ -z "$fields" ] || reject_with_reason "$fields" \
         "$staged_path opens without the module fields; end its //! doc with File:, Author: and Date: lines:"
+}
+
+# Rejects a `#` comment directly above a module- or class-level assignment, because an attribute docstring
+# below it is what help() and editors show. Directives, bracketed continuations, runnable tours and dotfile
+# tool configs are exempt.
+check_python_attributes_use_docstrings() {
+    case "${staged_path##*/}" in .* | example.py | setup.py) return 0 ;; esac
+    local commented
+    commented=$(scan_staged_file_marking_added_lines '
+        function indent_of(line) { match(line, /^[[:space:]]*/); return RLENGTH }
+        function bracket_balance(line,    opened, closed) {
+            gsub(/"[^"]*"|\047[^\047]*\047/, "", line); sub(/#.*/, "", line)
+            opened = gsub(/[([{]/, "", line); closed = gsub(/[])}]/, "", line)
+            return opened - closed
+        }
+        {
+            if (gsub(/"""/, "&") % 2 == 1) { inside_string = !inside_string; next }
+            if (inside_string || /^[[:space:]]*$/) next
+            if (/^[[:space:]]*#/) {
+                comment_line = FNR
+                is_directive = ($0 ~ /^[[:space:]]*#[[:space:]]*(region|endregion|noqa|type:|fmt:|pragma|pyright:|ruff:|mypy:|isort:)/)
+                next
+            }
+            depth = indent_of($0)
+            if (bracket_depth == 0) {
+                while (scopes > 0 && scope_indent[scopes] >= depth) --scopes
+                at_attribute_scope = (scopes == 0 || scope_kind[scopes] == "class")
+                if (at_attribute_scope && comment_line == FNR - 1 && !is_directive &&
+                    $0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(:[^=]+)?=[^=]/ &&
+                    ((comment_line in added) || (FNR in added)))
+                    printf "line %d: %s\n", FNR, $0
+                if ($0 ~ /^[[:space:]]*class[[:space:]]/) { scope_indent[++scopes] = depth; scope_kind[scopes] = "class" }
+                else if ($0 ~ /^[[:space:]]*(async[[:space:]]+)?def[[:space:]]/) { scope_indent[++scopes] = depth; scope_kind[scopes] = "def" }
+            }
+            bracket_depth += bracket_balance($0)
+            if (bracket_depth < 0) bracket_depth = 0
+        }')
+    [ -z "$commented" ] || reject_with_reason "$commented" \
+        "$staged_path documents an attribute with a # comment above it; write a docstring below it instead:"
+}
+
+# Rejects a Python module whose first docstring lacks the `File:`, `Author:` and `Date:` lines, because
+# the docstring is the one header Python tooling reads. Dotfiles are tool configuration and exempt.
+check_python_module_fields() {
+    case "${staged_path##*/}" in .*) return 0 ;; esac
+    local fields
+    fields=$("$fastest_awk" -v path="$staged_path" '
+        NR == 1 && /^#!/ { next }
+        !opened && /^[[:space:]]*$/ { next }
+        !opened { if ($0 !~ /^"""/) { print "line " NR ": no module docstring"; exit } opened = 1; text = $0; if (NR > 0 && $0 ~ /^""".*"""$/ && length($0) > 6) { closed = 1 } else next }
+        opened && !closed { text = text "\n" $0; if ($0 ~ /"""/) closed = 1; else next }
+        closed {
+            if (text !~ ("\nFile: " path "\n")) print "docstring lacks File: " path
+            else if (text !~ /\nAuthor: [A-Z][^\n]*\n/) print "docstring lacks Author:"
+            else if (text !~ /\nDate: [A-Z][a-z]+ [0-9]+, [0-9][0-9][0-9][0-9]\n/) print "docstring lacks Date: Month D, YYYY"
+            exit
+        }' <<<"$staged_file_text")
+    [ -z "$fields" ] || reject_with_reason "$fields" \
+        "$staged_path opens without the module fields; end its docstring with File:, Author: and Date: lines:"
+}
+
+# Rejects a one-space continuation inside a TypeScript or JavaScript docblock, because two spaces align the
+# text under the opener's, as in the C headers.
+check_tsdoc_continuation_two_spaces() {
+    local narrow
+    narrow=$(scan_staged_file_marking_added_lines '
+        is_docblock_opener($0) { inside = 1 }
+        inside && (FNR in added) && /^[[:space:]]*\* [^[:space:]]/ && !/^[[:space:]]*\* \// { printf "line %d:%s\n", FNR, $0 }
+        /\*\// { inside = 0 }')
+    [ -z "$narrow" ] || reject_with_reason "$narrow" \
+        "$staged_path indents a docblock line by one space after its *; use two, as the C headers do:"
+}
+
+# Rejects a TypeScript, JavaScript or Swift file whose first block is not `@file <path>`, `@author`, `@date` and
+# `@brief` in that order, because the header reads the same as a C header does. A shebang may come first.
+check_tsdoc_file_header() {
+    local header
+    header=$("$fastest_awk" -v path="$staged_path" '
+        NR == 1 && /^#!/ { shebang_lines = 1; next }
+        { header_line = NR - shebang_lines }
+        header_line == 1 && $0 != "/**" { print "line " NR ": header must open with /**"; exit }
+        header_line == 2 && $0 != " *  @file " path { print "line " NR ": header must read *  @file " path; exit }
+        header_line == 3 && $0 !~ /^ \*  @author [A-Z]/ { print "line " NR ": @author expected"; exit }
+        header_line == 4 && $0 !~ /^ \*  @date [A-Z][a-z]+ [0-9]+, [0-9][0-9][0-9][0-9]$/ { print "line " NR ": @date Month D, YYYY expected"; exit }
+        header_line == 5 { if ($0 !~ /^ \*  @brief [A-Z]/) print "line " NR ": @brief expected"; exit }' <<<"$staged_file_text")
+    [ -z "$header" ] || reject_with_reason "$header" \
+        "$staged_path opens without its header: @file <path>, @author, @date, @brief:"
+}
+
+# Rejects `@brief` below the file header of a TypeScript or JavaScript file, because TSDoc and JSDoc take the
+# first sentence as the summary and know no `@brief`.
+check_tsdoc_brief_only_in_header() {
+    local briefs
+    briefs=$(scan_staged_file_marking_added_lines '
+        /\*\// && !header_closed { header_closed = 1; next }
+        header_closed && (FNR in added) && /^[[:space:]]*\*[[:space:]]*@brief/ { printf "line %d:%s\n", FNR, $0 }')
+    [ -z "$briefs" ] || reject_with_reason "$briefs" \
+        "$staged_path uses @brief below the file header; let the first sentence be the summary:"
+}
+
+# Rejects a `//` comment directly above a top-level TypeScript declaration, because editors show only
+# `/** */` TSDoc on hover.
+check_tsdoc_above_declarations() {
+    local line_comments
+    line_comments=$(scan_staged_file_marking_added_lines '
+        /^\/\/[^\/]/ || /^\/\/$/ { comment_line = FNR; comment = $0; next }
+        comment_line == FNR - 1 && /^(export[[:space:]]+)?(default[[:space:]]+)?(declare[[:space:]]+)?(abstract[[:space:]]+)?(async[[:space:]]+)?(function|class|enum|interface|type|const|let|var)[[:space:]]/ {
+            if ((comment_line in added) || (FNR in added)) printf "line %d:%s\n", comment_line, comment
+        }
+        { comment_line = 0 }')
+    [ -z "$line_comments" ] || reject_with_reason "$line_comments" \
+        "$staged_path documents a declaration with a bare \`//\` comment; use a /** ... */ TSDoc block:"
+}
+
+# Rejects JSDoc `{type}` braces and a `@param` without its ` - `, because the signature carries the types
+# and TSDoc separates the name with a hyphen.
+check_tsdoc_tag_syntax() {
+    local jsdoc_tags
+    jsdoc_tags=$(printf '%s\n' "$staged_added_text" | grep -E "$added_docblock_line_pattern" |
+        grep -nE '@(param|returns?)[[:space:]]+\{|@param[[:space:]]+[[:alnum:]_]+[[:space:]]+[^-]' || true)
+    [ -z "$jsdoc_tags" ] || reject_with_reason "$jsdoc_tags" \
+        "$staged_path uses JSDoc tag syntax;" \
+        "            write \`@param name - text\` and \`@returns text\`, without {type} braces:"
+}
+
+# Rejects `name()` in TypeScript doc prose, because references are `{@link name}`; example lines, which
+# end in `;` or assign, are exempt.
+check_tsdoc_references_linked() {
+    local call_references
+    call_references=$(printf '%s\n' "$staged_added_text" | grep -E "$added_docblock_line_pattern" |
+        grep -vE '(;|=)[[:space:]]*(//.*)?$|[[:space:]]=[[:space:]]' |
+        grep -nE '(^|[^[:alnum:]_.`{])[[:alpha:]_][[:alnum:]_]*\(\)' || true)
+    [ -z "$call_references" ] || reject_with_reason "$call_references" \
+        "$staged_path references a function as a call in a doc;" \
+        "            write {@link name} for an export, or wrap a method call in backticks:"
+}
+
+# Rejects a `// Title:` pseudo-heading, because Go doc headings are `// # Title`.
+check_go_doc_headings_hash_prefixed() {
+    local pseudo_headings
+    pseudo_headings=$(printf '%s\n' "$staged_added_text" | grep -nE '^\+[[:space:]]*// [A-Z][A-Za-z ]*:$' || true)
+    [ -z "$pseudo_headings" ] || reject_with_reason "$pseudo_headings" \
+        "$staged_path uses a Go pseudo-heading ending in a colon;" \
+        "            write a doc heading as \`// # Title\` with blank comment lines around it:"
+}
+
+# Rejects an exported name spelled as a call in a Go comment, because doc links are `[Name]`.
+check_go_doc_links_bracketed() {
+    local call_references
+    call_references=$(printf '%s\n' "$staged_added_text" | grep -E '^\+[[:space:]]*//' |
+        grep -nE '(^|[^[:alnum:]_.[])[A-Z][[:alnum:]_]*[a-z][[:alnum:]_]*\(' || true)
+    [ -z "$call_references" ] || reject_with_reason "$call_references" \
+        "$staged_path references an exported Go name as a call;" \
+        "            link it as [Name] or [Type.Method] instead:"
 }
 
 # endregion Binding Docs
@@ -1493,7 +1870,7 @@ check_rust_module_fields() {
 check_ascii_arrows() {
     local arrows comment_opener
     case "$staged_path" in
-    *.mojo) comment_opener='#' ;;
+    *.py | *.pyi | *.mojo) comment_opener='#' ;;
     *.md) comment_opener='^[[:space:]]*#|^[[:space:]]*\*([[:space:]]|$)' ;;
     *) comment_opener='\/\/|\/\*|^[[:space:]]*\*([[:space:]]|$)' ;;
     esac
@@ -1541,9 +1918,10 @@ check_docblock_without_backticks() {
 }
 
 # Rejects a comment line that is only a `Usage:`, `Commands:` or `Example usage:` label, because a sentence
-# introduces a code block and the block names its language.
+# introduces a code block and the block names its language. Python sections and Go, checked apart, are exempt.
 check_usage_label_absent() {
     local labels
+    case "$staged_path" in *.py | *.pyi | *.go) return 0 ;; esac
     labels=$(printf '%s\n' "$staged_added_text" |
         grep -nE '^\+[[:space:]]*(\*|//[/!]?|#)[[:space:]]*(Usage|Commands|Example usage|Examples?|Invocation|Or locally|Run)( [a-z]+)?:[[:space:]]*$' || true)
     [ -z "$labels" ] || reject_with_reason "$labels" \
@@ -1576,9 +1954,11 @@ check_backward_references() {
 # A design justified by another project's design ages into a lie the moment that project moves.
 check_sibling_justification() {
     local excuses
-    # Naming a sibling as a dependency, an oracle or a data source is fine, and excused first.
+    # Naming a sibling as a dependency, an oracle or a data source is fine, and excused first, as is an
+    # include's trailing list of the symbols it brings in.
     excuses=$(printf '%s\n' "$staged_added_text" |
         grep -E '(//|/\*|^\+[[:space:]]*\*)' |
+        grep -vE '^\+[[:space:]]*#[[:space:]]*include[[:space:]]*[<"][^>"]*[>"][[:space:]]*//[[:space:]]*`[^`]*`(,[[:space:]]*`[^`]*`)*[[:space:]]*$' |
         grep -iE "$sibling_projects" |
         grep -viE '\b(ships?|provides?|supplies|computes?|generates?|depends? on|vendored|submodule|requires?|installs?|see|@see)\b' |
         grep -iE '\b(match(es|ing)?|mirrors?|mimics?|borrow(s|ed)?|follow(s|ing)?|same|like|takes|convention|idiom|shape|split|the way|sibling)\b' || true)
@@ -1606,12 +1986,23 @@ check_proper_names_capitalized() {
 
 # Rejects an abbreviation from `abbreviations_refused`, such as `hi` or `lo` for register halves, because
 # names and prose spell words out. A bare one in a comment always fires; in code only a name new since HEAD
-# fires, so touching a line never forces a rename the commit is not about. A capitalized macro the file does
-# not define, like the kernel's `RISCV_HWPROBE_EXT_ZABHA`, belongs to another project and never fires.
+# fires, so touching a line never forces a rename the commit is not about. A path HEAD lacks, whether new or a
+# rename git cannot pair, is weighed against every name in HEAD's headers, as it reuses the library's types.
+# A capitalized macro the file does not define, like the kernel's `RISCV_HWPROBE_EXT_ZABHA`, belongs to another
+# project and never fires, as do literal contents and names under `third_party_identifier_prefixes`.
 check_abbreviations_spelled_out() {
-    local abbreviated
-    abbreviated=$(awk -v abbreviations="$abbreviations_refused" '
-        BEGIN { count = split(abbreviations, words, " "); for (word = 1; word <= count; ++word) banned[words[word]] = 1 }
+    local abbreviated previous_text
+    previous_text=$(git show "HEAD:$staged_path" 2> /dev/null) ||
+        previous_text=${head_header_names:=$(git grep -h -o -w -E '[A-Za-z_][A-Za-z0-9_]*' HEAD -- include | sort -u)}
+    abbreviated=$("$fastest_awk" -v abbreviations="$abbreviations_refused" -v third_party="$third_party_identifier_prefixes" '
+        BEGIN {
+            count = split(abbreviations, words, " "); for (word = 1; word <= count; ++word) banned[words[word]] = 1
+            prefix_count = split(third_party, prefixes, " ")
+        }
+        function is_third_party(token,    prefix) {
+            for (prefix = 1; prefix <= prefix_count; ++prefix) if (index(token, prefixes[prefix]) == 1) return 1
+            return 0
+        }
         function has_banned_segment(token,    segments, total, segment) {
             total = split(token, segments, "_")
             for (segment = 1; segment <= total; ++segment) if (tolower(segments[segment]) in banned) return 1
@@ -1630,33 +2021,71 @@ check_abbreviations_spelled_out() {
             while (match(line, /[A-Za-z_][A-Za-z0-9_]*/)) { declared[substr(line, RSTART, RLENGTH)] = 1; line = substr(line, RSTART + RLENGTH) }
             next
         }
+        FILENAME == ARGV[3] { original[FNR] = substr($0, 2); next }
         {
             prose = ($0 ~ /^\+[[:space:]]*(\*([[:space:]]|$)|\/\*|\/\/)/)
             line = substr($0, 2)
             if (prose) { gsub(/"[^"]*"/, "", line); gsub(/`[^`]*`/, "", line); gsub(/<\/tt>/, "\001", line); gsub(/<tt>[^\001]*\001/, "", line); gsub(/@[pc][[:space:]]+[^[:space:]]+/, "", line) }
             while (match(line, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(line, RSTART, RLENGTH); accessor = substr(line, 1, RSTART - 1); line = substr(line, RSTART + RLENGTH)
-                if (!has_banned_segment(token) || accessor ~ /(\.|->)$/) continue
+                if (!has_banned_segment(token) || accessor ~ /(\.|->)$/ || is_third_party(token)) continue
                 if (token == toupper(token) && !(token in defined)) continue
                 if (prose && (token in declared || token == toupper(token))) continue
-                if ((prose && token !~ /_/) || !(token in existing)) { print "    " token ": " substr($0, 2); break }
+                if ((prose && token !~ /_/) || !(token in existing)) { print "    " token ": " original[FNR]; break }
             }
-        }' <(git show "HEAD:$staged_path" 2> /dev/null || true) \
-        <(printf '%s\n' "$staged_file_text" | blank_c_comments_preserving_columns) \
-        <(printf '%s\n' "$staged_added_text") || true)
+        }' <(printf '%s\n' "$previous_text") \
+        "$staged_code_path" \
+        <(printf '%s\n' "$staged_added_text") "$staged_added_unquoted_path" || true)
     [ -z "$abbreviated" ] || reject_with_reason "$abbreviated" \
         "$staged_path abbreviates a word this project spells out; write \`high\`, \`low\`, \`accumulator\`, and so on:"
+}
+
+# Template parameters are private names; public aliases belong inside the instantiated type.
+check_template_parameter_names() {
+    local names
+    names=$(scan_staged_file_marking_added_lines '
+        function check_parameter(    declaration, words, count, name) {
+            declaration = parameter
+            sub(/=.*/, "", declaration)
+            gsub(/\.\.\./, " ", declaration)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", declaration)
+            count = split(declaration, words, /[[:space:]]+/)
+            name = words[count]
+            if (changed && count > 1 && name ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && name !~ /_$/)
+                printf "line %d: %s\n", FNR, declaration
+            parameter = ""; changed = 0
+        }
+        {
+            code = $0
+            while (code != "") {
+                if (!depth) {
+                    if (!match(code, /(^|[^A-Za-z0-9_])template[[:space:]]*</)) break
+                    code = substr(code, RSTART + RLENGTH)
+                    depth = 1; parameter = ""; changed = 0
+                }
+                character = substr(code, 1, 1); code = substr(code, 2)
+                if (FNR in added) changed = 1
+                if (character == "<") ++depth
+                else if (character == ">") {
+                    if (!--depth) { check_parameter(); continue }
+                }
+                else if (character == "," && depth == 1) { check_parameter(); continue }
+                parameter = parameter character
+            }
+            if (depth) parameter = parameter " "
+        }' "$staged_code_path")
+    [ -z "$names" ] || reject_with_reason "$names" \
+        "$staged_path exposes a template parameter name; append an underscore and define public aliases inside:"
 }
 
 # Rejects a split string literal whose non-final fragment lacks a trailing `//`, because clang-format
 # restitches unpinned fragments into a staircase.
 check_split_string_literal_pinned() {
     local unpinned
-    unpinned=$(printf '%s\n' "$staged_file_text" | added_list="$staged_added_line_numbers_list" awk '
-        BEGIN { count = split(ENVIRON["added_list"], numbers, "\n"); for (index_ = 1; index_ <= count; ++index_) added[numbers[index_] + 0] = 1 }
+    unpinned=$(scan_staged_file_marking_added_lines '
         (FNR in added) && ((FNR - 1) in added) && previous ~ /"[[:space:]]*$/ && previous !~ /\/\/[[:space:]]*$/ &&
             $0 ~ /^[[:space:]]*"/ { print FNR - 1 ": " previous }
-        { previous = $0 }' || true)
+        { previous = $0 }')
     [ -z "$unpinned" ] || reject_with_reason "$unpinned" \
         "$staged_path splits a string literal without a trailing \`//\` pin;" \
         "            end every fragment but the last with \`\" //\`:"
@@ -1667,11 +2096,11 @@ check_split_string_literal_pinned() {
 check_boolean_parameters() {
     local switches
     # A single-argument `explicit` constructor wraps a boolean VALUE rather than selecting behaviour,
-    # and so does a `fallback`, the value a harness setting keeps when its variable is unset.
+    # and a `fallback` is the value an unset setting reads as, not a switch.
     switches=$(printf '%s\n' "$staged_added_text" |
         grep -E '\b(bool)[[:space:]]+[a-z_][a-z_0-9]*[[:space:]]*[,)]' |
         grep -vE '\b(is|has|was|can|should|contains|empty|equals)_?' |
-        grep -vE '\bbool[[:space:]]+fallback[[:space:]]*[,)]' |
+        grep -vE '\bbool[[:space:]]+fallback\b' |
         grep -vE 'explicit[[:space:]]+[a-z_][a-z_0-9]*\([[:space:]]*bool[[:space:]]+[a-z_][a-z_0-9]*\)' || true)
     [ -z "$switches" ] || reject_with_reason "$switches" \
         "$staged_path takes a bool parameter that selects behaviour - name the states in an enum:"
@@ -1681,9 +2110,7 @@ check_boolean_parameters() {
 # reads as hiding something.
 check_void_discards() {
     local casts
-    casts=$(printf '%s\n' "$staged_added_text" |
-        grep -vE "$added_comment_line_pattern" |
-        grep -E '\(void\)[[:space:]]*[A-Za-z_:(]' || true)
+    casts=$(grep -E '(^|[^A-Za-z0-9_])\(void\)[[:space:]]*[A-Za-z_:(]' "$staged_added_code_path" || true)
     [ -z "$casts" ] || reject_with_reason "$casts" \
         "$staged_path casts a result to void - bind it to a [[maybe_unused]] variable instead:"
 }
@@ -1712,28 +2139,79 @@ check_filesystem_in_harnesses_only() {
         "$staged_path uses std::filesystem in library code - it is allowed only in test/, bench/ and tools/ harnesses:"
 }
 
-# `_t` marks a materialized type. A concept names a requirement rather than a type, and a class
-# template names a family rather than one member of it, so neither wears the suffix - the alias that
-# instantiates the template is what carries it.
+# Rejects the standard containers, `std::pair` and `std::tuple` in the library and its bindings, because the
+# containers allocate through the global heap behind the caller's back and throw when it runs out, and a pair
+# or a tuple hides what each member means behind `first` and `get<1>`; only the harnesses may use them.
+check_std_collections_in_harnesses_only() {
+    local reached baseline_path
+    for baseline_path in $std_collections_baseline_paths; do
+        [ "$staged_path" != "$baseline_path" ] || return 0
+    done
+    reached=$(printf '%s\n' "$staged_added_text" |
+        grep -vE "$added_comment_line_pattern" |
+        grep -E '\bstd::(vector|pair|tuple|deque|list|forward_list|map|multimap|set|multiset|unordered_map|unordered_multimap|unordered_set|unordered_multiset|queue|priority_queue|stack|valarray)\b|#[[:space:]]*include[[:space:]]*<(vector|deque|list|forward_list|map|set|unordered_map|unordered_set|queue|stack|valarray)>' ||
+        true)
+    [ -z "$reached" ] || reject_with_reason "$reached" \
+        "$staged_path uses a standard container, std::pair or std::tuple in library code - name a struct, take" \
+        "            the caller's buffer or allocator, or move the code to a test/, bench/ or tools/ harness:"
+}
+
+# `_t` marks a materialized type and `_k` a materialized constant. A concept names a requirement
+# rather than a type, and a class or variable template names a family rather than one member of it, so
+# none wears a suffix - the alias or constant that instantiates the template is what carries it.
 check_type_suffixes() {
-    local concepts templates
+    local concepts templates variables
     concepts=$(printf '%s\n' "$staged_added_text" | grep -E '^\+[[:space:]]*concept[[:space:]]+[A-Za-z_]+_t\b' || true)
     [ -z "$concepts" ] || reject_with_reason "$concepts" \
         "$staged_path suffixes a concept with '_t' - a concept names a requirement, not a type, so it takes no suffix:"
-    templates=$(printf '%s\n' "$staged_added_text" | awk '
-        /^\+[[:space:]]*template[[:space:]]*</ { pending = 1; next }
-        pending && /^\+[[:space:]]*(struct|class)[[:space:]]+[A-Za-z_]+_t[[:space:]:{]/ { print; pending = 0; next }
-        pending && /^\+[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
-        { pending = 0 }')
+    templates=$(scan_staged_file_marking_added_lines '
+        /^[[:space:]]*#/ { next }
+        {
+            code = $0
+            gsub(/"([^"\\]|\\.)*"/, "", code)
+            if (!pending && match(code, /(^|[^A-Za-z0-9_])template[[:space:]]*</)) {
+                code = substr(code, RSTART + RLENGTH - 1)
+                pending = 1; angles = 0; changed = 0; declaration = ""
+            }
+            if (!pending) next
+            if (angles || substr(code, 1, 1) == "<") {
+                changed = changed || (FNR in added)
+                for (position = 1; position <= length(code); ++position) {
+                    character = substr(code, position, 1)
+                    if (character == "<") ++angles
+                    else if (character == ">" && --angles == 0) break
+                }
+                if (angles) next
+                code = substr(code, position + 1)
+            }
+            declaration = declaration " " code
+            changed = changed || (FNR in added)
+            header = declaration
+            sub(/[;{].*$/, "", header)
+            if (header ~ /(^|[^A-Za-z0-9_])(struct|class)[[:space:]]+[A-Za-z_][A-Za-z0-9_:]*_t([[:space:]]|$|[<:])/) {
+                if (changed) printf "line %d: %s\n", FNR, declaration
+                pending = 0
+            }
+            else if (declaration ~ /[;{}]/ || declaration ~ /^[[:space:]]*(using|typedef|inline|static|void|auto)[[:space:]]/) pending = 0
+        }' "$staged_code_path" || true)
     [ -z "$templates" ] || reject_with_reason "$templates" \
         "$staged_path suffixes a class template with '_t' - the template stays bare and the alias that materializes it carries the suffix:"
+    variables=$(printf '%s\n' "$staged_added_text" | "$fastest_awk" '
+        function suffixed(line) { return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ }
+        /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
+        pending && suffixed($0) { print; pending = 0; next }
+        pending && /\{[[:space:]]*$/ { pending = 0; next }
+        pending && /^\+[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
+        { pending = 0 }')
+    [ -z "$variables" ] || reject_with_reason "$variables" \
+        "$staged_path suffixes a variable template with '_k' or '_t' - the template stays bare, like \`template <typename type_> constexpr bool bounded\`:"
 }
 
 # A header's @date is when the file was created, not when it was last touched. Git records every edit
 # since; the header records the one fact git cannot show without archaeology.
 check_header_date() {
     local rewritten
-    rewritten=$(awk '
+    rewritten=$("$fastest_awk" '
         /^-[^-].*@date/ { value = $0; sub(/^.*@date[[:space:]]+/, "", value); removed[value] = $0 }
         /^\+[^+].*@date/ { value = $0; sub(/^.*@date[[:space:]]+/, "", value); added[value] = 1 }
         END { for (value in removed) if (!(value in added)) print removed[value] }' "$staged_diff_path" || true)
@@ -1769,16 +2247,17 @@ check_rust_macros_absent() {
 }
 
 # Rejects list mutation and self-referencing `set`, because a variable is written once. A `foreach` may
-# still append to the list it builds, since CMake has no way to map a list in one `set`.
+# still append to the list it builds, since CMake has no way to map a list in one `set`, and a
+# `TRANSFORM` into an `OUTPUT_VARIABLE` defines a new list rather than mutating its source.
 check_cmake_variable_written_once() {
     local mutated
-    mutated=$(printf '%s\n' "$staged_file_text" | sed -E 's,#.*$,,' |
-        added_list="$staged_added_line_numbers_list" awk '
-        BEGIN { count = split(ENVIRON["added_list"], numbers, "\n"); for (index_ = 1; index_ <= count; ++index_) added[numbers[index_] + 0] = 1 }
+    mutated=$(scan_staged_file_marking_added_lines '
+        { sub(/#.*/, "") }
         /^[[:space:]]*foreach[[:space:]]*\(/ { ++loops }
         /^[[:space:]]*endforeach[[:space:]]*\(/ { --loops }
         (FNR in added) && !(loops > 0 && /^[[:space:]]*list[[:space:]]*\([[:space:]]*APPEND[[:space:]]/) { print FNR ":" $0 }' |
-        grep -E '^[0-9]+:[[:space:]]*(list[[:space:]]*\([[:space:]]*(APPEND|PREPEND|INSERT|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|TRANSFORM|FILTER)[[:space:]]|set[[:space:]]*\([[:space:]]*([A-Za-z0-9_]+)[[:space:]].*\$\{\3\})' || true)
+        grep -E '^[0-9]+:[[:space:]]*(list[[:space:]]*\([[:space:]]*(APPEND|PREPEND|INSERT|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|TRANSFORM|FILTER)[[:space:]]|set[[:space:]]*\([[:space:]]*([A-Za-z0-9_]+)[[:space:]].*\$\{\3\})' |
+        grep -vE 'list[[:space:]]*\([[:space:]]*TRANSFORM[[:space:]].*[[:space:]]OUTPUT_VARIABLE[[:space:]]' || true)
     [ -z "$mutated" ] || reject_with_reason "$mutated" \
         "$staged_path mutates a variable after defining it;" \
         "            define it once, and select per-configuration items with generator expressions:"
@@ -1789,7 +2268,7 @@ check_cmake_variable_written_once() {
 # only for CMake's own, a sibling's options, the published values or third-party inputs, and caches written once.
 check_cmake_conventions() { # check_cmake_conventions <path> <staged-text> <added-line-numbers>
     local findings
-    findings=$(awk -v path="$1" -v prefix="$project_include_prefix" -v siblings="$sibling_projects" \
+    findings=$("$fastest_awk" -v path="$1" -v prefix="$project_include_prefix" -v siblings="$sibling_projects" \
         -v published=" $cmake_published_variables $cmake_third_party_variables " '
         function hit(rule, message) {
             if (!(rule in messages)) { order[++rules] = rule; messages[rule] = message }
@@ -1871,21 +2350,21 @@ check_harness_namespace_matches_directory() {
     local expected_namespace foreign
     case "$staged_path" in
     test/*.h | bench/*.h)
-        printf '%s\n' "$staged_file_text" | grep -qE '(^|[^A-Za-z0-9_])(namespace|template|class)[[:space:]]' || return 0
+        grep -qE '(^|[^A-Za-z0-9_])(namespace|template|class)[[:space:]]' <<< "$staged_file_text" || return 0
         ;;
     esac
     expected_namespace="${project_namespace}::${staged_path%/*}"
     expected_namespace=${expected_namespace//\//::}
     case "$staged_path" in
     *.hpp | *.cuh)
-        if ! printf '%s\n' "$staged_file_text" | grep -qE "^namespace ${expected_namespace} \{"; then
+        if ! grep -qE "^namespace ${expected_namespace} \{" <<< "$staged_file_text"; then
             reject_with_reason "" "$staged_path does not open \`namespace $expected_namespace {\` in one piece;" \
                 "            spell the namespace its directory names on a single line"
             return 0
         fi
         ;;
     esac
-    foreign=$(printf '%s\n' "$staged_file_text" | blank_c_comments_preserving_columns | awk -v expected="$expected_namespace" '
+    foreign=$("$fastest_awk" -v expected="$expected_namespace" '
         continued { continued = ($0 ~ /\\$/); next }
         /^[[:space:]]*#/ { continued = ($0 ~ /\\$/); next }
         {
@@ -1901,7 +2380,7 @@ check_harness_namespace_matches_directory() {
             }
             depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
         }
-        END { if (!opened) print "no namespace at all" }' || true)
+        END { if (!opened) print "no namespace at all" }' "$staged_code_path")
     [ -z "$foreign" ] || reject_with_reason "$foreign" \
         "$staged_path opens a file-scope namespace other than \`$expected_namespace\`;" \
         "            wrap its contents in the namespace its directory names, and open no other:"
@@ -1928,22 +2407,36 @@ check_regions_not_pragma_mark() {
 }
 
 # Rejects two string-literal fragments on one line, because that is exactly what clang-format's
-# `BreakStringLiterals` leaves behind; a trailing `//` pins a deliberate split, as for `"\x9F" "e"`.
+# `BreakStringLiterals` leaves behind; a trailing `//` pins a deliberate split, as for `"\x9F" "e"`. A raw
+# string is one literal, whatever quotes it holds.
 check_string_fragments_one_per_line() {
     local fragments
-    fragments=$(printf '%s\n' "$staged_added_text" | grep -E '"([^"\\]|\\.)*"[[:space:]]+"' | grep -v '//' || true)
+    fragments=$("$fastest_awk" 'NR == FNR { fragmented[FNR] = ($0 ~ /"[[:space:]]*"[[:space:]]+"/ && $0 !~ /\/\//); next } fragmented[FNR]' \
+        "$staged_added_unquoted_path" <(printf '%s\n' "$staged_added_text") || true)
     [ -z "$fragments" ] || reject_with_reason "$fragments" \
         "$staged_path leaves two string-literal fragments on one line; put each fragment on its own line," \
         "            or pin a deliberate split with a trailing // naming why:"
 }
 
-# Rejects an unqualified `memcpy` in C++, because the standard only promises the name inside `std::`, and a
-# raw byte copy should say it is one.
+# Rejects an unqualified `memcpy` call in C++, because the standard only promises the name inside `std::`, and a
+# raw byte copy should say it is one. A type before the name, rather than a statement keyword, makes the line a
+# declaration of a function called `memcpy`, which is not a call.
 check_memcpy_qualified() {
     local copies
     copies=$(printf '%s\n' "$staged_added_text" |
         grep -vE "$added_comment_line_pattern" |
-        grep -E '(^|[^:[:alnum:]_])memcpy[[:space:]]*\(' || true)
+        "$fastest_awk" '{
+            rest = $0
+            while (match(rest, /(^|[^:[:alnum:]_])memcpy[[:space:]]*\(/)) {
+                lead = substr(rest, RSTART, RLENGTH) ~ /^memcpy/ ? "" : substr(rest, 1, RSTART)
+                rest = substr(rest, RSTART + RLENGTH)
+                sub(/[[:space:]*&]+$/, "", lead)
+                word = match(lead, /[[:alnum:]_]+$/) ? substr(lead, RSTART, RLENGTH) : ""
+                if (lead ~ />$/ || (word != "" && word !~ /^(return|else|do|case|throw|co_return|co_yield|co_await)$/)) continue
+                print
+                next
+            }
+        }' || true)
     [ -z "$copies" ] || reject_with_reason "$copies" \
         "$staged_path calls unqualified memcpy; write std::memcpy for a genuine byte copy, or prefer" \
         "            assignment or std::bit_cast where the types should survive:"
@@ -1971,20 +2464,36 @@ check_cmake_format_clean() {
     reject_with_reason "" "$staged_path is not cmake-format clean;" "            run: cmake-format -i $staged_path"
 }
 
-# Rejects rustfmt drift across the crate, because `rustfmt.toml` is the law; `rustfmt_command` names the
-# toolchain that understands it, and the check skips without that toolchain or a crate.
+# Rejects gofmt drift on the staged content; it skips without gofmt.
+check_gofmt_clean() {
+    command -v gofmt > /dev/null 2>&1 || return 0
+    [ -z "$(printf '%s\n' "$staged_file_text" | gofmt -l)" ] && return 0
+    reject_with_reason "" "$staged_path is not gofmt clean;" "            run: gofmt -w $staged_path"
+}
+
+# Rejects rustfmt drift in the Rust files as staged, not as they sit in the working tree, because `rustfmt.toml`
+# is the law; `rustfmt_command` names the toolchain that understands it, as in `cargo +nightly fmt`, and the
+# check skips without that toolchain or a crate.
 check_rustfmt_clean() {
-    [ -f Cargo.toml ] && command -v cargo > /dev/null 2>&1 && $rustfmt_command --version > /dev/null 2>&1 || return 0
-    git diff --cached --name-only --diff-filter=ACM -- '*.rs' | grep -q . || return 0
-    $rustfmt_command --check > /dev/null 2>&1 && return 0
-    reject_with_reason "" "staged Rust changes are not rustfmt clean;" "            run: $rustfmt_command"
+    local toolchain=${rustfmt_command#cargo }
+    toolchain=${toolchain%fmt}
+    [ -f Cargo.toml ] && rustfmt $toolchain --version > /dev/null 2>&1 || return 0
+    local edition staged_rust_path drifted=""
+    edition=$(sed -n 's/^edition = "\(.*\)"/\1/p' Cargo.toml)
+    for staged_rust_path in $(git diff --cached --name-only --find-renames --diff-filter=ACMR -- '*.rs'); do
+        # Reading stdin, `--check` prints its diff yet exits 0, so the diff itself is the verdict.
+        [ -z "$(rustfmt $toolchain --edition "$edition" --config-path rustfmt.toml \
+            --check < "$results_directory/index/$staged_rust_path" 2> /dev/null)" ] || drifted="$drifted $staged_rust_path"
+    done
+    [ -z "$drifted" ] || reject_with_reason "" "staged Rust files are not rustfmt clean:$drifted;" \
+        "            run: $rustfmt_command"
 }
 
 # Rejects Rust imports out of the standard library, external crates, own crate order, or without a blank line
 # between those groups and after the last one, which rustfmt leaves alone. It reads the whole source from stdin.
 check_rust_use_groups() { # check_rust_use_groups <own-crate> <path> < source
     local findings
-    findings=$(awk -v own="$1" -v path="$2" -v quote="'" '
+    findings=$("$fastest_awk" -v own="$1" -v path="$2" -v quote="'" '
         BEGIN { literal = "r#*\"|\"|" quote "(\\\\.|[^" quote "\\\\])" quote "|//|/\\*" }
         function blanks(width) { return sprintf("%" width "s", "") }
         function count(text, bracket) { return gsub(bracket, "", text) }
@@ -2059,30 +2568,6 @@ check_rust_use_groups() { # check_rust_use_groups <own-crate> <path> < source
     return 1
 }
 
-# Rejects `zig fmt` drift on staged Zig files, because `zig fmt` is the law; it skips without zig.
-check_zig_fmt_clean() {
-    command -v zig > /dev/null 2>&1 || return 0
-    local staged_zig_paths=()
-    while IFS= read -r -d '' zig_path; do staged_zig_paths+=("$zig_path"); done \
-        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.zig')
-    [ ${#staged_zig_paths[@]} -gt 0 ] || return 0
-    zig fmt --check "${staged_zig_paths[@]}" > /dev/null 2>&1 && return 0
-    reject_with_reason "" "staged Zig changes are not zig-fmt clean;" "            run: zig fmt ${staged_zig_paths[*]}"
-}
-
-# Rejects `mojo format` drift on a staged Mojo file; `mojo format` has no check mode, so a copy is formatted
-# and compared, at the 120 columns `pyproject.toml` sets. It skips without mojo.
-check_mojo_format_clean() {
-    command -v mojo > /dev/null 2>&1 || return 0
-    local formatted_directory formatted_copy
-    formatted_directory=$(mktemp -d) && formatted_copy="$formatted_directory/copy.mojo"
-    printf '%s\n' "$staged_file_text" > "$formatted_copy"
-    mojo format -q -l 120 "$formatted_copy" > /dev/null 2>&1
-    printf '%s\n' "$staged_file_text" | diff -q - "$formatted_copy" > /dev/null 2>&1 ||
-        reject_with_reason "" "$staged_path is not mojo-format clean;" "            run: mojo format -l 120 $staged_path"
-    rm -rf "$formatted_directory"
-}
-
 # Rejects ruff format drift that rewrites an added line or inserts beside one, because `pyproject.toml` is the
 # law and legacy lines migrate on their own schedule. It skips without ruff, and on a syntax error, which the
 # lint check reports.
@@ -2090,7 +2575,7 @@ check_ruff_format_on_added_lines() {
     command -v ruff > /dev/null 2>&1 || return 0
     local formatted drift
     formatted=$(ruff format --force-exclude --stdin-filename "$staged_path" - < "$staged_text_path" 2> /dev/null) || return 0
-    drift=$(diff -U0 "$staged_text_path" <(printf '%s\n' "$formatted") | awk '
+    drift=$(diff -U0 "$staged_text_path" <(printf '%s\n' "$formatted") | "$fastest_awk" '
         NR == FNR { added[$1 + 0]; next }
         /^@@/ {
             split($2, range, ",")
@@ -2113,11 +2598,21 @@ check_ruff_lint_on_added_lines() {
     local findings
     findings=$(ruff check --quiet --force-exclude --output-format=concise --stdin-filename "$staged_path" - \
         < "$staged_text_path" 2> /dev/null |
-        awk -F: 'NR == FNR { added[$1 + 0]; next } ($2 + 0) in added || $4 == " invalid-syntax"' \
+        "$fastest_awk" -F: 'NR == FNR { added[$1 + 0]; next } ($2 + 0) in added || $4 == " invalid-syntax"' \
             "$staged_lines_path" -)
     [ -z "$findings" ] || reject_with_reason "$findings" \
         "$staged_path has ruff lint findings on its added lines; run: ruff check --fix $staged_path," \
         "            or fix them by hand:"
+}
+
+# Rejects swift-format lint findings, because `.swift-format` is the law; it skips without swift-format.
+check_swift_format_clean() {
+    command -v swift-format > /dev/null 2>&1 && [ -f .swift-format ] || return 0
+    local staged_swift_paths
+    staged_swift_paths=$(git diff --cached --name-only --find-renames --diff-filter=ACMR -- '*.swift')
+    [ -n "$staged_swift_paths" ] || return 0
+    swift-format lint --strict $staged_swift_paths > /dev/null 2>&1 && return 0
+    reject_with_reason "" "staged Swift changes are not swift-format clean;" "            run: swift-format -i <files>"
 }
 
 # Rejects taplo drift on staged TOML, because `.taplo.toml` is the law; it skips without taplo or its config.
@@ -2125,7 +2620,7 @@ check_taplo_clean() {
     command -v taplo > /dev/null 2>&1 && [ -f .taplo.toml ] || return 0
     local staged_toml_paths=()
     while IFS= read -r -d '' toml_path; do staged_toml_paths+=("$toml_path"); done \
-        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.toml')
+        < <(git diff --cached --name-only -z --find-renames --diff-filter=ACMR -- '*.toml')
     [ ${#staged_toml_paths[@]} -gt 0 ] || return 0
     taplo fmt --check "${staged_toml_paths[@]}" > /dev/null 2>&1 && return 0
     reject_with_reason "" "staged TOML is not taplo clean;" "            run: taplo fmt"
@@ -2136,7 +2631,7 @@ check_dprint_clean() {
     command -v dprint > /dev/null 2>&1 && [ -e .dprint.json ] || return 0
     local staged_json_yaml_paths=()
     while IFS= read -r -d '' json_yaml_path; do staged_json_yaml_paths+=("$json_yaml_path"); done \
-        < <(git diff --cached --name-only -z --diff-filter=ACM -- '*.json' '*.jsonc' '*.yml' '*.yaml')
+        < <(git diff --cached --name-only -z --find-renames --diff-filter=ACMR -- '*.json' '*.jsonc' '*.yml' '*.yaml')
     [ ${#staged_json_yaml_paths[@]} -gt 0 ] || return 0
     dprint check "${staged_json_yaml_paths[@]}" > /dev/null 2>&1 && return 0
     reject_with_reason "" "staged JSON or YAML is not dprint clean;" "            run: dprint fmt"
@@ -2156,6 +2651,30 @@ check_editor_settings_sorted() {
     [ "${unsorted_list_count:-0}" = 0 ] || reject_with_reason "" \
         "$staged_path has unsorted top-level keys, cSpell.words or extension recommendations;" \
         "            sort them case-insensitively"
+}
+
+# Rejects `zig fmt` drift on staged Zig files, because `zig fmt` is the law; it skips without zig.
+check_zig_fmt_clean() {
+    command -v zig > /dev/null 2>&1 || return 0
+    local staged_zig_paths=()
+    while IFS= read -r -d '' zig_path; do staged_zig_paths+=("$zig_path"); done \
+        < <(git diff --cached --name-only -z --find-renames --diff-filter=ACMR -- '*.zig')
+    [ ${#staged_zig_paths[@]} -gt 0 ] || return 0
+    zig fmt --check "${staged_zig_paths[@]}" > /dev/null 2>&1 && return 0
+    reject_with_reason "" "staged Zig changes are not zig-fmt clean;" "            run: zig fmt ${staged_zig_paths[*]}"
+}
+
+# Rejects `mojo format` drift on a staged Mojo file; `mojo format` has no check mode, so a copy is formatted
+# and compared at 120 columns. It skips without mojo.
+check_mojo_format_clean() {
+    command -v mojo > /dev/null 2>&1 || return 0
+    local formatted_directory formatted_copy
+    formatted_directory=$(mktemp -d) && formatted_copy="$formatted_directory/copy.mojo"
+    printf '%s\n' "$staged_file_text" > "$formatted_copy"
+    mojo format -q -l 120 "$formatted_copy" > /dev/null 2>&1
+    printf '%s\n' "$staged_file_text" | diff -q - "$formatted_copy" > /dev/null 2>&1 ||
+        reject_with_reason "" "$staged_path is not mojo-format clean;" "            run: mojo format -l 120 $staged_path"
+    rm -rf "$formatted_directory"
 }
 
 # endregion Formatters
@@ -2180,7 +2699,7 @@ check_generated_artifacts() {
 check_workflow_names() {
     local nameless
     nameless=$(
-        printf '%s\n' "$staged_file_text" | awk '
+        printf '%s\n' "$staged_file_text" | "$fastest_awk" '
             # Jobs: two-space keys under the top-level `jobs:` section, named by a four-space `name:`.
             /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
             in_jobs && /^[^ #]/ { in_jobs = 0 }
@@ -2223,7 +2742,7 @@ check_banners() { # check_banners <path> < added-lines
     *) return 0 ;;
     esac
     local rulers
-    rulers=$(awk -v path="$1" -v quote="'" '
+    rulers=$("$fastest_awk" -v path="$1" -v quote="'" '
         BEGIN {
             stroke = "(─|━|┄|┅|┈|┉|╌|╍|═)"
             run = "(---+|===+|####+|////+|\\*\\*\\*+|" stroke stroke stroke "+)"
@@ -2256,10 +2775,10 @@ check_formatter_toggles_absent() {
 }
 
 # Rejects two or more spaces after `.`, `!` or `?` before a capital, because prose uses one space between
-# sentences. Lines tagged `nk-nolint: spacing` are exempt.
+# sentences. Lines tagged `nk-nolint: spacing` and C-family literal contents, which are data, are exempt.
 check_single_space_between_sentences() {
     local doubled
-    doubled=$(printf '%s\n' "$staged_added_text" | grep -v 'nk-nolint: spacing' |
+    doubled=$(grep -v 'nk-nolint: spacing' "$staged_added_unquoted_path" |
         sed -E 's,^\+,,; s,^[[:space:]]*(//[/!]?|#|\*),,' |
         grep -nE '[.!?]  +[A-Z]' || true)
     [ -z "$doubled" ] || reject_with_reason "$doubled" \
@@ -2279,7 +2798,7 @@ run_shared_checks() {
         ;;
     esac
     case "$staged_path" in
-    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.pml)
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal | *.pml)
         check_docblock_documents_a_declaration
         check_file_header_tag_order
         check_enumerators_documented_individually
@@ -2291,11 +2810,13 @@ run_shared_checks() {
             check_param_has_direction
             check_markdown_emphasis_absent_in_comments
             check_doxygen_command_not_glued
+            check_doxygen_columns_unaligned
             check_sa_names_identifiers_see_names_urls
             check_cross_references_start_their_line
             check_section_has_snake_case_identifier
             check_section_anchor_unique
             check_member_docs_not_trailing
+            check_member_comments_above
             check_shape_spelled_bold_bracketed
             check_tuple_spelled_bold_parenthesized
             check_call_not_marked
@@ -2336,34 +2857,44 @@ run_shared_checks() {
         ;;
     esac
     case "$staged_path" in
-    *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh)
+    *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
         check_boolean_parameters
         check_void_discards
         check_thread_local
         check_type_suffixes
+        check_template_parameter_names
         check_header_date
         check_retval
         check_deprecations
         check_region_label_plain
         check_regions_not_pragma_mark
         check_string_fragments_one_per_line
+        check_codegen_macros_are_approved
+        check_no_cast_indexing
         ;;
     esac
     case "$staged_path" in
     *.hpp | *.cpp | *.cc) check_memcpy_qualified ;;
     esac
     case "$staged_path" in
-    c/* | include/* | src/*)
+    c/* | cpp/* | include/* | src/* | python/* | javascript/* | swift/* | golang/* | java/* | csharp/*)
         case "$staged_path" in
-        *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx | *.mm) check_filesystem_in_harnesses_only ;;
+        *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx | *.mm)
+            check_filesystem_in_harnesses_only
+            check_std_collections_in_harnesses_only
+            ;;
         esac
         ;;
+    esac
+    case "$staged_path" in
+    *.md) check_markdown_tex_not_in_code_spans ;;
     esac
     case "$staged_path" in
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h) check_harness_namespace_matches_directory ;;
     esac
     case "$staged_path" in
-    *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh | *.rs | *.zig | *.mojo | *.md | *.pml)
+    *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal | *.pml | *.rs | *.go | *.swift | *.zig | *.mojo | *.ts | *.mts | \
+        *.js | *.mjs | *.cjs | *.py | *.pyi | *.md)
         check_ascii_arrows
         check_backward_references
         check_sibling_justification
@@ -2374,7 +2905,7 @@ run_shared_checks() {
         ;;
     esac
     case "$staged_path" in
-    *.rs | *.zig | *.mojo)
+    *.rs | *.go | *.swift | *.zig | *.mojo | *.ts | *.mts | *.js | *.mjs | *.cjs | *.py | *.pyi | python/*.c)
         check_binding_prose_width
         check_binding_fences_name_language
         check_binding_prose_filled
@@ -2396,8 +2927,31 @@ run_shared_checks() {
         check_rust_macros_absent
         check_deprecations
         check_rust_module_fields
-        check_rust_use_groups forkunion "$staged_path" < "$staged_text_path" ||
+        check_rust_use_groups "$project_include_prefix" "$staged_path" < "$staged_text_path" ||
             rejection_count=$((rejection_count + 1))
+        ;;
+    *.go)
+        check_go_doc_headings_hash_prefixed
+        check_go_doc_links_bracketed
+        check_go_method_links_bracketed
+        check_go_package_comment_in_package_file
+        check_go_file_header
+        ;;
+    *.swift) [ "${staged_path##*/}" = Package.swift ] || check_tsdoc_file_header ;;
+    *.ts | *.mts | *.js | *.mjs | *.cjs)
+        check_tsdoc_tag_syntax
+        check_tsdoc_references_linked
+        check_tsdoc_file_header
+        check_tsdoc_continuation_two_spaces
+        check_tsdoc_brief_only_in_header
+        check_tsdoc_above_declarations
+        check_docblock_brackets_match_content
+        ;;
+    python/*.c) check_python_docstring_sections ;;
+    *.py | *.pyi)
+        check_python_module_fields
+        check_python_attributes_use_docstrings
+        check_python_arguments_unaligned
         ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
     .vscode/settings.json | .vscode/extensions.json | .zed/settings.json) check_editor_settings_sorted ;;
@@ -2418,6 +2972,7 @@ run_shared_formatters() {
     case "$staged_path" in
     *.c | *.h | *.cc | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.metal) check_clang_format_on_changed_lines ;;
     CMakeLists.txt | *.cmake) check_cmake_format_clean ;;
+    *.go) check_gofmt_clean ;;
     *.mojo) check_mojo_format_clean ;;
     *.py)
         check_ruff_format_on_added_lines
@@ -2429,8 +2984,9 @@ run_shared_formatters() {
 # Runs the checks that judge the staged tree as a whole rather than one file at a time.
 run_tree_checks() {
     check_rustfmt_clean
-    check_zig_fmt_clean
     check_taplo_clean
+    check_swift_format_clean
+    check_zig_fmt_clean
     check_dprint_clean
 }
 
@@ -2478,7 +3034,7 @@ check_platform_macros_through_vocabulary() {
 # region, so a block's gate is the one line above it.
 check_capability_gates_flat() {
     local nested
-    nested=$(printf '%s\n' "$staged_file_text" | awk '
+    nested=$(printf '%s\n' "$staged_file_text" | "$fastest_awk" '
         /^[[:space:]]*#[[:space:]]*if/ { depth++; stack[depth] = 0 }
         /^[[:space:]]*#[[:space:]]*(if|elif)/ {
             gate = ($0 ~ /FORKUNION_TARGET_/); outer = ($0 ~ /FORKUNION_TARGET_|FORKUNION_ARCH_/)
@@ -2510,7 +3066,7 @@ check_macro_names_current() {
     retired=$(printf '%s\n' "$staged_added_text" | grep -E '(^|[^A-Za-z0-9_]|-D)FU_[A-Z0-9]' || true)
     [ -z "$retired" ] || reject_with_reason "$retired" \
         "$staged_path spells the retired FU_ prefix; every all-caps name starts with FORKUNION_:"
-    positive=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns | awk '
+    positive=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns | "$fastest_awk" '
         { line = $0; gsub(/![[:space:]]*defined[[:space:]]*\(?[[:space:]]*FORKUNION_(ARCH|OS|HAS)_/, "", line) }
         line ~ /defined[[:space:]]*\(?[[:space:]]*FORKUNION_(ARCH|OS|HAS)_|#[[:space:]]*ifdef[[:space:]]+FORKUNION_(ARCH|OS|HAS)_/' || true)
     [ -z "$positive" ] || reject_with_reason "$positive" \
@@ -2590,10 +3146,10 @@ split_diff_by_path='
 read_staged_paths() {
     staged_paths=()
     while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
-        < <(git diff --cached --name-only -z --diff-filter=ACM)
+        < <(git diff --cached --name-only -z --find-renames --diff-filter=ACMR)
     [ ${#staged_paths[@]} -eq 0 ] || printf '%s\0' "${staged_paths[@]}" |
         git checkout-index --prefix="$results_directory/index/" -z --stdin
-    git diff --cached --unified=0 --diff-filter=ACM | awk -v directory="$results_directory/" "$split_diff_by_path"
+    git diff --cached --unified=0 --find-renames --diff-filter=ACMR | "$fastest_awk" -v directory="$results_directory/" "$split_diff_by_path"
 }
 
 # Deals the paths round-robin to one worker per core, each running `judge_path` into a numbered report, then
@@ -2649,8 +3205,19 @@ load_path_files() {
     [ -s "$results_directory/$ordinal.added" ] || return 1
     [ -f "$staged_diff_path" ] || staged_diff_path=$results_directory/$ordinal.added
     staged_added_text=$(< "$results_directory/$ordinal.added")
-    staged_added_line_numbers_list=$(< "$staged_lines_path")
+    staged_added_unquoted_path=$results_directory/$ordinal.added
     staged_file_text=$(< "$staged_text_path")
+    case "$staged_path" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
+        staged_code_path=$results_directory/$ordinal.code
+        staged_added_code_path=$results_directory/$ordinal.added-code
+        staged_added_unquoted_path=$results_directory/$ordinal.added-unquoted
+        blank_c_comments_preserving_columns < "$staged_text_path" > "$staged_code_path"
+        scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' "$staged_code_path" > "$staged_added_code_path"
+        blank_c_comments_preserving_columns literals < "$staged_text_path" |
+            scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' - > "$staged_added_unquoted_path"
+        ;;
+    esac
 }
 
 # `--all-lines <path>...` judges whole working-tree files as though every line outside a function body were
@@ -2661,7 +3228,7 @@ if [ "${1:-}" = --changed-lines ]; then
     judge_path() {
         [ -f "$staged_path" ] || return 0
         git diff HEAD --unified=0 -- "$staged_path" |
-            awk -v directory="$results_directory/" -v ordinal=$((ordinal - 1)) "$split_diff_by_path"
+            "$fastest_awk" -v directory="$results_directory/" -v ordinal=$((ordinal - 1)) "$split_diff_by_path"
         staged_text_path=$staged_path
         load_path_files || return 0
         run_shared_checks
@@ -2675,7 +3242,7 @@ elif [ "${1:-}" = --all-lines ]; then
         staged_file_text=$(< "$staged_path")
         [ -n "$staged_file_text" ] || return 0
         printf '%s\n' "$(lines_outside_function_bodies)" > "$results_directory/$ordinal.lines"
-        awk -v added="$results_directory/$ordinal.added" 'NR == FNR { kept[$1]; next } FNR in kept { print "+" $0 > added }' \
+        "$fastest_awk" -v added="$results_directory/$ordinal.added" 'NR == FNR { kept[$1]; next } FNR in kept { print "+" $0 > added }' \
             "$results_directory/$ordinal.lines" "$staged_path"
         staged_text_path=$staged_path
         load_path_files || return 0

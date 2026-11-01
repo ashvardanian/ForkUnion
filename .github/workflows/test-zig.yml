@@ -1,0 +1,33 @@
+name: Test Zig
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test_zig:
+    name: Test Zig on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Ubuntu, runner: ubuntu-26.04 }
+          - { name: Ubuntu with portable, runner: ubuntu-26.04, options: -Dportable=true }
+          - { name: Ubuntu Arm64 with NUMA, runner: ubuntu-26.04-arm, options: -Dplace-memory-on-domain=true }
+          - { name: macOS arm64, runner: macos-26 }
+          - { name: macOS x86_64, runner: macos-26-intel }
+          - { name: Windows, runner: windows-2025 }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Set Up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Test Zig
+        run: zig build test ${{ matrix.options }}

@@ -93,7 +93,7 @@ inline std::optional<std::chrono::milliseconds> parse_duration(std::string_view 
 
 /** A 32-bit seed, or "random" for a fresh draw from @c std::random_device. */
 inline std::optional<std::uint32_t> parse_seed(std::string_view text) noexcept {
-    if (text == "random") return static_cast<std::uint32_t>(std::random_device {}());
+    if (text == "random") return std::random_device {}();
     std::uint32_t seed = 0;
     auto const [end, error] = std::from_chars(text.data(), text.data() + text.size(), seed);
     if (error != std::errc {} || end != text.data() + text.size()) return std::nullopt;
@@ -210,7 +210,7 @@ class loop_t {
 
     /** The finished benchmark under @p name. */
     row_t row(std::string_view name) const noexcept {
-        return {name, calls_ / std::chrono::duration<double>(elapsed_).count(), counters_};
+        return {name, static_cast<double>(calls_) / std::chrono::duration<double>(elapsed_).count(), counters_};
     }
 };
 
