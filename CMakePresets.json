@@ -72,7 +72,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "FORKUNION_BUILD_BENCH": "OFF",
-        "FORKUNION_WITH_TOPOLOGY": "OFF",
         "FORKUNION_BUILD_SANITIZERS": "address"
       }
     },
@@ -83,7 +82,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "FORKUNION_BUILD_BENCH": "OFF",
-        "FORKUNION_WITH_TOPOLOGY": "OFF",
         "FORKUNION_BUILD_SANITIZERS": "thread"
       }
     },
@@ -248,7 +246,7 @@
     { "name": "debug", "configurePreset": "debug" },
     { "name": "check", "configurePreset": "check" },
     { "name": "release", "configurePreset": "release" },
-    { "name": "asan", "configurePreset": "asan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
+    { "name": "asan", "configurePreset": "asan" },
     { "name": "tsan", "configurePreset": "tsan", "targets": ["forkunion_test_cpp20", "forkunion_test_cpp23"] },
     { "name": "msvc2026_x64", "configurePreset": "msvc2026_x64", "configuration": "RelWithDebInfo" },
     { "name": "msvc2022_x64", "configurePreset": "msvc2022_x64", "configuration": "RelWithDebInfo" },
@@ -298,8 +296,7 @@
     {
       "name": "asan",
       "inherits": "base",
-      "configurePreset": "asan",
-      "filter": { "include": { "name": "^forkunion_test_cpp" } }
+      "configurePreset": "asan"
     },
     {
       "name": "tsan",

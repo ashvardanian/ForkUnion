@@ -4,10 +4,10 @@
 if (FORKUNION_BUILD_SANITIZERS STREQUAL "address" AND MSVC)
     add_compile_options(/fsanitize=address)
 elseif (FORKUNION_BUILD_SANITIZERS STREQUAL "address")
-    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all)
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all -UNDEBUG -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
 elseif (FORKUNION_BUILD_SANITIZERS STREQUAL "thread" AND NOT MSVC)
-    add_compile_options(-fsanitize=thread)
+    add_compile_options(-fsanitize=thread -UNDEBUG -fno-omit-frame-pointer)
     add_link_options(-fsanitize=thread)
 elseif (NOT FORKUNION_BUILD_SANITIZERS STREQUAL "off")
     message(FATAL_ERROR "FORKUNION_BUILD_SANITIZERS is off, address or thread, the last with Clang or GCC, "

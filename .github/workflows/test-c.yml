@@ -83,7 +83,7 @@ jobs:
         run: ctest --preset debug
 
   # Sanitizers get their own rows so the platform jobs stay on the critical path with one build
-  # each. Restricted to the NUMA-free basic_pool, whose pinned NUMA path stalls under TSan.
+  # each. TSan runs the C++ suites only: the C suite stops on its first `x86_pause` row.
   test_ubuntu_sanitizers:
     name: Test ${{ matrix.sanitizer }} on Ubuntu with ${{ matrix.cc }}
     runs-on: ubuntu-26.04
