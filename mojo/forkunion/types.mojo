@@ -323,11 +323,29 @@ struct Capabilities(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     comptime COLOCATE_POOLS_ON_DOMAIN = Self(1 << 14)
     """The domain-aware colocated and distributed pools are compiled."""
     comptime X86_CLDEMOTE = Self(1 << 15)
-    """`CLDEMOTE` moves a just-written line toward the shared LLC. Reporting only."""
+    """`CLDEMOTE` moves a just-written line toward the shared LLC."""
     comptime ARM64_DC_CVAC = Self(1 << 16)
     """`DC CVAC` cleans a dirty line to the coherency point."""
     comptime RISCV64_ZICBOM = Self(1 << 17)
     """User-mode Zicbom cache-block management, attested through `hwprobe`."""
+    comptime X86_CMPCCXADD = Self(1 << 18)
+    """`CMPCCXADD`, the conditional atomic add."""
+    comptime X86_RAOINT = Self(1 << 19)
+    """RAO-INT `aadd` and its family, executed at the shared cache."""
+    comptime ARM64_LSE = Self(1 << 20)
+    """Armv8.1 `FEAT_LSE`: one instruction per read-modify-write."""
+    comptime ARM64_RCPC = Self(1 << 21)
+    """Armv8.3 `FEAT_LRCPC`: `LDAPR` acquires, cheaper than `LDAR`'s."""
+    comptime RISCV64_ZACAS = Self(1 << 22)
+    """RISC-V Zacas, the `amocas` compare-and-swap."""
+    comptime RISCV64_ATOMIC = Self(1 << 23)
+    """The RISC-V A extension's `lr`, `sc` and `amo` words."""
+    comptime ARM64_PRFM = Self(1 << 24)
+    """`PRFM`, AArch64's prefetch hint."""
+    comptime RISCV64_ZICBOP = Self(1 << 25)
+    """RISC-V Zicbop, the `prefetch.w` hint."""
+    comptime RISCV64_ZABHA = Self(1 << 26)
+    """RISC-V Zabha, byte and halfword atomics."""
 
     comptime ANY_YIELD = Self(0x3F)
     """Every busy-wait waiter bit, to enumerate the ones a machine offers."""

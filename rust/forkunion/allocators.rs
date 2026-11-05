@@ -968,6 +968,7 @@ impl SymmetricAllocation {
 
     /// Base of the slice on `memory_domain`, at `base + memory_domain * stride_bytes`.
     fn slice_base(&self, memory_domain: usize) -> *mut u8 {
+        assert!(memory_domain < self.domains, "memory domain out of range");
         unsafe { self.base.as_ptr().add(memory_domain * self.stride_bytes) }
     }
 }
@@ -984,13 +985,33 @@ unsafe impl Sync for SymmetricAllocation {}
 /// One length-`n` copy of a sequence per memory domain, so every thread reads a node-local replica.
 ///
 /// A thin owner of one symmetric mapping - replica `d` lives at `base + d * stride_bytes()` and
-/// holds `n` elements. Raw uninitialized storage: the caller fills every replica and keeps them
-/// coherent, mirroring the C++ `replicated_array`. `T` must be plain-old-data - any bit pattern is
-/// a valid value - since the container runs no constructors or destructors.
+/// holds `n` elements, each starting as `T::default()`: the caller fills every replica and keeps
+/// them coherent, mirroring the C++ `replicated_array`.
 pub struct ReplicatedArray<T> {
     allocation: Option<SymmetricAllocation>,
     len: usize,
     _phantom: core::marker::PhantomData<T>,
+}
+
+impl<T: Copy + Default> ReplicatedArray<T> {
+    /// Allocates one length-`n` replica per domain, each element `T::default()`.
+    pub fn new_in(topology: &Topology, n: usize) -> Result<Self> {
+        if n == 0 {
+            return Ok(Self::new());
+        }
+        let bytes_per_domain = bytes_for_elements(n, core::mem::size_of::<T>())?;
+        let mut replicas = Self {
+            allocation: Some(SymmetricAllocation::new(topology, bytes_per_domain)?),
+            len: n,
+            _phantom: core::marker::PhantomData,
+        };
+        for memory_domain in 0..replicas.memory_domains_count() {
+            replicas
+                .on_memory_domain_mut(MemoryDomain(memory_domain))
+                .fill(T::default());
+        }
+        Ok(replicas)
+    }
 }
 
 impl<T: Copy> ReplicatedArray<T> {
@@ -1002,19 +1023,6 @@ impl<T: Copy> ReplicatedArray<T> {
             len: 0,
             _phantom: core::marker::PhantomData,
         }
-    }
-
-    /// Allocates one uninitialized length-`n` replica per domain; the caller first-touches them.
-    pub fn new_in(topology: &Topology, n: usize) -> Result<Self> {
-        if n == 0 {
-            return Ok(Self::new());
-        }
-        let bytes_per_domain = bytes_for_elements(n, core::mem::size_of::<T>())?;
-        Ok(Self {
-            allocation: Some(SymmetricAllocation::new(topology, bytes_per_domain)?),
-            len: n,
-            _phantom: core::marker::PhantomData,
-        })
     }
 
     /// The logical length of each replica.
@@ -1090,7 +1098,7 @@ pub struct ShardLocation {
 /// Each domain owns a contiguous logical segment of `segment()` elements, so element `i` lives at
 /// `{i / segment(), i % segment()}` - see [`location_of`](Self::location_of) - and a scan of a
 /// domain's shard is sequential in memory. Backed by one symmetric mapping; the trailing shard may
-/// be short. `T` must be plain-old-data, mirroring [`ReplicatedArray`].
+/// be short, and each element starts as `T::default()`, mirroring [`ReplicatedArray`].
 pub struct ShardedArray<T> {
     allocation: Option<SymmetricAllocation>,
     len: usize,
@@ -1098,19 +1106,8 @@ pub struct ShardedArray<T> {
     _phantom: core::marker::PhantomData<T>,
 }
 
-impl<T: Copy> ShardedArray<T> {
-    /// An empty array holding no mapping.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            allocation: None,
-            len: 0,
-            segment: 0,
-            _phantom: core::marker::PhantomData,
-        }
-    }
-
-    /// Allocates uninitialized storage for `n` elements partitioned round-robin across the domains.
+impl<T: Copy + Default> ShardedArray<T> {
+    /// Allocates `n` elements partitioned round-robin across the domains, each `T::default()`.
     pub fn new_in(topology: &Topology, n: usize) -> Result<Self> {
         if n == 0 {
             return Ok(Self::new());
@@ -1124,12 +1121,31 @@ impl<T: Copy> ShardedArray<T> {
         }
         let segment = n.div_ceil(domains);
         let bytes_per_domain = bytes_for_elements(segment, core::mem::size_of::<T>())?;
-        Ok(Self {
+        let mut shards = Self {
             allocation: Some(SymmetricAllocation::new(topology, bytes_per_domain)?),
             len: n,
             segment,
             _phantom: core::marker::PhantomData,
-        })
+        };
+        for memory_domain in 0..domains {
+            shards
+                .on_memory_domain_mut(MemoryDomain(memory_domain))
+                .fill(T::default());
+        }
+        Ok(shards)
+    }
+}
+
+impl<T: Copy> ShardedArray<T> {
+    /// An empty array holding no mapping.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            allocation: None,
+            len: 0,
+            segment: 0,
+            _phantom: core::marker::PhantomData,
+        }
     }
 
     /// The logical length, summed across the shards.
@@ -1247,6 +1263,10 @@ mod tests {
         let n = 4096usize;
         let mut replicas: ReplicatedArray<u32> = ReplicatedArray::new_in(&topology, n).expect("replicated array");
         assert_eq!(replicas.len(), n);
+        assert!(replicas
+            .on_memory_domain(MemoryDomain(0))
+            .iter()
+            .all(|&value| value == 0));
         assert_eq!(
             replicas.memory_domains_count(),
             topology.memory_domains_count().unwrap()

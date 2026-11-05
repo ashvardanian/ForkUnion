@@ -308,7 +308,7 @@ test "CacheAligned pads rather than merely aligns" {
     // `align(default_alignment)` is the wrapper's only source of alignment, so asserting the two
     // agree proves nothing. These are the properties that do not follow from the definition.
     try std.testing.expect(std.math.isPowerOfTwo(default_alignment));
-    try std.testing.expect(default_alignment >= 64);
+    try std.testing.expect(default_alignment >= std.atomic.cache_line);
 
     // A one-byte payload still occupies the whole span - alignment without padding would let two
     // accumulators share one span and false-share anyway.

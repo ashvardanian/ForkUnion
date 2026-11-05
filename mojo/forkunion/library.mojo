@@ -42,6 +42,7 @@ from forkunion.scheduling import (
     PoolIsComplete,
     PoolLocateThreadIn,
     PoolNew,
+    PoolNap,
     PoolSleep,
     PoolSpawn,
     PoolSpawnOn,
@@ -182,6 +183,8 @@ struct Symbols:
     """`fu_pool_threads_count_in`."""
     var pool_locate_thread_in: PoolLocateThreadIn
     """`fu_pool_locate_thread_in`."""
+    var pool_nap: PoolNap
+    """`fu_pool_nap`."""
     var pool_sleep: PoolSleep
     """`fu_pool_sleep`."""
     var pool_terminate: PoolTerminate
@@ -273,6 +276,7 @@ struct Symbols:
         self.pool_threads_count = _resolve[PoolCount](handle, "fu_pool_threads_count")
         self.pool_threads_count_in = _resolve[PoolCountIn](handle, "fu_pool_threads_count_in")
         self.pool_locate_thread_in = _resolve[PoolLocateThreadIn](handle, "fu_pool_locate_thread_in")
+        self.pool_nap = _resolve[PoolNap](handle, "fu_pool_nap")
         self.pool_sleep = _resolve[PoolSleep](handle, "fu_pool_sleep")
         self.pool_terminate = _resolve[PoolTerminate](handle, "fu_pool_terminate")
 

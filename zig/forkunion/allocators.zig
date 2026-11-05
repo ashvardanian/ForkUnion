@@ -79,7 +79,9 @@ pub fn allocateAtLeast(memory_domain_id: MemoryDomainId, minimum_bytes: usize) ?
 
 /// Allocates exactly the requested bytes on a domain; id from `Topology.memoryDomainIdAtIndex`.
 pub fn allocate(memory_domain_id: MemoryDomainId, bytes: usize) ?[*]u8 {
-    const ptr = fu_allocate_on_domain_id(memory_domain_id.identifier(), bytes) orelse return null;
+    var raw: ?*anyopaque = null;
+    if (fu_allocate_on_domain_id(memory_domain_id.identifier(), bytes, &raw) != 0) return null;
+    const ptr = raw orelse return null;
     return @ptrCast(@alignCast(ptr));
 }
 
@@ -133,7 +135,9 @@ pub const DomainAllocator = struct {
 
     /// Allocates exactly @p bytes on this domain, or null on failure.
     pub fn allocate(self: Self, bytes: usize) ?[*]u8 {
-        const ptr = fu_allocate_on_domain_id(self.memory_domain_id.identifier(), bytes) orelse return null;
+        var raw: ?*anyopaque = null;
+        if (fu_allocate_on_domain_id(self.memory_domain_id.identifier(), bytes, &raw) != 0) return null;
+        const ptr = raw orelse return null;
         return @ptrCast(@alignCast(ptr));
     }
 

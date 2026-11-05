@@ -35,6 +35,7 @@ extern "C" {
         compute_domain_index: usize,
         local_index_out: *mut usize,
     ) -> c_int;
+    fn fu_pool_nap(pool: *mut c_void);
     fn fu_pool_sleep(pool: *mut c_void, micros: usize);
     fn fu_pool_terminate(pool: *mut c_void);
 
@@ -128,7 +129,7 @@ extern "C" {
 /// let mut pool = spawn(&topology, 4);
 ///
 /// // Execute work on each thread
-/// pool.for_threads(&|thread_index, compute_domain_index| {
+/// pool.broadcast(|thread_index, compute_domain_index| {
 ///     println!("Thread {} on compute_domain {}", thread_index, compute_domain_index);
 /// });
 ///
@@ -145,10 +146,10 @@ extern "C" {
 /// # Generation Tokens
 ///
 /// Every dispatch is identified by a `usize` generation token. The safe `for_threads` API wraps it
-/// inside a [`BroadcastJoin`] guard: the workers start at construction, `join`/`Drop` waits for
-/// them, and on `Inclusive` pools first runs the calling thread's own slice, so only `Exclusive`
-/// pools can be polled with `is_complete` before it. Raw token-level access is available through
-/// the `unsafe_for_threads`/`unsafe_join` pair.
+/// inside a [`BroadcastJoin`] guard it lends to the caller: the workers start at construction,
+/// `join`/`Drop` waits for them, and on `Inclusive` pools first runs the calling thread's own
+/// slice, so only `Exclusive` pools can be polled with `is_complete` before it. Raw token-level
+/// access is available through the `unsafe_for_threads`/`unsafe_join` pair.
 pub struct ThreadPool {
     inner: *mut c_void,
 }
@@ -462,9 +463,8 @@ impl ThreadPool {
     ///     std::hint::black_box(task * 2);
     /// });
     ///
-    /// // Put threads to sleep between batches to save power
-    /// // Check for new work every 10 milliseconds
-    /// pool.sleep(10_000); // 10,000 microseconds = 10ms
+    /// // Put threads to sleep between batches to save power, until the next dispatch
+    /// pool.sleep(0);
     ///
     /// // Process another batch
     /// pool.for_n(500, |task, _at| {
@@ -477,15 +477,27 @@ impl ThreadPool {
         }
     }
 
-    /// Executes a function on each thread of the pool, returning a [`BroadcastJoin`] guard.
+    /// Parks worker threads on the CPU's address monitor until the next dispatch.
     ///
-    /// The workers start right away, and `join`, or dropping the guard, waits for them; on
-    /// `CallerExclusivity::Inclusive` pools it first runs the calling thread's own slice.
+    /// Unlike [`sleep`](Self::sleep), the workers stay on their cores and wake with no syscall.
+    pub fn nap(&mut self) {
+        unsafe {
+            fu_pool_nap(self.inner);
+        }
+    }
+
+    /// Executes a function on each thread of the pool while `caller` overlaps its own work.
+    ///
+    /// The workers start right away and `caller` receives a [`BroadcastJoin`] to poll or join. The
+    /// join also runs when `caller` returns or unwinds, on `CallerExclusivity::Inclusive` pools
+    /// first running the calling thread's own slice, so `function` outlives every worker.
     ///
     /// # Arguments
     ///
-    /// - `function` - Closure reference executed on each thread, receiving
-    ///   `(thread_index, compute_domain_index)`; borrowed for the guard's lifetime.
+    /// - `function` - Closure executed on each thread, receiving
+    ///   `(thread_index, compute_domain_index)`.
+    /// - `caller` - Closure the calling thread runs with the dispatch underway; its result is
+    ///   returned.
     ///
     /// # Examples
     ///
@@ -494,16 +506,29 @@ impl ThreadPool {
     ///
     /// let topology = Topology::new().unwrap();
     /// let mut pool = spawn(&topology, 4);
-    /// pool.for_threads(&|thread_index, compute_domain_index| {
-    ///     println!("Thread {} on compute_domain {}", thread_index, compute_domain_index);
-    /// })
-    /// .join();
+    /// pool.for_threads(
+    ///     |thread_index, compute_domain_index| {
+    ///         println!("Thread {} on compute_domain {}", thread_index, compute_domain_index);
+    ///     },
+    ///     |operation| operation.join(),
+    /// );
     /// ```
-    pub fn for_threads<'fork, F>(&mut self, function: &'fork F) -> BroadcastJoin<'_, 'fork, F>
+    ///
+    /// The guard is only lent, so it cannot be leaked past the dispatch:
+    ///
+    /// ```compile_fail
+    /// use forkunion::*;
+    /// let topology = Topology::new().unwrap();
+    /// let mut pool = spawn(&topology, 2);
+    /// let escaped = pool.for_threads(|_, _| {}, |operation| operation);
+    /// ```
+    pub fn for_threads<F, R>(&mut self, function: F, caller: impl FnOnce(&BroadcastJoin<'_>) -> R) -> R
     where
         F: Fn(usize, usize) + Sync,
     {
-        BroadcastJoin::new(self, function)
+        // ? Declared after `function`, so the guard joins before `function` drops, even unwinding
+        let join = BroadcastJoin::new(self, &function);
+        caller(&join)
     }
 
     /// Runs `function` on every thread and blocks until all of them finish.
@@ -715,7 +740,7 @@ impl ThreadPool {
     /// Dispatches `callback` on every thread without blocking, returning the generation token.
     ///
     /// This is the raw C-ABI mirror for building custom orchestration; prefer the safe
-    /// [`BroadcastJoin`] guard returned by `for_threads`.
+    /// [`BroadcastJoin`] guard `for_threads` lends.
     ///
     /// # Safety
     ///
@@ -896,23 +921,20 @@ impl Drop for Fabric {
 /// `CallerExclusivity::Inclusive` pools first runs the calling thread's own slice, so only
 /// `CallerExclusivity::Exclusive` pools may poll `is_complete` before it.
 ///
-/// The closure is borrowed rather than owned, so its address stays stable while worker threads hold
-/// a pointer to it, and the guard itself remains freely movable.
-pub struct BroadcastJoin<'pool, 'fork, F>
-where
-    F: Fn(usize, usize) + Sync,
-{
+/// Only ever lent to the closure given to [`ThreadPool::for_threads`], so it cannot be leaked past
+/// the dispatch: a `mem::forget` of an owned guard would let workers outlive what they call.
+pub struct BroadcastJoin<'pool> {
     pool: &'pool mut ThreadPool,
-    function: PhantomData<&'fork F>,
     generation: usize,
 }
 
-impl<'pool, 'fork, F> BroadcastJoin<'pool, 'fork, F>
-where
-    F: Fn(usize, usize) + Sync,
-{
-    /// Create a new BroadcastJoin, for internal use by ThreadPool
-    pub(crate) fn new(pool: &'pool mut ThreadPool, function: &'fork F) -> Self {
+impl<'pool> BroadcastJoin<'pool> {
+    /// Create a new BroadcastJoin, for internal use by ThreadPool, which keeps `function` alive
+    /// until this guard drops.
+    pub(crate) fn new<F>(pool: &'pool mut ThreadPool, function: &F) -> Self
+    where
+        F: Fn(usize, usize) + Sync,
+    {
         extern "C" fn trampoline<F>(context: *mut c_void, thread_index: usize, compute_domain_index: usize)
         where
             F: Fn(usize, usize) + Sync,
@@ -927,11 +949,7 @@ where
             // ? The `&mut` borrow admits no other dispatch here, so the core never refuses this one
             let _ = fu_pool_unsafe_for_threads(pool.inner, trampoline::<F>, context, &mut generation);
         }
-        Self {
-            pool,
-            function: PhantomData,
-            generation,
-        }
+        Self { pool, generation }
     }
 
     /// The generation token of this broadcast.
@@ -953,15 +971,12 @@ where
 
     /// Waits for every thread, running the caller's own slice first on `Inclusive` pools.
     /// Idempotent: the core returns at once for a generation already joined.
-    pub fn join(&mut self) {
+    pub fn join(&self) {
         unsafe { fu_pool_unsafe_join(self.pool.inner, self.generation) };
     }
 }
 
-impl<F> Drop for BroadcastJoin<'_, '_, F>
-where
-    F: Fn(usize, usize) + Sync,
-{
+impl Drop for BroadcastJoin<'_> {
     fn drop(&mut self) {
         self.join();
     }
@@ -1370,7 +1385,7 @@ mod tests {
                     visited_ref[thread_index].store(true, Ordering::Relaxed);
                 }
             };
-            let _operation = pool.for_threads(&broadcast_function);
+            pool.for_threads(broadcast_function, |_operation| {});
         } // Operation executes in destructor
 
         for (i, flag) in visited.iter().enumerate() {
@@ -1587,19 +1602,20 @@ mod tests {
             visited_b[thread_index].store(true, Ordering::Relaxed);
         };
 
-        let mut operation_a = pool_a.for_threads(&work_a);
-        let mut operation_b = pool_b.for_threads(&work_b);
-
-        operation_a.join();
-        operation_b.join();
-        assert!(
-            operation_a.is_complete(),
-            "pool_a generation must be complete after join"
-        );
-        assert!(
-            operation_b.is_complete(),
-            "pool_b generation must be complete after join"
-        );
+        pool_a.for_threads(work_a, |operation_a| {
+            pool_b.for_threads(work_b, |operation_b| {
+                operation_a.join();
+                operation_b.join();
+                assert!(
+                    operation_a.is_complete(),
+                    "pool_a generation must be complete after join"
+                );
+                assert!(
+                    operation_b.is_complete(),
+                    "pool_b generation must be complete after join"
+                );
+            });
+        });
 
         for i in 0..count_threads {
             assert!(visited_a[i].load(Ordering::Relaxed), "Thread {i} in pool_a not visited");

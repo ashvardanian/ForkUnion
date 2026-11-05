@@ -112,10 +112,28 @@ pub const Capabilities = packed struct(u32) {
     /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
     arm64_dc_cvac: bool = false,
     /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
-    /// hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+    /// bit the C ABI's cascade selects `cbo.clean` on.
     riscv64_zicbom: bool = false,
+    /// `CMPCCXADD`, the conditional atomic add, admitting `x86_cmpccxadd_atomic_ref`.
+    x86_cmpccxadd: bool = false,
+    /// RAO-INT `aadd` and its family, executed at the shared cache.
+    x86_raoint: bool = false,
+    /// Armv8.1 `FEAT_LSE`: one instruction per read-modify-write.
+    arm64_lse: bool = false,
+    /// Armv8.3 `FEAT_LRCPC`: `LDAPR` acquires, cheaper than `LDAR`'s.
+    arm64_rcpc: bool = false,
+    /// RISC-V Zacas, the `amocas` compare-and-swap.
+    riscv64_zacas: bool = false,
+    /// The RISC-V A extension's `lr`, `sc` and `amo` words.
+    riscv64_atomic: bool = false,
+    /// `PRFM`, AArch64's prefetch hint.
+    arm64_prfm: bool = false,
+    /// RISC-V Zicbop, the `prefetch.w` hint.
+    riscv64_zicbop: bool = false,
+    /// RISC-V Zabha, byte and halfword atomics.
+    riscv64_zabha: bool = false,
 
-    _unused: u14 = 0,
+    _unused: u5 = 0,
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub fn all() Capabilities {
@@ -317,16 +335,18 @@ test "capability bits match the C ABI numbering" {
     try std.testing.expect(bit(15).x86_cldemote);
     try std.testing.expect(bit(16).arm64_dc_cvac);
     try std.testing.expect(bit(17).riscv64_zicbom);
+    try std.testing.expect(bit(18).x86_cmpccxadd);
+    try std.testing.expect(bit(26).riscv64_zabha);
 
     // Every bit the core defines must have a field; none may fall through to `_unused`.
-    const all_defined: Capabilities = @bitCast(@as(u32, (1 << 18) - 1));
+    const all_defined: Capabilities = @bitCast(@as(u32, (1 << 27) - 1));
     try std.testing.expectEqual(0, all_defined._unused);
 }
 
 test "system capabilities" {
     const comptime_caps = comptimeCapabilities();
     const runtime_caps = runtimeCapabilities();
-    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
+    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 27 names total 427 bytes, plus a terminator.
     var runtime_buf: [512]u8 = undefined;
     try std.testing.expect((try runtimeCapabilitiesString(&runtime_buf)).len > 0);
 

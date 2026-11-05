@@ -57,8 +57,10 @@ comptime PoolCountIn = def(Handle, c_size_t, OutSize) thin abi("C") -> c_int
 """`fu_pool_threads_count_in`: the same count narrowed to one compute-domain index."""
 comptime PoolLocateThreadIn = def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int
 """`fu_pool_locate_thread_in`: rebases a global thread index inside one compute domain."""
+comptime PoolNap = def(Handle) thin abi("C") -> None
+"""`fu_pool_nap`: parks idle workers on the CPU's address monitor."""
 comptime PoolSleep = def(Handle, c_size_t) thin abi("C") -> None
-"""`fu_pool_sleep`: parks idle workers, re-checking for work on the given microsecond period."""
+"""`fu_pool_sleep`: blocks idle workers in the kernel."""
 comptime PoolTerminate = def(Handle) thin abi("C") -> None
 """`fu_pool_terminate`: stops the workers while leaving the handle spawnable again."""
 comptime FabricNew = def(OutHandle) thin abi("C") -> c_int
@@ -75,13 +77,13 @@ comptime FabricLevelsCount = def(Handle, OutSize) thin abi("C") -> c_int
 """`fu_fabric_memory_levels_count`: how many distinct tiers the harvest distinguished."""
 comptime ForThreads = def(Context, c_size_t, c_size_t) thin abi("C") -> None
 """`fu_for_threads_t`: the callback of a per-worker dispatch, which carries no task index."""
-comptime ForProngs = def(Context, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
+comptime ForTasks = def(Context, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
 """`fu_for_task_t`: the callback of an indexed dispatch, invoked once per task."""
 comptime ForSlices = def(Context, c_size_t, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
 """`fu_for_range_t`: the callback of a slice dispatch, given a first-and-count run of tasks."""
 comptime PoolForThreads = def(Handle, ForThreads, Context) thin abi("C") -> c_int
 """`fu_pool_for_threads`: one blocking call per worker."""
-comptime PoolForN = def(Handle, c_size_t, ForProngs, Context) thin abi("C") -> c_int
+comptime PoolForN = def(Handle, c_size_t, ForTasks, Context) thin abi("C") -> c_int
 """`fu_pool_for_n` and `fu_pool_for_n_dynamic`: `n` tasks, split up front or claimed on demand."""
 comptime PoolForSlices = def(Handle, c_size_t, ForSlices, Context) thin abi("C") -> c_int
 """`fu_pool_for_slices`: `n` tasks as one contiguous run per worker."""
@@ -332,13 +334,20 @@ struct Pool:
             raise Error(ErrorKind.of(status), "fu_pool_capabilities")
         return Capabilities(UInt32(Int(out[unsafe_offset=0])))
 
-    def sleep(self, microseconds: Int):
-        """Parks the workers; the next dispatch wakes them.
+    def nap(self):
+        """Parks the workers on the CPU's address monitor; the next dispatch wakes them.
+
+        Not thread-safe: call it between task batches, never during a dispatch.
+        """
+        self.library.symbols().pool_nap(self.handle)
+
+    def sleep(self, microseconds: Int = 0):
+        """Blocks the workers in the kernel; the next dispatch wakes them.
 
         Not thread-safe: call it between task batches, never during a dispatch.
 
         Args:
-            microseconds: How long a parked worker waits before re-checking for work, above zero.
+            microseconds: The longest a worker stays blocked before re-checking; 0 means no limit.
         """
         self.library.symbols().pool_sleep(self.handle, c_size_t(microseconds))
 

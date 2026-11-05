@@ -20,6 +20,7 @@ from std.testing import (
 )
 
 from forkunion import (
+    DEFAULT_ALIGNMENT,
     AllocationResult,
     BroadcastJoin,
     CacheAligned,
@@ -119,7 +120,7 @@ def test_cache_aligned_pads_to_a_line() raises:
     for index in range(4):
         assert_equal(slots[index].value, Int64(index * 7), "the payload round-trips")
     var gap = Int(Pointer(to=slots.unsafe_ptr()[unsafe_offset=1])) - Int(slots.unsafe_ptr())
-    assert_true(gap >= 64, "distinct accumulators land on distinct cache lines")
+    assert_equal(gap, DEFAULT_ALIGNMENT, "distinct accumulators land on distinct cache lines")
 
 
 def test_capability_masks() raises:

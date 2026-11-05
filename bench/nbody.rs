@@ -31,6 +31,7 @@
 //!
 //! File: bench/nbody.rs
 //! Author: Ash Vardanian
+//! Date: May 29, 2025
 use std::error::Error;
 
 use rayon::{prelude::*, ThreadPool as RayonPool, ThreadPoolBuilder};
@@ -65,7 +66,7 @@ impl std::ops::AddAssign for Vector3 {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 struct Body {
     position: Vector3,
     velocity: Vector3,

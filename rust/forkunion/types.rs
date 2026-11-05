@@ -699,11 +699,12 @@ mod tests {
         let broadcast_function = move |_thread_index: usize, _compute_domain: usize| {
             counter_ref.fetch_add(1, Ordering::Relaxed);
         };
-        let mut operation = pool.for_threads(&broadcast_function);
-        while !operation.is_complete() {} // ? Wait without joining
+        pool.for_threads(broadcast_function, |operation| {
+            while !operation.is_complete() {} // ? Wait without joining
 
-        operation.join();
-        assert!(operation.is_complete(), "join must leave the operation complete");
+            operation.join();
+            assert!(operation.is_complete(), "join must leave the operation complete");
+        });
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 
@@ -720,12 +721,13 @@ mod tests {
         let broadcast_function = move |_thread_index: usize, _compute_domain: usize| {
             counter_ref.fetch_add(1, Ordering::Relaxed);
         };
-        let mut operation = pool.for_threads(&broadcast_function);
-        while counter.load(Ordering::Relaxed) != 3 {} // ? Every worker, no join
-        assert!(!operation.is_complete(), "The caller's own slice waits for join");
+        pool.for_threads(broadcast_function, |operation| {
+            while counter.load(Ordering::Relaxed) != 3 {} // ? Every worker, no join
+            assert!(!operation.is_complete(), "The caller's own slice waits for join");
 
-        operation.join();
-        assert!(operation.is_complete());
+            operation.join();
+            assert!(operation.is_complete());
+        });
         assert_eq!(counter.load(Ordering::Relaxed), 4);
     }
 

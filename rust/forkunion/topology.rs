@@ -110,8 +110,26 @@ impl Capabilities {
     /// EL0 execution is known-legal, i.e. Linux, which sets `SCTLR_EL1.UCI`.
     pub const ARM64_DC_CVAC: Capabilities = Capabilities(1 << 16);
     /// The kernel enabled user-mode Zicbom cache-block management, attested through `hwprobe` - the
-    /// hook for a future runtime-dispatched `cbo.clean`; nothing emits it yet.
+    /// bit the C ABI's cascade selects `cbo.clean` on.
     pub const RISCV64_ZICBOM: Capabilities = Capabilities(1 << 17);
+    /// `CMPCCXADD`, the conditional atomic add, admitting `x86_cmpccxadd_atomic_ref`.
+    pub const X86_CMPCCXADD: Capabilities = Capabilities(1 << 18);
+    /// RAO-INT `aadd` and its family, executed at the shared cache.
+    pub const X86_RAOINT: Capabilities = Capabilities(1 << 19);
+    /// Armv8.1 `FEAT_LSE`: one instruction per read-modify-write.
+    pub const ARM64_LSE: Capabilities = Capabilities(1 << 20);
+    /// Armv8.3 `FEAT_LRCPC`: `LDAPR` acquires, cheaper than `LDAR`'s.
+    pub const ARM64_RCPC: Capabilities = Capabilities(1 << 21);
+    /// RISC-V Zacas, the `amocas` compare-and-swap.
+    pub const RISCV64_ZACAS: Capabilities = Capabilities(1 << 22);
+    /// The RISC-V A extension's `lr`, `sc` and `amo` words.
+    pub const RISCV64_ATOMIC: Capabilities = Capabilities(1 << 23);
+    /// `PRFM`, AArch64's prefetch hint.
+    pub const ARM64_PRFM: Capabilities = Capabilities(1 << 24);
+    /// RISC-V Zicbop, the `prefetch.w` hint.
+    pub const RISCV64_ZICBOP: Capabilities = Capabilities(1 << 25);
+    /// RISC-V Zabha, byte and halfword atomics.
+    pub const RISCV64_ZABHA: Capabilities = Capabilities(1 << 26);
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub const ALL: Capabilities = Capabilities(u32::MAX);

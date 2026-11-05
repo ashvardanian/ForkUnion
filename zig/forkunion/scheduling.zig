@@ -27,6 +27,7 @@ extern fn fu_pool_delete(pool: *anyopaque) void;
 extern fn fu_pool_spawn(topology: *anyopaque, pool: *anyopaque, threads: usize, exclusivity: c_int) c_int;
 extern fn fu_pool_spawn_on(topology: *anyopaque, pool: *anyopaque, compute_domain_index: usize, threads: usize, exclusivity: c_int) c_int;
 extern fn fu_pool_terminate(pool: *anyopaque) void;
+extern fn fu_pool_nap(pool: *anyopaque) void;
 extern fn fu_pool_sleep(pool: *anyopaque, micros: usize) void;
 extern fn fu_pool_caller_exclusivity(pool: *anyopaque, exclusivity_out: *c_int) c_int;
 extern fn fu_pool_capabilities(pool: *anyopaque, capabilities_out: *u32) c_int;
@@ -237,7 +238,14 @@ pub const Pool = struct {
         fu_pool_terminate(self.handle);
     }
 
-    /// Puts worker threads into power-saving sleep state.
+    /// Parks worker threads on the CPU's address monitor, staying on their cores.
+    /// Not thread-safe; call between task batches, and the next dispatch wakes the workers.
+    pub fn nap(self: Pool) void {
+        fu_pool_nap(self.handle);
+    }
+
+    /// Blocks worker threads in the kernel, freeing their cores, for at most `microseconds` between
+    /// re-checks, or until the next dispatch when 0.
     /// Not thread-safe; call between task batches, and the next dispatch wakes the workers.
     pub fn sleep(self: Pool, microseconds: usize) void {
         fu_pool_sleep(self.handle, microseconds);
@@ -603,7 +611,8 @@ test "per-compute_domain pool" {
 test "fabric harvest fills edges" {
     const topo = try Topology.init();
     defer topo.deinit();
-    const pool = try Pool.init(topo, .{ .threads = 4 });
+    // Every core, so the pool occupies the first compute domain, whose edges are read below.
+    const pool = try Pool.init(topo, .{ .threads = try topo.logicalCoresCount() });
     defer pool.deinit();
     const fabric = try Fabric.init();
     defer fabric.deinit();

@@ -66,6 +66,7 @@ fn main() {
     match target_os.as_str() {
         "windows" => {}
         "macos" | "ios" | "freebsd" => println!("cargo:rustc-link-lib=dylib=c++"),
+        "android" => println!("cargo:rustc-link-lib=dylib=c++_shared"),
         // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh`
         // multilib.
         "wasi" => {
