@@ -5,24 +5,25 @@
  *  @brief Spin model of @c colocated_pool from `include/forkunion/distributed.hpp`: its spawn and
  *      the startup wait before a worker finds its handle.
  *
- *  The spawn stores chill with a release, starts the workers, writes their handles, and stores
- *  grind with a release. A fresh worker waits out the chill with an uncapped wait, finds its
+ *  The spawn stores nap with a release, starts the workers, writes their handles, and stores
+ *  grind with a release. A fresh worker waits out the nap with an uncapped wait, finds its
  *  handle, and then runs the worker loop, which @c colocated_pool shares with @c flat_pool. The
  *  dispatcher may sleep between dispatches, joins every generation, and terminates.
  *
  *  - Every worker leaves its startup wait and reads the handles the spawn wrote.
  *
+ *  @budget 4096
  *  @verify pass sc,rc11
- *  @verify fail rc11 chill_at_spawn=false: without the chill, a fresh worker leaves its startup
- *      wait at once and reads no handle
- *  @verify stuck sc strong_wake=false: a weak one may fail spuriously on load-linked
- *      architectures, so the join waits on that worker forever
+ *  @verify fail rc11 nap_at_spawn=false: without the nap, a fresh worker leaves its startup wait
+ *      at once and reads no handle
+ *  @verify fail rc11 wake_order=order_relaxed: a relaxed wake-up ends the release sequence of the
+ *      nap before it, so a worker leaving its startup wait on that store reads no handle
  *  @verify stuck sc recheck=false: without it, a write that lands between a waiter's load and its
  *      arming wakes nobody, and the uncapped waiter waits forever
  */
 #define thread_count 3
 #define location_count 10
-#define history_depth 9
+#define history_depth 13
 #define through_c_shim false
 #include <flat_pool/protocol.pml>
 
@@ -30,15 +31,15 @@
 #define handles 9
 
 /** The knob: the header's choice, overridden by a `@verify` line. */
-#ifndef chill_at_spawn
-#define chill_at_spawn true
+#ifndef nap_at_spawn
+#define nap_at_spawn true
 #endif
 
-/** Chill, the workers, their handles, then grind with a release: @c colocated_pool::spawn in
+/** Nap, the workers, their handles, then grind with a release: @c colocated_pool::spawn in
  *  `distributed.hpp`. */
 inline spawn_colocated(t) {
     if
-    :: chill_at_spawn -> atomic { store(t, mood, order_release, chill); wake(mood) }
+    :: nap_at_spawn -> atomic { store(t, mood, order_release, nap); wake(mood) }
     :: else
     fi;
     store(t, spawned, order_release, 1);
@@ -48,7 +49,7 @@ inline spawn_colocated(t) {
     atomic { store(t, mood, order_release, grind); wake(mood) }
 }
 
-/** A worker: acquires the spawn, waits out the chill, finds its handle, and runs the worker loop:
+/** A worker: acquires the spawn, waits out the nap, finds its handle, and runs the worker loop:
  *  @c colocated_pool::worker_loop_body_ in `distributed.hpp`. */
 proctype worker(byte t) {
     int startup_mood, seen_handles;
@@ -56,8 +57,8 @@ proctype worker(byte t) {
     do
     :: load(t, mood, order_acquire, startup_mood);
        if
-       :: startup_mood != chill -> break
-       :: else -> wait_on(t, mood, chill, false)
+       :: startup_mood != nap && startup_mood != sleep -> break
+       :: else -> wait_on(t, mood, startup_mood, false)
        fi
     od;
     if
@@ -75,9 +76,12 @@ proctype dispatcher(byte t) {
     bool exchanged;
     spawn_colocated(t);
     for (round : 1 .. generations) {
-        // Sleep, between the tasks and from the thread that runs them: `colocated_pool::sleep`
+        // Park, between the tasks and from the thread running them: `colocated_pool::nap`, `sleep`
         if
-        :: atomic { store(t, mood, order_release, chill); wake(mood) }
+        :: nap_workers(t, observed)
+        :: sleep_workers(t)
+        :: nap_workers(t, observed); sleep_workers(t)
+        :: sleep_workers(t); nap_workers(t, observed)
         :: skip
         fi;
         dispatch(t, round, generation, observed, exchanged);

@@ -259,34 +259,25 @@ static bool test_uncomfortable_input_size(fu_capabilities_t mask) {
     return true;
 }
 
-/** Aligned visit structure for cache-line alignment */
-struct aligned_visit_t {
-    _Alignas(64) size_t task;
-};
-
-/** @c qsort comparator ordering visit records by task index, so a sorted pass can assert iota
- *  coverage. */
+/** @c qsort comparator ordering visited task indices, so a sorted pass can assert iota coverage. */
 static int compare_visits(const void *a, const void *b) {
-    const struct aligned_visit_t *va = (const struct aligned_visit_t *)a;
-    const struct aligned_visit_t *vb = (const struct aligned_visit_t *)b;
-    if (va->task < vb->task) return -1;
-    if (va->task > vb->task) return 1;
-    return 0;
+    size_t const first = *(size_t const *)a, second = *(size_t const *)b;
+    return (first > second) - (first < second);
 }
 
 /** Sorts the visit records in place and checks they cover [0, @p size) exactly once. */
-static bool contains_iota(struct aligned_visit_t *visited, size_t size) {
-    qsort(visited, size, sizeof(struct aligned_visit_t), compare_visits);
+static bool contains_iota(size_t *visited, size_t size) {
+    qsort(visited, size, sizeof(size_t), compare_visits);
 
     for (size_t i = 0; i < size; ++i)
-        if (visited[i].task != i) return false;
+        if (visited[i] != i) return false;
     return true;
 }
 
 /** Context for for_n test */
 struct for_n_context_t {
     atomic_size_t counter;
-    struct aligned_visit_t *visited;
+    size_t *visited;
 };
 
 /** Appends the task index to the shared visit log at the next free slot. */
@@ -296,7 +287,7 @@ static void for_n_callback(void *context_punned, size_t task, size_t thread, siz
     struct for_n_context_t *context = (struct for_n_context_t *)context_punned;
 
     size_t count_populated = atomic_fetch_add(&context->counter, 1);
-    context->visited[count_populated].task = task;
+    context->visited[count_populated] = task;
 }
 
 /** @c for_n must execute each of N tasks exactly once - and again on a repeated dispatch. */
@@ -304,7 +295,7 @@ static bool test_for_n(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_n", mask, fu_caller_inclusive_k);
     if (!pool) return false;
 
-    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    size_t *visited = calloc(default_parallel_tasks_k, sizeof(size_t));
     struct for_n_context_t context = {.counter = 0, .visited = visited};
 
     fu_pool_for_n(pool, default_parallel_tasks_k, for_n_callback, &context);
@@ -339,7 +330,7 @@ static bool test_for_n_dynamic(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_for_n_dynamic", mask, fu_caller_inclusive_k);
     if (!pool) return false;
 
-    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    size_t *visited = calloc(default_parallel_tasks_k, sizeof(size_t));
     struct for_n_context_t context = {.counter = 0, .visited = visited};
 
     fu_pool_for_n_dynamic(pool, default_parallel_tasks_k, for_n_callback, &context);
@@ -372,7 +363,7 @@ static void oversubscribed_callback(void *context_punned, size_t task, size_t th
     for (size_t i = 0; i != task % 3; ++i) some_local_work = some_local_work + i * i;
 
     size_t count_populated = atomic_fetch_add(&context->counter, 1);
-    context->visited[count_populated].task = task;
+    context->visited[count_populated] = task;
 }
 
 /**
@@ -396,7 +387,7 @@ static bool test_oversubscribed_threads(fu_capabilities_t mask) {
         return false;
     }
 
-    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    size_t *visited = calloc(default_parallel_tasks_k, sizeof(size_t));
     struct for_n_context_t context = {.counter = 0, .visited = visited};
 
     fu_pool_for_n_dynamic(pool, default_parallel_tasks_k, oversubscribed_callback, &context);
@@ -456,20 +447,21 @@ static bool test_for_slices(fu_capabilities_t mask) {
 /**
  *  @brief A sleeping pool must wake on the next dispatch with no tasks lost.
  *
- *  @c fu_pool_sleep parks the workers on a periodic timer; the following @c for_n is itself the
- *  wake-up call, and every task must still run exactly once, twice in a row.
+ *  @c fu_pool_nap and @c fu_pool_sleep park the workers; the following @c for_n is itself the
+ *  wake-up call, and every task must still run exactly once after either.
  */
 static bool test_sleep_wake(fu_capabilities_t mask) {
     fu_pool_t pool = spawn_default_pool("test_sleep", mask, fu_caller_inclusive_k);
     if (!pool) return false;
 
-    struct aligned_visit_t *visited = calloc(default_parallel_tasks_k, sizeof(struct aligned_visit_t));
+    size_t *visited = calloc(default_parallel_tasks_k, sizeof(size_t));
     struct for_n_context_t context = {.counter = 0, .visited = visited};
 
     // Each batch naps the workers, then the dispatch itself must wake them - exactly once per task.
     bool result = true;
     for (size_t batch = 0; batch != 2 && result; ++batch) {
-        fu_pool_sleep(pool, 100);
+        if (batch % 2) fu_pool_sleep(pool, batch);
+        else fu_pool_nap(pool);
         atomic_store(&context.counter, 0);
         fu_pool_for_n(pool, default_parallel_tasks_k, for_n_callback, &context);
         result = atomic_load(&context.counter) == default_parallel_tasks_k &&
@@ -907,7 +899,7 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
 #endif
     };
 
-    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 18 names total 306 bytes, plus a terminator.
+    // `FORKUNION_CAPABILITIES_NAME_CAPACITY`: 27 names total 427 bytes, plus a terminator.
     char mask_name[FORKUNION_CAPABILITIES_NAME_CAPACITY];
     size_t mask_name_length = 0;
     if (fu_name_capabilities(mask, mask_name, sizeof(mask_name), &mask_name_length) != fu_success_k)
@@ -915,6 +907,7 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
 
     for (size_t i = 0; i < sizeof(unit_tests) / sizeof(unit_tests[0]); ++i) {
         printf("Running %s for `%s`... ", unit_tests[i].name, mask_name);
+        fflush(stdout);
         bool const ok = unit_tests[i].function(mask);
         printf(ok ? "PASS\n" : "FAIL\n");
         *passes_out += ok, *failures_out += !ok;
@@ -964,7 +957,11 @@ int main(void) {
         fu_capability_x86_tpause_k,
         fu_capability_x86_tpause_k | fu_capability_x86_cldemote_k, /* Tremont, SPR, GNR */
         fu_capability_arm64_yield_k,
-        fu_capability_arm64_wfet_k,
+        fu_capability_arm64_yield_k | fu_capability_arm64_dc_cvac_k | fu_capability_arm64_lse_k,
+        fu_capability_arm64_yield_k | fu_capability_arm64_dc_cvac_k | fu_capability_arm64_lse_k |
+            fu_capability_arm64_rcpc_k,
+        fu_capability_arm64_wfet_k | fu_capability_arm64_dc_cvac_k | fu_capability_arm64_lse_k |
+            fu_capability_arm64_rcpc_k,
         fu_capability_riscv64_pause_k,
         fu_capability_riscv64_wrs_k,
         fu_capability_riscv64_wrs_k | fu_capability_riscv64_zicbom_k, /* RVA23 mandates them together */

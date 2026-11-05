@@ -44,18 +44,9 @@
 #include <intrin.h> // `__yield`
 #endif
 
-/*  Runtime extension detection on Linux RISC-V goes through the @c riscv_hwprobe syscall, wherever
- *  this build's kernel headers define it; older headers leave every extension unclaimed. */
-#if FORKUNION_ARCH_RISCV64_ && FORKUNION_OS_LINUX_ && __has_include(<asm/hwprobe.h>) && \
-    __has_include(<sys/syscall.h>) && __has_include(<unistd.h>)
-#include <asm/hwprobe.h> // `riscv_hwprobe`, `RISCV_HWPROBE_KEY_IMA_EXT_0`, `RISCV_HWPROBE_EXT_*`
-#include <sys/syscall.h> // `SYS_riscv_hwprobe`
-#include <unistd.h>      // `syscall`
-#endif
-#if defined(SYS_riscv_hwprobe) && defined(RISCV_HWPROBE_KEY_IMA_EXT_0)
-#define FORKUNION_HAS_RISCV_HWPROBE_ 1
-#else
-#define FORKUNION_HAS_RISCV_HWPROBE_ 0
+/*  Runtime extension detection on Linux RISC-V goes through the @c riscv_hwprobe syscall. */
+#if FORKUNION_ARCH_RISCV64_ && FORKUNION_OS_LINUX_
+#include <unistd.h> // `syscall`
 #endif
 
 namespace ashvardanian {
@@ -667,6 +658,8 @@ using preferred_yield_t = x86_tpause_t;
 using preferred_yield_t = x86_pause_t;
 #elif FORKUNION_TARGET_ARM64_WFET
 using preferred_yield_t = arm64_wfet_t;
+#elif FORKUNION_TARGET_ARM64_WFE
+using preferred_yield_t = arm64_wfe_t;
 #elif FORKUNION_TARGET_ARM64_YIELD
 using preferred_yield_t = arm64_yield_t;
 #elif FORKUNION_TARGET_RISCV64_WRS
@@ -930,15 +923,17 @@ inline capabilities_t arm64_cpu_capabilities() noexcept {
 
 #elif FORKUNION_ARCH_RISCV64_
 
-#if FORKUNION_HAS_RISCV_HWPROBE_
+#if FORKUNION_OS_LINUX_
 
 /** One @c hwprobe answer for @p key, the AND across every online hart, or zero if the kernel
  *  refuses to answer. */
 inline std::uint64_t riscv64_hwprobe(std::int64_t key) noexcept {
-    riscv_hwprobe probe;
-    probe.key = key;
-    probe.value = 0;
-    long const result = ::syscall(SYS_riscv_hwprobe, &probe, static_cast<std::size_t>(1), static_cast<std::size_t>(0),
+    constexpr long syscall_number_k = 258; // ? Syscall ABI, so no fresh uapi headers on the build host
+    struct {
+        std::int64_t key;
+        std::uint64_t value;
+    } probe {key, 0};
+    long const result = ::syscall(syscall_number_k, &probe, static_cast<std::size_t>(1), static_cast<std::size_t>(0),
                                   static_cast<void *>(nullptr), 0u);
     return result == 0 ? probe.value : 0;
 }
@@ -948,27 +943,19 @@ inline std::uint64_t riscv64_hwprobe(std::int64_t key) noexcept {
  *  @brief The instruction-level bits this RISC-V offers: the spin hint and the A extension, which
  *      every Linux ABI guarantees, then the monitored wait, the cache-line hint and @c amocas from
  *      one @c hwprobe of the @c IMA_EXT_0 key.
- *  @note U-mode has no CSR listing the extensions, so the kernel's word is the only one: a bit
- *      whose name this build's uapi headers predate is never asked for. A @c -march flag says what
- *      the compiler was promised, not what this machine runs, so it sets nothing here.
+ *  @note U-mode has no CSR listing the extensions, so the kernel's word is the only one. A
+ *      @c -march flag only says what the compiler was promised, so it sets nothing here.
  */
 inline capabilities_t riscv64_cpu_capabilities() noexcept {
     capabilities_t caps = capability_riscv64_pause_k | capability_riscv64_zicbop_k | capability_riscv64_atomic_k;
-#if FORKUNION_HAS_RISCV_HWPROBE_
-    std::uint64_t const extensions = riscv64_hwprobe(RISCV_HWPROBE_KEY_IMA_EXT_0);
-#if defined(RISCV_HWPROBE_EXT_ZAWRS)
-    if (extensions & RISCV_HWPROBE_EXT_ZAWRS) caps |= capability_riscv64_wrs_k;
-#endif
-#if defined(RISCV_HWPROBE_EXT_ZICBOM)
-    if (extensions & RISCV_HWPROBE_EXT_ZICBOM)
-        caps |= capability_riscv64_zicbom_k; // ? Only where `senvcfg.CBCFE` is set
-#endif
-#if defined(RISCV_HWPROBE_EXT_ZACAS)
-    if (extensions & RISCV_HWPROBE_EXT_ZACAS) caps |= capability_riscv64_zacas_k;
-#endif
-#if defined(RISCV_HWPROBE_EXT_ZABHA)
-    if (extensions & RISCV_HWPROBE_EXT_ZABHA) caps |= capability_riscv64_zabha_k;
-#endif
+#if FORKUNION_OS_LINUX_
+    constexpr std::int64_t extensions_key_k = 4; // ? `RISCV_HWPROBE_KEY_IMA_EXT_0`
+    constexpr std::uint64_t zacas_k = 1ull << 34, zawrs_k = 1ull << 48, zicbom_k = 1ull << 55, zabha_k = 1ull << 58;
+    std::uint64_t const extensions = riscv64_hwprobe(extensions_key_k);
+    if (extensions & zawrs_k) caps |= capability_riscv64_wrs_k;
+    if (extensions & zicbom_k) caps |= capability_riscv64_zicbom_k; // ? Only where `senvcfg.CBCFE` is set
+    if (extensions & zacas_k) caps |= capability_riscv64_zacas_k;
+    if (extensions & zabha_k) caps |= capability_riscv64_zabha_k;
 #endif
     return caps;
 }

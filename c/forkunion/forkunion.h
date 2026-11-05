@@ -5,8 +5,8 @@
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
  *
  *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel
- *  Algorithms, avoiding dynamic memory allocations, exceptions, system calls, and heavy
- *  Compare-And-Swap instructions.
+ *  Algorithms, avoiding dynamic memory allocations, exceptions, system calls, and Compare-And-Swap
+ *  loops on the hot path.
  *  The library leverages the "weak memory model" to allow Arm and IBM Power CPUs to aggressively
  *  optimize execution at runtime. It also aggressively tests against overflows on smaller index
  *  types, is safe to use even with the maximal @c size_t values, and compiles as C 99 and later.
@@ -373,8 +373,8 @@ typedef enum fu_capabilities_t {
     fu_capability_colocate_pools_on_domain_k = 1 << 14,
 
     /** @c CLDEMOTE moves a just-written line from this core's private caches toward the shared LLC
-     *  and retains it there. Reporting-only: the emitter is chosen at compile time by
-     *  @c FORKUNION_WITH_DEMOTE_CACHE_LINES, never dispatched. */
+     *  and retains it there. The C ABI's cascade selects on this bit, within what
+     *  @c FORKUNION_WITH_DEMOTE_CACHE_LINES compiled. */
     fu_capability_x86_cldemote_k = 1 << 15,
 
     /** <tt>DC CVAC</tt> cleans a dirty line to the coherency point, AArch64's nearest demote. Set where
@@ -382,7 +382,7 @@ typedef enum fu_capabilities_t {
     fu_capability_arm64_dc_cvac_k = 1 << 16,
 
     /** The kernel enabled user-mode Zicbom cache-block management, attested through @c hwprobe -
-     *  the hook for a future runtime-dispatched <tt>cbo.clean</tt>; nothing emits it yet. */
+     *  the C ABI's cascade selects <tt>cbo.clean</tt> on this bit. */
     fu_capability_riscv64_zicbom_k = 1 << 17,
 
     /** @c CMPCCXADD, the conditional atomic add - CPUID leaf 7, subleaf 1, EAX bit 7, on Sierra
@@ -817,7 +817,7 @@ void fu_free_on_domain_id(fu_memory_domain_id_t memory_domain_id, void *pointer,
  *  @param[out] memory_out Receives the base pointer of the mapping.
  *  @note This API is @b thread-safe. Slice @b d begins at <tt>base + d * *stride_bytes</tt> and is bound
  *      to its own memory domain; a machine with no NUMA API collapses the mapping to a single
- *      heap-backed memory slice.
+ *      heap-backed memory slice. Every slice starts zeroed.
  *
  *  Prefers the largest available huge-page size to minimize TLB pressure, so the stride may exceed
  *  @p bytes_per_domain - always read @p stride_bytes.
@@ -1045,13 +1045,25 @@ fu_status_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index,
                                      size_t *local_index_out);
 
 /**
- *  @brief Parks idle workers in a low-power sleep, re-checking for work every @p micros.
+ *  @brief Parks idle workers on the CPU's address monitor, for short idle periods.
  *  @param[in] pool Pool handle, must not be NULL.
- *  @param[in] micros Wake-up poll interval in microseconds, must be > 0.
  *  @note Not thread-safe; call between task batches. The next dispatch wakes the workers.
  *
- *  Trades up to @p micros of startup latency for lower power draw during long idle periods; on
- *  Linux it also de-prioritizes the sleeping threads with the scheduler.
+ *  Workers stay on their cores and wake with no syscall of their own. Without a monitor they keep
+ *  spinning on a hint. With enough privileges on Linux and FreeBSD they also drop to the idle
+ *  scheduling class, and on Linux under @c schedutil to a lower frequency.
+ */
+void fu_pool_nap(fu_pool_t pool);
+
+/**
+ *  @brief Blocks idle workers in the kernel, for long idle periods.
+ *  @param[in] pool Pool handle, must not be NULL.
+ *  @param[in] micros Longest a worker stays blocked before re-checking, or 0 to leave the wake to
+ *      the next dispatch alone.
+ *  @note Not thread-safe; call between task batches. The next dispatch wakes the workers.
+ *
+ *  Workers leave their cores, at the price of syscalls in the next dispatch. Same as
+ *  @ref fu_pool_nap where the kernel can't wait on a word, which is Apple's case.
  */
 void fu_pool_sleep(fu_pool_t pool, size_t micros);
 

@@ -274,7 +274,7 @@ struct log_numa_topology_t {
 
             for (std::size_t j = 0; j < page_settings.size(); ++j) {
                 auto const &ps = page_settings[j];
-                if (ps.bytes_per_page <= 4096) continue; // Skip regular pages
+                if (ps.bytes_per_page <= ram_page_size()) continue;
 
                 if (first_page) {
                     advance(std::snprintf(line_buffer + pos, sizeof(line_buffer) - pos, " • %sPages:%s ", //

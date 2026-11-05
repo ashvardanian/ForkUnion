@@ -38,8 +38,13 @@
  *  through. */
 #define contributors 3
 #define grind 0
-#define chill 1
+#define nap 1
 #define die 2
+#define sleep 3
+
+/** Not a word but the kernel's queue of threads blocked on @c mood: a store to the word wakes a
+ *  monitor, while only an explicit @c os_wake_all_on_word wakes a thread in this queue. */
+#define kernel_queue location_count
 
 /** The knobs: the header's choices, the generations, and the epoch's width, which is 2^64 in the
  *  header and small enough here to wrap on request, as @c generation_modulus is in the gate's
@@ -86,8 +91,11 @@
 #ifndef wait_cap
 #define wait_cap true
 #endif
-#ifndef strong_wake
-#define strong_wake true
+#ifndef wake_order
+#define wake_order order_release
+#endif
+#ifndef nap_wakes_kernel
+#define nap_wakes_kernel true
 #endif
 #ifndef generation_check
 #define generation_check true
@@ -153,11 +161,13 @@ inline spawn(t) {
 }
 
 /** Die with a release, then the epoch's current value re-released, whose write wakes the workers
- *  asleep on it: @c flat_pool::signal_die_ in `flat.hpp`, over the caller's @p observed. */
+ *  waiting on it, then the kernel's queue: @c flat_pool::signal_die_ in <tt>flat.hpp</tt>, over the
+ *  caller's @p observed. */
 inline signal_die(t, observed) {
     atomic { store(t, mood, order_release, die); terminated = true; wake(mood) };
     load(t, epoch, order_relaxed, observed);
-    atomic { store(t, epoch, order_release, observed); wake(epoch) }
+    atomic { store(t, epoch, order_release, observed); wake(epoch) };
+    wake(kernel_queue)
 }
 
 /** Die after the last join, the joins, then the resets, as @c flat_pool::terminate in `flat.hpp`
@@ -174,9 +184,40 @@ inline terminate(t, observed) {
     atomic { store(t, epoch, order_relaxed, 0); wake(epoch) }
 }
 
+/** The mood each dispatcher read, for its wake after the epoch store. */
+byte parked_mood[thread_count];
+
+/** Thread @p t blocks in the kernel while @c mood holds @p observed: @c os_wait_on_word, whose
+ *  period only ever adds an early return, so the model leaves it out. */
+inline kernel_wait(t, observed) {
+    atomic {
+        armed[t] = kernel_queue + 1;
+        event[t] = recheck && newest_value(mood) != (observed);
+        (event[t]);
+        armed[t] = 0;
+        event[t] = false
+    }
+}
+
+/** Parks on the monitor from the dispatching thread, waking any kernel waiters a @c sleep left:
+ *  @c flat_pool::nap in <tt>flat.hpp</tt>, over the caller's @p observed. */
+inline nap_workers(t, observed) {
+    load(t, mood, order_relaxed, observed);
+    atomic { store(t, mood, order_release, nap); wake(mood) };
+    if
+    :: observed == sleep && nap_wakes_kernel -> wake(kernel_queue)
+    :: else
+    fi
+}
+
+/** Parks in the kernel from the dispatching thread: @c flat_pool::sleep in <tt>flat.hpp</tt>. */
+inline sleep_workers(t) {
+    atomic { store(t, mood, order_release, sleep); wake(mood) }
+}
+
 /** The claim from zero, refused with the zero token, then the fork, the wait for an even epoch,
- *  the wake-up from a chill as a relaxed read and a strong exchange back to grind, and the next
- *  epoch stored with a release, since the claim leaves the dispatcher its only writer:
+ *  the wake-up from a parked mood as a relaxed read and a releasing store back to grind, and the
+ *  next epoch stored with a release, since the claim leaves the dispatcher its only writer:
  *  @c flat_pool::unsafe_for_threads in `flat.hpp`, over the caller's @p observed and
  *  @p exchanged. */
 inline dispatch(t, round, generation, observed, exchanged) {
@@ -208,12 +249,9 @@ inline dispatch(t, round, generation, observed, exchanged) {
         fi;
         generation = stepped(observed);
         load(t, mood, order_relaxed, observed);
+        parked_mood[t] = observed;
         if
-        :: observed == chill ->
-            if
-            :: atomic { compare_exchange(t, mood, order_relaxed, observed, grind, exchanged); if :: exchanged -> wake(mood) :: else fi }
-            :: !strong_wake -> skip
-            fi
+        :: observed != grind -> atomic { store(t, mood, wake_order, grind); wake(mood) }
         :: else
         fi;
         atomic {
@@ -221,7 +259,11 @@ inline dispatch(t, round, generation, observed, exchanged) {
             forked[round_of(generation)] = round;
             running = contributors;
             wake(epoch)
-        }
+        };
+        if
+        :: parked_mood[t] == sleep -> wake(kernel_queue)
+        :: else
+        fi
     :: else -> generation = 0
     fi
 }
@@ -284,8 +326,8 @@ inline check_results(t, generation, observed) {
 }
 
 /** The worker loop of @c flat_pool::worker_loop_ in `flat.hpp`, until die: waits on the epoch,
- *  looks at the mood only while the epoch stands still, naps while chill, and contributes to
- *  every odd epoch. */
+ *  looks at the mood only while the epoch stands still, parks on the mood word by the monitor at
+ *  nap and in the kernel at sleep, and contributes to every odd epoch. */
 inline serve(t) {
     int last_epoch, new_epoch, seen_mood, before, observed, seen_fork, seen_callback;
     do
@@ -295,7 +337,8 @@ inline serve(t) {
            load(t, mood, order_acquire, seen_mood);
            if
            :: seen_mood == die -> break
-           :: seen_mood == chill -> skip // the nap, then another look
+           :: seen_mood == nap -> wait_on(t, mood, nap, false)
+           :: seen_mood == sleep -> kernel_wait(t, sleep)
            :: else -> wait_on(t, epoch, last_epoch, wait_cap && newest_value(mood) != grind)
            fi
        :: else ->

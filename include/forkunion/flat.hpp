@@ -118,7 +118,7 @@ namespace forkunion {
  *  @tparam alignment_ The alignment of the thread pool. Defaults to @c default_alignment_k.
  */
 template <                                                                //
-    typename allocator_type_ = std::allocator<std::thread>,               //
+    typename allocator_type_ = portable_aligned_allocator<std::thread>,   //
     typename micro_yield_type_ = standard_yield_t,                        //
     template <typename> class atomic_ref_template_ = standard_atomic_ref, //
     typename cache_hints_type_ = standard_cache_hints_t,                  //
@@ -234,11 +234,12 @@ class flat_pool {
     /** Whether the caller thread is counted as one of the contributors. */
     caller_exclusivity_t exclusivity_ {caller_inclusive_k};
 
-    /** How long to nap in microseconds while @c chill_k, waiting for work. */
-    std::size_t sleep_length_micros_ {0};
+    /** The longest a worker stays blocked at @c sleep_k before re-checking, or 0 for no limit. */
+    std::size_t wake_up_periodicity_micros_ {0};
 
-    /** Lifecycle switch between spinning at @c grind_k, sleeping at @c chill_k, and exiting at
-     *  @c die_k. */
+    /** Lifecycle switch between spinning at @c grind_k, parking at @c nap_k or @c sleep_k, and
+     *  exiting at @c die_k. Workers park on this word: a store wakes a monitor, while a kernel wait
+     *  also needs @c os_wake_all_on_word. */
     alignas(alignment_k) mood_t mood_ {mood_t::grind_k};
 
     /* Task-specific variables: */
@@ -432,6 +433,7 @@ class flat_pool {
         // Prepare for future spawns: a joined thread is not joinable, so destroying the cells here
         // runs `~thread` on quiescent objects rather than calling `std::terminate`.
         threads_count_ = 0;
+        exclusivity_ = caller_inclusive_k;
         workers_ = {};
         reset_fork_();
         atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_relaxed);
@@ -439,20 +441,37 @@ class flat_pool {
     }
 
     /**
-     *  @brief Transitions "workers" to a sleeping state, waiting for a wake-up call.
-     *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
+     *  @brief Parks "workers" on the waiter's monitor until the next dispatch or @c terminate.
+     *  @note Callable only @b between tasks on a single thread; no synchronization runs.
+     *  @sa sleep for long idle periods, where the kernel takes the core back.
+     *
+     *  Wakes without a syscall. Waiters with no monitor keep spinning on their hint.
+     */
+    void nap() noexcept {
+        mood_t const mood = atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed);
+        atomic_ref<mood_t>(mood_).store(mood_t::nap_k, std::memory_order_release);
+        // ? Or the dispatch finds a nap and leaves the workers blocked
+        if (mood == mood_t::sleep_k) os_wake_all_on_word(&mood_);
+    }
+
+    /**
+     *  @brief Blocks "workers" in the kernel until the next dispatch or @c terminate.
+     *  @param[in] wake_up_periodicity_micros Longest a worker stays blocked before re-checking,
+     *      or 0 to leave the wake to the dispatch alone.
      *  @note Callable only @b between tasks on a single thread; no synchronization runs.
      *
-     *  Useful in batch processing when we clearly know the next task won't arrive for a while,
-     *  so power can be saved without major latency penalties.
+     *  Useful in batch processing when we clearly know the next task won't arrive for a while, so
+     *  power can be saved at the price of syscalls in that dispatch. Falls back to @c nap where the
+     *  kernel can't wait on a word.
      *
      *  It may also be used in a high-level Python or JavaScript library offloading some parallel
      *  operations to an underlying C++ engine, where latency is irrelevant.
      */
-    void sleep(std::size_t wake_up_periodicity_micros) noexcept {
-        assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
-        sleep_length_micros_ = wake_up_periodicity_micros;
-        atomic_ref<mood_t>(mood_).store(mood_t::chill_k, std::memory_order_release);
+    void sleep(std::size_t const wake_up_periodicity_micros = 0) noexcept {
+        atomic_ref<std::size_t>(wake_up_periodicity_micros_)
+            .store(wake_up_periodicity_micros, std::memory_order_relaxed);
+        atomic_ref<mood_t>(mood_).store(os_waits_on_words_k ? mood_t::sleep_k : mood_t::nap_k,
+                                        std::memory_order_release);
     }
 
     /** Helper function to create a spin mutex with same yield characteristics. */
@@ -542,18 +561,15 @@ class flat_pool {
         while ((previous_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) & 1u)
             micro_yield(&epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
 
-        // We are most likely already "grinding", but in the unlikely case we are not, let's wake up
-        // from the "chilling" state with relaxed semantics. Assuming the sleeping logic for the
-        // workers also checks the epoch counter, no synchronization is needed and no immediate
-        // wake-up is required. Read first, so a grinding pool takes no locked step.
-        mood_t may_be_chilling = mood_t::chill_k;
-        if (atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed) == mood_t::chill_k)
-            atomic_ref<mood_t>(mood_).compare_exchange_strong(may_be_chilling, mood_t::grind_k,
-                                                              std::memory_order_relaxed, std::memory_order_relaxed);
+        // We are most likely already "grinding"; parked workers wake on this store and then spin on
+        // `epoch_`. Read first, so a grinding pool takes no extra store or syscall.
+        mood_t const mood = atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed);
+        if (mood != mood_t::grind_k) atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_release);
 
         // The claim leaves this caller the epoch's only writer until its contributors count down
         generation_t const generation = static_cast<generation_t>(previous_epoch + 1);
         atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
+        if (mood == mood_t::sleep_k) os_wake_all_on_word(&mood_);
         return generation;
     }
 
@@ -617,6 +633,11 @@ class flat_pool {
      */
     constexpr index_t compute_domains_count() const noexcept { return 1; }
 
+    /** The topology's compute domain behind our only one, so the identity. */
+    constexpr index_t compute_domain_index_of(index_t compute_domain_index) const noexcept {
+        return compute_domain_index;
+    }
+
     /**
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
      *  @return Same value as <tt>threads_count()</tt>, as we only support one compute_domain.
@@ -663,6 +684,7 @@ class flat_pool {
         atomic_ref<mood_t>(mood_).store(mood_t::die_k, std::memory_order_release);
         atomic_ref<epoch_index_t> const epoch(epoch_);
         epoch.store(epoch.load(std::memory_order_relaxed), std::memory_order_release);
+        os_wake_all_on_word(&mood_);
     }
 
     /**
@@ -700,8 +722,14 @@ class flat_pool {
 
             if (mood == mood_t::die_k) [[unlikely]]
                 break;
-            if (mood == mood_t::chill_k && new_epoch == last_epoch) [[unlikely]] {
-                std::this_thread::sleep_for(std::chrono::microseconds(sleep_length_micros_));
+            if (mood == mood_t::nap_k && new_epoch == last_epoch) [[unlikely]] {
+                micro_yield(&mood_, mood, thread_index, wait_uncapped_k);
+                continue;
+            }
+            if (mood == mood_t::sleep_k && new_epoch == last_epoch) [[unlikely]] {
+                std::size_t const period =
+                    atomic_ref<std::size_t>(wake_up_periodicity_micros_).load(std::memory_order_relaxed);
+                os_wait_on_word(&mood_, mood, period);
                 continue;
             }
 

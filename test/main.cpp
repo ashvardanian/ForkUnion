@@ -404,10 +404,11 @@ static void test_measured_fabric() noexcept {
 }
 #endif // FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN
 
-/** Zero threads is not a pool: the spawn must be rejected cleanly, not crash or hang. */
+/** Zero threads is not a pool, nor is a count that wraps its size: both are refused cleanly. */
 static void test_spawn_zero() noexcept {
     fu::flat_pool_t pool;
     expect(fu::failed(pool.spawn(0u)));
+    expect_eq(pool.spawn((std::numeric_limits<std::size_t>::max)()), fu::status_t::bad_alloc_k);
 }
 
 /** The default spawn - one thread per allowed core - must succeed on every pool type. */
@@ -416,6 +417,7 @@ static void test_spawn_success() noexcept {
     auto maker = make_pool_type_ {};
     auto pool = maker.construct();
     expect(fu::succeeded(pool.spawn(maker.scope())));
+    expect_eq(pool.spawn(maker.scope()), fu::status_t::already_spawned_k);
 }
 
 /** The pool is the single source of truth for exclusivity, even across re-spawns. */
@@ -1122,11 +1124,11 @@ static void test_oversubscribed_threads() noexcept {
 }
 
 /**
- *  @brief Naps the workers between batches; every wake must still dispatch exactly-once.
+ *  @brief Parks the workers between batches; every wake must still dispatch exactly-once.
  *
- *  @c sleep flips the pool to @c chill_k and, where the platform allows, demotes workers to the
- *  idle scheduling class; the next dispatch must wake and restore them. Losing a worker to a missed
- *  wake-up shows up here as a hung join, and a double-dispatched task as a broken iota.
+ *  @c nap parks them on a monitor and @c sleep in the kernel; the next dispatch must wake them from
+ *  either, whichever came last. Losing a worker to a missed wake-up shows up here as a hung join,
+ *  and a double-dispatched task as a broken iota.
  */
 template <typename make_pool_type_ = make_pool_t>
 static void test_sleep_wake() noexcept {
@@ -1137,7 +1139,10 @@ static void test_sleep_wake() noexcept {
     std::vector<aligned_visit_t> visited(default_parallel_tasks_k);
     std::atomic<std::size_t> counter {0};
     for (std::size_t batch = 0; batch != 4; ++batch) {
-        pool.sleep(100); // ? Nap in 100 us intervals until the next dispatch
+        if (batch == 0) pool.nap(), pool.nap();
+        if (batch == 1) pool.sleep(100), pool.sleep();
+        if (batch == 2) pool.nap(), pool.sleep();
+        if (batch == 3) pool.sleep(), pool.nap();
         counter.store(0, std::memory_order_relaxed);
         pool.for_n(default_parallel_tasks_k, [&](std::size_t const task, fu::thread_in_domain_t) noexcept {
             std::size_t const count_populated = counter.fetch_add(1, std::memory_order_relaxed);
@@ -1663,11 +1668,11 @@ static void check_atomic_verbs() noexcept {
 template <template <typename> class atomic_ref_>
 static void check_atomic_ref_under_contention() noexcept {
     constexpr std::size_t threads_k = 8, rounds_k = 20'000, claim_limit_k = threads_k * rounds_k / 3;
-    alignas(128) std::uint32_t dispensed = 0;
-    alignas(128) std::uint32_t claimed = 0;
-    alignas(128) std::uint64_t high_water = 0;
-    alignas(128) bool lock = false;
-    alignas(128) std::uint64_t guarded = 0;
+    alignas(fu::default_alignment_k) std::uint32_t dispensed = 0;
+    alignas(fu::default_alignment_k) std::uint32_t claimed = 0;
+    alignas(fu::default_alignment_k) std::uint64_t high_water = 0;
+    alignas(fu::default_alignment_k) bool lock = false;
+    alignas(fu::default_alignment_k) std::uint64_t guarded = 0;
 
     fu::flat_pool_t pool;
     expect(fu::succeeded(pool.spawn(threads_k)));

@@ -121,8 +121,8 @@ An assertion that is wrong is a design decision to revisit in its own commit, wi
 The pool's three atomics are sound, and the models prove the behaviours composed on them; what they found sits at the edges.
 Where a model replays a finding, its `@verify` line links it.
 
-- A dispatch waking a chilled pool restores the workers' scheduling class to `SCHED_OTHER`, the class they started on, since `SCHED_FIFO | SCHED_RR` is `SCHED_BATCH` on Linux.
-- The same wake-up exchanges the mood strongly, since a spurious failure of a weak one leaves a colocated worker in its startup wait forever: [`colocated_pool.pml`](colocated_pool.pml).
+- A dispatch waking a parked pool restores the workers' scheduling class to `SCHED_OTHER`, the class they started on, since `SCHED_FIFO | SCHED_RR` is `SCHED_BATCH` on Linux.
+- Parked workers wait on the mood word with no cap, so a store to it wakes a monitor, while a kernel wait needs an explicit wake, which `nap` owes a `sleep` before it, and the dispatch's wake-up is a release, or a worker leaving its startup wait on it reads a stale handle: [`flat_pool/moods.pml`](flat_pool/moods.pml).
 - `terminate` is documented as callable only with no task running and the last dispatch joined, which it asserts.
 - A dispatch claims the pool by exchanging the contributor countdown from zero with an acquire, writes its fork only after the claim, and waits out the previous generation's completion step, or a refused caller tears the running fork, or a token comes out even: [`flat_pool/contenders.pml`](flat_pool/contenders.pml).
 - `distributed_pool` claims every colocation before it publishes on any, or a colocation that refuses leaves the others running half a dispatch: [`distributed_pool/contenders.pml`](distributed_pool/contenders.pml).
@@ -132,7 +132,7 @@ Where a model replays a finding, its `@verify` line links it.
 - The epoch's dispatch release, the workers' pickup acquire, the last contributor's completion release and the join's acquire each carry the fork and its results, and the countdown's decrements acquire as well as release, or the last contributor reads a stale result, under RC11 and under IMM: [`flat_pool/`](flat_pool/).
 - `spin_mutex`'s `lock` and `lock_if_free` acquire and its `unlock` releases, or the next holder reads the last one's writes stale: [`spin_mutex.pml`](spin_mutex.pml).
 - The loops behind `fetch_add_if_at_most` and `fetch_max` acquire even when they refuse, or a refused caller reads the winner's data stale, under RC11 and under IMM: [`standard_atomic_ref.cpp`](standard_atomic_ref.cpp).
-- The workers re-check the mood under a capped wait, which bounds a `sleep` or a `terminate` notice to one timeout; `terminate` re-releases the epoch after die, which wakes the workers asleep on it but not one arming after it: [`flat_pool/moods.pml`](flat_pool/moods.pml).
+- The workers re-check the mood under a capped wait, which bounds a `nap`, `sleep` or `terminate` notice to one timeout; `terminate` re-releases the epoch after die, which wakes the workers asleep on it but not one arming after it: [`flat_pool/moods.pml`](flat_pool/moods.pml).
 - The epoch's width aliases at the debug widths, as the header prices: at a modulus of 2 a stale token names the live generation: [`flat_pool/polling.pml`](flat_pool/polling.pml).
 - `invoke_for_n_dynamic::rewind` writes the cursors relaxed, since the dispatch's release on the epoch carries every cursor and end to every worker: [`for_n_dynamic.pml`](for_n_dynamic.pml).
 - Both epoch steps are plain release stores: the claim leaves the dispatcher the epoch's only writer until its contributors count down, and the next claimer waits for the last contributor's even epoch before it writes: [`flat_pool/`](flat_pool/), [`distributed_pool/`](distributed_pool/).

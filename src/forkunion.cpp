@@ -19,7 +19,14 @@
 
 namespace fu = ashvardanian::forkunion;
 
-using thread_allocator_t = std::allocator<std::thread>;
+using thread_allocator_t = fu::portable_aligned_allocator<std::thread>;
+
+/** The Arm waiter for machines with no @c WFET: @c yield in dispatch loops, @c WFE when napping. */
+#if FORKUNION_TARGET_ARM64_WFE
+using arm64_nap_t = fu::arm64_wfe_t;
+#elif FORKUNION_TARGET_ARM64_YIELD
+using arm64_nap_t = fu::arm64_yield_t;
+#endif
 
 /** The concrete pool type for a shape, a waiter, an atomic reference and a cache-hints policy - the
  *  reverse map from a pool's @c kind_k and its stored capability bits. */
@@ -75,13 +82,13 @@ struct pool_variants_t {
         fu::flat_pool<thread_allocator_t, fu::arm64_wfet_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_RCPC
-        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, arm64_nap_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>,
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_LSE
-        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, arm64_nap_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>,
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD
-        fu::flat_pool<thread_allocator_t, fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
+        fu::flat_pool<thread_allocator_t, arm64_nap_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>,
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
         fu::flat_pool<thread_allocator_t, fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cbo_cache_hints_t>, //
@@ -117,16 +124,16 @@ struct pool_variants_t {
         fu::distributed_pool<fu::arm64_wfet_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_RCPC
-        fu::colocated_pool<fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>,   //
-        fu::distributed_pool<fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>, //
+        fu::colocated_pool<arm64_nap_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>,
+        fu::distributed_pool<arm64_nap_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>,
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_LSE
-        fu::colocated_pool<fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>,   //
-        fu::distributed_pool<fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>, //
+        fu::colocated_pool<arm64_nap_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>,
+        fu::distributed_pool<arm64_nap_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>,
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD
-        fu::colocated_pool<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>,   //
-        fu::distributed_pool<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>, //
+        fu::colocated_pool<arm64_nap_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>,
+        fu::distributed_pool<arm64_nap_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>,
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS && FORKUNION_TARGET_RISCV64_ZICBOM
         fu::colocated_pool<fu::riscv64_wrs_t, fu::standard_atomic_ref, fu::riscv64_cbo_cache_hints_t>,   //
@@ -240,19 +247,21 @@ static auto select_pool([[maybe_unused]] fu::capabilities_t const bits, action_t
                                                       fu::preferred_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_RCPC
-    if (selects<fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::arm64_rcpc_atomic_ref,
+    if (selects<arm64_nap_t, fu::arm64_rcpc_atomic_ref, fu::preferred_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, arm64_nap_t, fu::arm64_rcpc_atomic_ref,
                                                       fu::preferred_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD && FORKUNION_TARGET_ARM64_LSE
-    if (selects<fu::arm64_yield_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::arm64_lse_atomic_ref,
-                                                      fu::preferred_cache_hints_t>::type> {});
+    if (selects<arm64_nap_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>(bits))
+        return action(
+            pool_type_tag<
+                typename pool_for<kind_, arm64_nap_t, fu::arm64_lse_atomic_ref, fu::preferred_cache_hints_t>::type> {});
 #endif
 #if FORKUNION_TARGET_ARM64_YIELD
-    if (selects<fu::arm64_yield_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>(bits))
-        return action(pool_type_tag<typename pool_for<kind_, fu::arm64_yield_t, fu::standard_atomic_ref,
-                                                      fu::preferred_cache_hints_t>::type> {});
+    if (selects<arm64_nap_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>(bits))
+        return action(
+            pool_type_tag<
+                typename pool_for<kind_, arm64_nap_t, fu::standard_atomic_ref, fu::preferred_cache_hints_t>::type> {});
 #endif
     // RVA23 mandates Zawrs and Zicbom together, so the monitored waiter travels with the
     // `cbo.clean` demote where the kernel attested it; older parts keep the hint-space `prefetch.w`
@@ -509,8 +518,8 @@ fu_status_t fu_name_capabilities(fu_capabilities_t capabilities, char *name_buff
         char const *const name = fu::capability_name(static_cast<fu::capabilities_t>(bit));
         if (!name) continue; // A bit we set, but do not name
         int const written = std::snprintf(pos, static_cast<size_t>(end - pos), pos == name_buffer ? "%s" : ",%s", name);
-        if (written <= 0) break;
-        pos += written < end - pos ? written : end - pos; // ! Clamp on truncation
+        if (written <= 0 || written >= end - pos) break; // ? A name that doesn't fit is left out whole
+        pos += written;
     }
     *pos = '\0';
     *written_out = static_cast<size_t>(pos - name_buffer);
@@ -737,7 +746,7 @@ fu_status_t fu_allocate_at_least_on_domain_id(fu_memory_domain_id_t memory_domai
     fu::domain_allocator_t allocator(static_cast<fu::memory_domain_id_t>(memory_domain_id));
     auto result = allocator.allocate_at_least(minimum_bytes);
     if (!result) return fu_bad_alloc_k;
-    *allocated_bytes = result.count;
+    *allocated_bytes = result.bytes;
     *bytes_per_page = result.bytes_per_page();
     *memory_out = result.ptr;
     return fu_success_k;
@@ -802,7 +811,7 @@ inline void fu_aligned_free(void *ptr, std::size_t alignment) noexcept {
     ::operator delete(ptr, std::align_val_t {alignment}, std::nothrow);
 }
 
-fu_status_t fu_pool_new([[maybe_unused]] char const *name, fu_capabilities_t allowed, fu_pool_t *pool_out) {
+fu_status_t fu_pool_new(char const *name, fu_capabilities_t allowed, fu_pool_t *pool_out) {
     if (!pool_out) return fu_invalid_argument_k;
     *pool_out = nullptr;
     fu::capabilities_t const effective = static_cast<fu::capabilities_t>(
@@ -878,7 +887,8 @@ static fu_status_t spawn_colocated(opaque_pool_t *opaque, fu::machine_topology_t
     }
     return lower(visit_kind<fu::pool_kind_t::colocated_k>(
         [&](auto &variant) {
-            return variant.spawn(machine.compute_domain_at(compute_domain_index), threads, exclusivity);
+            return variant.spawn(machine.compute_domain_at(compute_domain_index), threads, exclusivity,
+                                 fu::pin_to_core_k, compute_domain_index, machine.compute_levels_count());
         },
         opaque->variants));
 }
@@ -1117,6 +1127,12 @@ fu_status_t fu_pool_locate_thread_in(fu_pool_t pool, size_t global_thread_index,
         visit([=](auto &variant) { return variant.thread_local_index(global_thread_index, compute_domain_index); },
               opaque->variants, std::size_t {0});
     return fu_success_k;
+}
+
+void fu_pool_nap(fu_pool_t pool) {
+    assert(pool != nullptr);
+    opaque_pool_t *opaque = upcast_pool(pool);
+    visit([](auto &variant) { variant.nap(); }, opaque->variants);
 }
 
 void fu_pool_sleep(fu_pool_t pool, size_t micros) {

@@ -21,25 +21,35 @@ namespace forkunion {
 
 #if FORKUNION_WITH_OS_THREADS
 
+#if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS && FORKUNION_OS_LINUX_
+
 /**
- *  @brief Sleeps the calling thread for @p micros microseconds.
- *  @note Linux's @c clock_nanosleep lets us name the clock; Darwin only has @c nanosleep, whose
- *      clock is monotonic anyway. Neither is interruptible by our wake path - the sleep is short.
+ *  @brief Moves @p thread to @p policy, capping its utilization at zero under @c SCHED_IDLE, which
+ *      @c schedutil follows with the core's frequency.
+ *  @note Drivers picking frequency in hardware, such as active @c intel_pstate, ignore the ceiling.
  */
-inline void sleep_for_micros([[maybe_unused]] std::size_t const micros) noexcept {
-#if FORKUNION_OS_WINDOWS_
-    // Reached only after the pool is told to `sleep` to save power, where the docs promise latency
-    // is irrelevant - so a millisecond-granular `Sleep`, rounded up, is enough, and spares us the
-    // per-nap timer object a sub-millisecond wait would cost.
-    ::Sleep(static_cast<DWORD>(div_ceil(micros, 1000)));
-#elif FORKUNION_OS_LINUX_
-    struct timespec ts {0, static_cast<long>(micros * 1000)};
-    ::clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr); // ? A named clock; Darwin has only `nanosleep`
-#else
-    struct timespec ts {0, static_cast<long>(micros * 1000)};
-    ::nanosleep(&ts, nullptr);
-#endif
+inline void reclass_thread(pid_t const thread, int const policy) noexcept {
+    constexpr std::uint64_t utilization_clamp_flags_k = 0x20 | 0x40; // ? `SCHED_FLAG_UTIL_CLAMP_MIN | _MAX`
+    constexpr std::uint32_t full_speed_k = 1024;                     // ? `SCHED_CAPACITY_SCALE`
+    // ? The kernel's `sched_attr`, which glibc only recently started to declare
+    struct {
+        std::uint32_t size, policy;
+        std::uint64_t flags;
+        std::int32_t nice;
+        std::uint32_t priority;
+        std::uint64_t runtime, deadline, period;
+        std::uint32_t utilization_floor, utilization_ceiling;
+    } attributes {};
+    attributes.size = sizeof(attributes);
+    attributes.policy = static_cast<std::uint32_t>(policy);
+    attributes.flags = utilization_clamp_flags_k;
+    attributes.utilization_ceiling = policy == SCHED_IDLE ? 0 : full_speed_k;
+    if (::syscall(SYS_sched_setattr, thread, &attributes, 0u) == 0) return;
+    sched_param parameters {};
+    ::sched_setscheduler(thread, policy, &parameters); // ? A kernel built without clamps
 }
+
+#endif
 
 /**
  *  @brief How tightly a spawned worker is bound to the hardware beneath it.
@@ -142,15 +152,8 @@ template <typename micro_yield_type_ = standard_yield_t,
 struct colocated_pool {
 
   public:
-#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
-
-    /** Places the pool's own state on its node. */
+    /** Places the pool's own state on its node, where the platform can. */
     using allocator_t = domain_allocator_t;
-#else
-
-    /** One memory domain; there is nothing to place. */
-    using allocator_t = std::allocator<char>;
-#endif
 
     /** Functor spinning threads while they wait on an atomic. */
     using micro_yield_t = micro_yield_type_;
@@ -223,9 +226,6 @@ struct colocated_pool {
     /** The global index of this pool's first thread, offsetting its local indices. */
     thread_index_t first_thread_ {0};
 
-    /** How long to nap in microseconds while @c chill_k, waiting for work. */
-    std::size_t sleep_length_micros_ {0};
-
     /** Fixed-size buffer for a POSIX thread name. */
     using char16_name_t = char[16];
 
@@ -253,8 +253,12 @@ struct colocated_pool {
     /** Workers the kernel refused to place, distinguishing a pinned pool from a crowded one. */
     thread_index_t unpinned_threads_ {0};
 
-    /** Lifecycle switch between spinning at @c grind_k, sleeping at @c chill_k, and exiting at
-     *  @c die_k. */
+    /** The longest a worker stays blocked at @c sleep_k before re-checking, or 0 for no limit. */
+    std::size_t wake_up_periodicity_micros_ {0};
+
+    /** Lifecycle switch between spinning at @c grind_k, parking at @c nap_k or @c sleep_k, and
+     *  exiting at @c die_k. Workers park on this word: a store wakes a monitor, while a kernel wait
+     *  also needs @c os_wake_all_on_word. */
     alignas(alignment_k) mood_t mood_ {mood_t::grind_k};
 
     /* Task-specific variables. */
@@ -373,8 +377,8 @@ struct colocated_pool {
      *  @param[in] threads The number of threads to be used.
      *  @param[in] exclusivity Should we count the calling thread as one of the threads?
      *  @param[in] pin_granularity How to pin the threads to the NUMA node?
-     *  @param[in] first_thread The index of the first thread to start from, defaults to 0.
      *  @param[in] compute_domain_index A unique {NUMA node, QoS level} compute_domain index.
+     *  @param[in] compute_levels How many QoS levels the machine has, ranking this domain's.
      *  @return true if the thread-pool was created successfully, started, and is ready to use, or
      *      false if the number of threads is zero or if spawning has failed.
      *  @note This is the de-facto @b constructor - you only call it again after @c terminate.
@@ -392,16 +396,23 @@ struct colocated_pool {
      */
     status_t spawn(compute_domain_t const &domain, thread_index_t const threads,
                    caller_exclusivity_t const exclusivity = caller_inclusive_k,
-                   pin_granularity_t const pin_granularity = pin_to_core_k, thread_index_t const first_thread = 0,
-                   index_t const compute_domain_index = 0, [[maybe_unused]] index_t const compute_levels = 1) noexcept {
+                   pin_granularity_t const pin_granularity = pin_to_core_k, index_t const compute_domain_index = 0,
+                   index_t const compute_levels = 1) noexcept {
+        return spawn_(domain, threads, exclusivity, pin_granularity, 0, compute_domain_index, compute_levels);
+    }
+
+  private:
+    /** @c spawn, numbering threads from @p first_thread for the owning @c distributed_pool. */
+    status_t spawn_(compute_domain_t const &domain, thread_index_t const threads,
+                    caller_exclusivity_t const exclusivity, pin_granularity_t const pin_granularity,
+                    thread_index_t const first_thread, index_t const compute_domain_index,
+                    [[maybe_unused]] index_t const compute_levels) noexcept {
 
         if (threads == 0) return status_t::invalid_argument_k; // ! Can't have zero threads
         if (pthreads_.size() != 0) return status_t::already_spawned_k;
 
         // Allocate the thread pool of `pinned_thread_t` objects
-#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
         allocator_ = domain_allocator_t {domain.memory_domain_id};
-#endif
         pinned_threads_allocator_t pthread_allocator {allocator_};
         dynamic_padded_array<pinned_thread_t, pinned_threads_allocator_t> pthreads {pthread_allocator};
         if (status_t const grew = pthreads.resize(threads); failed(grew)) return grew;
@@ -417,20 +428,13 @@ struct colocated_pool {
         exclusivity_ = exclusivity;
         memory_domain_id_ = domain.memory_domain_id;
         pin_granularity_ = pin_granularity;
-        auto reset_on_failure = [&]() noexcept {
-            pthreads_ = {};
-            memory_domain_id_ = memory_domain_id_t {-1};
-            pin_granularity_ = pin_to_core_k;
-        };
-
-        // Snapshot the caller's affinity before we narrow it, so teardown can put back exactly what
-        // it had rather than the whole machine. Captured even when the caller is excluded: the
-        // failure path below may still have touched it.
-        [[maybe_unused]] status_t const captured = capture_thread_cores(caller_affinity_);
 
         // Include the main thread into the list of handles
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (use_caller_thread) {
+            // Snapshot the caller's affinity before we narrow it, so teardown can put back exactly
+            // what it had rather than the whole machine.
+            [[maybe_unused]] status_t const captured = capture_thread_cores(caller_affinity_);
 #if FORKUNION_OS_WINDOWS_
             // A pseudo-handle that always means "this thread"; valid because slot 0 is only ever
             // pinned from within this very call, on this very thread, and is never joined.
@@ -446,8 +450,8 @@ struct colocated_pool {
 
         // The startup sequence for the POSIX threads differs from the `flat_pool`,
         // where at start up there is a race condition to read the `pthreads_`.
-        // So we mark the threads as "chilling" until the
-        atomic_ref<mood_t>(mood_).store(mood_t::chill_k, std::memory_order_release);
+        // So we mark the threads as "napping" until the
+        atomic_ref<mood_t>(mood_).store(mood_t::nap_k, std::memory_order_release);
 
         // Initializing the thread pool can fail for all kinds of reasons, like:
         // - `EAGAIN` if we reach the `RLIMIT_NPROC` soft resource limit.
@@ -500,7 +504,7 @@ struct colocated_pool {
                     assert(join_result == 0 && "Failed to join a thread");
 #endif
                 }
-                reset_on_failure();
+                reset_spawned_state_();
                 return status_t::thread_refused_k;
             }
         }
@@ -539,6 +543,7 @@ struct colocated_pool {
         return status_t::success_k;
     }
 
+  public:
     /**
      *  @brief Executes a @p fork function in parallel on all threads.
      *  @param[in] fork The callback object, receiving the thread index as an argument.
@@ -557,7 +562,8 @@ struct colocated_pool {
 
     /**
      *  @brief Stops all threads and deallocates the thread-pool after the last call finishes.
-     *  @note Can be called from @b any thread, after the last dispatch was joined.
+     *  @note Can be called from @b any thread, after the last dispatch was joined. Only the thread
+     *      that spawned an inclusive pool gets its affinity back.
      *  @note Must @c spawn again to re-use the pool.
      *
      *  When and how @b not to use this function:
@@ -572,8 +578,6 @@ struct colocated_pool {
         assert(atomic_ref<thread_index_t>(threads_to_sync_).load(std::memory_order_seq_cst) == 0);
         assert((atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_seq_cst) & 1u) == 0);
         if (pthreads_.size() == 0) return; // ? Uninitialized
-
-        pinned_threads_allocator_t pthread_allocator {allocator_};
 
         // Stop all threads and wait for them to finish
         signal_die_();
@@ -593,11 +597,13 @@ struct colocated_pool {
 #endif
         }
 
-        // Deallocate the handles, IDs, and the claim cursors they carry
-        pthreads_ = {};
+        // Unpin the caller thread if it joined this pool, and is the one we pinned to the node.
+        bool const spawner =
+            use_caller_thread && pthreads_[0].id.load(std::memory_order_relaxed) == current_thread_id();
 
-        // Unpin the caller thread if it was part of this pool and was pinned to the NUMA node.
-        if (use_caller_thread) reset_affinity_();
+        // Deallocate the handles, IDs, and the claim cursors they carry
+        reset_spawned_state_();
+        if (spawner) reset_affinity_();
         reset_fork_();
 
         atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_relaxed);
@@ -605,20 +611,38 @@ struct colocated_pool {
     }
 
     /**
-     *  @brief Transitions "workers" to a sleeping state, waiting for a wake-up call.
-     *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
+     *  @brief Blocks "workers" in the kernel until the next dispatch or @c terminate.
+     *  @param[in] wake_up_periodicity_micros Longest a worker stays blocked before re-checking,
+     *      or 0 to leave the wake to the dispatch alone.
      *  @note Callable only @b between one thread's tasks; performs no synchronization.
      *
-     *  Useful in batch processing when we clearly know the next task won't arrive for a while,
-     *  so power can be saved without major latency penalties.
+     *  Useful in batch processing when we clearly know the next task won't arrive for a while, so
+     *  power can be saved at the price of syscalls in that dispatch. Falls back to @c nap where the
+     *  kernel can't wait on a word.
      *
      *  It may also be used in a high-level Python or JavaScript library offloading some parallel
      *  operations to an underlying C++ engine, where latency is irrelevant.
      */
-    void sleep(std::size_t wake_up_periodicity_micros) noexcept {
-        assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
-        sleep_length_micros_ = wake_up_periodicity_micros;
-        atomic_ref<mood_t>(mood_).store(mood_t::chill_k, std::memory_order_release);
+    void sleep(std::size_t const wake_up_periodicity_micros = 0) noexcept {
+        atomic_ref<std::size_t>(wake_up_periodicity_micros_)
+            .store(wake_up_periodicity_micros, std::memory_order_relaxed);
+        atomic_ref<mood_t>(mood_).store(os_waits_on_words_k ? mood_t::sleep_k : mood_t::nap_k,
+                                        std::memory_order_release);
+    }
+
+    /**
+     *  @brief Parks "workers" on the waiter's monitor until the next dispatch or @c terminate.
+     *  @note Callable only @b between one thread's tasks; performs no synchronization.
+     *  @sa sleep for long idle periods, where the kernel takes the core back.
+     *
+     *  Wakes without a syscall into the worker. Waiters with no monitor keep spinning on their
+     *  hint, so where the platform allows, the workers also drop to the idle scheduling class.
+     */
+    void nap() noexcept {
+        mood_t const mood = atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed);
+        atomic_ref<mood_t>(mood_).store(mood_t::nap_k, std::memory_order_release);
+        // ? Or the dispatch finds a nap and leaves the workers blocked
+        if (mood == mood_t::sleep_k) os_wake_all_on_word(&mood_);
 
         // On Linux the thread's scheduling class can go IDLE to cut power draw:
 #if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
@@ -642,8 +666,7 @@ struct colocated_pool {
             struct ::rtprio rtp {RTP_PRIO_IDLE, RTP_PRIO_MAX};
             ::rtprio_thread(RTP_SET, static_cast<lwpid_t>(pthread_id), &rtp);
 #else
-            sched_param param {};
-            ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_IDLE, &param);
+            reclass_thread(static_cast<pid_t>(pthread_id), SCHED_IDLE);
 #endif
         }
 #endif // ? No idle scheduling class on Darwin or Windows
@@ -777,6 +800,12 @@ struct colocated_pool {
      */
     constexpr index_t compute_domains_count() const noexcept { return 1; }
 
+    /** The topology's compute domain behind our only one, set by @c spawn. */
+    index_t compute_domain_index_of([[maybe_unused]] index_t colocation_index) const noexcept {
+        assert(colocation_index == 0 && "Only one compute_domain is supported");
+        return compute_domain_index_;
+    }
+
     /**
      *  @brief Returns the number of threads in one NUMA-specific local @b compute_domain.
      *  @return Same value as <tt>threads_count()</tt>, as we only support one compute_domain.
@@ -813,6 +842,16 @@ struct colocated_pool {
     template <typename, template <typename> class, typename, std::size_t>
     friend struct distributed_pool;
 
+    /** Forgets all @c spawn_ set, so a pool that failed to spawn or terminated starts afresh. */
+    void reset_spawned_state_() noexcept {
+        pthreads_ = {};
+        first_thread_ = 0;
+        compute_domain_index_ = 0;
+        exclusivity_ = caller_inclusive_k;
+        memory_domain_id_ = memory_domain_id_t {-1};
+        pin_granularity_ = pin_to_core_k;
+    }
+
     /** Clears the fork state and trampoline between dispatches. */
     void reset_fork_() noexcept {
         fork_state_ = nullptr;
@@ -826,6 +865,7 @@ struct colocated_pool {
         atomic_ref<mood_t>(mood_).store(mood_t::die_k, std::memory_order_release);
         atomic_ref<epoch_index_t> const epoch(epoch_);
         epoch.store(epoch.load(std::memory_order_relaxed), std::memory_order_release);
+        os_wake_all_on_word(&mood_);
     }
 
     /**
@@ -864,24 +904,21 @@ struct colocated_pool {
         while ((previous_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) & 1u)
             micro_yield(&epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
 
-        // We are most likely already "grinding", but in the unlikely case we are not, let's wake up
-        // from the "chilling" state with relaxed semantics. Assuming the sleeping logic for the
-        // workers also checks the epoch counter, no synchronization is needed and no immediate
-        // wake-up is required. Strong, since this is the one store a worker still in its startup
-        // wait after a `sleep` waits on. Read first, so a grinding pool takes no locked step.
-        mood_t may_be_chilling = mood_t::chill_k;
-        bool const was_chilling =
-            atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed) == mood_t::chill_k &&
-            atomic_ref<mood_t>(mood_).compare_exchange_strong(may_be_chilling, mood_t::grind_k,
-                                                              std::memory_order_relaxed, std::memory_order_relaxed);
+        // We are most likely already "grinding"; parked workers, and any still in their startup
+        // wait after a `nap`, wake on this store. Read first, so a grinding pool takes no extra
+        // store or syscall. A release, as that startup wait reads its handle after this store.
+        mood_t const mood = atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed);
+        if (mood != mood_t::grind_k) atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_release);
 
         // The claim leaves this caller the epoch's only writer until its contributors count down
         generation_t const generation = previous_epoch + 1;
         atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
 
-        // If the workers were indeed "chilling", we can inform the scheduler to wake them up.
+        if (mood == mood_t::sleep_k) os_wake_all_on_word(&mood_);
+
+        // Workers that napped dropped to the idle class, even if a `sleep` followed: restore them.
 #if FORKUNION_WITH_RESCHEDULE_THREADS_BY_CLASS
-        if (was_chilling) {
+        if (mood != mood_t::grind_k) {
             bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
             for (std::size_t i = use_caller_thread; i < pthreads_.size(); ++i) {
                 std::uint64_t const pthread_id = pthreads_[i].id.load(std::memory_order_acquire);
@@ -895,13 +932,10 @@ struct colocated_pool {
 #else
                 // Back to the time-sharing class the worker started on: `SCHED_FIFO | SCHED_RR` is
                 // `SCHED_BATCH`, and a real-time class would be a boost, not a wake.
-                sched_param param {};
-                ::sched_setscheduler(static_cast<pid_t>(pthread_id), SCHED_OTHER, &param);
+                reclass_thread(static_cast<pid_t>(pthread_id), SCHED_OTHER);
 #endif
             }
         }
-#else
-        fu_unused_(was_chilling); // ? No runnable-class nudge on Darwin or Windows
 #endif
         return generation;
     }
@@ -936,10 +970,11 @@ struct colocated_pool {
         // for a bit until the pool is ready.
         mood_t mood;
         micro_yield_t micro_yield;
-        // Only `mood_` moves here, so a monitored waiter wakes on the store leaving `chill_k`.
-        while ((mood = atomic_ref<mood_t>(pool->mood_).load(std::memory_order_acquire)) == mood_t::chill_k)
+        // Only `mood_` moves here, so a monitored waiter wakes on the store leaving a parked mood.
+        while ((mood = atomic_ref<mood_t>(pool->mood_).load(std::memory_order_acquire)) == mood_t::nap_k ||
+               mood == mood_t::sleep_k)
             // Technically, we are not on the zero thread index, but we don't know our index yet.
-            micro_yield(&pool->mood_, mood_t::chill_k, static_cast<thread_index_t>(0), wait_uncapped_k);
+            micro_yield(&pool->mood_, mood, static_cast<thread_index_t>(0), wait_uncapped_k);
 
         // If we are ready to start grinding, export this threads metadata to make it externally
         // observable and controllable.
@@ -997,8 +1032,14 @@ struct colocated_pool {
 
             if (mood == mood_t::die_k) [[unlikely]]
                 break;
-            if (mood == mood_t::chill_k && new_epoch == last_epoch) [[unlikely]] {
-                sleep_for_micros(pool->sleep_length_micros_);
+            if (mood == mood_t::nap_k && new_epoch == last_epoch) [[unlikely]] {
+                micro_yield(&pool->mood_, mood, global_thread_index, wait_uncapped_k);
+                continue;
+            }
+            if (mood == mood_t::sleep_k && new_epoch == last_epoch) [[unlikely]] {
+                std::size_t const period =
+                    atomic_ref<std::size_t>(pool->wake_up_periodicity_micros_).load(std::memory_order_relaxed);
+                os_wait_on_word(&pool->mood_, mood, period);
                 continue;
             }
 
@@ -1510,7 +1551,8 @@ struct distributed_pool {
 
     /**
      *  @brief Stops all threads and deallocates the thread-pool after the last call finishes.
-     *  @note Can be called from @b any thread, after the last dispatch was joined.
+     *  @note Can be called from @b any thread, after the last dispatch was joined. Only the thread
+     *      that spawned an inclusive pool gets its affinity back.
      *  @note Must @c spawn again to re-use the pool.
      *
      *  When and how @b not to use this function:
@@ -1530,18 +1572,20 @@ struct distributed_pool {
     }
 
     /**
-     *  @brief Transitions "workers" to a sleeping state, waiting for a wake-up call.
-     *  @param[in] wake_up_periodicity_micros How often to check for new work in microseconds.
+     *  @brief Parks "workers" on the waiter's monitor until the next dispatch or @c terminate.
      *  @note Callable only @b between one thread's tasks; performs no synchronization.
-     *
-     *  Useful in batch processing when we clearly know the next task won't arrive for a while,
-     *  so power can be saved without major latency penalties.
-     *
-     *  It may also be used in a high-level Python or JavaScript library offloading some parallel
-     *  operations to an underlying C++ engine, where latency is irrelevant.
+     *  @sa colocated_pool::nap
      */
-    void sleep(std::size_t wake_up_periodicity_micros) noexcept {
-        assert(wake_up_periodicity_micros > 0 && "Sleep length must be positive");
+    void nap() noexcept {
+        for (index_t i = 0; i < colocations_.size(); ++i) colocations_[i].nap();
+    }
+
+    /**
+     *  @brief Blocks "workers" in the kernel until the next dispatch or @c terminate.
+     *  @note Callable only @b between one thread's tasks; performs no synchronization.
+     *  @sa colocated_pool::sleep
+     */
+    void sleep(std::size_t const wake_up_periodicity_micros = 0) noexcept {
         for (index_t i = 0; i < colocations_.size(); ++i) colocations_[i].sleep(wake_up_periodicity_micros);
     }
 
@@ -1722,12 +1766,8 @@ struct distributed_pool {
      *  @brief An allocator that places bytes on @p memory_domain_id, where the kernel allows.
      *  @note On a machine without NUMA memory the node is meaningless and the argument is dropped.
      */
-    static allocator_t allocator_for_node([[maybe_unused]] memory_domain_id_t const memory_domain_id) noexcept {
-#if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN
+    static allocator_t allocator_for_node(memory_domain_id_t const memory_domain_id) noexcept {
         return allocator_t {memory_domain_id};
-#else
-        return allocator_t {};
-#endif
     }
 
     /**
@@ -1794,8 +1834,8 @@ struct distributed_pool {
             // ? Only the first sub-pool may take the caller; a sub-pool's refusal propagates as is
             caller_exclusivity_t const local_exclusivity = colocation_index == 0 ? exclusivity : caller_exclusive_k;
             if (status_t const spawned =
-                    colocations[colocation_index].spawn(domain, domain_threads, local_exclusivity, pin_granularity,
-                                                        first_thread, domain_index, compute_levels);
+                    colocations[colocation_index].spawn_(domain, domain_threads, local_exclusivity, pin_granularity,
+                                                         first_thread, domain_index, compute_levels);
                 failed(spawned)) {
                 reset_on_failure();
                 return spawned;
@@ -1848,7 +1888,7 @@ struct measured_edge_t {
 };
 
 /** One hop of the latency walk, padded to a cache line so consecutive slots never share one. */
-struct alignas(64) chase_slot_t {
+struct alignas(default_alignment_k) chase_slot_t {
 
     /** Index of the slot the walk visits next; no initializer, as @c resize_uninitialized demands
      *  trivial construction and @c thread_chase_list_ writes every slot anyway. */
@@ -1963,7 +2003,8 @@ inline status_t touchers_per_position_(machine_topology_t const &topology, pool_
     for (std::size_t position = 0; position != touchers.size(); ++position) touchers[position] = unreachable_position_k;
     for (std::size_t domain = 0; domain != pool.compute_domains_count(); ++domain) {
         memory_domain_index_t const position =
-            topology.compute_domain_at(static_cast<compute_domain_index_t>(domain)).memory_domain_index;
+            topology.compute_domain_at(static_cast<compute_domain_index_t>(pool.compute_domain_index_of(domain)))
+                .memory_domain_index;
         if (position >= touchers.size()) return status_t::config_mismatch_k; // ? A foreign topology
         if (touchers[position] == unreachable_position_k) touchers[position] = pool.first_thread(domain);
     }
@@ -2022,7 +2063,7 @@ inline status_t measure_bandwidth_edges_(machine_topology_t const &topology, poo
         }
 
         // ? A bandwidth-only observation: the streaming experiment says nothing about latency
-        measured_edge_t const edge {static_cast<compute_domain_index_t>(initiator),
+        measured_edge_t const edge {static_cast<compute_domain_index_t>(pool.compute_domain_index_of(initiator)),
                                     static_cast<memory_domain_index_t>(target), 0,
                                     static_cast<std::size_t>(best_megabytes_per_second)};
         if (status_t const added = edges.push_back(edge); failed(added)) return added;
@@ -2340,8 +2381,9 @@ class measured_fabric {
                                [&]() noexcept { nanoseconds = chase_ns_per_hop_(list.data(), hops, segments); });
                 nanoseconds += drained == ~std::size_t(0); // ? The data-dependent tail defeats elision
                 // ? A latency-only observation: the lone-core chase says nothing about bandwidth
-                measured_edge_t const edge {static_cast<compute_domain_index_t>(initiator),
-                                            static_cast<memory_domain_index_t>(target), nanoseconds, 0};
+                measured_edge_t const edge {
+                    static_cast<compute_domain_index_t>(pool.compute_domain_index_of(initiator)),
+                    static_cast<memory_domain_index_t>(target), nanoseconds, 0};
                 if (status_t const added = edges_.push_back(edge); failed(added)) return added;
             }
         }

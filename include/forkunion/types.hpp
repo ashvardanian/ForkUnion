@@ -322,7 +322,16 @@
 
 #if FORKUNION_WITH_OS_THREADS && (FORKUNION_OS_POSIX_ || FORKUNION_ARCH_WASM_)
 #include <pthread.h> // `pthread_create`, `pthread_setname_np`
-#include <ctime>     // `nanosleep`, `clock_nanosleep`
+#endif
+
+/*  The kernel's wait on a word, behind @c os_wait_on_word. */
+#if FORKUNION_WITH_OS_THREADS && FORKUNION_OS_LINUX_
+#include <sys/syscall.h> // `SYS_futex`
+#include <unistd.h>      // `syscall`
+#elif FORKUNION_WITH_OS_THREADS && FORKUNION_OS_FREEBSD_
+#include <ctime> // `timespec`
+#include <sys/types.h>
+#include <sys/umtx.h> // `_umtx_op`, `UMTX_OP_WAIT_UINT_PRIVATE`, `UMTX_OP_WAKE_PRIVATE`
 #endif
 
 #if FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY && FORKUNION_OS_POSIX_
@@ -366,7 +375,8 @@
 #include <windows.h> // `GlobalMemoryStatusEx`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`
 #include <io.h>      // `_isatty`, `_fileno`
 #if defined(_MSC_VER)
-#pragma comment(lib, "advapi32.lib") // `OpenProcessToken`, `LookupPrivilegeValueW` for large pages
+#pragma comment(lib, "advapi32.lib")        // `OpenProcessToken`, `LookupPrivilegeValueW` for large pages
+#pragma comment(lib, "Synchronization.lib") // `WaitOnAddress`, `WakeByAddressAll`
 #endif
 #endif
 #pragma endregion Platform Headers
@@ -589,6 +599,8 @@
 #if !FORKUNION_TARGET_RISCV64_ATOMIC
 #undef FORKUNION_TARGET_RISCV64_ZACAS
 #define FORKUNION_TARGET_RISCV64_ZACAS 0
+#undef FORKUNION_TARGET_RISCV64_WRS
+#define FORKUNION_TARGET_RISCV64_WRS 0
 #endif
 #if !FORKUNION_TARGET_RISCV64_ZACAS
 #undef FORKUNION_TARGET_RISCV64_ZABHA
@@ -823,8 +835,11 @@ enum class mood_t : unsigned int {
     /** That's our default ;) */
     grind_k = 0,
 
-    /** Sleepy and tired, but just a wake-up call away. */
-    chill_k,
+    /** Stays on the core, parked on this word by the waiter's monitor; no syscall to wake. */
+    nap_k,
+
+    /** Off the core, blocked in the kernel on this word; one syscall to wake. */
+    sleep_k,
 
     /** The thread is about to die, we must exit the loop peacefully. */
     die_k,
@@ -966,7 +981,7 @@ enum capabilities_t : unsigned int {
      *      shared LLC and retains it there.
      *
      *  Runtime-detected on Sapphire-Rapids-class parts; the emitting functor is chosen at compile
-     *  time by @c FORKUNION_WITH_DEMOTE_CACHE_LINES, so this bit reports, it never dispatches.
+     *  time by @c FORKUNION_WITH_DEMOTE_CACHE_LINES, and the C ABI's cascade selects on this bit.
      *
      *  @sa x86_cache_hints_t - the functor emitting it.
      */
@@ -987,7 +1002,7 @@ enum capabilities_t : unsigned int {
      *      attested through @c hwprobe, the only sound signal, since a compile-time @c +zicbom
      *      proves nothing about the kernel.
      *
-     *  No compile-time policy emits <tt>cbo.clean</tt> yet; the bit is the hook for runtime dispatch.
+     *  The C ABI's cascade selects <tt>cbo.clean</tt> on this bit.
      *
      *  @sa riscv64_cbo_cache_hints_t - the functor that would emit it.
      */
@@ -1762,7 +1777,9 @@ class dynamic_padded_array {
         constexpr std::size_t object_alignment_k = alignof(object_t);
         constexpr bool over_aligned_k = object_alignment_k > alignof(std::max_align_t);
         std::size_t const slack = over_aligned_k ? object_alignment_k - 1 : 0;
-        std::size_t const total = new_objects_count * bytes_per_object_ + slack;
+        std::size_t const payload = bytes_for_elements(new_objects_count, bytes_per_object_);
+        if (payload == 0 || payload + slack < payload) return status_t::bad_alloc_k;
+        std::size_t const total = payload + slack;
 
         // NUMA-aware allocators can hand back more than we asked for, and tell us how much. Plain
         // `std::allocator` cannot, so take exactly `total` and remember that as the size to free.
@@ -1841,6 +1858,71 @@ inline constexpr wait_capped_t wait_capped_k {};
 
 /** The canonical @c wait_uncapped_t value to pass as a wait tag. */
 inline constexpr wait_uncapped_t wait_uncapped_k {};
+
+/** Whether this platform can block a thread on a word; @c sleep falls back to @c nap otherwise. */
+inline constexpr bool os_waits_on_words_k =
+    FORKUNION_WITH_OS_THREADS &&
+    (FORKUNION_OS_LINUX_ || FORKUNION_OS_WINDOWS_ || FORKUNION_OS_FREEBSD_ || FORKUNION_TARGET_WASM_WAIT);
+
+/**
+ *  @brief Blocks the calling thread in the kernel while @p word holds @p observed.
+ *  @param[in] word The 32-bit word to wait on.
+ *  @param[in] observed The value last read, so a change before the wait arms ends it at once.
+ *  @param[in] wake_up_periodicity_micros Longest wait in microseconds, or 0 to wait for the wake.
+ *  @note May return early, so callers loop on their own condition.
+ *  @sa os_wake_all_on_word
+ */
+template <typename word_type_>
+inline void os_wait_on_word([[maybe_unused]] word_type_ const *word, [[maybe_unused]] word_type_ observed,
+                            [[maybe_unused]] std::size_t const wake_up_periodicity_micros) noexcept {
+    static_assert(sizeof(word_type_) == 4, "Kernel waits watch one 32-bit word");
+#if !FORKUNION_WITH_OS_THREADS
+#elif FORKUNION_OS_LINUX_
+    constexpr int futex_wait_private_k = 128; // ? `FUTEX_WAIT_PRIVATE`, syscall ABI that needs no header
+    // ? Two `long`s, not `timespec`: that is `SYS_futex`'s ABI even where `time_t` grew to 64 bits.
+    struct {
+        long seconds, nanoseconds;
+    } const period {static_cast<long>(wake_up_periodicity_micros / 1'000'000),
+                    static_cast<long>(wake_up_periodicity_micros % 1'000'000 * 1000)};
+    ::syscall(SYS_futex, word, futex_wait_private_k, std::bit_cast<std::uint32_t>(observed),
+              wake_up_periodicity_micros ? &period : nullptr, nullptr, 0);
+#elif FORKUNION_OS_WINDOWS_
+    ::WaitOnAddress(const_cast<word_type_ *>(word), &observed, sizeof(word_type_),
+                    wake_up_periodicity_micros ? static_cast<DWORD>(min_of(div_ceil(wake_up_periodicity_micros, 1000),
+                                                                           std::size_t {INFINITE - 1}))
+                                               : INFINITE);
+#elif FORKUNION_OS_FREEBSD_
+    struct timespec period {static_cast<std::time_t>(wake_up_periodicity_micros / 1'000'000),
+                            static_cast<long>(wake_up_periodicity_micros % 1'000'000 * 1000)};
+    ::_umtx_op(const_cast<word_type_ *>(word), UMTX_OP_WAIT_UINT_PRIVATE, std::bit_cast<std::uint32_t>(observed),
+               nullptr, wake_up_periodicity_micros ? &period : nullptr);
+#elif FORKUNION_TARGET_WASM_WAIT
+    __builtin_wasm_memory_atomic_wait32(
+        reinterpret_cast<int *>(const_cast<word_type_ *>(word)), std::bit_cast<int>(observed),
+        wake_up_periodicity_micros ? static_cast<long long>(wake_up_periodicity_micros) * 1000 : -1);
+#endif
+}
+
+/**
+ *  @brief Wakes every thread blocked on @p word by @c os_wait_on_word.
+ *  @param[in] word The 32-bit word they wait on.
+ */
+template <typename word_type_>
+inline void os_wake_all_on_word([[maybe_unused]] word_type_ const *word) noexcept {
+#if !FORKUNION_WITH_OS_THREADS
+#elif FORKUNION_OS_LINUX_
+    constexpr int futex_wake_private_k = 129; // ? `FUTEX_WAKE_PRIVATE`, syscall ABI that needs no header
+    ::syscall(SYS_futex, word, futex_wake_private_k, (std::numeric_limits<int>::max)(), nullptr, nullptr, 0);
+#elif FORKUNION_OS_WINDOWS_
+    ::WakeByAddressAll(const_cast<word_type_ *>(word));
+#elif FORKUNION_OS_FREEBSD_
+    ::_umtx_op(const_cast<word_type_ *>(word), UMTX_OP_WAKE_PRIVATE, (std::numeric_limits<int>::max)(), nullptr,
+               nullptr);
+#elif FORKUNION_TARGET_WASM_WAIT
+    __builtin_wasm_memory_atomic_notify(reinterpret_cast<int *>(const_cast<word_type_ *>(word)),
+                                        (std::numeric_limits<unsigned>::max)());
+#endif
+}
 
 /**
  *  @brief The portable busy-wait: hands the core back to the scheduler.
@@ -2200,9 +2282,9 @@ class invoke_for_slices {
     invoke_for_slices(index_type_ n, index_type_ threads, fork_type_ &&fork) noexcept
         : fork_(std::forward<fork_type_>(fork)), split_(n, threads) {}
 
-    void operator()(index_type_ const thread) const noexcept {
-        tasks_range<index_type_> const range = split_[thread];
-        fork_(range, thread_in_domain<index_type_> {thread});
+    void operator()(thread_in_domain<index_type_> const at) const noexcept {
+        tasks_range<index_type_> const range = split_[at.thread];
+        fork_(range, at);
     }
 };
 
@@ -2216,9 +2298,8 @@ class invoke_for_n {
     invoke_for_n(index_type_ n, index_type_ threads, fork_type_ &&fork) noexcept
         : fork_(std::forward<fork_type_>(fork)), split_(n, threads) {}
 
-    void operator()(index_type_ const thread) const noexcept {
-        tasks_range<index_type_> const range = split_[thread];
-        thread_in_domain<index_type_> const at {thread};
+    void operator()(thread_in_domain<index_type_> const at) const noexcept {
+        tasks_range<index_type_> const range = split_[at.thread];
         for (index_type_ const task : range) fork_(task, at);
     }
 };
@@ -2357,12 +2438,12 @@ class invoke_for_n_dynamic {
         }
     }
 
-    void operator()(index_type_ const thread) noexcept {
+    void operator()(thread_in_domain<index_type_> const at) noexcept {
+        index_type_ const thread = at.thread;
 
         // Run (up to) one static prong on the current thread
         index_type_ const n_dynamic = dynamic_count();
         index_type_ const one_static_task = static_cast<index_type_>(n_dynamic + thread);
-        thread_in_domain<index_type_> const at {thread};
         if (one_static_task < n_) fork_(one_static_task, at);
 
         // Help everyone, in a coprime order so drained threads don't collide on one victim.

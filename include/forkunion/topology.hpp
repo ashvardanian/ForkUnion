@@ -468,7 +468,6 @@ struct ram_page_setting_t {
     std::size_t free_pages {0};
 };
 
-inline constexpr std::size_t page_size_4k_k = 4ull * 1024ull;                     // 4 KB
 inline constexpr std::size_t page_size_2m_k = 2ull * 1024ull * 1024ull;           // 2 MB
 inline constexpr std::size_t page_size_1g_k = 1ull * 1024ull * 1024ull * 1024ull; // 1 GB
 
@@ -1896,10 +1895,8 @@ struct machine_topology {
 
         // A scratch table of every configured CPU's place in the split, filled once below and read
         // by the per-node sorts - O(n^2) comparisons - instead of re-opening sysfs each time.
-        std::size_t const configured_cores = possible_cores();
-        if (configured_cores == 0) return status_t::topology_unavailable_k; // ! Not a valid state
         dynamic_array<core_order_t, core_orders_allocator_t> core_orders {core_orders_allocator_t {allocator_}};
-        if (status_t const grew = core_orders.resize(configured_cores); failed(grew)) return grew;
+        if (status_t const grew = core_orders.resize(domain_mask.capacity()); failed(grew)) return grew;
 
         // Populate
         for (std::size_t node_number = 0, core_index = 0, node_index = 0; node_number != memory_domain_ids;
@@ -1949,8 +1946,7 @@ struct machine_topology {
         // sorts and compares capacities repeatedly, so reading sysfs per comparison would be
         // O(cores^2) file opens on a large node - a single pass here amortizes that to O(cores).
         for (core_id_t const core_id : std::span(core_ids))
-            if (static_cast<std::size_t>(core_id) < configured_cores)
-                core_orders[core_id].capacity = static_cast<std::uint32_t>(capacity_of_core(core_id));
+            core_orders[core_id].capacity = static_cast<std::uint32_t>(capacity_of_core(core_id));
 
         // A kernel rating every core alike rates nothing - Intel hybrid with SMT on, or an Arm
         // kernel publishing no capacities - yet still names each class exactly, through its PMU.

@@ -4,23 +4,25 @@
  *  @date September 11, 2026
  *  @brief The moods: a sleep between dispatches, the wake-up from it, and @c terminate.
  *
- *  The dispatcher may sleep between dispatches, storing chill from the thread that spawned, as the
- *  header allows; the dispatch exchanges it back to grind, a worker seeing chill with the epoch
- *  still naps once and looks again, and @c terminate stores die after the last join, waits for the
+ *  The dispatcher may nap, sleep, or do both in either order between dispatches, storing the mood
+ *  from the thread that spawned, as the header allows; the dispatch stores it back to grind, a
+ *  worker seeing a parked mood with the epoch still waits on the mood word with no cap, so only a
+ *  store to that word wakes it, and @c terminate stores die after the last join, waits for the
  *  workers, and resets the mood and the epoch.
  *
  *  - No slice runs after die, and no worker is left waiting on the pool.
  *
+ *  @budget 4096
  *  @verify pass sc,rc11
  *  @verify stuck sc wait_cap=false: a worker that read grind before die and arms after the
  *      re-release re-checks an unmoved epoch, so it never notices die, and @c terminate waits
  *      on it forever
- *  @verify pass sc strong_wake=false: a @c flat_pool worker looks at the epoch before the mood, so
- *      a chill that a spuriously failed exchange leaves behind costs it naps and never a dispatch
+ *  @verify stuck sc nap_wakes_kernel=false: a @c sleep then a @c nap leaves a worker in the kernel,
+ *      where the store wakes nobody, and the dispatch reads nap and skips its wake
  */
 #define thread_count 3
 #define location_count 7
-#define history_depth 9
+#define history_depth 13
 #define through_c_shim false
 #include <flat_pool/protocol.pml>
 
@@ -36,9 +38,12 @@ proctype dispatcher(byte t) {
     bool exchanged;
     spawn(t);
     for (round : 1 .. generations) {
-        // Sleep, between the tasks and from the thread that runs them: `flat_pool::sleep`
+        // Park, between the tasks and from the thread that runs them: `flat_pool::nap` and `sleep`
         if
-        :: atomic { store(t, mood, order_release, chill); wake(mood) }
+        :: nap_workers(t, observed)
+        :: sleep_workers(t)
+        :: nap_workers(t, observed); sleep_workers(t)
+        :: sleep_workers(t); nap_workers(t, observed)
         :: skip
         fi;
         dispatch(t, round, generation, observed, exchanged);

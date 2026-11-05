@@ -53,11 +53,8 @@ inline void *linux_numa_allocate(std::size_t size_bytes, std::size_t page_size_b
         // Huge/explicit page sizes must be exact multiples
         assert(size_bytes % page_size_bytes == 0 && "Size must be a multiple of page size");
 
-        // Make sure the page size makes sense for Linux
-        if (page_size_bytes == page_size_4k_k) { mmap_flags |= MAP_HUGETLB; }
-        else if (page_size_bytes == page_size_2m_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_2MB); }
-        else if (page_size_bytes == page_size_1g_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_1GB); }
-        else { return nullptr; } // ! Unsupported page size
+        if (!std::has_single_bit(page_size_bytes)) return nullptr; // ! The kernel encodes a page size by its log2
+        mmap_flags |= MAP_HUGETLB | std::countr_zero(page_size_bytes) << MAP_HUGE_SHIFT;
 #else
         return nullptr; // ! Every page size but the base one needs `MAP_HUGETLB`
 #endif
@@ -140,14 +137,17 @@ struct linux_numa_allocator {
     allocation_result<value_type *, size_type> allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
         assert(std::has_single_bit(page_size_bytes) && "A page is a power of two bytes, which rules out zero");
         assert(memory_domain_id_ >= 0 && "A default-constructed allocator names no memory domain");
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
         size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
+        // ? `size_bytes` was positive, so rounding wrapped
+        if (aligned_size_bytes == 0) return {};
 
         // Check if the new size is actually perfectly divisible by the `sizeof(value_type)`
         if (aligned_size_bytes % sizeof(value_type)) return {}; // ! Not a size multiple
         auto result_ptr = allocate(aligned_size_bytes / sizeof(value_type), page_size_bytes);
         if (!result_ptr) return {}; // ! Allocation failed
-        size_type const pages_count = (page_size_bytes == 0) ? 0 : (aligned_size_bytes / page_size_bytes);
+        size_type const pages_count = aligned_size_bytes / page_size_bytes;
         return {result_ptr, size, aligned_size_bytes, pages_count};
     }
 
@@ -160,7 +160,8 @@ struct linux_numa_allocator {
      *      allocation fails or the size is not a multiple of <tt>sizeof(value_type)</tt>.
      */
     value_type *allocate(size_type size, size_type page_size_bytes) noexcept {
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
         void *result_ptr = linux_numa_allocate(size_bytes, page_size_bytes, memory_domain_id_);
         if (!result_ptr) return {}; // ! Allocation failed
         return static_cast<value_type *>(result_ptr);
@@ -175,7 +176,8 @@ struct linux_numa_allocator {
     allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
         // Go through all of the typical Linux page sizes, finding the largest one that makes sense
         // and doesn't fail.
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
 
         // Try 1 GB Huge Pages, for buffers larger than 2 GB
         if (size_bytes >= (2u * page_size_1g_k))
@@ -197,7 +199,8 @@ struct linux_numa_allocator {
     value_type *allocate(size_type size) noexcept {
         // Go through all of the typical Linux page sizes, finding the largest one that makes sense
         // and doesn't fail.
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
 
         // ! Unlike `allocate_at_least`, we can't round the request up to the page boundary here:
         // ! the matching `deallocate(p, n)` only knows `n`, so it would unmap less than we mapped.
@@ -236,15 +239,14 @@ inline void *linux_symmetric_allocate(machine_topology_t const &topology, std::s
                                       std::size_t page_size_bytes) noexcept {
 #if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_LINUX_
     std::size_t const domains = topology.memory_domains_count();
-    if (domains == 0 || stride_bytes == 0) return nullptr;
-    std::size_t const total_bytes = domains * stride_bytes;
+    std::size_t const total_bytes = bytes_for_elements(domains, stride_bytes);
+    if (total_bytes == 0) return nullptr;
 
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     if (page_size_bytes != ram_page_size()) {
 #if FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN
-        if (page_size_bytes == page_size_2m_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_2MB); }
-        else if (page_size_bytes == page_size_1g_k) { mmap_flags |= MAP_HUGETLB | static_cast<int>(MAP_HUGE_1GB); }
-        else { return nullptr; } // ! Unsupported page size
+        if (!std::has_single_bit(page_size_bytes)) return nullptr; // ! The kernel encodes a page size by its log2
+        mmap_flags |= MAP_HUGETLB | std::countr_zero(page_size_bytes) << MAP_HUGE_SHIFT;
 #else
         return nullptr; // ! Every page size but the base one needs `MAP_HUGETLB`
 #endif
@@ -325,7 +327,7 @@ struct linux_symmetric_allocator {
         if (!base) return {}; // ! Allocation failed
         size_type const domains = topology_->memory_domains_count();
         size_type const total_bytes = domains * stride_bytes;
-        size_type const pages = (page_size_bytes == 0) ? 0 : (total_bytes / page_size_bytes);
+        size_type const pages = total_bytes / page_size_bytes;
         return {static_cast<value_type *>(base), size, stride_bytes, domains, total_bytes, pages};
     }
 
@@ -389,8 +391,8 @@ inline void freebsd_first_touch([[maybe_unused]] void *ptr, [[maybe_unused]] std
  *  fault on the preferred domain, then restores the saved policy - the domainset analogue of
  *  Linux's per-mapping @c mbind.
  */
-inline status_t freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory_domain_id,
-                                      [[maybe_unused]] void *saved_set, [[maybe_unused]] int *saved_policy) noexcept {
+inline bool freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory_domain_id,
+                                  [[maybe_unused]] void *saved_set, [[maybe_unused]] int *saved_policy) noexcept {
 #if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     bool const have_saved = ::cpuset_getdomain(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizeof(domainset_t),
                                                static_cast<domainset_t *>(saved_set), saved_policy) == 0;
@@ -403,7 +405,7 @@ inline status_t freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory
     fu_unused_(memory_domain_id);
     fu_unused_(saved_set);
     fu_unused_(saved_policy);
-    return status_t::unsupported_k;
+    return false;
 #endif
 }
 
@@ -500,23 +502,29 @@ struct freebsd_numa_allocator {
     allocation_result<value_type *, size_type> allocate_at_least(size_type size, size_type page_size_bytes) noexcept {
         assert(std::has_single_bit(page_size_bytes) && "A page is a power of two bytes, which rules out zero");
         assert(memory_domain_id_ >= 0 && "A default-constructed allocator names no memory domain");
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
         size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
+        // ? `size_bytes` was positive, so rounding wrapped
+        if (aligned_size_bytes == 0) return {};
         if (aligned_size_bytes % sizeof(value_type)) return {}; // ! Not a size multiple
         auto result_ptr = allocate(aligned_size_bytes / sizeof(value_type), page_size_bytes);
         if (!result_ptr) return {}; // ! Allocation failed
-        size_type const pages_count = (page_size_bytes == 0) ? 0 : (aligned_size_bytes / page_size_bytes);
+        size_type const pages_count = aligned_size_bytes / page_size_bytes;
         return {result_ptr, size, aligned_size_bytes, pages_count};
     }
 
     value_type *allocate(size_type size, size_type page_size_bytes) noexcept {
-        void *result_ptr = freebsd_domain_allocate(size * sizeof(value_type), page_size_bytes, memory_domain_id_);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
+        void *result_ptr = freebsd_domain_allocate(size_bytes, page_size_bytes, memory_domain_id_);
         if (!result_ptr) return {}; // ! Allocation failed
         return static_cast<value_type *>(result_ptr);
     }
 
     allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
         if (size_bytes >= (2u * page_size_1g_k))
             if (auto result = allocate_at_least(size, page_size_1g_k); result) return result;
         if (size_bytes >= (2u * page_size_2m_k))
@@ -525,7 +533,8 @@ struct freebsd_numa_allocator {
     }
 
     value_type *allocate(size_type size) noexcept {
-        size_type const size_bytes = size * sizeof(value_type);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
         // ! As on Linux, `deallocate(p, n)` only knows `n` - exact-multiple huge pages only.
         if (size_bytes >= (2u * page_size_1g_k) && size_bytes % page_size_1g_k == 0)
             if (auto result = allocate(size, page_size_1g_k); result) return result;
@@ -553,8 +562,8 @@ inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std:
                                         std::size_t page_size_bytes) noexcept {
 #if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     std::size_t const domains = topology.memory_domains_count();
-    if (domains == 0 || stride_bytes == 0) return nullptr;
-    std::size_t const total_bytes = domains * stride_bytes;
+    std::size_t const total_bytes = bytes_for_elements(domains, stride_bytes);
+    if (total_bytes == 0) return nullptr;
 
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     bool huge_requested = false;
@@ -645,7 +654,7 @@ struct freebsd_symmetric_allocator {
         if (!base) return {}; // ! Allocation failed
         size_type const domains = topology_->memory_domains_count();
         size_type const total_bytes = domains * stride_bytes;
-        size_type const pages = (page_size_bytes == 0) ? 0 : (total_bytes / page_size_bytes);
+        size_type const pages = total_bytes / page_size_bytes;
         return {static_cast<value_type *>(base), size, stride_bytes, domains, total_bytes, pages};
     }
 
@@ -750,8 +759,8 @@ inline void windows_numa_free(void *ptr) noexcept {
 inline void *windows_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes) noexcept {
 #if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_WINDOWS_
     std::size_t const domains = topology.memory_domains_count();
-    if (domains == 0 || stride_bytes == 0) return nullptr;
-    std::size_t const total_bytes = domains * stride_bytes;
+    std::size_t const total_bytes = bytes_for_elements(domains, stride_bytes);
+    if (total_bytes == 0) return nullptr;
 
     void *base = ::VirtualAlloc(nullptr, total_bytes, MEM_RESERVE, PAGE_READWRITE);
     if (!base) return nullptr; // ! Reservation failed
@@ -831,16 +840,21 @@ struct windows_numa_allocator {
      */
     allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
         size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();
-        size_type const aligned_size_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
+        size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
+        // ? `size_bytes` was positive, so rounding wrapped
+        if (aligned_size_bytes == 0) return {};
         void *result_ptr = windows_numa_allocate(aligned_size_bytes, memory_domain_id_, large_pages_);
         if (!result_ptr) return {}; // ! Allocation failed
-        size_type const pages_count = (page_size_bytes == 0) ? 0 : (aligned_size_bytes / page_size_bytes);
+        size_type const pages_count = aligned_size_bytes / page_size_bytes;
         return {static_cast<value_type *>(result_ptr), size, aligned_size_bytes, pages_count};
     }
 
     value_type *allocate(size_type size) noexcept {
-        return static_cast<value_type *>(
-            windows_numa_allocate(size * sizeof(value_type), memory_domain_id_, large_pages_));
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
+        return static_cast<value_type *>(windows_numa_allocate(size_bytes, memory_domain_id_, large_pages_));
     }
 
     void deallocate(value_type *p, size_type) noexcept { windows_numa_free(p); }
@@ -901,7 +915,7 @@ struct windows_symmetric_allocator {
         if (!base) return {}; // ! Allocation failed
         size_type const domains = topology_->memory_domains_count();
         size_type const total_bytes = domains * stride_bytes;
-        size_type const pages = (page_size_bytes == 0) ? 0 : (total_bytes / page_size_bytes);
+        size_type const pages = total_bytes / page_size_bytes;
         return {static_cast<value_type *>(base), size, stride_bytes, domains, total_bytes, pages};
     }
 
@@ -946,16 +960,22 @@ struct portable_aligned_allocator {
     /** Allocates at least @p size elements, rounded up to the page size. */
     allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
         size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();
-        size_type const aligned_size_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
+        size_type const aligned_size_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
+        // ? `size_bytes` was positive, so rounding wrapped
+        if (aligned_size_bytes == 0) return {};
         void *result_ptr = allocate_aligned(aligned_size_bytes);
         if (!result_ptr) return {}; // ! Allocation failed
-        size_type const pages_count = (page_size_bytes == 0) ? 0 : (aligned_size_bytes / page_size_bytes);
+        size_type const pages_count = aligned_size_bytes / page_size_bytes;
         return {static_cast<value_type *>(result_ptr), size, aligned_size_bytes, pages_count};
     }
 
     /** Allocates exactly @p size elements. */
     value_type *allocate(size_type size) noexcept {
-        return static_cast<value_type *>(allocate_aligned(size * sizeof(value_type)));
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
+        return static_cast<value_type *>(allocate_aligned(size_bytes));
     }
 
     void deallocate(value_type *p, size_type) noexcept { ::operator delete(p, std::align_val_t {default_alignment_k}); }
@@ -1000,13 +1020,18 @@ struct portable_symmetric_allocator {
     allocation_type allocate_at_least(size_type size) noexcept {
         if (!topology_) return {}; // ! No topology to size the slice count
         size_type const page_size_bytes = default_page_size_ ? default_page_size_ : ram_page_size();
-        size_type const stride_bytes = round_up_to_multiple(size * sizeof(value_type), page_size_bytes);
+        size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
+        if (size_bytes == 0) return {};
+        size_type const stride_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
         size_type const domains = topology_->memory_domains_count();
-        if (domains == 0 || stride_bytes == 0) return {};
-        size_type const total_bytes = domains * stride_bytes;
+        size_type const total_bytes = bytes_for_elements(domains, stride_bytes);
+        // ! No domains, or a size that wrapped
+        if (total_bytes == 0) return {};
         void *base = ::operator new(total_bytes, std::align_val_t {default_alignment_k}, std::nothrow);
         if (!base) return {}; // ! Allocation failed
-        size_type const pages = (page_size_bytes == 0) ? 0 : (total_bytes / page_size_bytes);
+        // ? The mappings of the NUMA backends start zeroed too
+        std::memset(base, 0, total_bytes);
+        size_type const pages = total_bytes / page_size_bytes;
         return {static_cast<value_type *>(base), size, stride_bytes, domains, total_bytes, pages};
     }
 
