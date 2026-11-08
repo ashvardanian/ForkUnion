@@ -70,6 +70,7 @@ from .topology import (
     Topology,
     comptime_capabilities,
     comptime_capabilities_string,
+    memory_domain_id_of_pci,
     name_capabilities,
     runtime_capabilities,
     runtime_capabilities_string,

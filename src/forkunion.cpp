@@ -642,6 +642,17 @@ fu_status_t fu_local_memory_of(fu_topology_t topology, size_t compute_domain_ind
     return fu_success_k;
 }
 
+fu_status_t fu_memory_domain_id_of_pci(char const *pci_bus_id, fu_memory_domain_id_t *memory_domain_id_out) {
+    if (!memory_domain_id_out) return fu_invalid_argument_k;
+    *memory_domain_id_out = -1;
+    if (!pci_bus_id) return fu_invalid_argument_k;
+    fu::memory_domain_id_t memory_domain_id {-1};
+    if (fu::status_t const read = fu::memory_domain_id_of_pci(pci_bus_id, memory_domain_id); fu::failed(read))
+        return lower(read);
+    *memory_domain_id_out = memory_domain_id;
+    return fu_success_k;
+}
+
 fu_status_t fu_volume_ram_in(fu_topology_t topology, size_t memory_domain_index, size_t *bytes_out) {
     if (!bytes_out) return fu_invalid_argument_k;
     *bytes_out = poisoned_size_k;

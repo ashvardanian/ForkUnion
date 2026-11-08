@@ -53,6 +53,7 @@ from forkunion.scheduling import (
 from forkunion.topology import (
     Capabilities32,
     MemoryDomainIdAt,
+    MemoryDomainIdOfPci,
     NameCapabilities,
     TopologyCount,
     TopologyCountIn,
@@ -138,6 +139,8 @@ struct Symbols:
     """`fu_memory_domain_id_at_index`."""
     var local_memory_of: TopologyCountIn
     """`fu_local_memory_of`."""
+    var memory_domain_id_of_pci: MemoryDomainIdOfPci
+    """`fu_memory_domain_id_of_pci`."""
     var volume_ram: TopologyCount
     """`fu_volume_ram`."""
     var volume_ram_in: TopologyCountIn
@@ -250,6 +253,7 @@ struct Symbols:
         self.memory_domains_count = _resolve[TopologyCount](handle, "fu_memory_domains_count")
         self.memory_domain_id_at_index = _resolve[MemoryDomainIdAt](handle, "fu_memory_domain_id_at_index")
         self.local_memory_of = _resolve[TopologyCountIn](handle, "fu_local_memory_of")
+        self.memory_domain_id_of_pci = _resolve[MemoryDomainIdOfPci](handle, "fu_memory_domain_id_of_pci")
         self.volume_ram = _resolve[TopologyCount](handle, "fu_volume_ram")
         self.volume_ram_in = _resolve[TopologyCountIn](handle, "fu_volume_ram_in")
         self.volume_huge_pages = _resolve[TopologyCount](handle, "fu_volume_huge_pages")

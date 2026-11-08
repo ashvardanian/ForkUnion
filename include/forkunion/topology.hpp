@@ -1215,6 +1215,42 @@ inline status_t capture_memory_domain_cores(memory_domain_id_t const id, core_ma
     return status_t::success_k;
 }
 #endif // FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
+
+/**
+ *  @brief Reads the memory domain nearest a PCI device from its @c numa_node file in sysfs.
+ *  @param[in] pci_bus_id The device's @c domain:bus:device.function ID in hexadecimal, as drivers
+ *      spell it, in either case and any domain width.
+ *  @param[out] memory_domain_id Receives the OS memory-domain id; untouched on failure.
+ *
+ *  @par Statuses:
+ *  - @c invalid_argument_k An ID that does not parse.
+ *  - @c topology_unavailable_k No such device, a device the kernel ties to no memory domain, or any
+ *    system but Linux.
+ */
+inline status_t memory_domain_id_of_pci([[maybe_unused]] char const *pci_bus_id,
+                                        [[maybe_unused]] memory_domain_id_t &memory_domain_id) noexcept {
+#if FORKUNION_WITH_TOPOLOGY && FORKUNION_OS_LINUX_
+    unsigned domain = 0, bus = 0, device = 0, function = 0;
+    if (::sscanf(pci_bus_id, "%x:%x:%x.%x", &domain, &bus, &device, &function) != 4)
+        return status_t::invalid_argument_k;
+    // Drivers differ in case and in the domain's width, while sysfs spells one form.
+    char path[256];
+    int const path_result = std::snprintf(path, sizeof(path), "/sys/bus/pci/devices/%04x:%02x:%02x.%x/numa_node",
+                                          domain, bus, device, function);
+    if (path_result < 0 || static_cast<std::size_t>(path_result) >= sizeof(path))
+        return status_t::invalid_argument_k; // ? Path too long
+    FILE *node_file = ::fopen(path, "r");
+    if (!node_file) return status_t::topology_unavailable_k; // ? No such device
+    int id = -1;
+    if (::fscanf(node_file, "%d", &id) != 1) id = -1; // ? Failed to parse
+    ::fclose(node_file);
+    if (id < 0) return status_t::topology_unavailable_k; // ? The kernel ties it to no node
+    memory_domain_id = static_cast<memory_domain_id_t>(id);
+    return status_t::success_k;
+#else
+    return status_t::topology_unavailable_k;
+#endif
+}
 #pragma endregion Linux Memory Domains
 
 #pragma region Linux Core Classes

@@ -33,6 +33,7 @@ extern "C" {
     ) -> c_int;
     fn fu_memory_domains_count(topology: *mut c_void, count_out: *mut usize) -> c_int;
     fn fu_local_memory_of(topology: *mut c_void, compute_domain_index: usize, memory_domain_out: *mut usize) -> c_int;
+    fn fu_memory_domain_id_of_pci(pci_bus_id: *const c_char, memory_domain_id_out: *mut i32) -> c_int;
     fn fu_volume_ram_in(topology: *mut c_void, memory_domain_index: usize, bytes_out: *mut usize) -> c_int;
     fn fu_volume_ram(topology: *mut c_void, bytes_out: *mut usize) -> c_int;
     fn fu_volume_huge_pages_in(topology: *mut c_void, memory_domain_index: usize, bytes_out: *mut usize) -> c_int;
@@ -213,6 +214,17 @@ pub fn runtime_capabilities() -> Capabilities {
 #[cfg(feature = "std")]
 pub fn runtime_capabilities_string() -> Result<std::string::String> {
     name_capabilities(runtime_capabilities())
+}
+
+/// Returns the memory domain nearest a PCI device, such as a GPU or a NIC, from its
+/// `domain:bus:device.function` ID as drivers report it, with no [`Topology`] needed.
+pub fn memory_domain_id_of_pci(pci_bus_id: &core::ffi::CStr) -> Result<MemoryDomainId> {
+    let mut raw: i32 = -1;
+    Error::check(
+        unsafe { fu_memory_domain_id_of_pci(pci_bus_id.as_ptr(), &mut raw) },
+        "fu_memory_domain_id_of_pci",
+    )?;
+    Ok(MemoryDomainId(raw))
 }
 
 /// A position in the topology's array of __compute__ domains, in `[0, compute_domains_count())`.

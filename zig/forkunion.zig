@@ -54,6 +54,7 @@ pub const Topology = topology.Topology;
 pub const version = topology.version;
 pub const comptimeCapabilities = topology.comptimeCapabilities;
 pub const comptimeCapabilitiesString = topology.comptimeCapabilitiesString;
+pub const memoryDomainIdOfPci = topology.memoryDomainIdOfPci;
 pub const runtimeCapabilities = topology.runtimeCapabilities;
 pub const runtimeCapabilitiesString = topology.runtimeCapabilitiesString;
 

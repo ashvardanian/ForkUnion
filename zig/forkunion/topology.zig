@@ -43,6 +43,7 @@ extern fn fu_huge_pages_count(topology: *anyopaque, out: *usize) c_int;
 extern fn fu_huge_pages_count_in(topology: *anyopaque, memory_domain_index: usize, out: *usize) c_int;
 extern fn fu_local_memory_of(topology: *anyopaque, compute_domain_index: usize, out: *usize) c_int;
 extern fn fu_memory_domain_id_at_index(topology: *anyopaque, memory_domain_index: usize, id_out: *i32) c_int;
+extern fn fu_memory_domain_id_of_pci(pci_bus_id: [*:0]const u8, id_out: *i32) c_int;
 
 /// Defines whether the calling thread participates in task execution
 pub const CallerExclusivity = enum(c_int) {
@@ -169,6 +170,14 @@ pub fn runtimeCapabilitiesString(buf: []u8) Error![]const u8 {
     var written: usize = 0;
     try check(fu_name_capabilities(fu_runtime_capabilities(), buf.ptr, buf.len, &written));
     return buf[0..written];
+}
+
+/// Returns the memory domain nearest a PCI device, such as a GPU or a NIC, from its
+/// `domain:bus:device.function` ID as drivers report it, with no `Topology` needed.
+pub fn memoryDomainIdOfPci(pci_bus_id: [*:0]const u8) Error!MemoryDomainId {
+    var raw: i32 = -1;
+    try check(fu_memory_domain_id_of_pci(pci_bus_id, &raw));
+    return @enumFromInt(raw);
 }
 
 /// An explicit, owned handle to this machine's discovered compute and memory topology.

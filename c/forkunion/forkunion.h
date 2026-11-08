@@ -657,6 +657,25 @@ fu_status_t fu_memory_domains_count(fu_topology_t topology, size_t *count_out);
 fu_status_t fu_local_memory_of(fu_topology_t topology, size_t compute_domain_index, size_t *memory_domain_out);
 
 /**
+ *  @brief Returns the memory domain nearest a PCI device, such as a GPU or a NIC.
+ *  @param[in] pci_bus_id The device's @c domain:bus:device.function ID in hexadecimal, as drivers
+ *      report it, in either case and any domain width.
+ *  @param[out] memory_domain_id_out Receives the OS memory-domain id the allocators take.
+ *
+ *  The bridge for staging buffers beside a device: pass the result to @c fu_allocate_on_domain_id.
+ *  Needs no topology handle, as Linux reports it in @c /sys/bus/pci/devices.
+ *
+ *  @sa fu_local_memory_of, fu_allocate_on_domain_id.
+ *
+ *  @par Statuses:
+ *  - @c fu_invalid_argument_k A NULL @p pci_bus_id or @p memory_domain_id_out, or an ID that does
+ *    not parse.
+ *  - @c fu_topology_unavailable_k No such device, a device the kernel ties to no memory domain, or
+ *    any system but Linux.
+ */
+fu_status_t fu_memory_domain_id_of_pci(char const *pci_bus_id, fu_memory_domain_id_t *memory_domain_id_out);
+
+/**
  *  @brief Returns the RAM volume in bytes of a given memory domain.
  *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).

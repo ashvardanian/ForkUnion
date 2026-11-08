@@ -24,6 +24,7 @@ from forkunion.types import (
     MemoryDomainId,
     OutBytes,
     OutHandle,
+    _CString,
     _OutSize,
 )
 
@@ -49,6 +50,9 @@ comptime TopologyCountIn = def(_Handle, c_size_t, _OutSize) thin abi("C") -> c_i
 
 comptime MemoryDomainIdAt = def(_Handle, c_size_t, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
 """`fu_memory_domain_id_at_index`: resolves a dense memory-domain index to the OS id."""
+
+comptime MemoryDomainIdOfPci = def(_CString, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+"""`fu_memory_domain_id_of_pci`: resolves a PCI bus ID to the OS id of its nearest memory domain."""
 
 # endregion Signatures
 
@@ -454,3 +458,32 @@ def runtime_capabilities_string(library: Library) raises Error -> String:
         `INVALID_ARGUMENT`.
     """
     return name_capabilities(library, runtime_capabilities(library))
+
+
+def memory_domain_id_of_pci(library: Library, pci_bus_id: String) raises Error -> MemoryDomainId:
+    """The OS id of the memory domain nearest a PCI device, such as a GPU or a NIC.
+
+    Needs no `Topology`, as Linux reports it in `/sys/bus/pci/devices`.
+
+    Args:
+        library: The loaded core to ask.
+        pci_bus_id: The device's `domain:bus:device.function` ID, as drivers report it.
+
+    Returns:
+        The OS id, which the allocators take.
+
+    Raises:
+        `Error` if the core refuses the lookup, which an ID that does not parse does with
+        `INVALID_ARGUMENT`, and an unknown device, one tied to no memory domain, or any system
+        but Linux with `TOPOLOGY_UNAVAILABLE`.
+    """
+    var terminated = pci_bus_id
+    var out = stack_allocation[1, Int32]()
+    out[unsafe_offset=0] = Int32(-1)
+    var status = library.symbols().memory_domain_id_of_pci(
+        terminated.as_c_string_span().ptr().unsafe_bitcast[Int8]().unsafe_origin_cast[ImmUntrackedOrigin](),
+        out.unsafe_origin_cast[MutAnyOrigin](),
+    )
+    if status != 0:
+        raise Error(ErrorKind.of(status), "fu_memory_domain_id_of_pci")
+    return MemoryDomainId(out[unsafe_offset=0])
