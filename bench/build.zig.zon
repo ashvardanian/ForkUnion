@@ -3,6 +3,7 @@
     .version = "0.1.0",
     .fingerprint = 0x1accea9f530b9d5f,
     .minimum_zig_version = "0.16.0",
+    .license = "Apache-2.0",
 
     .dependencies = .{
         .forkunion = .{

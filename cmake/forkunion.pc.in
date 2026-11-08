@@ -6,6 +6,7 @@ includedir=@forkunion_pc_includedir_@
 Name: ForkUnion
 Description: @PROJECT_DESCRIPTION@
 URL: https://github.com/ashvardanian/ForkUnion
+License: Apache-2.0
 Version: @PROJECT_VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -l@forkunion_pc_library_@

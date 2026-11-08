@@ -1,8 +1,8 @@
 //! Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
 //!
 //! ForkUnion provides a minimalistic cross-platform thread-pool implementation for fork-join
-//! parallelism, avoiding dynamic memory allocations, exceptions, system calls, and heavy
-//! Compare-And-Swap instructions on the hot path.
+//! parallelism, avoiding dynamic memory allocations, exceptions, system calls, and Compare-And-Swap
+//! loops on the hot path.
 //!
 //! Zig 0.16 removed std.Thread.Pool, and its replacement std.Io.Group allocates per task and has no
 //! notion of topology. ForkUnion is designed for data parallelism and tight parallel loops - think

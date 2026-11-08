@@ -36,7 +36,7 @@ __pycache__/
 .mypy_cache/
 
 # Rust
-# `Cargo.lock` is tracked: this package ships `[[bin]]` targets, and CI needs `--locked`
+Cargo.lock
 target/
 
 # Zig

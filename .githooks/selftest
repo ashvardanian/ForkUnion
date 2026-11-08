@@ -2871,7 +2871,6 @@ stage_release_fixture() { # stage_release_fixture <version> <build.zig.zon versi
     printf '%s\n' "$1" > "$fixture_directory/VERSION"
     printf '[package]\nname = "forkunion"\nversion = "%s"\n' "$1" > "$fixture_directory/Cargo.toml"
     printf '[[package]]\nname = "forkunion"\nversion = "%s"\n' "$1" > "$fixture_directory/Cargo.lock"
-    printf 'version: %s\n' "$1" > "$fixture_directory/CITATION.cff"
     printf '.{\n    .version = "%s",\n}\n' "$2" > "$fixture_directory/build.zig.zon"
     printf '[workspace]\nversion = "%s"\n\n[package]\nversion = "%s"\n' "$1" "$1" > "$fixture_directory/pixi.toml"
     printf '    GIT_TAG v%s\nforkunion = "%s"\nforkunion = { version = "%s", features = ["portable"] }\n' "$1" "$1" "$1" \

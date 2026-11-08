@@ -3,6 +3,7 @@
     .version = "4.0.0-rc.1",
     .fingerprint = 0x3cdd441be686cfc7,
     .minimum_zig_version = "0.16.0",
+    .license = "Apache-2.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",

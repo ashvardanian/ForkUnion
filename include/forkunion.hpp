@@ -5,8 +5,8 @@
  *  @brief Low-latency OpenMP-style NUMA-aware cross-platform fine-grained parallelism library.
  *
  *  ForkUnion provides a minimalistic cross-platform thread-pool implementation and Parallel
- *  Algorithms, avoiding dynamic memory allocations, exceptions, system calls, and heavy
- *  Compare-And-Swap instructions.
+ *  Algorithms, avoiding dynamic memory allocations, exceptions, system calls, and Compare-And-Swap
+ *  loops on the hot path.
  *  The library leverages the "weak memory model" to allow Arm and IBM Power CPUs to aggressively
  *  optimize execution at runtime. It also aggressively tests against overflows on smaller index
  *  types, and is safe to use even with the maximal @c std::size_t values.

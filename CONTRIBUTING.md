@@ -1,6 +1,6 @@
-# Contributing
+# Contributing to ForkUnion
 
-The [Testing and Benchmarking](README.md#testing-and-benchmarking) section of the README lists the commands CI runs for C, C++, Rust, Zig and Mojo.
+The [Testing & Benchmarking](https://github.com/ashvardanian/ForkUnion/blob/main/README.md#testing--benchmarking) section of the README lists the commands CI runs for C, C++, Rust, Zig and Mojo.
 Configuring the CMake build points `core.hooksPath` at `.githooks`, which arms the hooks below.
 
 ## Commits

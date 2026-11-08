@@ -1,11 +1,14 @@
-# ForkUnion
+# ForkUnion: Low-Latency NUMA-Aware Fork-Join
 
-[![`ForkUnion` banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion.jpg?raw=true)](https://github.com/ashvardanian/ForkUnion)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion-v4-dark.jpg?raw=true">
+  <img alt="ForkUnion banner" src="https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ForkUnion-v4.jpg?raw=true">
+</picture>
 
 __ForkUnion__ is a NUMA-aware fork-join thread-pool for C++, C, Rust, Zig, and Mojo — built for the tightest `#pragma omp parallel for`-style loops, not task queues. 🍴
 It already powers NUMA-sharded vector search with [USearch](https://github.com/unum-cloud/USearch), LLM KV-cache and attention kernels with [NumKong](https://github.com/ashvardanian/NumKong), and unbalanced bioinformatics workloads — thousands of combinatorial tasks per core — with [StringZilla](https://github.com/ashvardanian/StringZilla).
 
-On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks-and-mutexes), __zero__ [CAS loops](#atomics-and-cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
+On the hot path it makes __zero__ [heap allocations](#memory-allocations), __zero__ [system calls](#locks--mutexes), __zero__ [CAS loops](#atomics--cas), and suffers no [false-sharing](#alignment--false-sharing) of cache-lines.
 So dispatch latency stays flat into the hundreds of cores, precisely where task-queue runtimes like Rayon collapse and even OpenMP begins to slip.
 It is also unique in parking idle workers on a __hardware address monitor__ — x86 `UMONITOR`/`UMWAIT`, Arm `WFE`/`WFET`, RISC-V `Zawrs` — so a worker light-sleeps on the exact cache-line it is waiting for and the silicon wakes it the instant another core writes there, with no hot spinning and no kernel futex.
 That bet compounds as sockets multiply: Intel Xeon Platinum and NVIDIA Vera pack up to 8 sockets per node, where shared CAS thrashes the interconnect and private `fetch_add` cursors keep synchronization off it.
@@ -19,7 +22,7 @@ Despite being far more deeply tied to hardware and the OS than most alternatives
 Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux, FreeBSD, and Windows, and elsewhere allocation falls back to a single memory domain.
 It also compiles to __WebAssembly__, where the pools are real in the two shapes that carry threads — Emscripten with `-pthread` over a shared memory, and `wasm32-wasip1-threads` under a runtime like Wasmtime — and collapse to the calling thread in a plain single-threaded module.
 
-## Basic Usage
+## Quickstart
 
 __`ForkUnion`__ is dead-simple to use!
 There is no nested parallelism, exception handling, or "future promises"; they are banned.
@@ -37,7 +40,8 @@ Higher-level APIs for index-addressable tasks are also available:
 
 For additional flow control and tuning, following helpers are available:
 
-- `sleep(microseconds)` - for longer naps,
+- `nap` - to park workers on the CPU's address monitor, waking with no syscall,
+- `sleep(microseconds)` - to block workers in the kernel for long idle periods, with 0 waiting for the next dispatch,
 - `terminate` - to kill the threads before the destructor is called,
 - `unsafe_for_threads` - to broadcast a callback without blocking, returning a generation token,
 - `unsafe_join` - to block until the completion of a broadcasted generation,
@@ -49,9 +53,11 @@ On `caller_inclusive_k` pools the calling thread owes one slice of the work, whi
 The same rule shapes the RAII guard returned by `for_threads` and, in C++, the `for_n` family: the workers start at the guard's construction on every pool, and on inclusive pools the caller's own slice runs at `join` or destruction.
 
 In C++ it provides [NUMA extensions](#numa).
-That includes the `colocated_pool` analog of the `flat_pool` and the `domain_allocator_t` for allocating memory in a specific memory domain, backed by `linux_numa_allocator_t`, `freebsd_numa_allocator_t`, or `windows_numa_allocator_t`.
+That includes the `colocated_pool` analog of the `flat_pool` and the `domain_allocator_t` for allocating memory in a specific memory domain.
 Those are out-of-the-box compatible with the higher-level APIs.
 Most interestingly, for Big Data applications, a higher-level `distributed_pool` class addresses and balances the work across all compute domains.
+
+> `domain_allocator_t` is backed by `linux_numa_allocator_t`, `freebsd_numa_allocator_t`, or `windows_numa_allocator_t`.
 
 ### Intro in Rust
 
@@ -77,7 +83,7 @@ A minimal example may look like this:
 use forkunion as fu;
 let topology = fu::Topology::new().expect("Failed to detect hardware topology");
 let mut pool = fu::spawn(&topology, 2);
-pool.for_threads(&|thread_index, compute_domain_index| {
+pool.broadcast(|thread_index, compute_domain_index| {
     println!("Hello from thread # {} on compute domain # {}", thread_index + 1, compute_domain_index + 1);
 });
 ```
@@ -602,7 +608,7 @@ The trade-offs line up like this, verified against each project's own source and
 > ⁷ oneTBB pins threads to a NUMA node via `task_arena` constraints, but does not place memory locally for you.
 > ⁸ Only LLVM/Intel `libomp` issues x86 `UMONITOR` / `UMWAIT`, gated behind `KMP_USER_LEVEL_MWAIT` and off by default; there is no Arm `WFET` or RISC-V `Zawrs` path in any OpenMP runtime.
 
-### Locks and Mutexes
+### Locks & Mutexes
 
 Unlike `std::atomic`, `std::mutex` can fall into a system call, and it can be expensive to acquire and release.
 Its implementations generally have 2 executable paths:
@@ -623,7 +629,7 @@ Most of those, I believe, are unusable in Big-Data applications, where you alway
 As we focus on a simpler ~~concurrency~~ parallelism model, we can avoid the complexity of allocating shared states, wrapping callbacks into some heap-allocated "tasks", and other boilerplate code.
 Less work - more performance.
 
-### Atomics and [CAS](https://en.wikipedia.org/wiki/Compare-and-swap)
+### Atomics & CAS
 
 Once you get to the lowest-level primitives on concurrency, you end up with the `std::atomic` and a small set of hardware-supported atomic instructions.
 Hardware implements it differently:
@@ -642,7 +648,7 @@ Most importantly, "Compare and Swap" (CAS) is a costly operation and should be a
 On x86, for example, the `LOCK ADD` [can easily take 50 CPU cycles](https://travisdowns.github.io/blog/2020/07/06/concurrency-costs), being 50× slower than a regular `ADD` instruction, and an uncontended `LOCK CMPXCHG` costs about the same.
 Once contention rises, the CAS falls behind, amplified by its "failure" rate, particularly when the value being compared has already changed.
 That's why, in the "dynamic" mode, threads claim tasks with `fetch_add` on private per-thread cursors rather than a CAS loop.
-A dispatch does take one compare-and-swap to claim the pool, plus one to wake a pool told to sleep, and never retries either: a claim that loses is refused rather than repeated.
+A dispatch does take one compare-and-swap to claim the pool, and never retries it: a claim that loses is refused rather than repeated.
 
 ### Atomic References
 
@@ -654,7 +660,7 @@ Besides the standard operations, every reference offers the verbs the standard l
 - no-return `add`, `sub`, `set_bits`, `clear_bits` and `flip_bits`: `stadd` and kin on Arm, `amoadd` into `x0` on RISC-V, and RAO-INT `aadd` and kin for relaxed orders on x86 parts that implement it.
 
 On an M5 Pro the Arm references run 5x faster than a baseline build's exclusive loops uncontended, and 3-4x faster with 18 threads on one word.
-A no-return add may complete away from the core, so a relaxed one carries nothing to a later release: publish through it with `release`, as the `far` memory model in [`verification/`](verification/) checks.
+A no-return add may complete away from the core, so a relaxed one carries nothing to a later release: publish through it with `release`, as the `far` memory model in [`verification/`](https://github.com/ashvardanian/ForkUnion/tree/main/verification) checks.
 
 ### Alignment & False Sharing
 
@@ -1052,11 +1058,11 @@ The original Rust implementation was a standalone library, but in essence, Rust 
 It enforces stringent safety rules, which is excellent for building trustworthy software, but realistically, it makes lock-free concurrent programming with minimal memory allocations too complicated.
 Now, the Rust library is a wrapper over the C binding of the C++ core implementation.
 
-## Testing and Benchmarking
+## Testing & Benchmarking
 
 Toolchain floors, never caps.
 The header needs __C++20__, a C++23 consumer keeps its own standard, and the pre-compiled libraries build at C++20 regardless.
-The C ABI needs __C99__, and the build tooling __CMake 3.21__ or 3.25 for the presets, __Rust 1.100__, __Zig 0.16__, and __Mojo 1.1__.
+The C ABI needs __C99__, and the build tooling __CMake 3.28__, __Rust 1.100__, __Zig 0.16__, and __Mojo 1.2__.
 
 To run the C++ tests, use the CMake presets CI uses; `cmake --list-presets` shows the ones this machine can build:
 
@@ -1211,14 +1217,14 @@ If ForkUnion helps your research or product, please cite it:
 ```bibtex
 @software{Vardanian_ForkUnion,
   author = {Vardanian, Ash},
-  title = {{ForkUnion: Low-latency NUMA-aware fork-join thread-pool with zero allocations, syscalls, CAS loops, or false-sharing on the hot path for C, C++, Rust, Zig, and Mojo}},
+  title = {{ForkUnion: NUMA-Aware Fork-Join with No Allocations, Syscalls or CAS Loops, Parking Workers on Address Monitors}},
   doi = {10.5281/zenodo.21472185},
   url = {https://github.com/ashvardanian/ForkUnion},
   license = {Apache-2.0}
 }
 ```
 
-A machine-readable [`CITATION.cff`](CITATION.cff) is provided at the repository root.
+A machine-readable [`CITATION.cff`](https://github.com/ashvardanian/ForkUnion/blob/main/CITATION.cff) is provided at the repository root.
 
 ## License
 

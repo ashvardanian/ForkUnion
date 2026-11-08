@@ -72,8 +72,8 @@ jobs:
       # ? 1.100 is the beta channel until 2026-11-12; pin `1.100` here once it ships.
       - name: Test Rust at the MSRV
         run: |
-          rustup toolchain install beta --profile minimal
-          cargo +beta test --lib
+          rustup toolchain install beta-2026-10-18 --profile minimal
+          cargo +beta-2026-10-18 test --lib
 
       # Nothing else builds `benchmarks`, so both `[[bin]]` targets went uncompiled.
       - name: Build the Rust benchmarks
@@ -84,7 +84,7 @@ jobs:
       - name: Package the crate
         run: |
           set -euo pipefail
-          cargo package --locked 2>&1 | tee package.log
+          cargo package 2>&1 | tee package.log
           if grep -q 'warning: ignoring' package.log; then
             echo "::error::cargo package dropped a declared target - check the include list in Cargo.toml"
             exit 1

@@ -511,6 +511,7 @@ void fu_topology_delete(fu_topology_t topology);
 
 /**
  *  @brief Returns the number of logical cores in a given compute domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[out] cores_out Receives the number of cores backing that compute domain.
  *
@@ -522,20 +523,22 @@ void fu_topology_delete(fu_topology_t topology);
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p cores_out or an index out of range.
  */
-fu_status_t fu_logical_cores_count_in(fu_topology_t, size_t compute_domain_index, size_t *cores_out);
+fu_status_t fu_logical_cores_count_in(fu_topology_t topology, size_t compute_domain_index, size_t *cores_out);
 
 /**
  *  @brief The number of logical cores the OS exposes - hyper-threads and every core class included.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[out] cores_out Receives the count, fit as the thread count for @c fu_pool_spawn.
  *  @sa fu_logical_cores_count_in for the per-compute-domain count.
  *
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p cores_out.
  */
-fu_status_t fu_logical_cores_count(fu_topology_t, size_t *cores_out);
+fu_status_t fu_logical_cores_count(fu_topology_t topology, size_t *cores_out);
 
 /**
  *  @brief The number of compute domains: bindable clusters of same-QoS, co-located cores.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[out] count_out Receives 0 if unsupported, 1 on a uniform machine, 2+ per NUMA node and
  *      QoS class, e.g. Intel P/E or Arm big.LITTLE.
  *
@@ -547,10 +550,11 @@ fu_status_t fu_logical_cores_count(fu_topology_t, size_t *cores_out);
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p count_out.
  */
-fu_status_t fu_compute_domains_count(fu_topology_t, size_t *count_out);
+fu_status_t fu_compute_domains_count(fu_topology_t topology, size_t *count_out);
 
 /**
  *  @brief Returns the performance level of a given compute domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[out] level_out Receives the level ordinal of that compute domain, where @b higher @b is
  *      @b more @b performant and 0 is the most efficient; homogeneous systems report 0 everywhere.
@@ -565,10 +569,11 @@ fu_status_t fu_compute_domains_count(fu_topology_t, size_t *count_out);
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p level_out or an index out of range.
  */
-fu_status_t fu_compute_level_in(fu_topology_t, size_t compute_domain_index, size_t *level_out);
+fu_status_t fu_compute_level_in(fu_topology_t topology, size_t compute_domain_index, size_t *level_out);
 
 /**
  *  @brief Returns the number of distinct compute performance levels across all compute domains.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[out] count_out Receives 0 if unsupported, 1 on homogeneous cores, 2-3 with heterogeneous
  *      cores, e.g. Intel P/E or Arm big.LITTLE.
  *  @note May be smaller than <tt>fu_compute_domains_count()</tt> - several domains can share one level, as
@@ -578,10 +583,11 @@ fu_status_t fu_compute_level_in(fu_topology_t, size_t compute_domain_index, size
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p count_out.
  */
-fu_status_t fu_compute_levels_count(fu_topology_t, size_t *count_out);
+fu_status_t fu_compute_levels_count(fu_topology_t topology, size_t *count_out);
 
 /**
  *  @brief Returns the relative throughput of @b one core in a given compute domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[out] capacity_out Receives the relative throughput of one core in that compute domain, on
  *      the Linux @c cpu_capacity scale where 1024 is the fastest core present, or 0 when the
@@ -595,10 +601,11 @@ fu_status_t fu_compute_levels_count(fu_topology_t, size_t *count_out);
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p capacity_out or an index out of range.
  */
-fu_status_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index, size_t *capacity_out);
+fu_status_t fu_compute_capacity_in(fu_topology_t topology, size_t compute_domain_index, size_t *capacity_out);
 
 /**
  *  @brief Returns each logical core's share of the deepest cache confined to a compute domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[out] bytes_out Receives the bytes of one cache instance per sharing core, 0 if unknown.
  *
@@ -611,10 +618,11 @@ fu_status_t fu_compute_capacity_in(fu_topology_t, size_t compute_domain_index, s
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p bytes_out or an index out of range.
  */
-fu_status_t fu_compute_cache_bytes_per_core_in(fu_topology_t, size_t compute_domain_index, size_t *bytes_out);
+fu_status_t fu_compute_cache_bytes_per_core_in(fu_topology_t topology, size_t compute_domain_index, size_t *bytes_out);
 
 /**
  *  @brief Returns the number of memory domains - the distinct allocation targets.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[out] count_out Receives 0 if unsupported, 1 on uniform-memory systems, 2+ on NUMA /
  *      tiered-memory systems.
  *
@@ -629,10 +637,11 @@ fu_status_t fu_compute_cache_bytes_per_core_in(fu_topology_t, size_t compute_dom
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p count_out.
  */
-fu_status_t fu_memory_domains_count(fu_topology_t, size_t *count_out);
+fu_status_t fu_memory_domains_count(fu_topology_t topology, size_t *count_out);
 
 /**
  *  @brief Returns the memory domain nearest to a given compute domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[out] memory_domain_out Receives the index of that compute domain's nearest memory domain.
  *
@@ -645,10 +654,11 @@ fu_status_t fu_memory_domains_count(fu_topology_t, size_t *count_out);
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p memory_domain_out or a compute-domain index
  *    out of range.
  */
-fu_status_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index, size_t *memory_domain_out);
+fu_status_t fu_local_memory_of(fu_topology_t topology, size_t compute_domain_index, size_t *memory_domain_out);
 
 /**
  *  @brief Returns the RAM volume in bytes of a given memory domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
  *  @param[out] bytes_out Receives the bytes of RAM in that memory domain.
  *
@@ -659,20 +669,22 @@ fu_status_t fu_local_memory_of(fu_topology_t, size_t compute_domain_index, size_
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p bytes_out or an index out of range.
  */
-fu_status_t fu_volume_ram_in(fu_topology_t, size_t memory_domain_index, size_t *bytes_out);
+fu_status_t fu_volume_ram_in(fu_topology_t topology, size_t memory_domain_index, size_t *bytes_out);
 
 /**
  *  @brief Returns the total RAM volume in bytes across all memory domains.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[out] bytes_out Receives the number of bytes of RAM installed, regardless of page size.
  *  @sa fu_volume_ram_in.
  *
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p bytes_out.
  */
-fu_status_t fu_volume_ram(fu_topology_t, size_t *bytes_out);
+fu_status_t fu_volume_ram(fu_topology_t topology, size_t *bytes_out);
 
 /**
  *  @brief Returns the huge-page volume in bytes available in a given memory domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
  *  @param[out] bytes_out Receives the bytes backed by free huge pages in that memory domain.
  *
@@ -684,20 +696,22 @@ fu_status_t fu_volume_ram(fu_topology_t, size_t *bytes_out);
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p bytes_out or an index out of range.
  */
-fu_status_t fu_volume_huge_pages_in(fu_topology_t, size_t memory_domain_index, size_t *bytes_out);
+fu_status_t fu_volume_huge_pages_in(fu_topology_t topology, size_t memory_domain_index, size_t *bytes_out);
 
 /**
  *  @brief Returns the total huge-page volume in bytes across all memory domains.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[out] bytes_out Receives the bytes backed by free huge pages, 0 if unavailable.
  *  @sa fu_volume_huge_pages_in, fu_huge_pages_count.
  *
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p bytes_out.
  */
-fu_status_t fu_volume_huge_pages(fu_topology_t, size_t *bytes_out);
+fu_status_t fu_volume_huge_pages(fu_topology_t topology, size_t *bytes_out);
 
 /**
  *  @brief Returns the number of free huge pages in a given memory domain.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
  *  @param[out] pages_out Receives the free huge pages, all sizes, in that memory domain.
  *
@@ -708,17 +722,18 @@ fu_status_t fu_volume_huge_pages(fu_topology_t, size_t *bytes_out);
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle, a NULL @p pages_out or an index out of range.
  */
-fu_status_t fu_huge_pages_count_in(fu_topology_t, size_t memory_domain_index, size_t *pages_out);
+fu_status_t fu_huge_pages_count_in(fu_topology_t topology, size_t memory_domain_index, size_t *pages_out);
 
 /**
  *  @brief Returns the total number of free huge pages across all memory domains.
+ *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[out] pages_out Receives the count of free huge pages of any size, 0 if unavailable.
  *  @sa fu_volume_huge_pages, fu_huge_pages_count_in.
  *
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p pages_out.
  */
-fu_status_t fu_huge_pages_count(fu_topology_t, size_t *pages_out);
+fu_status_t fu_huge_pages_count(fu_topology_t topology, size_t *pages_out);
 
 #pragma endregion Metadata
 
@@ -1129,6 +1144,7 @@ fu_status_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_
 
 /**
  *  @brief Returns the measured read latency from a compute domain to a memory domain.
+ *  @param[in] fabric Fabric from @c fu_fabric_new.
  *  @param[in] compute_domain_index Initiator compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
  *  @param[out] nanoseconds_out Receives the dependent-load latency in nanoseconds.
@@ -1139,11 +1155,12 @@ fu_status_t fu_fabric_harvest(fu_topology_t topology, fu_pool_t pool, fu_fabric_
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p nanoseconds_out.
  */
-fu_status_t fu_fabric_memory_latency(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index,
+fu_status_t fu_fabric_memory_latency(fu_fabric_t fabric, size_t compute_domain_index, size_t memory_domain_index,
                                      size_t *nanoseconds_out);
 
 /**
  *  @brief Returns the measured read bandwidth from a compute domain to a memory domain.
+ *  @param[in] fabric Fabric from @c fu_fabric_new.
  *  @param[in] compute_domain_index Initiator compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
  *  @param[out] megabytes_per_second_out Receives the saturated read bandwidth in MB/s.
@@ -1154,11 +1171,12 @@ fu_status_t fu_fabric_memory_latency(fu_fabric_t, size_t compute_domain_index, s
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p megabytes_per_second_out.
  */
-fu_status_t fu_fabric_memory_bandwidth(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index,
+fu_status_t fu_fabric_memory_bandwidth(fu_fabric_t fabric, size_t compute_domain_index, size_t memory_domain_index,
                                        size_t *megabytes_per_second_out);
 
 /**
  *  @brief Returns the relative access distance from a compute domain to a memory domain.
+ *  @param[in] fabric Fabric from @c fu_fabric_new.
  *  @param[in] compute_domain_index Initiator compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
  *  @param[out] distance_out Receives the relative distance, @b 10 meaning local.
@@ -1170,11 +1188,12 @@ fu_status_t fu_fabric_memory_bandwidth(fu_fabric_t, size_t compute_domain_index,
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p distance_out.
  */
-fu_status_t fu_fabric_memory_distance(fu_fabric_t, size_t compute_domain_index, size_t memory_domain_index,
+fu_status_t fu_fabric_memory_distance(fu_fabric_t fabric, size_t compute_domain_index, size_t memory_domain_index,
                                       size_t *distance_out);
 
 /**
  *  @brief Returns the derived speed class of a given memory domain, independent of any initiator.
+ *  @param[in] fabric Fabric from @c fu_fabric_new.
  *  @param[in] memory_domain_index Target memory domain, in [0, <tt>fu_memory_domains_count()</tt>).
  *  @param[out] level_out Receives the tier ordinal, @b lower @b is @b faster.
  *
@@ -1187,10 +1206,11 @@ fu_status_t fu_fabric_memory_distance(fu_fabric_t, size_t compute_domain_index, 
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p level_out.
  */
-fu_status_t fu_fabric_memory_level_in(fu_fabric_t, size_t memory_domain_index, size_t *level_out);
+fu_status_t fu_fabric_memory_level_in(fu_fabric_t fabric, size_t memory_domain_index, size_t *level_out);
 
 /**
  *  @brief Returns the number of distinct derived memory tiers across all memory domains.
+ *  @param[in] fabric Fabric from @c fu_fabric_new.
  *  @param[out] levels_out Receives 1 on single-tier systems and before a harvest, 2+ when HBM / DDR
  *      / CXL are mixed.
  *  @note Memory-axis twin of @c fu_compute_levels_count; several domains may share a tier.
@@ -1198,7 +1218,7 @@ fu_status_t fu_fabric_memory_level_in(fu_fabric_t, size_t memory_domain_index, s
  *  @par Statuses:
  *  - @c fu_invalid_argument_k A NULL handle or a NULL @p levels_out.
  */
-fu_status_t fu_fabric_memory_levels_count(fu_fabric_t, size_t *levels_out);
+fu_status_t fu_fabric_memory_levels_count(fu_fabric_t fabric, size_t *levels_out);
 
 #pragma endregion Fabric
 
