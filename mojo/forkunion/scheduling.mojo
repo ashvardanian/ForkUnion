@@ -25,13 +25,13 @@ from forkunion.types import (
     Capabilities,
     ComputeDomain,
     Context,
-    CString,
+    _CString,
     Error,
     ErrorKind,
-    Handle,
+    _Handle,
     MemoryDomain,
     OutHandle,
-    OutSize,
+    _OutSize,
     TasksRange,
     ThreadInDomain,
 )
@@ -39,41 +39,41 @@ from forkunion.types import (
 
 # region Signatures
 
-comptime PoolNew = def(CString, c_int, OutHandle) thin abi("C") -> c_int
+comptime PoolNew = def(_CString, c_int, OutHandle) thin abi("C") -> c_int
 """`fu_pool_new`: allocates a pool from a name and an allow-mask, writing the handle out."""
-comptime PoolDelete = def(Handle) thin abi("C") -> None
+comptime PoolDelete = def(_Handle) thin abi("C") -> None
 """`fu_pool_delete`: frees a pool whose workers have already stopped."""
-comptime PoolCapabilities = def(Handle, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+comptime PoolCapabilities = def(_Handle, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
 """`fu_pool_capabilities`: reads back the allow-mask the spawn actually settled on."""
-comptime PoolSpawn = def(Handle, Handle, c_size_t, c_int) thin abi("C") -> c_int
+comptime PoolSpawn = def(_Handle, _Handle, c_size_t, c_int) thin abi("C") -> c_int
 """`fu_pool_spawn`: starts workers across every compute domain the topology describes."""
-comptime PoolSpawnOn = def(Handle, Handle, c_size_t, c_size_t, c_int) thin abi("C") -> c_int
+comptime PoolSpawnOn = def(_Handle, _Handle, c_size_t, c_size_t, c_int) thin abi("C") -> c_int
 """`fu_pool_spawn_on`: starts workers pinned to the one compute domain named by index."""
-comptime PoolExclusivity = def(Handle, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+comptime PoolExclusivity = def(_Handle, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
 """`fu_pool_caller_exclusivity`: reads whether the dispatching thread also runs a slice."""
-comptime PoolCount = def(Handle, OutSize) thin abi("C") -> c_int
+comptime PoolCount = def(_Handle, _OutSize) thin abi("C") -> c_int
 """`fu_pool_threads_count` and `fu_pool_compute_domains_count`: a whole-pool count."""
-comptime PoolCountIn = def(Handle, c_size_t, OutSize) thin abi("C") -> c_int
+comptime PoolCountIn = def(_Handle, c_size_t, _OutSize) thin abi("C") -> c_int
 """`fu_pool_threads_count_in`: the same count narrowed to one compute-domain index."""
-comptime PoolLocateThreadIn = def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int
+comptime PoolLocateThreadIn = def(_Handle, c_size_t, c_size_t, _OutSize) thin abi("C") -> c_int
 """`fu_pool_locate_thread_in`: rebases a global thread index inside one compute domain."""
-comptime PoolNap = def(Handle) thin abi("C") -> None
+comptime PoolNap = def(_Handle) thin abi("C") -> None
 """`fu_pool_nap`: parks idle workers on the CPU's address monitor."""
-comptime PoolSleep = def(Handle, c_size_t) thin abi("C") -> None
+comptime PoolSleep = def(_Handle, c_size_t) thin abi("C") -> None
 """`fu_pool_sleep`: blocks idle workers in the kernel."""
-comptime PoolTerminate = def(Handle) thin abi("C") -> None
+comptime PoolTerminate = def(_Handle) thin abi("C") -> None
 """`fu_pool_terminate`: stops the workers while leaving the handle spawnable again."""
 comptime FabricNew = def(OutHandle) thin abi("C") -> c_int
 """`fu_fabric_new`: allocates an empty fabric, which holds nothing until a harvest."""
-comptime FabricDelete = def(Handle) thin abi("C") -> None
+comptime FabricDelete = def(_Handle) thin abi("C") -> None
 """`fu_fabric_delete`: frees a fabric and the observations it snapshotted."""
-comptime FabricHarvest = def(Handle, Handle, Handle) thin abi("C") -> c_int
+comptime FabricHarvest = def(_Handle, _Handle, _Handle) thin abi("C") -> c_int
 """`fu_fabric_harvest`: probes every reachable edge through a pool, replacing what the fabric held."""
-comptime FabricEdge = def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int
+comptime FabricEdge = def(_Handle, c_size_t, c_size_t, _OutSize) thin abi("C") -> c_int
 """`fu_fabric_memory_latency`, `fu_fabric_memory_bandwidth`, and `fu_fabric_memory_distance`: one edge."""
-comptime FabricLevelIn = def(Handle, c_size_t, OutSize) thin abi("C") -> c_int
+comptime FabricLevelIn = def(_Handle, c_size_t, _OutSize) thin abi("C") -> c_int
 """`fu_fabric_memory_level_in`: the performance tier one memory domain was sorted into."""
-comptime FabricLevelsCount = def(Handle, OutSize) thin abi("C") -> c_int
+comptime FabricLevelsCount = def(_Handle, _OutSize) thin abi("C") -> c_int
 """`fu_fabric_memory_levels_count`: how many distinct tiers the harvest distinguished."""
 comptime ForThreads = def(Context, c_size_t, c_size_t) thin abi("C") -> None
 """`fu_for_threads_t`: the callback of a per-worker dispatch, which carries no task index."""
@@ -81,17 +81,17 @@ comptime ForTasks = def(Context, c_size_t, c_size_t, c_size_t) thin abi("C") -> 
 """`fu_for_task_t`: the callback of an indexed dispatch, invoked once per task."""
 comptime ForSlices = def(Context, c_size_t, c_size_t, c_size_t, c_size_t) thin abi("C") -> None
 """`fu_for_range_t`: the callback of a slice dispatch, given a first-and-count run of tasks."""
-comptime PoolForThreads = def(Handle, ForThreads, Context) thin abi("C") -> c_int
+comptime PoolForThreads = def(_Handle, ForThreads, Context) thin abi("C") -> c_int
 """`fu_pool_for_threads`: one blocking call per worker."""
-comptime PoolForN = def(Handle, c_size_t, ForTasks, Context) thin abi("C") -> c_int
+comptime PoolForN = def(_Handle, c_size_t, ForTasks, Context) thin abi("C") -> c_int
 """`fu_pool_for_n` and `fu_pool_for_n_dynamic`: `n` tasks, split up front or claimed on demand."""
-comptime PoolForSlices = def(Handle, c_size_t, ForSlices, Context) thin abi("C") -> c_int
+comptime PoolForSlices = def(_Handle, c_size_t, ForSlices, Context) thin abi("C") -> c_int
 """`fu_pool_for_slices`: `n` tasks as one contiguous run per worker."""
-comptime PoolUnsafeForThreads = def(Handle, ForThreads, Context, OutSize) thin abi("C") -> c_int
+comptime PoolUnsafeForThreads = def(_Handle, ForThreads, Context, _OutSize) thin abi("C") -> c_int
 """`fu_pool_unsafe_for_threads`: the non-blocking per-worker dispatch, writing a generation out."""
-comptime PoolIsComplete = def(Handle, c_size_t, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+comptime PoolIsComplete = def(_Handle, c_size_t, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
 """`fu_pool_is_complete`: polls whether one generation has finished."""
-comptime PoolUnsafeJoin = def(Handle, c_size_t) thin abi("C") -> None
+comptime PoolUnsafeJoin = def(_Handle, c_size_t) thin abi("C") -> None
 """`fu_pool_unsafe_join`: blocks until one generation completes, running the caller's slice first."""
 
 # endregion Signatures
@@ -112,7 +112,7 @@ struct Pool:
 
     var library: Library
     """The loaded core, held so its symbol table outlives every call made through the handle."""
-    var handle: Handle
+    var handle: _Handle
     """The opaque `fu_pool_t` every call below hands back to the core."""
 
     # region Lifetime
@@ -181,7 +181,7 @@ struct Pool:
         Self._check_spawn(spawned, "fu_pool_spawn_on")
         return Self(library=library, handle=handle)
 
-    def __init__(out self, *, library: Library, handle: Handle):
+    def __init__(out self, *, library: Library, handle: _Handle):
         """Adopts a handle that is already spawned, which is how `on` hands one back.
 
         Args:
@@ -192,9 +192,9 @@ struct Pool:
         self.handle = handle
 
     @staticmethod
-    def _create(library: Library, name: StaticString, allowed: Capabilities) raises Error -> Handle:
+    def _create(library: Library, name: StaticString, allowed: Capabilities) raises Error -> _Handle:
         """Allocates the pool object; placement is decided later, at the spawn."""
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, Int]()
         out[unsafe_offset=0] = 0
         var status = library.symbols().pool_new(
@@ -204,7 +204,7 @@ struct Pool:
         )
         if status != 0:
             raise Error(ErrorKind.of(status), "fu_pool_new")
-        return Handle(unsafe_from_address=out[unsafe_offset=0])
+        return _Handle(unsafe_from_address=out[unsafe_offset=0])
 
     @staticmethod
     def _check_spawn(spawned: c_int, symbol: StaticString) raises Error:
@@ -222,7 +222,7 @@ struct Pool:
     # region Queries
 
     @inline(.always)
-    def _count(self, symbol: def(Handle, OutSize) thin abi("C") -> c_int, detail: StaticString) raises Error -> Int:
+    def _count(self, symbol: def(_Handle, _OutSize) thin abi("C") -> c_int, detail: StaticString) raises Error -> Int:
         """Runs a `(handle) -> status` query; an unspawned pool is a reported failure."""
         var out = stack_allocation[1, c_size_t]()
         out[unsafe_offset=0] = c_size_t(0)
@@ -287,7 +287,7 @@ struct Pool:
         Raises:
             `Error` if the pool was never spawned.
         """
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, c_size_t]()
         out[unsafe_offset=0] = c_size_t(0)
         var status = self.library.symbols().pool_locate_thread_in(
@@ -309,7 +309,7 @@ struct Pool:
         Raises:
             `Error` if the pool was never spawned.
         """
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, Int32]()
         out[unsafe_offset=0] = Int32(0)
         var status = self.library.symbols().pool_caller_exclusivity(self.handle, out.unsafe_origin_cast[MutAnyOrigin]())
@@ -326,7 +326,7 @@ struct Pool:
         Raises:
             `Error` if the pool was never spawned.
         """
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, Int32]()
         out[unsafe_offset=0] = Int32(0)
         var status = self.library.symbols().pool_capabilities(self.handle, out.unsafe_origin_cast[MutAnyOrigin]())
@@ -519,7 +519,7 @@ struct Pool:
         def trampoline(carried: Context, thread: c_size_t, domain: c_size_t) abi("C"):
             work(Int(thread), Int(domain), carried.unsafe_bitcast[Scratch]()[])
 
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, c_size_t]()
         out[unsafe_offset=0] = c_size_t(0)
         var status = self.library.symbols().pool_unsafe_for_threads(
@@ -572,7 +572,7 @@ struct BroadcastJoin[pool_origin: ImmOrigin, scratch_origin: MutOrigin](Implicit
         Raises:
             `Error` if the pool was never spawned.
         """
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, Int32]()
         out[unsafe_offset=0] = Int32(0)
         var status = (
@@ -594,7 +594,7 @@ struct Fabric:
 
     var library: Library
     """The loaded core, held so its symbol table outlives every call made through the handle."""
-    var handle: Handle
+    var handle: _Handle
     """The opaque `fu_fabric_t`, which answers zeroes until a harvest has filled it."""
 
     def __init__(out self, library: Library) raises Error:
@@ -607,13 +607,13 @@ struct Fabric:
             `Error` if the allocation is refused.
         """
         self.library = library
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, Int]()
         out[unsafe_offset=0] = 0
         var status = library.symbols().fabric_new(out.unsafe_origin_cast[MutAnyOrigin]())
         if status != 0:
             raise Error(ErrorKind.of(status), "fu_fabric_new")
-        self.handle = Handle(unsafe_from_address=out[unsafe_offset=0])
+        self.handle = _Handle(unsafe_from_address=out[unsafe_offset=0])
 
     def __deinit__(deinit self):
         """Frees the fabric along with the observations it snapshotted."""
@@ -636,7 +636,7 @@ struct Fabric:
     @inline(.always)
     def _edge(
         self,
-        symbol: def(Handle, c_size_t, c_size_t, OutSize) thin abi("C") -> c_int,
+        symbol: def(_Handle, c_size_t, c_size_t, _OutSize) thin abi("C") -> c_int,
         compute: ComputeDomain,
         memory: MemoryDomain,
     ) raises Error -> Int:

@@ -56,7 +56,7 @@ schedulers rather than compiler flag sets.
 """
 
 
-@always_inline
+@inline(.always)
 def split_mix(counter: UInt64) -> UInt64:
     """The SplitMix64 avalanche behind every random draw - a pure function of the counter.
 
@@ -71,13 +71,13 @@ def split_mix(counter: UInt64) -> UInt64:
     return x ^ (x >> 31)
 
 
-@always_inline
+@inline(.always)
 def random_unit(key: UInt64, counter: UInt64) -> Float32:
     """Draw `counter` of stream `key` in `[0, 1)`: the top 24 bits scaled by 2^-24, exact in `Float32`."""
     return Float32(Int(split_mix(key + counter) >> 40)) * (Float32(1.0) / Float32(16777216.0))
 
 
-@always_inline
+@inline(.always)
 def fast_rsqrt(x: Float32) -> Float32:
     """Quake-style reciprocal square root with one Newton iteration."""
     var i = UInt32(0x5F3759DF) - (bitcast[DType.uint32](x) >> 1)
@@ -109,7 +109,7 @@ struct Bodies(ImplicitlyCopyable, TrivialRegisterPassable):
     """Each compute domain's nearest memory domain, probed once so no kernel calls the FFI."""
 
 
-@always_inline
+@inline(.always)
 def net_force(bodies: Bodies, index: Int) -> Tuple[Float32, Float32, Float32]:
     """The net gravitational force on one body, in eight explicit lanes."""
     var lanes_x = Array[Float32, FORCE_LANES](fill=0)

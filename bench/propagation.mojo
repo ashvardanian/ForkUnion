@@ -40,7 +40,7 @@ comptime SENTINEL = UInt32(0xFFFF_FFFF)
 """Sorts past every valid edge; marks a dropped self-loop, trimmed with the duplicates."""
 
 
-@always_inline
+@inline(.always)
 def split_mix(counter: UInt64) -> UInt64:
     """The SplitMix64 avalanche behind every random draw - a pure function of the counter."""
     var x = (counter + 1) * 0x9E37_79B9_7F4A_7C15
@@ -49,13 +49,13 @@ def split_mix(counter: UInt64) -> UInt64:
     return x ^ (x >> 31)
 
 
-@always_inline
+@inline(.always)
 def random_percent(key: UInt64, counter: UInt64) -> UInt32:
     """One quadrant choice in `[0, 100)` - the same draw scheme as every sibling benchmark."""
     return UInt32(Int(split_mix(key + counter) % 100))
 
 
-@always_inline
+@inline(.always)
 def random_index(key: UInt64, counter: UInt64, bound: UInt32) -> UInt32:
     """One bridge endpoint in `[0, bound)`, from the same avalanche."""
     return UInt32(Int(split_mix(key + counter) % UInt64(Int(bound))))
@@ -129,7 +129,7 @@ struct Round(ImplicitlyCopyable, TrivialRegisterPassable):
     var local_memory: Pointer[Int32, MutUntrackedOrigin]
 
 
-@always_inline
+@inline(.always)
 def min_label_of(graph: Graph, labels: Pointer[UInt32, MutUntrackedOrigin], vertex: Int) -> UInt32:
     """The smallest label among a vertex and its neighbours, read from the previous round."""
     var best = labels[unsafe_offset=vertex]

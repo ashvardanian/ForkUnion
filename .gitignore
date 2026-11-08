@@ -48,6 +48,7 @@ zig-pkg/
 # Mojo
 # Pixi environments, created in the repository root by `pixi run`
 .pixi/
+pixi.lock
 .magic/
 
 # Editors, assistants, language servers and tool caches

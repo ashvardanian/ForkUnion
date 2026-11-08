@@ -16,7 +16,7 @@ version = "4.0.0-rc.1"
 
 [dependencies]
 cxx-compiler = "*"
-mojo = ">=1.1.0,<1.2"
+mojo = ">=1.2.0,<1.3" # ? Mojo minors still change the language, as 1.1 and 1.2 did, so each is adopted by hand
 
 # Consumers depend on this by source rather than by channel: `pixi-build-mojo` compiles the package
 # and the C++ core together, so a `git` or `path` entry in their manifest is the whole install.
@@ -43,12 +43,15 @@ test = { cmd = "mojo run -I mojo test/main.mojo", depends-on = ["build-native"] 
 # The demo benchmarks measure against a baseline the library itself never needs, so it is scoped
 # here rather than carried by every consumer.
 [feature.benchmarks.dependencies]
-max = ">=26.6,<26.7"
+max = ">=26.7,<26.8"
 
 # The MAX runtime the baseline pulls in needs a newer glibc than conda-forge's default sysroot,
 # and the constraint below carries the floor. Scoped here so the library itself keeps the lower one.
 [feature.benchmarks.target.linux-64.dependencies]
 sysroot_linux-64 = ">=2.34"
+
+[feature.benchmarks.target.linux-aarch64.dependencies]
+sysroot_linux-aarch64 = ">=2.34"
 
 [feature.benchmarks.tasks]
 build-benchmarks = { cmd = "mojo build -I mojo -I bench bench/nbody.mojo -o build/mojo_nbody && mojo build -I mojo -I bench bench/propagation.mojo -o build/mojo_propagation" }

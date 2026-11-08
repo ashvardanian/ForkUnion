@@ -24,16 +24,16 @@ from std.sys import size_of
 
 # region Pointers
 
-comptime Handle = Pointer[NoneType, MutUntrackedOrigin]
+comptime _Handle = Pointer[NoneType, MutUntrackedOrigin]
 """An opaque `fu_topology_t`, `fu_pool_t`, or `fu_fabric_t`."""
 
 comptime Context = Pointer[NoneType, MutUntrackedOrigin]
 """The type-punned callback context the C API carries through a dispatch."""
 
-comptime CString = Pointer[Int8, ImmUntrackedOrigin]
+comptime _CString = Pointer[Int8, ImmUntrackedOrigin]
 """A borrowed null-terminated C string."""
 
-comptime OutSize = Pointer[c_size_t, MutAnyOrigin]
+comptime _OutSize = Pointer[c_size_t, MutAnyOrigin]
 """A `size_t *` the C API writes through.
 
 `MutAnyOrigin` rather than `MutUntrackedOrigin` is load-bearing: it is what tells the compiler the
@@ -42,13 +42,13 @@ caller last stored there, and every out-parameter reads back as zero.
 """
 
 comptime OutHandle = Pointer[Int, MutAnyOrigin]
-"""A handle-sized slot the C API writes through, with the same aliasing caveat as `OutSize`."""
+"""A handle-sized slot the C API writes through, with the same aliasing caveat as `_OutSize`."""
 
 comptime OutBytes = Pointer[Int8, MutAnyOrigin]
-"""A `char *` buffer the C API fills, with the same aliasing caveat as `OutSize`."""
+"""A `char *` buffer the C API fills, with the same aliasing caveat as `_OutSize`."""
 
 comptime OutAddress = Pointer[Int, MutAnyOrigin]
-"""A `void **` slot the C API writes an allocation into, with the same aliasing caveat as `OutSize`."""
+"""A `void **` slot the C API writes an allocation into, with the same aliasing caveat as `_OutSize`."""
 
 # endregion Pointers
 
@@ -98,34 +98,35 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
         Args:
             writer: The sink the reason is appended to.
         """
-        if self == .LIBRARY_MISSING:
-            writer.write("the core is not on the loader path")
-        elif self == .SYMBOL_MISSING:
-            writer.write("the loaded core is missing a symbol")
-        elif self == .BAD_ALLOC:
-            writer.write("an allocation failed")
-        elif self == .CAPACITY_EXHAUSTED:
-            writer.write("a fixed capacity was exhausted")
-        elif self == .INVALID_ARGUMENT:
-            writer.write("an argument was rejected")
-        elif self == .CONFIG_MISMATCH:
-            writer.write("the handles cannot serve this call together")
-        elif self == .ALREADY_SPAWNED:
-            writer.write("the pool is already spawned")
-        elif self == .NOT_SPAWNED:
-            writer.write("the pool was never spawned")
-        elif self == .THREAD_REFUSED:
-            writer.write("the OS declined to create a thread")
-        elif self == .TOPOLOGY_UNAVAILABLE:
-            writer.write("the machine could not be described")
-        elif self == .PERMISSION_DENIED:
-            writer.write("a privileged operation was declined")
-        elif self == .UNSUPPORTED:
-            writer.write("this build has no such facility")
-        elif self == .CONTENDED:
-            writer.write("the pool is running another dispatch")
-        else:
-            writer.write("the core reported no reason")
+        match self:
+            case == .LIBRARY_MISSING:
+                writer.write("the core is not on the loader path")
+            case == .SYMBOL_MISSING:
+                writer.write("the loaded core is missing a symbol")
+            case == .BAD_ALLOC:
+                writer.write("an allocation failed")
+            case == .CAPACITY_EXHAUSTED:
+                writer.write("a fixed capacity was exhausted")
+            case == .INVALID_ARGUMENT:
+                writer.write("an argument was rejected")
+            case == .CONFIG_MISMATCH:
+                writer.write("the handles cannot serve this call together")
+            case == .ALREADY_SPAWNED:
+                writer.write("the pool is already spawned")
+            case == .NOT_SPAWNED:
+                writer.write("the pool was never spawned")
+            case == .THREAD_REFUSED:
+                writer.write("the OS declined to create a thread")
+            case == .TOPOLOGY_UNAVAILABLE:
+                writer.write("the machine could not be described")
+            case == .PERMISSION_DENIED:
+                writer.write("a privileged operation was declined")
+            case == .UNSUPPORTED:
+                writer.write("this build has no such facility")
+            case == .CONTENDED:
+                writer.write("the pool is running another dispatch")
+            case _:
+                writer.write("the core reported no reason")
 
     @staticmethod
     def of(status: c_int) -> Self:

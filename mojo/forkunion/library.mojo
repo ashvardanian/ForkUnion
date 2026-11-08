@@ -61,7 +61,7 @@ from forkunion.topology import (
 )
 from forkunion.types import Error
 
-comptime LIBRARY_FILE = StaticString("libforkunion.so")
+comptime _LIBRARY_FILE = StaticString("libforkunion.so")
 """The name `build-native` installs on every platform, macOS included. The loader already searches
 the environment's library directory, because `mojo build` bakes it into the binary's runpath, so an
 unqualified name is enough for a library installed there."""
@@ -71,7 +71,7 @@ comptime BINDING_MAJOR = 4
 
 # region Signatures
 
-comptime VersionPart = def() thin abi("C") -> c_int
+comptime _VersionPart = def() thin abi("C") -> c_int
 """A nullary `int` getter, the shape the three version numbers share."""
 
 # endregion Signatures
@@ -87,10 +87,9 @@ def _resolve[
     stale library name the symbol it is missing instead of dying without a message.
     """
     comptime assert __fn_type_is_cabi[Signature](), 'the signature must carry abi("C")'
-    var address = handle.get_symbol[NoneType](name)
-    if not address:
-        raise Error(.SYMBOL_MISSING, name)
-    return Pointer(to=address.value()).unsafe_bitcast[Signature]()[]
+    if case .Some(address) = handle.get_symbol[NoneType](name):
+        return Pointer(to=address).unsafe_bitcast[Signature]()[]
+    raise Error(.SYMBOL_MISSING, name)
 
 
 struct Symbols:
@@ -101,11 +100,11 @@ struct Symbols:
     both, and the C test battery checks exactly that.
     """
 
-    var version_major: VersionPart
+    var version_major: _VersionPart
     """`fu_version_major`."""
-    var version_minor: VersionPart
+    var version_minor: _VersionPart
     """`fu_version_minor`."""
-    var version_patch: VersionPart
+    var version_patch: _VersionPart
     """`fu_version_patch`."""
 
     var comptime_capabilities: Capabilities32
@@ -231,9 +230,9 @@ struct Symbols:
         Raises:
             With `SYMBOL_MISSING`, on the first symbol the loaded library does not export.
         """
-        self.version_major = _resolve[VersionPart](handle, "fu_version_major")
-        self.version_minor = _resolve[VersionPart](handle, "fu_version_minor")
-        self.version_patch = _resolve[VersionPart](handle, "fu_version_patch")
+        self.version_major = _resolve[_VersionPart](handle, "fu_version_major")
+        self.version_minor = _resolve[_VersionPart](handle, "fu_version_minor")
+        self.version_patch = _resolve[_VersionPart](handle, "fu_version_patch")
 
         self.comptime_capabilities = _resolve[Capabilities32](handle, "fu_comptime_capabilities")
         self.runtime_capabilities = _resolve[Capabilities32](handle, "fu_runtime_capabilities")
@@ -308,9 +307,9 @@ struct _Loaded:
         try:
             # A release reads its entry point, then drops the last `Library` before the call, so
             # the final `dlclose` must leave the code mapped.
-            self.handle = OwnedDLHandle(String(LIBRARY_FILE), DEFAULT_RTLD | RTLD.NODELETE)
+            self.handle = OwnedDLHandle(String(_LIBRARY_FILE), DEFAULT_RTLD | RTLD.NODELETE)
         except:
-            raise Error(.LIBRARY_MISSING, LIBRARY_FILE)
+            raise Error(.LIBRARY_MISSING, _LIBRARY_FILE)
         self.symbols = Symbols(self.handle)
         if Int(self.symbols.version_major()) != BINDING_MAJOR:
             raise Error(

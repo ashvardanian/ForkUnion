@@ -44,7 +44,7 @@ Date: August 22, 2026
 """
 
 # library
-from .library import Library, Symbols
+from .library import Library
 
 # types
 from .types import (

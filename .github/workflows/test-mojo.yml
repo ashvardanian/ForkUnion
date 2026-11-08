@@ -8,9 +8,13 @@ permissions:
 
 jobs:
   test_mojo:
-    name: Test Mojo on Ubuntu
-    runs-on: ubuntu-26.04
+    name: Test Mojo on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm, macos-26]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -18,7 +22,7 @@ jobs:
       - name: Set Up Pixi
         uses: prefix-dev/setup-pixi@v0
         with:
-          pixi-version: v0.62.1
+          pixi-version: v0.84.1
       # The binding loads the core with `dlopen`, so this both compiles the translation unit and
       # proves a consumer needs no linker flag: the test build below passes none.
       - name: Test Mojo

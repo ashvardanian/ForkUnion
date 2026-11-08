@@ -22,11 +22,11 @@ from forkunion.types import (
     ComputeDomain,
     Error,
     ErrorKind,
-    Handle,
+    _Handle,
     MemoryDomain,
     MemoryDomainId,
     OutAddress,
-    OutSize,
+    _OutSize,
 )
 
 # region Signatures
@@ -34,13 +34,13 @@ from forkunion.types import (
 comptime AllocateOnDomain = def(c_int, c_size_t, OutAddress) thin abi("C") -> c_int
 """`fu_allocate_on_domain_id`: places exactly the bytes asked for, writing the address out."""
 
-comptime AllocateAtLeastOnDomain = def(c_int, c_size_t, OutSize, OutSize, OutAddress) thin abi("C") -> c_int
+comptime AllocateAtLeastOnDomain = def(c_int, c_size_t, _OutSize, _OutSize, OutAddress) thin abi("C") -> c_int
 """`fu_allocate_at_least_on_domain_id`: rounds up onto the largest suitable page, reporting both sizes."""
 
 comptime FreeOnDomain = def(c_int, Pointer[Int8, MutUntrackedOrigin], c_size_t) thin abi("C") -> None
 """`fu_free_on_domain_id`: releases pages, and needs the byte count the placement reported back."""
 
-comptime AllocateSymmetric = def(Handle, c_size_t, OutSize, OutSize, OutSize, OutSize, OutAddress) thin abi(
+comptime AllocateSymmetric = def(_Handle, c_size_t, _OutSize, _OutSize, _OutSize, _OutSize, OutAddress) thin abi(
     "C"
 ) -> c_int
 """`fu_allocate_symmetric`: one mapping striped over every domain, reporting stride, slices, total, and page."""
@@ -186,7 +186,7 @@ struct DomainAllocator(Equatable, ImplicitlyCopyable):
         """
         if bytes == 0:
             raise Error(.INVALID_ARGUMENT, "an allocation needs bytes")
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[1, Int]()
         out[unsafe_offset=0] = 0
         var status = self.library.symbols().allocate_on_domain_id(
@@ -210,7 +210,7 @@ struct DomainAllocator(Equatable, ImplicitlyCopyable):
         """
         if minimum_bytes == 0:
             raise Error(.INVALID_ARGUMENT, "an allocation needs bytes")
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[2, c_size_t]()
         out[unsafe_offset=0] = c_size_t(0)
         out[unsafe_offset=1] = c_size_t(0)
@@ -337,7 +337,7 @@ struct SymmetricAllocation:
         """
         if bytes_per_domain == 0:
             raise Error(.INVALID_ARGUMENT, "a symmetric mapping needs bytes")
-        # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+        # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
         var out = stack_allocation[4, c_size_t]()
         for slot in range(4):
             out[unsafe_offset=slot] = c_size_t(0)

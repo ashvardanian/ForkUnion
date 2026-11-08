@@ -19,12 +19,12 @@ from forkunion.types import (
     ComputeDomain,
     Error,
     ErrorKind,
-    Handle,
+    _Handle,
     MemoryDomain,
     MemoryDomainId,
     OutBytes,
     OutHandle,
-    OutSize,
+    _OutSize,
 )
 
 # region Signatures
@@ -32,22 +32,22 @@ from forkunion.types import (
 comptime Capabilities32 = def() thin abi("C") -> c_int
 """`fu_comptime_capabilities` and `fu_runtime_capabilities`: a capability mask returned by value."""
 
-comptime NameCapabilities = def(c_int, OutBytes, c_size_t, OutSize) thin abi("C") -> c_int
+comptime NameCapabilities = def(c_int, OutBytes, c_size_t, _OutSize) thin abi("C") -> c_int
 """`fu_name_capabilities`: renders a mask into the caller's buffer, writing the byte count out."""
 
 comptime TopologyNew = def(OutHandle) thin abi("C") -> c_int
 """`fu_topology_new`: harvests the machine description, writing the handle out."""
 
-comptime TopologyDelete = def(Handle) thin abi("C") -> None
+comptime TopologyDelete = def(_Handle) thin abi("C") -> None
 """`fu_topology_delete`: releases a harvested topology, and tolerates a null handle."""
 
-comptime TopologyCount = def(Handle, OutSize) thin abi("C") -> c_int
+comptime TopologyCount = def(_Handle, _OutSize) thin abi("C") -> c_int
 """`fu_logical_cores_count` and every other whole-machine count: one `size_t` written out."""
 
-comptime TopologyCountIn = def(Handle, c_size_t, OutSize) thin abi("C") -> c_int
+comptime TopologyCountIn = def(_Handle, c_size_t, _OutSize) thin abi("C") -> c_int
 """`fu_logical_cores_count_in` and every other per-domain count, taking a dense domain index."""
 
-comptime MemoryDomainIdAt = def(Handle, c_size_t, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
+comptime MemoryDomainIdAt = def(_Handle, c_size_t, Pointer[Int32, MutAnyOrigin]) thin abi("C") -> c_int
 """`fu_memory_domain_id_at_index`: resolves a dense memory-domain index to the OS id."""
 
 # endregion Signatures
@@ -62,7 +62,7 @@ struct Topology:
 
     var library: Library
     """The loaded core, kept so the release can still reach `fu_topology_delete`."""
-    var handle: Handle
+    var handle: _Handle
     """The `fu_topology_t` this struct owns, non-null for as long as it lives."""
 
     def __init__(out self, library: Library) raises Error:
@@ -87,14 +87,14 @@ struct Topology:
         var address = out[unsafe_offset=0]
         if status != 0:
             raise Error(ErrorKind.of(status), "fu_topology_new")
-        self.handle = Handle(unsafe_from_address=address)
+        self.handle = _Handle(unsafe_from_address=address)
 
     def __deinit__(deinit self):
         """Releases the harvested description; the loader reference goes with it."""
         self.library.symbols().topology_delete(self.handle)
 
     @inline(.always)
-    def _count(self, symbol: def(Handle, OutSize) thin abi("C") -> c_int) raises Error -> Int:
+    def _count(self, symbol: def(_Handle, _OutSize) thin abi("C") -> c_int) raises Error -> Int:
         """Runs a `(handle) -> status` query; the answer is meaningful only on success."""
         var out = stack_allocation[1, c_size_t]()
         out[unsafe_offset=0] = c_size_t(0)
@@ -106,7 +106,7 @@ struct Topology:
     @inline(.always)
     def _count_in(
         self,
-        symbol: def(Handle, c_size_t, OutSize) thin abi("C") -> c_int,
+        symbol: def(_Handle, c_size_t, _OutSize) thin abi("C") -> c_int,
         index: Int,
     ) raises Error -> Int:
         """Runs a `(handle, index) -> status` lookup; an index this machine lacks is a failure."""
@@ -402,7 +402,7 @@ def name_capabilities(library: Library, capabilities: Capabilities) raises Error
         `INVALID_ARGUMENT`.
     """
     var buffer = List[UInt8](length=_NAME_BUFFER_BYTES, fill=0)
-    # Stack storage the C side writes through; see `OutSize` for why the origin is `Any`.
+    # Stack storage the C side writes through; see `_OutSize` for why the origin is `Any`.
     var out = stack_allocation[1, c_size_t]()
     out[unsafe_offset=0] = c_size_t(0)
     var status = library.symbols().name_capabilities(
@@ -421,9 +421,7 @@ def name_capabilities(library: Library, capabilities: Capabilities) raises Error
         if buffer[index] == 0:
             length = index
             break
-    return String(
-        StringSlice(unsafe_from_utf8=Span[UInt8, origin_of(buffer)](unsafe_ptr=buffer.unsafe_ptr(), length=length))
-    )
+    return String(unsafe_from_utf8=Span[UInt8, origin_of(buffer)](unsafe_ptr=buffer.unsafe_ptr(), length=length))
 
 
 def comptime_capabilities_string(library: Library) raises Error -> String:
