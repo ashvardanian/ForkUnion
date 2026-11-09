@@ -510,6 +510,64 @@ static void test_generation_polling() noexcept {
     for (std::size_t i = 0; i < pool_b.threads_count(); ++i) expect(visited_b[i]);
 }
 
+/** On an exclusive pool thread 0 forks from inside its slice three levels deep while the other
+ *  threads' forks and a rival dispatch are refused; the caller polls the outer generation, a second
+ *  join of an inner fork does nothing, and the pool takes a plain dispatch once the outer ends. */
+template <typename make_pool_type_ = make_pool_t>
+static void test_forks_from_thread_zero() noexcept {
+
+    auto maker = make_pool_type_ {};
+    auto pool = maker.construct();
+    expect(fu::succeeded(pool.spawn(maker.scope(), fu::caller_exclusive_k)));
+    std::size_t const threads = pool.threads_count();
+
+    constexpr std::size_t tasks_k = 1000;
+    struct visits_t {
+        std::vector<std::atomic<std::size_t>> first, second, third;
+        std::atomic<std::size_t> refused {0}, rival_checked {0}, third_forks {0};
+    } visits {std::vector<std::atomic<std::size_t>>(tasks_k), std::vector<std::atomic<std::size_t>>(tasks_k),
+              std::vector<std::atomic<std::size_t>>(threads)};
+
+    auto third_level = [&](std::size_t thread) noexcept { visits.third[thread].fetch_add(1); };
+    auto second_level = [&](std::size_t task, auto at) noexcept {
+        visits.second[task].fetch_add(1);
+        if (at.thread == 0 && visits.third_forks.fetch_add(1) == 0) pool.for_threads(third_level);
+    };
+    auto first_level = [&](std::size_t task, auto) noexcept {
+        visits.first[task].fetch_add(1);
+        if (task != 0) return; // ? Static slicing hands task 0 to thread 0
+        // Joined twice, as the C interface joins; the second join of thread 0's fork does nothing
+        auto twice_joined = pool.for_n_dynamic(tasks_k, second_level);
+        twice_joined.join();
+    };
+    auto outer = [&](std::size_t thread) noexcept {
+        if (thread != 0) {
+            auto refused = [](std::size_t) noexcept {};
+            if (pool.unsafe_for_threads(refused) == 0) visits.refused.fetch_add(1);
+            return;
+        }
+        while (visits.rival_checked.load(std::memory_order_acquire) == 0) std::this_thread::yield();
+        pool.for_n(tasks_k, first_level);
+    };
+
+    auto const generation = pool.unsafe_for_threads(outer);
+    expect(generation != 0);
+    auto rival = [](std::size_t) noexcept {};
+    expect(pool.unsafe_for_threads(rival) == 0);
+    visits.rival_checked.store(1, std::memory_order_release);
+    while (!pool.is_complete(generation)) std::this_thread::yield();
+    pool.unsafe_join(generation);
+
+    for (std::size_t task = 0; task != tasks_k; ++task) expect(visits.first[task].load() == 1);
+    for (std::size_t task = 0; task != tasks_k; ++task) expect(visits.second[task].load() == 1);
+    for (std::size_t thread = 0; thread != threads; ++thread) expect(visits.third[thread].load() == 1);
+    expect(visits.refused.load() == threads - 1);
+
+    std::atomic<std::size_t> plain_visits {0};
+    pool.for_threads([&](std::size_t) noexcept { plain_visits.fetch_add(1, std::memory_order_relaxed); });
+    expect(plain_visits.load() == threads);
+}
+
 /** Verifies guard timing: dispatch at construction, and the inclusive caller's slice at join. */
 template <typename make_pool_type_ = make_pool_t>
 static void test_guard_lifecycle() noexcept {
@@ -1791,6 +1849,7 @@ int main(void) {
         {"`generation` inclusive contract", test_generation_inclusive},     //
         {"`generation` single-thread pool", test_generation_single_thread}, //
         {"`generation` single-worker exclusive", test_generation_single_thread_exclusive},
+        {"thread 0 forks three levels deep", test_forks_from_thread_zero},
         {"`generation` stress", test_generation_stress},                         //
         {"`caller_exclusive_k` calls", test_exclusivity},                        //
         {"`caller_exclusive_k` inline guards", test_exclusivity_inline_guards},  //
@@ -1814,6 +1873,7 @@ int main(void) {
         {"UMA `for_threads` dispatch", test_for_threads<make_colocated_pool_t>},
         {"UMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_colocated_pool_t>},
         {"UMA `generation` polling", test_generation_polling<make_colocated_pool_t>},
+        {"UMA thread 0 forks three levels deep", test_forks_from_thread_zero<make_colocated_pool_t>},
         {"UMA `broadcast_join` lifecycle", test_guard_lifecycle<make_colocated_pool_t>},
         {"UMA `broadcast_join` destructor joins", test_guard_destructor_joins<make_colocated_pool_t>},
         {"UMA `generation` inclusive contract", test_generation_inclusive<make_colocated_pool_t>},
@@ -1838,6 +1898,7 @@ int main(void) {
         {"NUMA `for_threads` dispatch", test_for_threads<make_distributed_pool_t>},
         {"NUMA `unsafe_for_threads` dispatch", test_unsafe_for_threads<make_distributed_pool_t>},
         {"NUMA `generation` polling", test_generation_polling<make_distributed_pool_t>},
+        {"NUMA thread 0 forks three levels deep", test_forks_from_thread_zero<make_distributed_pool_t>},
         {"NUMA `broadcast_join` lifecycle", test_guard_lifecycle<make_distributed_pool_t>},
         {"NUMA `broadcast_join` destructor joins", test_guard_destructor_joins<make_distributed_pool_t>},
         {"NUMA `generation` inclusive contract", test_generation_inclusive<make_distributed_pool_t>},

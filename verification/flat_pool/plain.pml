@@ -21,7 +21,7 @@
  *      arming, wakes nobody, and the uncapped join waits for it forever
  */
 #define thread_count 3
-#define location_count 7
+#define location_count 10
 #define history_depth 9
 #define through_c_shim false
 #include <flat_pool/protocol.pml>

@@ -275,6 +275,10 @@ struct colocated_pool {
     /** Generation clock: odd while a fork is in flight, even when idle. */
     alignas(alignment_k) epoch_index_t epoch_ {0};
 
+    /** The generation of the dispatch in flight, stored by its claimer before the epoch that
+     *  publishes it, so a token stays exact while forks from thread 0 step the epoch past it. */
+    generation_t dispatched_generation_ {0};
+
   public:
     colocated_pool(colocated_pool &&) = delete;
     colocated_pool(colocated_pool const &) = delete;
@@ -736,7 +740,9 @@ struct colocated_pool {
     template <is_thread_callback<index_t> fork_type_>
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
         assert(threads_count() != 0 && "Thread pool not initialized");
-        if (!claim_()) return 0;
+        // Thread 0 runs code only inside a slice, still holding its own unit of the countdown
+        if (called_on_thread_zero_()) return fork_from_thread_zero_(fork);
+        if (!claim_(threads_count())) return 0;
         if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind(); // ? The cursors are ours only from here
         return publish_(fork);
     }
@@ -747,39 +753,47 @@ struct colocated_pool {
      *
      *  On @c caller_inclusive_k pools this can only turn @c true once @c unsafe_join contributes
      *  the calling thread's slice, so poll-then-join is reserved for @c caller_exclusive_k pools.
+     *  A fork from thread 0 steps the epoch past its enclosing generation, which stays in flight
+     *  until the epoch turns even.
+     *
+     *  @sa flat_pool::is_complete
      */
     bool is_complete(generation_t generation) const noexcept {
-        return generation != atomic_ref<epoch_index_t const>(epoch_).load(std::memory_order_acquire);
+        return completed_at_(generation, atomic_ref<epoch_index_t const>(epoch_).load(std::memory_order_acquire));
     }
 
     /**
      *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
      *  @note On @c caller_inclusive_k pools, first executes the calling thread's slice.
-     *
-     *  Idempotent, returning immediately for already-joined or stale generations.
+     *  @sa flat_pool::unsafe_join
      */
     void unsafe_join(generation_t generation) noexcept {
         assert((generation & 1u) == 1 && "Generation tokens are always odd");
+        micro_yield_t micro_yield;
+        if (caller_exclusivity() == caller_exclusive_k) {
+            // Thread 0's own forks read complete at once: they finish inside `unsafe_for_threads`
+            epoch_index_t epoch;
+            while (
+                !completed_at_(generation, epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)))
+                micro_yield(&epoch_, epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
+            return;
+        }
+
         // ? Stale or already complete
         if (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) != generation) return;
 
         // On inclusive pools the calling thread is a contributor: execute its slice and count it
         // down exactly like a worker thread would.
-        bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
-        if (use_caller_thread) {
-            fork_trampoline_(fork_state_, thread_in_domain_t {static_cast<thread_index_t>(0), compute_domain_index_});
-            thread_index_t const before_decrement =
-                atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
-            assert(before_decrement > 0 && "The contributor count must include the caller");
+        fork_trampoline_(fork_state_, thread_in_domain_t {static_cast<thread_index_t>(0), compute_domain_index_});
+        thread_index_t const before_decrement =
+            atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
+        assert(before_decrement > 0 && "The contributor count must include the caller");
 
-            // The last contributor steps the epoch, as its only writer, to signal completion
-            if (before_decrement == 1)
-                atomic_ref<epoch_index_t>(epoch_).store(generation + 1, std::memory_order_release);
-        }
+        // The last contributor steps the epoch, as its only writer, to signal completion
+        if (before_decrement == 1) atomic_ref<epoch_index_t>(epoch_).store(generation + 1, std::memory_order_release);
 
         // Wait for the last contributor's completion step. Only `epoch_` moves here, so a
         // monitored waiter arms the right line and the completing store wakes it as an event.
-        micro_yield_t micro_yield;
         while (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) == generation)
             micro_yield(&epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
     }
@@ -877,10 +891,10 @@ struct colocated_pool {
      *  The acquire carries the last generation's odd epoch to the wait in @c publish_, which would
      *  otherwise read an older even one and step the odd epoch to an even token.
      */
-    bool claim_() noexcept {
+    bool claim_(thread_index_t contributors) noexcept {
         thread_index_t idle = 0;
         return atomic_ref<thread_index_t>(threads_to_sync_)
-            .compare_exchange_strong(idle, threads_count(), std::memory_order_acquire, std::memory_order_relaxed);
+            .compare_exchange_strong(idle, contributors, std::memory_order_acquire, std::memory_order_relaxed);
     }
 
     /** Gives back a claim no dispatch was published on, released, so the next claimer still follows
@@ -893,25 +907,32 @@ struct colocated_pool {
      */
     template <typename fork_type_>
     generation_t publish_(fork_type_ &fork) noexcept {
-
         // Configure "fork" details: every contributor of the last generation counted down already
         fork_state_ = std::addressof(fork);
         fork_trampoline_ = &call_as_lambda_<fork_type_>;
+        return publish_claimed_();
+    }
 
+    /** Publishes the fork set on a claimed pool once the last generation's even epoch shows. */
+    generation_t publish_claimed_() noexcept {
         // The last contributor counts down to zero just before it steps the epoch to even
         micro_yield_t micro_yield;
         epoch_index_t previous_epoch;
         while ((previous_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) & 1u)
             micro_yield(&epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
+        atomic_ref<generation_t>(dispatched_generation_).store(previous_epoch + 1, std::memory_order_relaxed);
+        return step_epoch_and_wake_(previous_epoch + 1);
+    }
 
+    /** Stores the odd @p generation, waking parked workers first; the claim leaves this caller
+     *  its only writer. */
+    generation_t step_epoch_and_wake_(epoch_index_t const generation) noexcept {
         // We are most likely already "grinding"; parked workers, and any still in their startup
         // wait after a `nap`, wake on this store. Read first, so a grinding pool takes no extra
         // store or syscall. A release, as that startup wait reads its handle after this store.
         mood_t const mood = atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed);
         if (mood != mood_t::grind_k) atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_release);
 
-        // The claim leaves this caller the epoch's only writer until its contributors count down
-        generation_t const generation = previous_epoch + 1;
         atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
 
         if (mood == mood_t::sleep_k) os_wake_all_on_word(&mood_);
@@ -947,6 +968,58 @@ struct colocated_pool {
     void reset_affinity_() noexcept {
         [[maybe_unused]] status_t const restored = restore_thread_cores(caller_affinity_);
         caller_affinity_.reset();
+    }
+
+    /** Whether @p generation ended by the time the pool showed @p epoch: nothing runs, or another
+     *  dispatch does. A fork from thread 0 leaves the generation enclosing it recorded. */
+    bool completed_at_(generation_t generation, epoch_index_t epoch) const noexcept {
+        return (epoch & 1u) == 0 ||
+               atomic_ref<generation_t const>(dispatched_generation_).load(std::memory_order_relaxed) != generation;
+    }
+
+    /** Waits until one unit remains in the countdown: thread 0's own, or a distributed dispatch's
+     *  hold on a sub-pool without thread 0. */
+    void wait_for_other_slices_() noexcept {
+        micro_yield_t micro_yield;
+        thread_index_t remaining;
+        while ((remaining = atomic_ref<thread_index_t>(threads_to_sync_).load(std::memory_order_acquire)) != 1)
+            micro_yield(&threads_to_sync_, remaining, first_thread_, wait_uncapped_k);
+    }
+
+    /** Re-arms the held pool for @p fork with @p contributors, its remaining unit included. */
+    template <typename fork_type_>
+    generation_t rearm_held_(fork_type_ &fork, thread_index_t contributors) noexcept {
+        fork_state_ = std::addressof(fork);
+        fork_trampoline_ = &call_as_lambda_<fork_type_>;
+        // The count precedes the epoch's release, so a worker acquiring it decrements a fresh count
+        atomic_ref<thread_index_t>(threads_to_sync_).store(contributors, std::memory_order_relaxed);
+        epoch_index_t const epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_relaxed);
+        return step_epoch_and_wake_(epoch + 2);
+    }
+
+    /** Thread 0 re-arms its held pool for @p fork, runs its own slice, and waits for the rest. */
+    template <typename fork_type_>
+    generation_t fork_from_thread_zero_(fork_type_ &fork) noexcept {
+        wait_for_other_slices_();
+        if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind();
+        generation_t const generation = rearm_held_(fork, threads_count());
+        fork(thread_in_domain_t {first_thread_, compute_domain_index_});
+        wait_for_other_slices_();
+        return generation;
+    }
+
+    /** Ends a distributed dispatch's hold on this sub-pool: the countdown, then the even epoch. */
+    void release_hold_() noexcept {
+        epoch_index_t const epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_relaxed);
+        atomic_ref<thread_index_t>(threads_to_sync_).store(0, std::memory_order_release);
+        atomic_ref<epoch_index_t>(epoch_).store(epoch + 1, std::memory_order_release);
+    }
+
+    /** Whether the calling thread is worker 0 of a caller-exclusive pool; an inclusive pool's
+     *  slot 0 is its caller. */
+    bool called_on_thread_zero_() const noexcept {
+        return caller_exclusivity() == caller_exclusive_k && pthreads_.size() != 0 &&
+               pthreads_[0].id.load(std::memory_order_relaxed) == current_thread_id();
     }
 
     /**
@@ -1055,10 +1128,13 @@ struct colocated_pool {
                     atomic_ref<thread_index_t>(pool->threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
                 assert(before_decrement > 0 && "We can't be here if there are no worker threads");
 
-                // The last contributor to finish steps the epoch, signaling completion, as its only
-                // writer: the next claimer waits for this even epoch before it writes one
-                if (before_decrement == 1)
-                    atomic_ref<epoch_index_t>(pool->epoch_).store(new_epoch + 1, std::memory_order_release);
+                // The last contributor steps the epoch to even, as its only writer, and the next
+                // claimer waits for that before writing one. Forks from thread 0 may have moved it
+                // past the one picked up, so it steps the current one.
+                if (before_decrement == 1) {
+                    atomic_ref<epoch_index_t> const epoch(pool->epoch_);
+                    epoch.store(epoch.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+                }
             }
             last_epoch = new_epoch;
         }
@@ -1392,6 +1468,9 @@ struct distributed_pool {
      */
     colocations_t colocations_ {};
 
+    /** The fork of the dispatch in flight, whose slice on thread 0 ends the other holds. */
+    void *fork_state_ {nullptr};
+
   public:
     distributed_pool(distributed_pool &&) = delete;
     distributed_pool(distributed_pool const &) = delete;
@@ -1654,9 +1733,14 @@ struct distributed_pool {
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
         assert(colocations_ && "Thread pools must be initialized before broadcasting");
 
-        // Claim every sub-pool before publishing on any, so a refused dispatch leaves none running
+        // Thread 0 runs code only inside a slice, while every sub-pool still counts a unit for it
+        if (colocations_[0].called_on_thread_zero_()) return fork_from_thread_zero_(fork);
+
+        // Claim every sub-pool before publishing on any, so a refused dispatch leaves none running.
+        // Sub-pools without thread 0 count one extra unit, a hold its slice ends, so they stay
+        // claimed for any fork it makes, and the first sub-pool is still the last to finish.
         for (std::size_t i = 0; i != colocations_.size(); ++i) {
-            if (colocations_[i].claim_()) continue;
+            if (colocations_[i].claim_(colocations_[i].threads_count() + (i != 0 ? 1 : 0))) continue;
             while (i != 0) colocations_[--i].unclaim_();
             return 0;
         }
@@ -1666,7 +1750,10 @@ struct distributed_pool {
         // dispatch goes through this wrapper - never dispatch to a sub-pool directly.
         generation_t last_sub_generation {};
         for (std::size_t i = 1; i < colocations_.size(); ++i) last_sub_generation = colocations_[i].publish_(fork);
-        generation_t const generation = colocations_[0].publish_(fork);
+        fork_state_ = std::addressof(fork);
+        colocations_[0].fork_state_ = this;
+        colocations_[0].fork_trampoline_ = &call_as_lambda_then_end_holds_<fork_type_>;
+        generation_t const generation = colocations_[0].publish_claimed_();
         assert((colocations_.size() == 1 || last_sub_generation == generation) &&
                "ComputeDomain sub-pools must advance in generation lockstep");
         (void)last_sub_generation;
@@ -1694,6 +1781,8 @@ struct distributed_pool {
      */
     void unsafe_join(generation_t generation) noexcept {
         assert(colocations_ && "Thread pools must be initialized before broadcasting");
+        // ? Thread 0's forks finish inside their dispatch
+        if (colocations_[0].called_on_thread_zero_()) return;
 
         // Join the caller-hosting compute_domain first: on inclusive pools its slice runs here and
         // overlaps the remote sub-pools' completion instead of waiting behind them.
@@ -1847,6 +1936,33 @@ struct distributed_pool {
         threads_count_ = threads;
         exclusivity_ = exclusivity;
         return status_t::success_k;
+    }
+
+  private:
+    /** Runs a slice of the fork in flight on the first sub-pool; on thread 0 it then ends the holds
+     *  of the others, last to first, so a claimer winning the first finds the rest free. */
+    template <typename fork_type_>
+    static void call_as_lambda_then_end_holds_(void *punned_pool, thread_in_domain_t at) noexcept {
+        distributed_pool &pool = *static_cast<distributed_pool *>(punned_pool);
+        (*static_cast<fork_type_ *>(pool.fork_state_))(at);
+        if (at.thread != 0) return;
+        for (std::size_t i = pool.colocations_.size(); --i != 0;) {
+            pool.colocations_[i].wait_for_other_slices_();
+            pool.colocations_[i].release_hold_();
+        }
+    }
+
+    /** Thread 0 re-arms every sub-pool it holds for @p fork, runs its slice in place, and waits. */
+    template <typename fork_type_>
+    generation_t fork_from_thread_zero_(fork_type_ &fork) noexcept {
+        for (std::size_t i = 0; i != colocations_.size(); ++i) colocations_[i].wait_for_other_slices_();
+        if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind();
+        generation_t generation {};
+        for (std::size_t i = colocations_.size(); i-- != 0;)
+            generation = colocations_[i].rearm_held_(fork, colocations_[i].threads_count() + (i != 0 ? 1 : 0));
+        fork(thread_in_domain_t {0, colocations_[0].compute_domain_index_});
+        for (std::size_t i = 0; i != colocations_.size(); ++i) colocations_[i].wait_for_other_slices_();
+        return generation;
     }
 };
 

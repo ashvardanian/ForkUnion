@@ -18,7 +18,7 @@
  *      caller's still held and is refused, and leaves its fork running there with nobody to join it
  */
 #define thread_count 4
-#define location_count 8
+#define location_count 10
 #define history_depth 7
 #define remote_lags false
 #include <distributed_pool/protocol.pml>
@@ -26,7 +26,7 @@
 /** The thread that dispatches beside the caller, and the count of finished holders, past the words
  *  of the pool, whose @c acq_rel steps are the program's own hand-off before @c terminate. */
 #define rival 3
-#define finished 7
+#define finished 9
 
 /** A holder of the pool: one dispatch, joined caller first if admitted; the second to finish lets
  *  the workers go. */

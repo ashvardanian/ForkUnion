@@ -21,7 +21,7 @@
  *      where the store wakes nobody, and the dispatch reads nap and skips its wake
  */
 #define thread_count 3
-#define location_count 7
+#define location_count 10
 #define history_depth 13
 #define through_c_shim false
 #include <flat_pool/protocol.pml>

@@ -8,23 +8,28 @@
  *  The epoch is odd while a @c fork_state is in flight and even when idle, and the mood puts
  *  workers to sleep and lets them go. A dispatcher runs @c generations generations, two by default,
  *  on a caller-inclusive pool with two workers. Each epoch store has one writer, so neither step
- *  needs a read-modify-write. Every wait is the @c wait_on of <tt>monitor_wait.pml</tt>.
+ *  needs a read-modify-write. On a caller-exclusive pool, thread 0 may fork from its slice, still
+ *  holding its own unit. Every wait is the @c wait_on of <tt>monitor_wait.pml</tt>.
  *
  *  - No fork is torn.
  *  - Every contributor reads the @c fork_state its generation published and runs each one exactly
  *    once.
  *  - The @c threads_to_sync never goes below zero, and every token a join receives is odd.
  *  - A completed join sees every contributor's result.
+ *  - No completion step fires and no dispatch is admitted while thread 0 forks from its slice.
+ *  - A token reads complete exactly once its dispatch, forks from thread 0 included, ended.
  */
 #include <weak_memory.pml>
 #include <monitor_wait.pml>
 
 /** The caller's thread, which plays the dispatcher and contributes without a result word of its
- *  own; the workers are threads 1 and 2. */
+ *  own; the workers are threads 1 and 2. On a caller-exclusive pool, thread 0 is a worker, again
+ *  without a result word. */
 #define caller 0
 
 /** The words, by the pool member each stands for, then one result word per worker, the spawn edge,
- *  the C shim's callback slot @c opaque_pool_t::current_callback, and the poller's token. */
+ *  the C shim's callback slot @c opaque_pool_t::current_callback, the poller's token, and
+ *  @c dispatched_generation, the generation of the dispatch in flight. */
 #define epoch 0
 #define threads_to_sync 1
 #define mood 2
@@ -33,6 +38,7 @@
 #define spawned 6
 #define current_callback 7
 #define token 8
+#define dispatched_generation 9
 
 /** The contributors, the caller's slice and the two workers', and the moods the pool moves
  *  through. */
@@ -41,6 +47,16 @@
 #define nap 1
 #define die 2
 #define sleep 3
+
+/** The fork values past every round a dispatcher publishes: a dispatch of @c forking_fork has
+ *  thread 0 fork twice from its slice, the second fork's slice nesting a third, and one of
+ *  @c forking_once has it fork once. */
+#define forking_fork (generations + 1)
+#define first_fork (generations + 2)
+#define second_fork (generations + 3)
+#define nested_fork (generations + 4)
+#define forking_once (generations + 5)
+#define fork_values (generations + 6)
 
 /** Not a word but the kernel's queue of threads blocked on @c mood: a store to the word wakes a
  *  monitor, while only an explicit @c os_wake_all_on_word wakes a thread in this queue. */
@@ -100,21 +116,55 @@
 #ifndef generation_check
 #define generation_check true
 #endif
+#ifndef fork_publish_order
+#define fork_publish_order order_release
+#endif
+#ifndef wait_for_other_slices
+#define wait_for_other_slices true
+#endif
+#ifndef completion_from_current_epoch
+#define completion_from_current_epoch true
+#endif
 
 #define stepped(value) (((value) + 1) % epoch_modulus)
 #define round_of(generation) (((generation) + 1) / 2)
+#define rounds (epoch_modulus / 2 + 1)
 
 byte workers_exited;
 bool terminated;                     // die was stored and not yet reset
 byte current_generation;             // `opaque_pool_t::current_generation`, which only its holder touches
-byte forked[epoch_modulus / 2 + 1];  // the fork each generation published, by its round
+byte forked[rounds];                 // the fork each generation published, by its round
 byte running;                        // contributors of the live generation yet to count down
-byte ran[thread_count * (generations + 3)]; // slices run, per contributor and fork
+byte ran[thread_count * fork_values]; // slices run, per contributor and fork
+bool forking;                        // thread 0 runs the slice it forks from, not yet counted down
 
-/** One slice: the @c fork_state, the result of a worker, the decrement, and the completion step
- *  for the last one, released with @p completion, over the caller's @p seen_fork,
- *  @p seen_callback, @p before and @p observed. */
-inline contribute(t, generation, by_worker, completion, seen_fork, seen_callback, before, observed) {
+/** The decrement after a slice, which never reads 1 while thread 0 forks from its slice, waking a
+ *  thread 0 that waits on the countdown, and the completion step by the last contributor, released
+ *  with @p completion, from the current epoch if @p from_current and else from @p generation, over
+ *  the caller's @p before and @p observed. */
+inline count_down(t, generation, completion, from_current, before, observed) {
+    atomic {
+        read_modify_write(t, threads_to_sync, decrement_order, before, before - 1);
+        assert(before != 1 || !forking);
+        running--;
+        wake(threads_to_sync)
+    };
+    assert(before > 0);
+    if
+    :: before == 1 ->
+        if
+        :: from_current -> load(t, epoch, order_relaxed, observed)
+        :: else -> observed = generation
+        fi;
+        atomic { store(t, epoch, completion, stepped(observed)); wake(epoch) }
+    :: else
+    fi
+}
+
+/** One slice: the @c fork_state, the result of a worker, thread 0's forks for @c forking_fork and
+ *  @c forking_once, and the count-down, over the caller's @p seen_fork, @p seen_callback,
+ *  @p before, @p observed and @p fork_generation. */
+inline contribute(t, generation, by_worker, completion, from_current, seen_fork, seen_callback, before, observed, fork_generation) {
     assert(!terminated);
     load(t, fork_state, order_relaxed, seen_fork);
     assert(seen_fork == forked[round_of(generation)]);
@@ -127,19 +177,19 @@ inline contribute(t, generation, by_worker, completion, seen_fork, seen_callback
     :: else
     fi;
     atomic {
-        ran[(t) * (generations + 3) + seen_fork]++;
-        assert(ran[(t) * (generations + 3) + seen_fork] == 1)
+        ran[(t) * fork_values + seen_fork]++;
+        assert(ran[(t) * fork_values + seen_fork] == 1)
     };
     if
     :: by_worker -> store(t, result(t), order_relaxed, generation)
     :: else
     fi;
-    atomic { read_modify_write(t, threads_to_sync, decrement_order, before, before - 1); running-- };
-    assert(before > 0);
     if
-    :: before == 1 -> atomic { store(t, epoch, completion, stepped(generation)); wake(epoch) }
+    :: (t) == 0 && seen_fork == forking_fork -> forks_from_thread_zero(t, fork_generation, observed)
+    :: (t) == 0 && seen_fork == forking_once -> fork_once_from_thread_zero(t, fork_generation, observed)
     :: else
-    fi
+    fi;
+    count_down(t, generation, completion, from_current, before, observed)
 }
 
 /** The spawn edge a fresh thread starts from: its view is its creator's at the spawn. */
@@ -215,9 +265,50 @@ inline sleep_workers(t) {
     atomic { store(t, mood, order_release, sleep); wake(mood) }
 }
 
-/** The claim from zero, refused with the zero token, then the fork, the wait for an even epoch,
- *  the wake-up from a parked mood as a relaxed read and a releasing store back to grind, and the
- *  next epoch stored with a release, since the claim leaves the dispatcher its only writer:
+/** Stores the odd @p generation, released with @p order, after the wake-up from a parked mood as a
+ *  relaxed read and a releasing store back to grind, then wakes the kernel's queue if the mood was
+ *  sleep: @c flat_pool::step_epoch_and_wake_ in <tt>flat.hpp</tt>, over the caller's @p observed. The
+ *  ghost records the fork the generation carries and the @p contributing count-downs it awaits. */
+inline step_epoch_and_wake(t, generation, order, round, contributing, observed) {
+    load(t, mood, order_relaxed, observed);
+    parked_mood[t] = observed;
+    if
+    :: observed != grind -> atomic { store(t, mood, wake_order, grind); wake(mood) }
+    :: else
+    fi;
+    atomic {
+        store(t, epoch, order, generation);
+        forked[round_of(generation)] = round;
+        running = contributing;
+        wake(epoch)
+    };
+    if
+    :: parked_mood[t] == sleep -> wake(kernel_queue)
+    :: else
+    fi
+}
+
+/** The wait for an even epoch, the next one recorded as the dispatch in flight, then stored with a
+ *  release, since the claim leaves the dispatcher its only writer: @c flat_pool::publish_claimed_
+ *  in <tt>flat.hpp</tt>, over the caller's @p observed. */
+inline publish_claimed(t, generation, round, contributing, observed) {
+    if
+    :: completion_wait ->
+        do
+        :: load(t, epoch, order_acquire, observed);
+           if
+           :: (observed % 2) == 0 -> break
+           :: else -> wait_on(t, epoch, observed, false)
+           fi
+        od
+    :: else -> load(t, epoch, order_acquire, observed)
+    fi;
+    generation = stepped(observed);
+    store(t, dispatched_generation, order_relaxed, generation);
+    step_epoch_and_wake(t, generation, dispatch_order, round, contributing, observed)
+}
+
+/** The claim from zero, refused with the zero token, then the fork and its publication:
  *  @c flat_pool::unsafe_for_threads in `flat.hpp`, over the caller's @p observed and
  *  @p exchanged. */
 inline dispatch(t, round, generation, observed, exchanged) {
@@ -236,36 +327,21 @@ inline dispatch(t, round, generation, observed, exchanged) {
         :: !claim -> store(t, threads_to_sync, order_relaxed, contributors)
         :: else
         fi;
-        if
-        :: completion_wait ->
-            do
-            :: load(t, epoch, order_acquire, observed);
-               if
-               :: (observed % 2) == 0 -> break
-               :: else -> wait_on(t, epoch, observed, false)
-               fi
-            od
-        :: else -> load(t, epoch, order_acquire, observed)
-        fi;
-        generation = stepped(observed);
-        load(t, mood, order_relaxed, observed);
-        parked_mood[t] = observed;
-        if
-        :: observed != grind -> atomic { store(t, mood, wake_order, grind); wake(mood) }
-        :: else
-        fi;
-        atomic {
-            store(t, epoch, dispatch_order, generation);
-            forked[round_of(generation)] = round;
-            running = contributors;
-            wake(epoch)
-        };
-        if
-        :: parked_mood[t] == sleep -> wake(kernel_queue)
-        :: else
-        fi
+        publish_claimed(t, generation, round, contributors, observed)
     :: else -> generation = 0
     fi
+}
+
+/** The wait for the completion step of the generation @p joined, into the caller's
+ *  @p seen_epoch. */
+inline await_completion(t, joined, seen_epoch) {
+    do
+    :: load(t, epoch, join_order, seen_epoch);
+       if
+       :: seen_epoch != joined -> break
+       :: else -> wait_on(t, epoch, joined, false)
+       fi
+    od
 }
 
 /** The token's parity, the caller's slice, then the wait for the completion step, as
@@ -275,14 +351,9 @@ inline join(t, joined, seen_epoch, seen_fork, seen_callback, before, observed) {
     load(t, epoch, order_acquire, seen_epoch);
     if
     :: seen_epoch == joined ->
-        contribute(t, joined, false, caller_completion_order, seen_fork, seen_callback, before, observed);
-        do
-        :: load(t, epoch, join_order, seen_epoch);
-           if
-           :: seen_epoch != joined -> break
-           :: else -> wait_on(t, epoch, joined, false)
-           fi
-        od
+        // The caller of an inclusive pool is no thread 0, so its slice never forks
+        contribute(t, joined, false, caller_completion_order, false, seen_fork, seen_callback, before, observed, seen_epoch);
+        await_completion(t, joined, seen_epoch)
     :: else
     fi
 }
@@ -325,11 +396,97 @@ inline check_results(t, generation, observed) {
     assert(observed >= generation)
 }
 
+/** Thread 0 waits, over its @p observed, until only its own unit remains in the countdown, unless
+ *  @c wait_for_other_slices is off: @c flat_pool::wait_for_other_slices_ in <tt>flat.hpp</tt>. */
+inline await_other_slices(t, observed) {
+    if
+    :: wait_for_other_slices ->
+        do
+        :: load(t, threads_to_sync, order_acquire, observed);
+           if
+           :: observed == 1 -> break
+           :: else -> wait_on(t, threads_to_sync, observed, false)
+           fi
+        od
+    :: else
+    fi
+}
+
+/** Thread 0 re-arms the pool its unit holds for the fork @p value, into @p fork_generation: the
+ *  wait, the fork, the countdown stored relaxed, still counting thread 0's unit, and the epoch two
+ *  past stored with @c fork_publish_order by the mood steps of a publication, then its own slice in
+ *  place, never counted down, as the first half of @c flat_pool::fork_from_thread_zero_ in
+ *  <tt>flat.hpp</tt> runs them. */
+inline fork_in_place(t, value, fork_generation, observed) {
+    await_other_slices(t, observed);
+    store(t, fork_state, order_relaxed, value);
+    store(t, threads_to_sync, order_relaxed, contributors);
+    load(t, epoch, order_relaxed, observed);
+    fork_generation = (observed + 2) % epoch_modulus;
+    step_epoch_and_wake(t, fork_generation, fork_publish_order, value, contributors, observed);
+    atomic {
+        ran[(t) * fork_values + value]++;
+        assert(ran[(t) * fork_values + value] == 1)
+    }
+}
+
+/** The second half: the wait for the other slices, after which the fork that made
+ *  @p fork_generation reads both workers' results of it. */
+inline fork_ended(t, fork_generation, observed) {
+    await_other_slices(t, observed);
+    load(t, result(1), order_relaxed, observed);
+    assert(observed == fork_generation);
+    load(t, result(2), order_relaxed, observed);
+    assert(observed == fork_generation)
+}
+
+/** Thread 0's slice of @c forking_fork: a fork, then a second whose slice forks once more, each
+ *  through @c flat_pool::unsafe_for_threads, whose join does nothing. */
+inline forks_from_thread_zero(t, fork_generation, observed) {
+    forking = true;
+    fork_in_place(t, first_fork, fork_generation, observed);
+    fork_ended(t, fork_generation, observed);
+    fork_in_place(t, second_fork, fork_generation, observed);
+    fork_in_place(t, nested_fork, fork_generation, observed);
+    fork_ended(t, fork_generation, observed);
+    fork_ended(t, fork_generation, observed);
+    forking = false
+}
+
+/** Thread 0's slice of @c forking_once: a single fork. */
+inline fork_once_from_thread_zero(t, fork_generation, observed) {
+    forking = true;
+    fork_in_place(t, first_fork, fork_generation, observed);
+    fork_ended(t, fork_generation, observed);
+    forking = false
+}
+
+/** Whether @p generation ended by the time the pool showed the epoch read into @p observed, into
+ *  @p complete, over the caller's @p seen_dispatched: nothing runs, or another dispatch does. This
+ *  is @c flat_pool::completed_at_ in <tt>flat.hpp</tt>. */
+inline completed_at(t, generation, observed, seen_dispatched, complete) {
+    load(t, dispatched_generation, order_relaxed, seen_dispatched);
+    complete = (observed % 2) == 0 || seen_dispatched != (generation)
+}
+
+/** The join of a caller-exclusive pool, which polls the token rule until @p generation reads
+ *  complete: @c flat_pool::unsafe_join in <tt>flat.hpp</tt>, over the caller's scratch. */
+inline await_token(t, generation, observed, seen_dispatched, complete) {
+    do
+    :: load(t, epoch, order_acquire, observed);
+       completed_at(t, generation, observed, seen_dispatched, complete);
+       if
+       :: complete -> break
+       :: else -> wait_on(t, epoch, observed, false)
+       fi
+    od
+}
+
 /** The worker loop of @c flat_pool::worker_loop_ in `flat.hpp`, until die: waits on the epoch,
  *  looks at the mood only while the epoch stands still, parks on the mood word by the monitor at
  *  nap and in the kernel at sleep, and contributes to every odd epoch. */
 inline serve(t) {
-    int last_epoch, new_epoch, seen_mood, before, observed, seen_fork, seen_callback;
+    int last_epoch, new_epoch, seen_mood, before, observed, seen_fork, seen_callback, fork_generation;
     do
     :: load(t, epoch, pickup_order, new_epoch);
        if
@@ -344,7 +501,7 @@ inline serve(t) {
        :: else ->
            if
            :: (new_epoch % 2) == 1 ->
-               contribute(t, new_epoch, true, worker_completion_order, seen_fork, seen_callback, before, observed)
+               contribute(t, new_epoch, (t) != 0, worker_completion_order, completion_from_current_epoch, seen_fork, seen_callback, before, observed, fork_generation)
            :: else
            fi;
            last_epoch = new_epoch

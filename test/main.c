@@ -543,6 +543,59 @@ static bool test_pool_refusal(fu_capabilities_t mask) {
     return result;
 }
 
+/** What the call thread 0 runs shares with the test thread. */
+struct nested_context_t {
+
+    fu_pool_t pool;
+    size_t *visited;
+    atomic_size_t counter;
+    atomic_size_t inner_counter;
+
+    /** Zero while the call runs, one once it stored its status. */
+    atomic_int status;
+};
+
+static void count_inner_task(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
+    struct nested_context_t *context = (struct nested_context_t *)context_punned;
+    atomic_fetch_add(&context->inner_counter, 1);
+}
+
+static void record_outer_task(void *context_punned, size_t task, size_t thread, size_t compute_domain) {
+    struct nested_context_t *context = (struct nested_context_t *)context_punned;
+    context->visited[atomic_fetch_add(&context->counter, 1)] = task;
+    // Thread 0 forks again from inside its slice of this fork
+    if (thread == 0 && task == 0) fu_pool_for_n_dynamic(context->pool, contended_tasks_k, count_inner_task, context);
+}
+
+static void run_call_on_thread_zero(void *context_punned, size_t thread, size_t compute_domain) {
+    struct nested_context_t *context = (struct nested_context_t *)context_punned;
+    if (thread != 0) return;
+    fu_pool_for_n(context->pool, default_parallel_tasks_k, record_outer_task, context);
+    atomic_store_explicit(&context->status, 1, memory_order_release);
+}
+
+/** Thread 0 runs a whole call on an exclusive pool, forking it two levels deep, while its caller
+ *  only polls; a zero-token join then frees the pool for the next dispatch. */
+static bool test_forks_from_thread_zero(fu_capabilities_t mask) {
+    if (!(fu_comptime_capabilities() & fu_capability_os_threads_k)) return true;
+    fu_pool_t pool = spawn_default_pool("test_forks_from_thread_zero", mask, fu_caller_exclusive_k);
+    if (!pool) return false;
+    size_t *visited = calloc(default_parallel_tasks_k, sizeof(size_t));
+    struct nested_context_t context = {.pool = pool, .visited = visited, .counter = 0, .inner_counter = 0, .status = 0};
+    fu_generation_t generation = 0;
+    bool result = fu_pool_unsafe_for_threads(pool, run_call_on_thread_zero, &context, &generation) == fu_success_k;
+    while (result && atomic_load_explicit(&context.status, memory_order_acquire) == 0) {}
+    fu_pool_unsafe_join(pool, 0);
+    result = result && atomic_load(&context.counter) == default_parallel_tasks_k &&
+             contains_iota(visited, default_parallel_tasks_k) &&
+             atomic_load(&context.inner_counter) == contended_tasks_k;
+    struct for_n_context_t tasks = {.counter = 0, .visited = visited};
+    result = result && fu_pool_for_n(pool, default_parallel_tasks_k, for_n_callback, &tasks) == fu_success_k;
+    free(visited);
+    fu_pool_delete(pool);
+    return result;
+}
+
 /**
  *  @brief Topology counts must be non-zero, levels dense, and cores partitioned exactly once.
  *
@@ -885,6 +938,7 @@ static void run_battery(fu_capabilities_t mask, size_t *passes_out, size_t *fail
         {"`for_n_dynamic` oversubscribed threads", test_oversubscribed_threads},
         {"`sleep` and wake exactly-once", test_sleep_wake},
         {"`fu_contended_k` refusals", test_pool_refusal},
+        {"forks from thread 0", test_forks_from_thread_zero},
         {"topology counts and core partition", test_topology_counts},
         {"topology memory-domain bounds", test_topology_memory_bounds},
         {"`fu_pool_capabilities` narrowing", test_pool_capabilities_narrowing},

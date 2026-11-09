@@ -1373,11 +1373,22 @@ typedef size_t fu_generation_t;
  *  On @b inclusive pools the caller's own slice runs inside @c fu_pool_unsafe_join, so the pool
  *  cannot complete until the caller joins.
  *
+ *  On @b exclusive pools the slice on thread 0 may itself call @c fu_pool_for_threads,
+ *  @c fu_pool_for_n, @c fu_pool_for_n_dynamic or @c fu_pool_for_slices on the same pool, at any
+ *  depth. Each such fork first waits for every other slice of the one enclosing it, then runs on
+ *  all threads and returns complete. Slices on other threads still have their forks refused. So a
+ *  whole multi-step call can run on the pool while its caller only polls:
+ *
  *  @code{.c}
+ *  void run_call(void *context, size_t thread, size_t compute_domain) {
+ *      if (thread != 0) return;                                   // thread 0 runs the call alone
+ *      fu_pool_for_n(pool, rows, encode_row, context);            // and forks the rest of the pool
+ *      fu_pool_for_n_dynamic(pool, rows, gather_row, context);
+ *      store_status(context, success);
+ *  }
  *  fu_generation_t generation;
- *  if (fu_pool_unsafe_for_threads(pool, callback, context, &generation) != fu_success_k) return;
- *  prepare_next_batch();
- *  fu_pool_unsafe_join(pool, generation);
+ *  if (fu_pool_unsafe_for_threads(pool, run_call, context, &generation) != fu_success_k) return;
+ *  while (!status_is_final(context)) prepare_next_batch();
  *  @endcode
  *
  *  @sa fu_pool_unsafe_join, fu_pool_for_threads for the blocking form.
@@ -1397,6 +1408,9 @@ fu_status_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback
  *      contributor's writes.
  *  @note On @b inclusive pools this turns non-zero only after @c fu_pool_unsafe_join runs the
  *      caller's slice, so poll-then-join is for @b exclusive pools only.
+ *
+ *  A fork from thread 0 of an exclusive pool steps the epoch past its enclosing generation, which
+ *  still reads incomplete until it ends.
  */
 fu_status_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation, fu_bool_t *complete_out);
 
@@ -1408,6 +1422,10 @@ fu_status_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation, fu_b
  *  The synchronization point for the non-blocking API: on return every contributor is done, their
  *  writes are visible, and the pool is ready for the next dispatch. @b Idempotent on a stale or
  *  already-joined generation.
+ *
+ *  On an @b exclusive pool it reads no token: it waits for whatever split dispatch runs. Thread 0
+ *  may finish a whole call before its submitter stores the token, so a thread that learned of the
+ *  call's end from the call itself joins with zero.
  *
  *  @code{.c}
  *  fu_generation_t generation;

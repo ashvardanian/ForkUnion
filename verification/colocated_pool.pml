@@ -22,13 +22,13 @@
  *      arming wakes nobody, and the uncapped waiter waits forever
  */
 #define thread_count 3
-#define location_count 10
+#define location_count 11
 #define history_depth 13
 #define through_c_shim false
 #include <flat_pool/protocol.pml>
 
 /** The handles the spawn writes, past the words of the flat pool. */
-#define handles 9
+#define handles 10
 
 /** The knob: the header's choice, overridden by a `@verify` line. */
 #ifndef nap_at_spawn

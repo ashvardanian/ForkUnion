@@ -25,7 +25,7 @@
  *      countdown never reaches zero, and the join waits forever
  */
 #define thread_count 4
-#define location_count 10
+#define location_count 11
 #define history_depth 9
 #define through_c_shim false
 #include <flat_pool/protocol.pml>
@@ -33,7 +33,7 @@
 /** The thread that dispatches beside the caller, and the word it releases once it finished, past
  *  the words of the flat pool, as the program's own hand-off before @c terminate would. */
 #define rival 3
-#define rival_finished 9
+#define rival_finished 10
 
 /** A worker the spawn starts: contributes to every dispatch until die. */
 proctype worker(byte t) {

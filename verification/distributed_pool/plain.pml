@@ -16,7 +16,7 @@
  *      colocation still running, and the poller reads its worker's result unwritten
  */
 #define thread_count 4
-#define location_count 7
+#define location_count 9
 #define history_depth 4
 #define remote_lags false
 #include <distributed_pool/protocol.pml>

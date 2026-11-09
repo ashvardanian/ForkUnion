@@ -256,6 +256,10 @@ class flat_pool {
     /** Generation clock: odd while a fork is in flight, even when idle. */
     alignas(alignment_k) epoch_index_t epoch_ {0};
 
+    /** The generation of the dispatch in flight, stored by its claimer before the epoch that
+     *  publishes it, so a token stays exact while forks from thread 0 step the epoch past it. */
+    generation_t dispatched_generation_ {0};
+
   public:
     flat_pool(flat_pool &&) = delete;
     flat_pool(flat_pool const &) = delete;
@@ -534,12 +538,18 @@ class flat_pool {
      *  @return A @c generation_t token identifying this dispatch, or the zero token when the pool
      *      refused it: another dispatch runs, another caller's or the one this call runs inside.
      *  @sa Use in conjunction with @c unsafe_join.
+     *
+     *  On a @c caller_exclusive_k pool, thread 0 may fork from inside its own slice. That fork
+     *  waits for every other slice of the enclosing one, runs on all threads, and returns complete,
+     *  so its join does nothing. A slice on any other thread still has its fork refused.
      */
     template <is_thread_callback<index_t> fork_type_>
     generation_t unsafe_for_threads(fork_type_ &fork) noexcept {
 
         thread_index_t const threads = threads_count();
         assert(threads != 0 && "Thread pool not initialized");
+        // Thread 0 runs code only inside a slice, still holding its own unit of the countdown
+        if (called_on_thread_zero_()) return fork_from_thread_zero_(fork);
 
         // The countdown is zero exactly when no contributor runs, so claiming it from zero admits
         // one dispatch, and its acquire carries the last generation's odd epoch to the wait below.
@@ -554,23 +564,7 @@ class flat_pool {
         // Configure "fork" details: every contributor of the last generation counted down already
         fork_state_ = std::addressof(fork);
         fork_trampoline_ = &call_as_lambda_<fork_type_>;
-
-        // The last contributor counts down to zero just before it steps the epoch to even
-        micro_yield_t micro_yield;
-        epoch_index_t previous_epoch;
-        while ((previous_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) & 1u)
-            micro_yield(&epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
-
-        // We are most likely already "grinding"; parked workers wake on this store and then spin on
-        // `epoch_`. Read first, so a grinding pool takes no extra store or syscall.
-        mood_t const mood = atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed);
-        if (mood != mood_t::grind_k) atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_release);
-
-        // The claim leaves this caller the epoch's only writer until its contributors count down
-        generation_t const generation = static_cast<generation_t>(previous_epoch + 1);
-        atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
-        if (mood == mood_t::sleep_k) os_wake_all_on_word(&mood_);
-        return generation;
+        return publish_claimed_();
     }
 
     /**
@@ -578,41 +572,50 @@ class flat_pool {
      *  @note A @c true result synchronizes with all contributors: their writes are visible.
      *
      *  On @c caller_inclusive_k pools this only turns @c true once @c unsafe_join runs the caller's
-     *  slice, so poll-then-join applies only to @c caller_exclusive_k pools.
+     *  slice, so poll-then-join applies only to @c caller_exclusive_k pools. A fork from thread 0
+     *  steps the epoch past its enclosing generation, which stays in flight until the epoch turns
+     *  even, while a token of that fork reads complete at once.
      */
     bool is_complete(generation_t generation) const noexcept {
-        return generation != atomic_ref<epoch_index_t const>(epoch_).load(std::memory_order_acquire);
+        return completed_at_(generation, atomic_ref<epoch_index_t const>(epoch_).load(std::memory_order_acquire));
     }
 
     /**
      *  @brief Blocks the calling thread until the generation identified by @p generation finishes.
      *  @note On @c caller_inclusive_k pools, first executes the calling thread's slice.
      *
-     *  Idempotent, returning immediately for already-joined or stale generations.
+     *  Idempotent, returning immediately for already-joined or stale generations, and for the
+     *  forks of thread 0, which finish inside @c unsafe_for_threads.
      */
     void unsafe_join(generation_t generation) noexcept {
         assert((generation & 1u) == 1 && "Generation tokens are always odd");
+        micro_yield_t micro_yield;
+        if (caller_exclusivity() == caller_exclusive_k) {
+            // Thread 0's own forks read complete at once: they finish inside `unsafe_for_threads`
+            epoch_index_t epoch;
+            while (
+                !completed_at_(generation, epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)))
+                micro_yield(&epoch_, epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
+            return;
+        }
+
         // ? Stale or already complete
         if (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) != generation) return;
 
         // On inclusive pools the calling thread is a contributor: execute its slice and count it
         // down exactly like a worker thread would.
-        bool const use_caller_thread = caller_exclusivity() == caller_inclusive_k;
-        if (use_caller_thread) {
-            fork_trampoline_(fork_state_, static_cast<thread_index_t>(0));
-            thread_index_t const before_decrement =
-                atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
-            assert(before_decrement > 0 && "The contributor count must include the caller");
+        fork_trampoline_(fork_state_, static_cast<thread_index_t>(0));
+        thread_index_t const before_decrement =
+            atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
+        assert(before_decrement > 0 && "The contributor count must include the caller");
 
-            // The last contributor steps the epoch, as its only writer, to signal completion
-            if (before_decrement == 1)
-                atomic_ref<epoch_index_t>(epoch_).store(static_cast<epoch_index_t>(generation + 1),
-                                                        std::memory_order_release);
-        }
+        // The last contributor steps the epoch, as its only writer, to signal completion
+        if (before_decrement == 1)
+            atomic_ref<epoch_index_t>(epoch_).store(static_cast<epoch_index_t>(generation + 1),
+                                                    std::memory_order_release);
 
         // Wait for the last contributor's completion step: only `epoch_` moves here, so a
         // monitored waiter arms the right line, and the completing store's release wakes it.
-        micro_yield_t micro_yield;
         while (atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire) == generation)
             micro_yield(&epoch_, generation, static_cast<thread_index_t>(0), wait_uncapped_k);
     }
@@ -671,6 +674,69 @@ class flat_pool {
 #pragma endregion ComputeDomains Compatibility
 
   private:
+    /** Publishes the claimed dispatch once the last generation's even epoch shows; the claim
+     *  leaves this caller the epoch's only writer until its contributors count down. */
+    generation_t publish_claimed_() noexcept {
+        // The last contributor counts down to zero just before it steps the epoch to even
+        micro_yield_t micro_yield;
+        epoch_index_t previous_epoch;
+        while ((previous_epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_acquire)) & 1u)
+            micro_yield(&epoch_, previous_epoch, static_cast<thread_index_t>(0), wait_uncapped_k);
+        atomic_ref<generation_t>(dispatched_generation_)
+            .store(static_cast<generation_t>(previous_epoch + 1), std::memory_order_relaxed);
+        return step_epoch_and_wake_(static_cast<epoch_index_t>(previous_epoch + 1));
+    }
+
+    /** Stores the odd @p generation, waking parked workers first. */
+    generation_t step_epoch_and_wake_(epoch_index_t generation) noexcept {
+        // We are most likely already "grinding"; parked workers wake on this store and then spin on
+        // `epoch_`. Read first, so a grinding pool takes no extra store or syscall.
+        mood_t const mood = atomic_ref<mood_t>(mood_).load(std::memory_order_relaxed);
+        if (mood != mood_t::grind_k) atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_release);
+        atomic_ref<epoch_index_t>(epoch_).store(generation, std::memory_order_release);
+        if (mood == mood_t::sleep_k) os_wake_all_on_word(&mood_);
+        return static_cast<generation_t>(generation);
+    }
+
+    /** Whether @p generation ended by the time the pool showed @p epoch: nothing runs, or another
+     *  dispatch does. A fork from thread 0 leaves the generation enclosing it recorded. */
+    bool completed_at_(generation_t generation, epoch_index_t epoch) const noexcept {
+        return (epoch & 1u) == 0 ||
+               atomic_ref<generation_t const>(dispatched_generation_).load(std::memory_order_relaxed) != generation;
+    }
+
+    /** Waits until only thread 0's own unit remains: every other slice of the fork has ended. */
+    void wait_for_other_slices_() noexcept {
+        micro_yield_t micro_yield;
+        thread_index_t remaining;
+        while ((remaining = atomic_ref<thread_index_t>(threads_to_sync_).load(std::memory_order_acquire)) != 1)
+            micro_yield(&threads_to_sync_, remaining, static_cast<thread_index_t>(0), wait_uncapped_k);
+    }
+
+    /** Thread 0 re-arms its held pool for @p fork, runs its own slice, and waits for the rest. */
+    template <typename fork_type_>
+    generation_t fork_from_thread_zero_(fork_type_ &fork) noexcept {
+        wait_for_other_slices_();
+        if constexpr (is_dynamic_invoker<fork_type_>) fork.rewind();
+        fork_state_ = std::addressof(fork);
+        fork_trampoline_ = &call_as_lambda_<fork_type_>;
+        // The count precedes the epoch's release, so a worker acquiring it counts a fresh value;
+        // thread 0's unit stays counted for the enclosing fork, which it counts down when that ends
+        atomic_ref<thread_index_t>(threads_to_sync_).store(threads_count(), std::memory_order_relaxed);
+        epoch_index_t const epoch = atomic_ref<epoch_index_t>(epoch_).load(std::memory_order_relaxed);
+        generation_t const generation = step_epoch_and_wake_(static_cast<epoch_index_t>(epoch + 2));
+        call_as_lambda_<fork_type_>(fork_state_, static_cast<thread_index_t>(0));
+        wait_for_other_slices_();
+        return generation;
+    }
+
+    /** Whether the calling thread is worker 0 of a caller-exclusive pool; an inclusive pool's
+     *  slot 0 is its caller. */
+    bool called_on_thread_zero_() const noexcept {
+        return caller_exclusivity() == caller_exclusive_k && threads_count_ != 0 &&
+               workers_[0].worker.get_id() == std::this_thread::get_id();
+    }
+
     /** Clears the fork state and trampoline between dispatches. */
     void reset_fork_() noexcept {
         fork_state_ = nullptr;
@@ -744,11 +810,14 @@ class flat_pool {
                     atomic_ref<thread_index_t>(threads_to_sync_).fetch_sub(1, std::memory_order_acq_rel);
                 assert(before_decrement > 0 && "We can't be here if there are no worker threads");
 
-                // The last contributor to finish steps the epoch, signaling completion, as its only
-                // writer: the next claimer waits for this even epoch before it writes one
-                if (before_decrement == 1)
-                    atomic_ref<epoch_index_t>(epoch_).store(static_cast<epoch_index_t>(new_epoch + 1),
-                                                            std::memory_order_release);
+                // The last contributor steps the epoch to even, as its only writer, and the next
+                // claimer waits for that before writing one. Forks from thread 0 may have moved it
+                // past the one picked up, so it steps the current one.
+                if (before_decrement == 1) {
+                    atomic_ref<epoch_index_t> const epoch(epoch_);
+                    epoch.store(static_cast<epoch_index_t>(epoch.load(std::memory_order_relaxed) + 1),
+                                std::memory_order_release);
+                }
             }
             last_epoch = new_epoch;
         }

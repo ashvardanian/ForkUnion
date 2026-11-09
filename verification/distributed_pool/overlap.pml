@@ -14,7 +14,7 @@
  *      slice, and the two wait on each other forever
  */
 #define thread_count 4
-#define location_count 7
+#define location_count 9
 #define history_depth 4
 #define remote_lags true
 #include <distributed_pool/protocol.pml>

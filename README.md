@@ -52,6 +52,11 @@ On `caller_exclusive_k` pools you can dispatch, overlap your own work, poll `is_
 On `caller_inclusive_k` pools the calling thread owes one slice of the work, which only runs inside `unsafe_join`, so completion can't be reached by polling alone.
 The same rule shapes the RAII guard returned by `for_threads` and, in C++, the `for_n` family: the workers start at the guard's construction on every pool, and on inclusive pools the caller's own slice runs at `join` or destruction.
 
+On `caller_exclusive_k` pools thread 0 may also fork from inside its own slice, at any depth: such a fork waits for every other slice of the one enclosing it, runs on all threads, and returns complete.
+So `unsafe_for_threads` can hand a whole multi-step call to thread 0, which forks the rest of the pool as it goes, while the caller only polls a status word the call stores at its end.
+That is how one manager thread keeps several exclusive pools busy with no queue and no extra thread.
+A join on such a pool waits for whatever dispatch runs, since the call may end before its submitter stores the token.
+
 In C++ it provides [NUMA extensions](#numa).
 That includes the `colocated_pool` analog of the `flat_pool` and the `domain_allocator_t` for allocating memory in a specific memory domain.
 Those are out-of-the-box compatible with the higher-level APIs.

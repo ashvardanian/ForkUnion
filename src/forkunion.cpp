@@ -1226,6 +1226,12 @@ fu_status_t fu_pool_for_n_dynamic(fu_pool_t pool, size_t n, fu_for_task_t callba
 
 #pragma region Flexible API
 
+/** Whether @p opaque spawned without its caller, so its thread 0 may fork and advance the epoch. */
+static bool runs_exclusive(opaque_pool_t &opaque) noexcept {
+    return visit([](auto &variant) { return variant.caller_exclusivity() == fu::caller_exclusive_k; }, opaque.variants,
+                 false);
+}
+
 fu_status_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback, fu_lambda_context_t context,
                                        fu_generation_t *generation_out) {
     if (!generation_out) return fu_invalid_argument_k;
@@ -1245,7 +1251,8 @@ fu_status_t fu_pool_unsafe_for_threads(fu_pool_t pool, fu_for_threads_t callback
         opaque->current_callback.store(nullptr, std::memory_order_release);
         return fu_contended_k;
     }
-    opaque->current_generation = *generation_out;
+    // An exclusive pool's join reads no token, so none is kept to race the next dispatch over
+    if (!runs_exclusive(*opaque)) opaque->current_generation = *generation_out;
     return fu_success_k;
 }
 
@@ -1269,16 +1276,22 @@ fu_status_t fu_pool_is_complete(fu_pool_t pool, fu_generation_t generation, fu_b
 void fu_pool_unsafe_join(fu_pool_t pool, fu_generation_t generation) {
     assert(pool != nullptr);
     opaque_pool_t *opaque = upcast_pool(pool);
-    // A refusal's zero token joins nothing, whoever holds the slot meanwhile
-    if (generation == 0 || opaque->current_callback.load(std::memory_order_relaxed) == nullptr ||
-        generation != opaque->current_generation)
-        return; // ? Idle, refused, or stale
-    visit(
-        [generation](auto &variant) {
-            variant.unsafe_join(
-                static_cast<typename std::remove_reference_t<decltype(variant)>::generation_t>(generation));
-        },
-        opaque->variants);
+    if (opaque->current_callback.load(std::memory_order_relaxed) == nullptr) return; // ? Nothing split-dispatched
+    if (runs_exclusive(*opaque)) {
+        // Thread 0 may finish a dispatch before its submitter stores the token, so on an exclusive
+        // pool a join waits for whatever dispatch runs and reads no token at all
+        visit([](auto &variant) { variant.unsafe_join(); }, opaque->variants);
+    }
+    else {
+        // A refusal's zero token joins nothing, whoever holds the slot meanwhile
+        if (generation == 0 || generation != opaque->current_generation) return; // ? Refused or stale
+        visit(
+            [generation](auto &variant) {
+                variant.unsafe_join(
+                    static_cast<typename std::remove_reference_t<decltype(variant)>::generation_t>(generation));
+            },
+            opaque->variants);
+    }
     opaque->current_context = nullptr;
     // Last and released, so the next claimer of the slot follows everything this dispatch did
     opaque->current_callback.store(nullptr, std::memory_order_release);

@@ -21,7 +21,7 @@
  *      stale join contributes a slice that is not its own, taking the countdown past zero
  */
 #define thread_count 4
-#define location_count 9
+#define location_count 10
 #define history_depth 9
 #define through_c_shim false
 #include <flat_pool/protocol.pml>
@@ -69,7 +69,7 @@ proctype poller(byte t) {
     load(t, epoch, order_acquire, seen_epoch);
     if
     :: seen_epoch == watched ->
-        contribute(t, watched, false, caller_completion_order, seen_fork, seen_callback, before, observed)
+        contribute(t, watched, false, caller_completion_order, false, seen_fork, seen_callback, before, observed, seen_epoch)
     :: else
     fi
 }

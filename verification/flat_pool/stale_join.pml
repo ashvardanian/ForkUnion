@@ -13,7 +13,7 @@
  *      dispatch, and a worker calls through the cleared slot
  */
 #define thread_count 3
-#define location_count 8
+#define location_count 10
 #define history_depth 9
 #define through_c_shim true
 #include <flat_pool/protocol.pml>
