@@ -244,12 +244,6 @@ struct colocated_pool {
     /** Whether workers pin to one core each or to the whole memory domain. */
     pin_granularity_t pin_granularity_ {pin_to_core_k};
 
-    /**
-     *  @brief The caller's affinity as it was before this pool narrowed it.
-     *  @sa reset_affinity_.
-     */
-    core_mask_t caller_affinity_;
-
     /** Workers the kernel refused to place, distinguishing a pinned pool from a crowded one. */
     thread_index_t unpinned_threads_ {0};
 
@@ -433,12 +427,10 @@ struct colocated_pool {
         memory_domain_id_ = domain.memory_domain_id;
         pin_granularity_ = pin_granularity;
 
-        // Include the main thread into the list of handles
+        // Include the main thread into the list of handles as slot 0. It keeps its own cores and
+        // name: the pool pins and names only the threads it spawns.
         bool const use_caller_thread = exclusivity == caller_inclusive_k;
         if (use_caller_thread) {
-            // Snapshot the caller's affinity before we narrow it, so teardown can put back exactly
-            // what it had rather than the whole machine.
-            [[maybe_unused]] status_t const captured = capture_thread_cores(caller_affinity_);
 #if FORKUNION_OS_WINDOWS_
             // A pseudo-handle that always means "this thread"; valid because slot 0 is only ever
             // pinned from within this very call, on this very thread, and is never joined.
@@ -520,7 +512,6 @@ struct colocated_pool {
         for (thread_index_t i = 0; i < pthreads_.size(); ++i)
             fill_thread_name(pthreads_[i].name, name_,
                              static_cast<std::size_t>(domain.core_ids[i % domain.core_ids.size()]), max_possible_cores);
-        if (use_caller_thread) set_current_thread_name(pthreads_[0].name);
 
         // Pin all of the threads. Where the kernel refuses, the domains still describe the machine
         // and the pool still partitions work by them - it simply cannot hold a thread in place.
@@ -528,7 +519,7 @@ struct colocated_pool {
         // cores spins itself to a standstill, and `all_threads_pinned` is how a caller finds out.
         unpinned_threads_ = 0;
         if (pin_granularity == pin_to_core_k) {
-            for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
+            for (thread_index_t i = use_caller_thread; i < pthreads_.size(); ++i) {
                 std::span<core_id_t const> const cpu = domain.core_ids.subspan(i % domain.core_ids.size(), 1);
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
                 if (succeeded(pin_thread_to_cores(pin_handle, cpu))) pthreads_[i].core_id = cpu.front();
@@ -536,7 +527,7 @@ struct colocated_pool {
             }
         }
         else {
-            for (thread_index_t i = 0; i < pthreads_.size(); ++i) {
+            for (thread_index_t i = use_caller_thread; i < pthreads_.size(); ++i) {
                 native_thread_t const pin_handle = pthreads_[i].handle.load(std::memory_order_relaxed);
                 if (failed(pin_thread_to_cores(pin_handle, domain.core_ids))) ++unpinned_threads_;
             }
@@ -601,13 +592,8 @@ struct colocated_pool {
 #endif
         }
 
-        // Unpin the caller thread if it joined this pool, and is the one we pinned to the node.
-        bool const spawner =
-            use_caller_thread && pthreads_[0].id.load(std::memory_order_relaxed) == current_thread_id();
-
         // Deallocate the handles, IDs, and the claim cursors they carry
         reset_spawned_state_();
-        if (spawner) reset_affinity_();
         reset_fork_();
 
         atomic_ref<mood_t>(mood_).store(mood_t::grind_k, std::memory_order_relaxed);
@@ -959,15 +945,6 @@ struct colocated_pool {
         }
 #endif
         return generation;
-    }
-
-    /**
-     *  @brief Restores the caller's CPU affinity to its pre-spawn snapshot.
-     *  @sa restore_thread_cores.
-     */
-    void reset_affinity_() noexcept {
-        [[maybe_unused]] status_t const restored = restore_thread_cores(caller_affinity_);
-        caller_affinity_.reset();
     }
 
     /** Whether @p generation ended by the time the pool showed @p epoch: nothing runs, or another
@@ -1578,7 +1555,7 @@ struct distributed_pool {
         caller_exclusivity_t const exclusivity = caller_inclusive_k,
         pin_granularity_t const pin_granularity = pin_to_core_k) noexcept {
 
-        // Place the array itself on the first compute domain, pinning the caller there too. We
+        // Place the array itself on the first compute domain, leaving the caller where it runs. We
         // spawn one sub-pool per compute domain, not per NUMA node, so performance and efficiency
         // cores on one node become separate, independently pinned pools.
         if (topology.compute_domains_count() == 0) return status_t::invalid_argument_k;

@@ -1434,7 +1434,7 @@ void log_numa_topology() noexcept {
 #if FORKUNION_WITH_COLOCATE_POOLS_ON_DOMAIN && FORKUNION_OS_LINUX_ && FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY
 
 /**
- *  @brief A pool sizes itself from the cores we were given, and hands the caller back its own mask.
+ *  @brief A pool sizes itself from the cores we were given, and leaves the caller its own mask.
  *
  *  The process is narrowed here the way @c taskset or a cgroup @c cpuset would narrow it. A
  *  topology harvested from the machine rather than from the mask would report every core, the pool
@@ -1462,10 +1462,13 @@ static void test_caller_affinity_preserved() noexcept {
             fu::distributed_pool_t pool;
             succeeded = fu::succeeded(pool.spawn(topology, 2));
             if (succeeded) succeeded = pool.all_threads_pinned();
+            // The caller joins as slot 0 but keeps its own two cores while the pool lives
+            fu::core_mask_t during;
+            succeeded = succeeded && fu::succeeded(fu::capture_thread_cores(during)) && during.count() == 2;
             pool.terminate();
         }
 
-        // The caller must be back on the two cores it narrowed itself to, not the machine's.
+        // The caller is still on the two cores it narrowed itself to, not the machine's.
         fu::core_mask_t afterwards;
         succeeded = succeeded && fu::succeeded(fu::capture_thread_cores(afterwards)) && afterwards.count() == 2;
     }
