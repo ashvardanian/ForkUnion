@@ -79,7 +79,7 @@ Or for the preview development version:
 
 ```toml
 [dependencies]
-forkunion = { git = "https://github.com/ashvardanian/ForkUnion.git", branch = "main-dev" }
+forkunion = { git = "https://github.com/ashvardanian/ForkUnion.git", branch = "main" }
 ```
 
 A minimal example may look like this:
@@ -1094,7 +1094,7 @@ To cross-compile for Android, point the `android_arm64` preset at the NDK's tool
 
 ```bash
 export CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake
-cmake --preset android_arm64 -D ANDROID_ABI=arm64-v8a -D ANDROID_PLATFORM=24    # or armeabi-v7a
+cmake --preset android_arm64 -D ANDROID_ABI=arm64-v8a -D ANDROID_PLATFORM=28    # or armeabi-v7a
 cmake --build --preset android_arm64
 ```
 

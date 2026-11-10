@@ -12,7 +12,7 @@ if (FORKUNION_INSTALL)
     install(DIRECTORY c/ include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
     # No `INCLUDES DESTINATION` here: `target_include_directories` above already declares the same
-    # `$<INSTALL_INTERFACE:include>`, and naming it twice exports the path twice.
+    # `$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>`, and naming it twice exports the path twice.
     install(TARGETS forkunion_header EXPORT forkunionTargets)
     install(
         TARGETS ${forkunion_libraries_}

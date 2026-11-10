@@ -102,10 +102,12 @@ set(forkunion_optional_macros_
 )
 
 # Header-only interface library
+include(GNUInstallDirs)
 add_library(forkunion_header INTERFACE)
 target_include_directories(
-    forkunion_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/c>
-                               $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>
+    forkunion_header
+    INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/c> $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+              $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 # C++20 is the floor consumers must clear, not a ceiling: `cxx_std_20` raises a consumer below it and leaves one at 23
