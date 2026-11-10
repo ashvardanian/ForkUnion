@@ -62,6 +62,12 @@
 
 #pragma region Platform Identity
 
+/** Identity comes from compiler predefines alone; a build sets a @c FORKUNION_WITH_* facility. */
+#if defined(FORKUNION_OS_LINUX_) || defined(FORKUNION_OS_ANDROID_) || defined(FORKUNION_OS_APPLE_) || \
+    defined(FORKUNION_OS_WINDOWS_) || defined(FORKUNION_OS_FREEBSD_) || defined(FORKUNION_OS_POSIX_)
+#error "FORKUNION_OS_*_ are identity, derived from the compiler; set a FORKUNION_WITH_* facility instead"
+#endif
+
 /** Layer 1 is identity: where are we? Derived once, from compiler predefines, and used only to
  *  derive the capabilities below. Nothing else in the library may ask @c __linux__ again. Identity
  *  is the kernel ABI - pthreads, @c sched_setaffinity, @c gettid, @c /proc, @c /sys - which Android
@@ -135,6 +141,18 @@
 #define FORKUNION_HAS_LINUX_MMAN_ 1
 #else
 #define FORKUNION_HAS_LINUX_MMAN_ 0
+#endif
+
+/** Whether Darwin's address waits are declared; they need Clang's @c __builtin_available. */
+#if FORKUNION_OS_APPLE_ && defined(__clang__) && __has_include(<os/os_sync_wait_on_address.h>)
+#define FORKUNION_HAS_APPLE_OS_SYNC_ 1
+#else
+#define FORKUNION_HAS_APPLE_OS_SYNC_ 0
+#endif
+
+/** Android is a sub-identity of Linux, so it stays out of the sum. */
+#if FORKUNION_OS_LINUX_ + FORKUNION_OS_APPLE_ + FORKUNION_OS_WINDOWS_ + FORKUNION_OS_FREEBSD_ > 1
+#error "Two operating-system identities hold at once"
 #endif
 #pragma endregion Platform Identity
 
@@ -332,6 +350,9 @@
 #include <ctime> // `timespec`
 #include <sys/types.h>
 #include <sys/umtx.h> // `_umtx_op`, `UMTX_OP_WAIT_UINT_PRIVATE`, `UMTX_OP_WAKE_PRIVATE`
+#elif FORKUNION_WITH_OS_THREADS && FORKUNION_HAS_APPLE_OS_SYNC_
+#include <os/clock.h>                   // `OS_CLOCK_MACH_ABSOLUTE_TIME`
+#include <os/os_sync_wait_on_address.h> // `os_sync_wait_on_address`, `os_sync_wake_by_address_all`
 #endif
 
 #if FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY && FORKUNION_OS_POSIX_
@@ -1861,8 +1882,8 @@ inline constexpr wait_uncapped_t wait_uncapped_k {};
 
 /** Whether this platform can block a thread on a word; @c sleep falls back to @c nap otherwise. */
 inline constexpr bool os_waits_on_words_k =
-    FORKUNION_WITH_OS_THREADS &&
-    (FORKUNION_OS_LINUX_ || FORKUNION_OS_WINDOWS_ || FORKUNION_OS_FREEBSD_ || FORKUNION_TARGET_WASM_WAIT);
+    FORKUNION_WITH_OS_THREADS && (FORKUNION_OS_LINUX_ || FORKUNION_HAS_APPLE_OS_SYNC_ || FORKUNION_OS_WINDOWS_ ||
+                                  FORKUNION_OS_FREEBSD_ || FORKUNION_TARGET_WASM_WAIT);
 
 /**
  *  @brief Blocks the calling thread in the kernel while @p word holds @p observed.
@@ -1896,6 +1917,21 @@ inline void os_wait_on_word([[maybe_unused]] word_type_ const *word, [[maybe_unu
                             static_cast<long>(wake_up_periodicity_micros % 1'000'000 * 1000)};
     ::_umtx_op(const_cast<word_type_ *>(word), UMTX_OP_WAIT_UINT_PRIVATE, std::bit_cast<std::uint32_t>(observed),
                nullptr, wake_up_periodicity_micros ? &period : nullptr);
+#elif FORKUNION_HAS_APPLE_OS_SYNC_
+    if (__builtin_available(macOS 14.4, iOS 17.4, tvOS 17.4, watchOS 10.4, *)) {
+        void *address = const_cast<word_type_ *>(word);
+        std::uint64_t const value = std::bit_cast<std::uint32_t>(observed);
+        if (wake_up_periodicity_micros)
+            ::os_sync_wait_on_address_with_timeout(address, value, sizeof(word_type_), OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                                   OS_CLOCK_MACH_ABSOLUTE_TIME,
+                                                   static_cast<std::uint64_t>(wake_up_periodicity_micros) * 1000);
+        else ::os_sync_wait_on_address(address, value, sizeof(word_type_), OS_SYNC_WAIT_ON_ADDRESS_NONE);
+        return;
+    }
+    // ? Older kernels cannot be woken, so nap at most a millisecond; the caller re-reads the word.
+    constexpr std::size_t nap_cap_micros_k = 1000;
+    ::usleep(static_cast<useconds_t>(wake_up_periodicity_micros ? min_of(wake_up_periodicity_micros, nap_cap_micros_k)
+                                                                : nap_cap_micros_k));
 #elif FORKUNION_TARGET_WASM_WAIT
     __builtin_wasm_memory_atomic_wait32(
         reinterpret_cast<int *>(const_cast<word_type_ *>(word)), std::bit_cast<int>(observed),
@@ -1918,6 +1954,9 @@ inline void os_wake_all_on_word([[maybe_unused]] word_type_ const *word) noexcep
 #elif FORKUNION_OS_FREEBSD_
     ::_umtx_op(const_cast<word_type_ *>(word), UMTX_OP_WAKE_PRIVATE, (std::numeric_limits<int>::max)(), nullptr,
                nullptr);
+#elif FORKUNION_HAS_APPLE_OS_SYNC_
+    if (__builtin_available(macOS 14.4, iOS 17.4, tvOS 17.4, watchOS 10.4, *))
+        ::os_sync_wake_by_address_all(const_cast<word_type_ *>(word), sizeof(word_type_), OS_SYNC_WAKE_BY_ADDRESS_NONE);
 #elif FORKUNION_TARGET_WASM_WAIT
     __builtin_wasm_memory_atomic_notify(reinterpret_cast<int *>(const_cast<word_type_ *>(word)),
                                         (std::numeric_limits<unsigned>::max)());

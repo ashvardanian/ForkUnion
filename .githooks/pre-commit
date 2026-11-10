@@ -43,6 +43,13 @@ std_collections_baseline_paths=''
 cmake_published_variables=''
 cmake_third_party_variables='EMSCRIPTEN_SYSTEM_PROCESSOR WASI_SDK_PREFIX'
 codegen_macro_prefix=''
+# Its macro prefix, the headers that alone read the compiler's platform predefines, and the predefines beyond
+# the operating systems that its identity also answers.
+macro_prefix="FORKUNION"
+identity_headers="include/forkunion/types.hpp"
+platform_predefines_refused="__gnu_linux__ __unix__ __unix unix __GLIBC__ __GLIBC_PREREQ __aarch64__ __arm64__ _M_ARM64 \
+    __x86_64__ __amd64__ _M_X64 _M_AMD64 __riscv __WAITPKG__ __CLDEMOTE__ __CMPCCXADD__ __RAOINT__ __ARM_FEATURE_ATOMICS \
+    __ARM_FEATURE_RCPC __riscv_atomic __riscv_zawrs __riscv_zicbom __riscv_zacas"
 
 # endregion Project Settings
 
@@ -2451,6 +2458,62 @@ check_memcpy_qualified() {
         "            assignment or std::bit_cast where the types should survive:"
 }
 
+# Rejects a raw operating-system predefine outside `identity_headers`, because each is read there once into the
+# `_OS_*_` identity. Compiler predefines like `__clang__` are read raw wherever they matter.
+check_platform_identity_once() {
+    case " $identity_headers " in *" $staged_path "*) return 0 ;; esac
+    case "$staged_path" in probes/*) return 0 ;; esac
+    local raw
+    raw=$(predefines="__linux__ __APPLE__ _WIN32 _WIN64 WIN32 \
+        __FreeBSD__ __CYGWIN__ __ANDROID__ __wasi__ __EMSCRIPTEN__ __MACH__ \
+        $platform_predefines_refused" scan_staged_file_marking_added_lines '
+        BEGIN {
+            names = ENVIRON["predefines"]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", names); gsub(/[[:space:]]+/, "|", names)
+            names = "(^|[^A-Za-z0-9_])(" names ")([^A-Za-z0-9_]|$)"
+        }
+        (FNR in added) && $0 ~ names { printf "line %d: %s\n", FNR, $0 }' "$staged_code_path")
+    [ -z "$raw" ] || reject_with_reason "$raw" \
+        "$staged_path reads a raw platform predefine; test the ${macro_prefix}_OS_*_" \
+        "            identity $identity_headers derives:"
+}
+
+# Rejects `#ifdef` or a positive `defined` of an `_OS_`, `_ARCH_`, `_HAS_`, `_WITH_`, `_ALLOW_` or `_TARGET_`
+# switch or of `_DEBUG`, because each holds 0 or 1 and `defined` is true either way. A `!defined` default passes,
+# and so does a guard an `#error` follows, as the identity region's override guard.
+check_switches_tested_by_value() {
+    local switches="${macro_prefix}_((OS|ARCH|HAS|WITH|ALLOW|TARGET)_|DEBUG([^A-Za-z0-9_]|$))" tested
+    tested=$(pattern="(^|[^A-Za-z0-9_])defined[[:space:]]*[(]?[[:space:]]*$switches|#[[:space:]]*ifdef[[:space:]]+$switches" \
+        defaulted="![[:space:]]*defined[[:space:]]*[(]?[[:space:]]*$switches" scan_staged_file_marking_added_lines '
+        {
+            first = FNR; fresh = (FNR in added); text = $0
+            while (text ~ /\\[[:space:]]*$/ && (getline continuation) > 0) {
+                if (FNR in added) fresh = 1
+                sub(/\\[[:space:]]*$/, " ", text); text = text continuation
+            }
+        }
+        text ~ /^[[:space:]]*$/ { next }
+        text ~ /^[[:space:]]*#[[:space:]]*error/ { held = ""; next }
+        {
+            if (held != "") print held
+            held = ""; probe = text; gsub(ENVIRON["defaulted"], "", probe)
+            if (fresh && probe ~ ENVIRON["pattern"]) held = "line " first ": " text
+        }
+        END { if (held != "") print held }' "$staged_code_path")
+    [ -z "$tested" ] || reject_with_reason "$tested" \
+        "$staged_path tests a ${macro_prefix}_ switch with defined or #ifdef, which is true at 0 too; test it with #if:"
+}
+
+# Rejects a `_USE_`, `_IS_`, `_ON_`, `_DETECT_`, `_DEFINED_` or `_AVOID_` macro, because a build choice is a
+# `_WITH_`, `_ALLOW_` or `_TARGET_` switch and a platform fact an `_OS_`, `_ARCH_` or `_HAS_` one.
+check_macro_families() {
+    local outside
+    outside=$(printf '%s\n' "$staged_added_text" |
+        grep -E "(^|[^A-Za-z0-9_]|-D)${macro_prefix}_(USE|IS|ON|DETECT|DEFINED|AVOID)_" || true)
+    [ -z "$outside" ] || reject_with_reason "$outside" \
+        "$staged_path names a macro family outside the vocabulary; use a _WITH_, _ALLOW_ or _TARGET_ switch," \
+        "            or an _OS_, _ARCH_ or _HAS_ fact:"
+}
+
 # endregion C and C++ Idioms
 
 # region Formatters
@@ -2885,6 +2948,9 @@ run_shared_checks() {
         check_string_fragments_one_per_line
         check_codegen_macros_are_approved
         check_no_cast_indexing
+        check_platform_identity_once
+        check_switches_tested_by_value
+        check_macro_families
         ;;
     esac
     case "$staged_path" in
@@ -2936,6 +3002,7 @@ run_shared_checks() {
     CMakeLists.txt | *.cmake)
         check_cmake_variable_written_once
         check_cmake_rpath_derived
+        check_macro_families
         ;;
     *.rs)
         check_rust_macros_absent
@@ -3030,20 +3097,6 @@ check_minmax_uses_helpers() {
         "$staged_path calls std::min or std::max; write fu::min_of or fu::max_of from types.hpp:"
 }
 
-# Rejects a raw platform predefine outside `types.hpp`, because `types.hpp` resolves them once into the FORKUNION_*
-# vocabulary. The probes predate that vocabulary, and a genuine exception carries `// FU-ALLOW: <reason>`.
-check_platform_macros_through_vocabulary() {
-    [ "$staged_path" != include/forkunion/types.hpp ] || return 0
-    case "$staged_path" in probes/*) return 0 ;; esac
-    local raw
-    raw=$(printf '%s\n' "$staged_added_text" | grep -vE 'FU-ALLOW' |
-        grep -oE '__linux__|__gnu_linux__|__APPLE__|__ANDROID__|__FreeBSD__|_WIN32|_WIN64|\b__unix__?\b|\bunix\b|__GLIBC__|__GLIBC_PREREQ|\b__aarch64__\b|__arm64__|_M_ARM64|\b__x86_64__\b|__amd64__|_M_X64|_M_AMD64|\b__riscv\b|__WAITPKG__|__CLDEMOTE__|__CMPCCXADD__|__RAOINT__|__ARM_FEATURE_ATOMICS|__ARM_FEATURE_RCPC|__riscv_atomic|__riscv_zawrs|__riscv_zicbom|__riscv_zacas' |
-        sort -u || true)
-    [ -z "$raw" ] || reject_with_reason "$raw" \
-        "$staged_path asks a raw platform macro; use the FORKUNION_* vocabulary types.hpp derives," \
-        "            FORKUNION_OS_*, FORKUNION_ARCH_*, FORKUNION_HAS_* or FORKUNION_TARGET_*, or mark an exception // FU-ALLOW:"
-}
-
 # Rejects a capability gate nested inside another, because each bit gets one flat `#if FORKUNION_TARGET_<CAPABILITY>`
 # region, so a block's gate is the one line above it.
 check_capability_gates_flat() {
@@ -3073,19 +3126,12 @@ check_test_bodies_quiet() {
         "            to the harness:"
 }
 
-# Rejects the retired `FU_` prefix, and a `defined(...)` or `#ifdef` test of a `FORKUNION_ARCH_`, `_OS_` or `_HAS_`
-# fact, because those facts are always defined, as 0 or 1, so such a test is true on every platform.
+# Rejects the retired `FU_` prefix, because every all-caps name spells `FORKUNION_` in full.
 check_macro_names_current() {
-    local retired positive
+    local retired
     retired=$(printf '%s\n' "$staged_added_text" | grep -E '(^|[^A-Za-z0-9_]|-D)FU_[A-Z0-9]' || true)
     [ -z "$retired" ] || reject_with_reason "$retired" \
         "$staged_path spells the retired FU_ prefix; every all-caps name starts with FORKUNION_:"
-    positive=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns | "$fastest_awk" '
-        { line = $0; gsub(/![[:space:]]*defined[[:space:]]*\(?[[:space:]]*FORKUNION_(ARCH|OS|HAS)_/, "", line) }
-        line ~ /defined[[:space:]]*\(?[[:space:]]*FORKUNION_(ARCH|OS|HAS)_|#[[:space:]]*ifdef[[:space:]]+FORKUNION_(ARCH|OS|HAS)_/' || true)
-    [ -z "$positive" ] || reject_with_reason "$positive" \
-        "$staged_path tests a FORKUNION_ARCH_, _OS_ or _HAS_ fact with defined(), which is true everywhere;" \
-        "            they are always 0 or 1, so test them with #if:"
 }
 
 # Rejects a `<file>.<ext>:<line>` citation in a verification model, client or note, because a line number
@@ -3105,7 +3151,6 @@ run_project_checks() {
     esac
     case "$staged_path" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.inl)
-        check_platform_macros_through_vocabulary
         check_capability_gates_flat
         check_ceiling_division_uses_helper
         check_macro_names_current

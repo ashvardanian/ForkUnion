@@ -28,6 +28,7 @@ target_compile_options(
               $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall
               -Wextra
               -Wpedantic
+              -Wundef
               -Wconversion
               -Wcast-qual
               -Wcast-align

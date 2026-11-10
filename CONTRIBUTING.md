@@ -3,6 +3,20 @@
 The [Testing & Benchmarking](https://github.com/ashvardanian/ForkUnion/blob/main/README.md#testing--benchmarking) section of the README lists the commands CI runs for C, C++, Rust, Zig and Mojo.
 Configuring the CMake build points `core.hooksPath` at `.githooks`, which arms the hooks below.
 
+## Macros
+
+The README lists the public macro families; the internal ones, which end in `_`, are listed here.
+
+| Family                | Form                       | Example                     |
+| :-------------------- | :------------------------- | :-------------------------- |
+| Architecture fact     | `FORKUNION_ARCH_<ARCH>_`   | `FORKUNION_ARCH_X8664_`     |
+| Operating-system fact | `FORKUNION_OS_<OS>_`       | `FORKUNION_OS_LINUX_`       |
+| Toolchain fact        | `FORKUNION_HAS_<FEATURE>_` | `FORKUNION_HAS_INLINE_ASM_` |
+
+Architectures are spelled `X8664`, `ARM64`, `RISCV64` and `WASM`.
+Only `include/forkunion/types.hpp` reads the operating-system predefines, like `__linux__` or `_WIN32`; compiler predefines, like `__clang__` or `_MSC_VER`, are tested directly.
+`defined(...)` appears only in a `!defined` default and in a guard that an `#error` follows.
+
 ## Commits
 
 `.githooks/commit-msg` checks every message:

@@ -148,7 +148,7 @@ struct linux_numa_allocator {
         auto result_ptr = allocate(aligned_size_bytes / sizeof(value_type), page_size_bytes);
         if (!result_ptr) return {}; // ! Allocation failed
         size_type const pages_count = aligned_size_bytes / page_size_bytes;
-        return {result_ptr, size, aligned_size_bytes, pages_count};
+        return {result_ptr, aligned_size_bytes / sizeof(value_type), aligned_size_bytes, pages_count};
     }
 
     /**
@@ -411,8 +411,8 @@ inline bool freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory_dom
 
 /**
  *  @brief Tries allocating and placing uninitialized memory on a specific NUMA @p memory_domain_id.
- *  @return A pointer to the allocated memory, or nullptr when the allocation failed or the page
- *      size stays unsupported.
+ *  @return The mapping in bytes and the pages actually granted, empty when the allocation failed or
+ *      the page size stays unsupported.
  *  @sa linux_numa_allocate is the Linux counterpart; FreeBSD places by thread policy, not @c mbind.
  *
  *  Larger-than-base page sizes ask for @c MAP_ALIGNED_SUPER - an alignment hint, since FreeBSD's
@@ -420,11 +420,12 @@ inline bool freebsd_domain_prefer([[maybe_unused]] memory_domain_id_t memory_dom
  *  super-aligned map retries with base pages so the allocator stays total, matching the Linux
  *  @c nullptr-on-unsupported contract.
  */
-inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_size_bytes,
-                                     memory_domain_id_t memory_domain_id) noexcept {
+inline allocation_result<void *, std::size_t> freebsd_domain_allocate(std::size_t size_bytes,
+                                                                      std::size_t page_size_bytes,
+                                                                      memory_domain_id_t memory_domain_id) noexcept {
     assert(memory_domain_id >= 0 && "NUMA node ID must be non-negative");
 #if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
-    if (size_bytes == 0) return nullptr;
+    if (size_bytes == 0) return {};
 
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     bool huge_requested = false;
@@ -434,7 +435,7 @@ inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_si
         mmap_flags |= MAP_ALIGNED_SUPER;
         huge_requested = true;
 #else
-        return nullptr; // ! Every page size but the base one needs the huge-page capability
+        return {}; // ! Every page size but the base one needs the huge-page capability
 #endif
     }
 
@@ -446,17 +447,19 @@ inline void *freebsd_domain_allocate(std::size_t size_bytes, std::size_t page_si
     if (result_ptr == MAP_FAILED && huge_requested) {
         // Superpage alignment failed; retry with base pages so the allocator stays total.
         mmap_flags &= ~MAP_ALIGNED_SUPER;
+        page_size_bytes = static_cast<std::size_t>(ram_page_size());
         result_ptr = ::mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
     }
     if (result_ptr != MAP_FAILED) freebsd_first_touch(result_ptr, size_bytes);
 
     freebsd_domain_restore(&saved, saved_policy, have_saved);
-    return result_ptr == MAP_FAILED ? nullptr : result_ptr;
+    if (result_ptr == MAP_FAILED) return {};
+    return {result_ptr, size_bytes, size_bytes, div_ceil(size_bytes, page_size_bytes)};
 #else
     fu_unused_(size_bytes);
     fu_unused_(page_size_bytes);
     fu_unused_(memory_domain_id);
-    return nullptr;
+    return {};
 #endif
 }
 
@@ -508,18 +511,16 @@ struct freebsd_numa_allocator {
         // ? `size_bytes` was positive, so rounding wrapped
         if (aligned_size_bytes == 0) return {};
         if (aligned_size_bytes % sizeof(value_type)) return {}; // ! Not a size multiple
-        auto result_ptr = allocate(aligned_size_bytes / sizeof(value_type), page_size_bytes);
-        if (!result_ptr) return {}; // ! Allocation failed
-        size_type const pages_count = aligned_size_bytes / page_size_bytes;
-        return {result_ptr, size, aligned_size_bytes, pages_count};
+        auto const mapping = freebsd_domain_allocate(aligned_size_bytes, page_size_bytes, memory_domain_id_);
+        if (!mapping) return {};
+        return {static_cast<value_type *>(mapping.ptr), aligned_size_bytes / sizeof(value_type), aligned_size_bytes,
+                mapping.pages};
     }
 
     value_type *allocate(size_type size, size_type page_size_bytes) noexcept {
         size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
         if (size_bytes == 0) return {};
-        void *result_ptr = freebsd_domain_allocate(size_bytes, page_size_bytes, memory_domain_id_);
-        if (!result_ptr) return {}; // ! Allocation failed
-        return static_cast<value_type *>(result_ptr);
+        return static_cast<value_type *>(freebsd_domain_allocate(size_bytes, page_size_bytes, memory_domain_id_).ptr);
     }
 
     allocation_result<value_type *, size_type> allocate_at_least(size_type size) noexcept {
@@ -555,15 +556,17 @@ using freebsd_numa_allocator_t = freebsd_numa_allocator<>;
 
 /**
  *  @brief Maps <tt>domains * stride_bytes</tt> and PREFER-touches slice @p d on <tt>domain_ids[d]</tt>.
- *  @return nullptr if the mapping failed or the page size is unsupported.
+ *  @return The mapping in bytes and the pages actually granted, empty if the mapping failed or the
+ *      page size is unsupported.
  *  @sa linux_symmetric_allocate is the Linux counterpart; FreeBSD places slices by thread policy.
  */
-inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std::size_t stride_bytes,
-                                        std::size_t page_size_bytes) noexcept {
+inline allocation_result<void *, std::size_t> freebsd_symmetric_allocate(machine_topology_t const &topology,
+                                                                         std::size_t stride_bytes,
+                                                                         std::size_t page_size_bytes) noexcept {
 #if FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN && FORKUNION_OS_FREEBSD_
     std::size_t const domains = topology.memory_domains_count();
     std::size_t const total_bytes = bytes_for_elements(domains, stride_bytes);
-    if (total_bytes == 0) return nullptr;
+    if (total_bytes == 0) return {};
 
     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
     bool huge_requested = false;
@@ -572,16 +575,17 @@ inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std:
         mmap_flags |= MAP_ALIGNED_SUPER;
         huge_requested = true;
 #else
-        return nullptr; // ! Every page size but the base one needs the huge-page capability
+        return {}; // ! Every page size but the base one needs the huge-page capability
 #endif
     }
 
     void *base = ::mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
     if (base == MAP_FAILED && huge_requested) {
         mmap_flags &= ~MAP_ALIGNED_SUPER;
+        page_size_bytes = static_cast<std::size_t>(ram_page_size());
         base = ::mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
     }
-    if (base == MAP_FAILED) return nullptr; // ! Mapping failed
+    if (base == MAP_FAILED) return {}; // ! Mapping failed
 
     // A single memory domain needs no placement - the one slice already spans the only node.
     if (domains > 1) {
@@ -600,12 +604,12 @@ inline void *freebsd_symmetric_allocate(machine_topology_t const &topology, std:
         }
         freebsd_domain_restore(&saved, saved_policy, have_saved);
     }
-    return base;
+    return {base, total_bytes, total_bytes, total_bytes / page_size_bytes};
 #else
     fu_unused_(topology);
     fu_unused_(stride_bytes);
     fu_unused_(page_size_bytes);
-    return nullptr;
+    return {};
 #endif
 }
 
@@ -650,12 +654,10 @@ struct freebsd_symmetric_allocator {
         size_type const size_bytes = bytes_for_elements(size, sizeof(value_type));
         if (size_bytes == 0) return {}; // ! Zero elements, or a byte count that would wrap
         size_type const stride_bytes = round_up_to_multiple(size_bytes, page_size_bytes);
-        void *base = freebsd_symmetric_allocate(*topology_, stride_bytes, page_size_bytes);
-        if (!base) return {}; // ! Allocation failed
+        auto const mapping = freebsd_symmetric_allocate(*topology_, stride_bytes, page_size_bytes);
+        if (!mapping) return {};
         size_type const domains = topology_->memory_domains_count();
-        size_type const total_bytes = domains * stride_bytes;
-        size_type const pages = total_bytes / page_size_bytes;
-        return {static_cast<value_type *>(base), size, stride_bytes, domains, total_bytes, pages};
+        return {static_cast<value_type *>(mapping.ptr), size, stride_bytes, domains, mapping.bytes, mapping.pages};
     }
 
     allocation_type allocate_at_least(size_type size) noexcept {
@@ -848,7 +850,8 @@ struct windows_numa_allocator {
         void *result_ptr = windows_numa_allocate(aligned_size_bytes, memory_domain_id_, large_pages_);
         if (!result_ptr) return {}; // ! Allocation failed
         size_type const pages_count = aligned_size_bytes / page_size_bytes;
-        return {static_cast<value_type *>(result_ptr), size, aligned_size_bytes, pages_count};
+        return {static_cast<value_type *>(result_ptr), aligned_size_bytes / sizeof(value_type), aligned_size_bytes,
+                pages_count};
     }
 
     value_type *allocate(size_type size) noexcept {
@@ -968,7 +971,8 @@ struct portable_aligned_allocator {
         void *result_ptr = allocate_aligned(aligned_size_bytes);
         if (!result_ptr) return {}; // ! Allocation failed
         size_type const pages_count = aligned_size_bytes / page_size_bytes;
-        return {static_cast<value_type *>(result_ptr), size, aligned_size_bytes, pages_count};
+        return {static_cast<value_type *>(result_ptr), aligned_size_bytes / sizeof(value_type), aligned_size_bytes,
+                pages_count};
     }
 
     /** Allocates exactly @p size elements. */
