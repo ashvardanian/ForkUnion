@@ -15,14 +15,10 @@
 #endif
 
 /*  Must precede the first CRT header below: @c strncpy and friends are only "unsafe" to MSVC, and
- *  the suppression is inert once `<cstring>` has already been parsed. @c NOMINMAX is hoisted for
- *  the same reason - it has to be set before the eventual `<windows.h>`. */
+ *  the suppression is inert once `<cstring>` has already been parsed. */
 #if defined(_WIN32)
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
 #endif
 #endif
 
@@ -289,11 +285,6 @@
 #error \
     "FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN places huge pages on a domain; it needs FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN"
 #endif
-#if defined(FU_ENABLE_NUMA) || defined(FU_WITH_NUMA_MEMORY) || defined(FU_WITH_HUGE_PAGES) || \
-    defined(FU_WITH_THREAD_PINNING) || defined(FU_WITH_TOPOLOGY_METRICS)
-#error \
-    "Retired capability macro. Use FORKUNION_WITH_PLACE_MEMORY_ON_DOMAIN, FORKUNION_WITH_PLACE_HUGE_PAGES_ON_DOMAIN, or FORKUNION_WITH_PLACE_THREADS_BY_AFFINITY"
-#endif
 
 /** The @c alignas width that keeps two threads' words off one line: 256-byte lines on s390x, 64 on
  *  wasm, which has no coherence to protect, and 128 elsewhere - x86 pairs its 64-byte lines in the
@@ -390,9 +381,14 @@
 #include <sys/mman.h>      // `mmap`, `MAP_PRIVATE`, `MAP_ANONYMOUS`, `MAP_ALIGNED_SUPER`
 #endif
 
-/*  @c NOMINMAX and @c _CRT_SECURE_NO_WARNINGS are already defined at the top of this header, before
- *  the CRT includes, where they can still take effect. */
+/*  The full `<windows.h>`, with no `NOMINMAX` or `WIN32_LEAN_AND_MEAN`, so a user including it
+ *  before or after this header sees the same declarations; no name here is one of its macros.
+ *  `<winsock2.h>` goes first, keeping Winsock 1.1 out for a later `<winsock2.h>`, unless an
+ *  earlier `<windows.h>` already brought Winsock 1.1 in, which `<winsock2.h>` would clash with. */
 #if FORKUNION_OS_WINDOWS_
+#if !defined(_WINSOCKAPI_)
+#include <winsock2.h>
+#endif
 #include <windows.h> // `GlobalMemoryStatusEx`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`
 #include <io.h>      // `_isatty`, `_fileno`
 #if defined(_MSC_VER)

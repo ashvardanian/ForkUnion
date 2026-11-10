@@ -7,10 +7,11 @@
  *
  *  @c standard_atomic_ref is the in-house @c std::atomic_ref: the standard operations verbatim plus
  *  the ones the standard lacks - @c fetch_max and @c fetch_min ahead of C++26, for floats too,
- *  no-return @c add, @c sub, @c set_bits, @c clear_bits, @c flip_bits, @c max and @c min, and the
- *  conditional @c fetch_add_if_at_most, @c fetch_add_if_at_least and @c fetch_sub_if_at_least -
- *  spelled portably via compare-exchange. Instruction-set references share that interface and
- *  replace both the portable loops and the compiler's flag-dependent lowering with instructions:
+ *  no-return @c store_add, @c store_sub, @c set_bits, @c clear_bits, @c flip_bits, @c store_max and
+ *  @c store_min, named as C++26 names them, and the conditional @c fetch_add_if_at_most,
+ *  @c fetch_add_if_at_least and @c fetch_sub_if_at_least - spelled portably via compare-exchange.
+ *  Instruction-set references share that interface and replace both the portable loops and the
+ *  compiler's flag-dependent lowering with instructions:
  *
  *  - @c x86_cmpccxadd_atomic_ref: the conditional adds as one @c cmpccxadd; every other operation
  *    is the @c lock-prefixed instruction the compiler emits anyway.
@@ -129,15 +130,15 @@ constexpr std::memory_order acquiring(std::memory_order order) noexcept {
  *  @c std::atomic_ref does not - so code holding either posts through the functions below. */
 template <typename reference_type_, typename value_type_>
 concept extended_atomic_ref = requires(reference_type_ reference, value_type_ value) {
-    reference.add(value, std::memory_order_relaxed);
-    reference.sub(value, std::memory_order_relaxed);
+    reference.store_add(value, std::memory_order_relaxed);
+    reference.store_sub(value, std::memory_order_relaxed);
     reference.set_bits(value, std::memory_order_relaxed);
     reference.clear_bits(value, std::memory_order_relaxed);
     reference.flip_bits(value, std::memory_order_relaxed);
     reference.fetch_test_and_set_bit(0u, std::memory_order_relaxed);
     reference.fetch_test_and_reset_bit(0u, std::memory_order_relaxed);
-    reference.max(value, std::memory_order_relaxed);
-    reference.min(value, std::memory_order_relaxed);
+    reference.store_max(value, std::memory_order_relaxed);
+    reference.store_min(value, std::memory_order_relaxed);
     reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
     reference.fetch_add_if_at_least(value, value, std::memory_order_relaxed);
     reference.fetch_sub_if_at_least(value, value, std::memory_order_relaxed);
@@ -147,12 +148,12 @@ concept extended_atomic_ref = requires(reference_type_ reference, value_type_ va
  *  one, the standard's returning form with the result discarded otherwise. */
 template <typename reference_type_, typename value_type_>
 void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.add(operand, order);
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.store_add(operand, order);
     else reference.fetch_add(operand, order);
 }
 template <typename reference_type_, typename value_type_>
 void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.sub(operand, order);
+    if constexpr (extended_atomic_ref<reference_type_, value_type_>) reference.store_sub(operand, order);
     else reference.fetch_sub(operand, order);
 }
 template <typename reference_type_, typename value_type_>
@@ -192,7 +193,7 @@ bool atomic_fetch_test_and_reset_bit(reference_type_ reference, unsigned bit, st
  *  where it spells one, a read-first compare-exchange loop otherwise. */
 template <typename reference_type_, typename value_type_>
 void atomic_max(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    if constexpr (requires { reference.max(operand, order); }) reference.max(operand, order);
+    if constexpr (requires { reference.store_max(operand, order); }) reference.store_max(operand, order);
     else {
         value_type_ observed = reference.load(std::memory_order_relaxed);
         while (observed < operand &&
@@ -201,7 +202,7 @@ void atomic_max(reference_type_ reference, value_type_ operand, std::memory_orde
 }
 template <typename reference_type_, typename value_type_>
 void atomic_min(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
-    if constexpr (requires { reference.min(operand, order); }) reference.min(operand, order);
+    if constexpr (requires { reference.store_min(operand, order); }) reference.store_min(operand, order);
     else {
         value_type_ observed = reference.load(std::memory_order_relaxed);
         while (observed > operand &&
@@ -216,9 +217,9 @@ template <typename value_type_>
 constexpr bool fetch_add_if_at_least_bound(value_type_ operand, value_type_ floor, value_type_ &bound) noexcept {
     using limits_t = std::numeric_limits<value_type_>;
     if constexpr (limits_t::is_signed) {
-        if (operand < value_type_ {} && floor > limits_t::max() + operand) return false;
-        bound = operand > value_type_ {} && floor < limits_t::min() + operand
-                    ? limits_t::min()
+        if (operand < value_type_ {} && floor > (limits_t::max)() + operand) return false;
+        bound = operand > value_type_ {} && floor < (limits_t::min)() + operand
+                    ? (limits_t::min)()
                     : static_cast<value_type_>(floor - operand);
     }
     else bound = floor < operand ? value_type_ {} : static_cast<value_type_>(floor - operand);
@@ -403,12 +404,12 @@ struct standard_atomic_ref {
      *  @c stset on Arm, <tt>lock add</tt> on x86, the remote @c aadd family with RAO-INT. Only relaxed and
      *  release orders exist for them, so release is the default: with no value returned there is
      *  nothing to acquire. */
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
         fetch_add(operand, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
         fetch_sub(operand, order);
@@ -444,12 +445,12 @@ struct standard_atomic_ref {
         word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
         return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
         fetch_max(operand, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
         fetch_min(operand, order);
@@ -684,15 +685,15 @@ struct x86_cmpccxadd_atomic_ref {
         return portable_().fetch_min(operand, order);
     }
 
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        portable_().add(operand, order);
+        portable_().store_add(operand, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        portable_().sub(operand, order);
+        portable_().store_sub(operand, order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
@@ -723,15 +724,15 @@ struct x86_cmpccxadd_atomic_ref {
         else if constexpr (sizeof(value_type_) == 8) return x86_lock_btr_u64(reinterpret_cast<word_t *>(word_), bit);
         else return portable_().fetch_test_and_reset_bit(bit, order);
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        portable_().max(operand, order);
+        portable_().store_max(operand, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        portable_().min(operand, order);
+        portable_().store_min(operand, order);
     }
 
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
@@ -964,15 +965,15 @@ struct x86_raoint_atomic_ref {
     {
         return weaker_().fetch_min(operand, order);
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().max(operand, order);
+        weaker_().store_max(operand, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().min(operand, order);
+        weaker_().store_min(operand, order);
     }
 
     /** The conditional adds stay one @c cmpccxadd: RAO-INT spells no comparing form. */
@@ -995,18 +996,18 @@ struct x86_raoint_atomic_ref {
         return weaker_().fetch_sub_if_at_least(operand, floor, order);
     }
 
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        if (order != std::memory_order_relaxed) return weaker_().add(operand, order);
+        if (order != std::memory_order_relaxed) return weaker_().store_add(operand, order);
         word_t *word = reinterpret_cast<word_t *>(word_);
         if constexpr (sizeof(value_type_) == 4) x86_aadd_u32(word, std::bit_cast<word_t>(operand));
         else x86_aadd_u64(word, std::bit_cast<word_t>(operand));
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
     {
-        add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
+        store_add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8)
@@ -3408,7 +3409,7 @@ struct arm64_lse_atomic_ref {
     }
 
     /** No-return forms: @c stadd, @c stclr, @c stset - posted, nothing waited for. */
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
         word_t const word = std::bit_cast<word_t>(operand);
@@ -3417,10 +3418,10 @@ struct arm64_lse_atomic_ref {
         else if constexpr (sizeof(value_type_) == 4) arm64_stadd_u32(word_, word, order);
         else arm64_stadd_u64(word_, word, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
+        store_add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
@@ -3461,7 +3462,7 @@ struct arm64_lse_atomic_ref {
         word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
         return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         word_t const bits = std::bit_cast<word_t>(operand);
@@ -3478,7 +3479,7 @@ struct arm64_lse_atomic_ref {
         else if constexpr (sizeof(value_type_) == 4) arm64_stumax_u32(word_, bits, order);
         else arm64_stumax_u64(word_, bits, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         word_t const bits = std::bit_cast<word_t>(operand);
@@ -3495,19 +3496,19 @@ struct arm64_lse_atomic_ref {
         else if constexpr (sizeof(value_type_) == 4) arm64_stumin_u32(word_, bits, order);
         else arm64_stumin_u64(word_, bits, order);
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_float<value_type_>
     {
         word_t const bits = std::bit_cast<word_t>(operand);
-        if (signed_bits_(bits) >= 0) signed_word_().max(signed_bits_(bits), order);
-        else unsigned_word_().min(bits, order);
+        if (signed_bits_(bits) >= 0) signed_word_().store_max(signed_bits_(bits), order);
+        else unsigned_word_().store_min(bits, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_float<value_type_>
     {
         word_t const bits = std::bit_cast<word_t>(operand);
-        if (signed_bits_(bits) >= 0) signed_word_().min(signed_bits_(bits), order);
-        else unsigned_word_().max(bits, order);
+        if (signed_bits_(bits) >= 0) signed_word_().store_min(signed_bits_(bits), order);
+        else unsigned_word_().store_max(bits, order);
     }
 
     /** The conditional forms: Arm has no @c cmpccxadd, so a read-first @c cas loop - one acquiring
@@ -3722,15 +3723,15 @@ struct arm64_rcpc_atomic_ref {
         return weaker_().fetch_min(operand, order);
     }
 
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        weaker_().add(operand, order);
+        weaker_().store_add(operand, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        weaker_().sub(operand, order);
+        weaker_().store_sub(operand, order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
@@ -3757,15 +3758,15 @@ struct arm64_rcpc_atomic_ref {
     {
         return weaker_().fetch_test_and_reset_bit(bit, order);
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().max(operand, order);
+        weaker_().store_max(operand, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().min(operand, order);
+        weaker_().store_min(operand, order);
     }
 
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
@@ -4310,7 +4311,7 @@ struct riscv64_atomic_ref {
     }
 
     /** No-return forms: the same operations into @c x0. */
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return add");
@@ -4318,10 +4319,10 @@ struct riscv64_atomic_ref {
         if constexpr (sizeof(value_type_) == 4) riscv64_amoadd_w_x0(word_, word, order);
         else riscv64_amoadd_d_x0(word_, word, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
+        store_add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
@@ -4359,7 +4360,7 @@ struct riscv64_atomic_ref {
         word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
         return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return maxima");
@@ -4371,7 +4372,7 @@ struct riscv64_atomic_ref {
         else if constexpr (sizeof(value_type_) == 4) riscv64_amomaxu_w_x0(word_, bits, order);
         else riscv64_amomaxu_d_x0(word_, bits, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_>
     {
         static_assert(sizeof(value_type_) >= 4, "Zabha spells sub-word no-return minima");
@@ -4383,19 +4384,19 @@ struct riscv64_atomic_ref {
         else if constexpr (sizeof(value_type_) == 4) riscv64_amominu_w_x0(word_, bits, order);
         else riscv64_amominu_d_x0(word_, bits, order);
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_float<value_type_>
     {
         word_t const bits = std::bit_cast<word_t>(operand);
-        if (signed_bits_(bits) >= 0) signed_word_().max(signed_bits_(bits), order);
-        else unsigned_word_().min(bits, order);
+        if (signed_bits_(bits) >= 0) signed_word_().store_max(signed_bits_(bits), order);
+        else unsigned_word_().store_min(bits, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_float<value_type_>
     {
         word_t const bits = std::bit_cast<word_t>(operand);
-        if (signed_bits_(bits) >= 0) signed_word_().min(signed_bits_(bits), order);
-        else unsigned_word_().max(bits, order);
+        if (signed_bits_(bits) >= 0) signed_word_().store_min(signed_bits_(bits), order);
+        else unsigned_word_().store_max(bits, order);
     }
 
     /** The conditional forms: a read-first compare-exchange loop, or @c amocas where available. */
@@ -4594,15 +4595,15 @@ struct riscv64_zacas_atomic_ref {
         return weaker_().fetch_min(operand, order);
     }
 
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        weaker_().add(operand, order);
+        weaker_().store_add(operand, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        weaker_().sub(operand, order);
+        weaker_().store_sub(operand, order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
@@ -4629,15 +4630,15 @@ struct riscv64_zacas_atomic_ref {
     {
         return weaker_().fetch_test_and_reset_bit(bit, order);
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().max(operand, order);
+        weaker_().store_max(operand, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().min(operand, order);
+        weaker_().store_min(operand, order);
     }
 
     value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
@@ -4845,16 +4846,16 @@ struct riscv64_zabha_atomic_ref {
     }
 
     /** No-return forms: the @c x0 words for 32 and 64 bits, the returning ones for the rest. */
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        if constexpr (sizeof(value_type_) >= 4) weaker_().add(operand, order);
+        if constexpr (sizeof(value_type_) >= 4) weaker_().store_add(operand, order);
         else fetch_add(operand, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        if constexpr (sizeof(value_type_) >= 4) weaker_().sub(operand, order);
+        if constexpr (sizeof(value_type_) >= 4) weaker_().store_sub(operand, order);
         else fetch_sub(operand, order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
@@ -4887,16 +4888,16 @@ struct riscv64_zabha_atomic_ref {
         word_t const mask = static_cast<word_t>(~(word_t {1} << bit));
         return (std::bit_cast<word_t>(fetch_and(std::bit_cast<value_type_>(mask), order)) >> bit) & 1;
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        if constexpr (sizeof(value_type_) >= 4) weaker_().max(operand, order);
+        if constexpr (sizeof(value_type_) >= 4) weaker_().store_max(operand, order);
         else fetch_max(operand, order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        if constexpr (sizeof(value_type_) >= 4) weaker_().min(operand, order);
+        if constexpr (sizeof(value_type_) >= 4) weaker_().store_min(operand, order);
         else fetch_min(operand, order);
     }
 
@@ -5114,16 +5115,16 @@ struct wasm_atomic_ref {
         return observed;
     }
 
-    void add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        weaker_().add(operand, order);
+        weaker_().store_add(operand, order);
         notify_(order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
         requires atomic_integer<value_type_>
     {
-        weaker_().sub(operand, order);
+        weaker_().store_sub(operand, order);
         notify_(order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
@@ -5158,16 +5159,16 @@ struct wasm_atomic_ref {
         notify_(order);
         return was_set;
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().max(operand, order);
+        weaker_().store_max(operand, order);
         notify_(order);
     }
-    void min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
         requires atomic_integer<value_type_> || atomic_float<value_type_>
     {
-        weaker_().min(operand, order);
+        weaker_().store_min(operand, order);
         notify_(order);
     }
 

@@ -658,7 +658,7 @@ Besides the standard operations, every reference offers the verbs the standard l
 
 - `fetch_add_if_at_most` and `fetch_sub_if_at_least`: one `cmpccxadd` on x86, a compare-exchange loop elsewhere;
 - `fetch_max` and `fetch_min`: one `ldsmax`, `ldumax` or `amomax` on Arm and RISC-V;
-- no-return `add`, `sub`, `set_bits`, `clear_bits` and `flip_bits`: `stadd` and kin on Arm, `amoadd` into `x0` on RISC-V, and RAO-INT `aadd` and kin for relaxed orders on x86 parts that implement it.
+- no-return `store_add`, `store_sub`, `store_max`, `store_min`, `set_bits`, `clear_bits` and `flip_bits`: `stadd` and kin on Arm, `amoadd` into `x0` on RISC-V, and RAO-INT `aadd` and kin for relaxed orders on x86 parts that implement it.
 
 On an M5 Pro the Arm references run 5x faster than a baseline build's exclusive loops uncontended, and 3-4x faster with 18 threads on one word.
 A no-return add may complete away from the core, so a relaxed one carries nothing to a later release: publish through it with `release`, as the `far` memory model in [`verification/`](https://github.com/ashvardanian/ForkUnion/tree/main/verification) checks.

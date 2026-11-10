@@ -8,7 +8,7 @@
 
 #include <cstdint> // `std::uint8_t`
 
-#include <algorithm>   // `std::max`
+#include <algorithm>   // `std::max_element`
 #include <atomic>      // `std::atomic`
 #include <new>         // placement `new` operator
 #include <type_traits> // `std::aligned_storage`
@@ -61,8 +61,10 @@ struct pool_variants_t {
     /** The largest @c sizeof and strictest @c alignof across @p types_, for the union's storage. */
     template <typename... types_>
     struct max_size_align {
-        static constexpr std::size_t size_k = std::max({sizeof(types_)...});
-        static constexpr std::size_t alignment_k = std::max({alignof(types_)...});
+        static constexpr std::size_t sizes_k[] = {sizeof(types_)...};
+        static constexpr std::size_t alignments_k[] = {alignof(types_)...};
+        static constexpr std::size_t size_k = *std::max_element(std::begin(sizes_k), std::end(sizes_k));
+        static constexpr std::size_t alignment_k = *std::max_element(std::begin(alignments_k), std::end(alignments_k));
     };
 
     /*  Every waiter, atomic reference and cache-hints triple the @c select_pool cascade below may

@@ -271,7 +271,7 @@ static void run(nbody_context_t &c) noexcept {
     if constexpr (placement_ == placement_t::replicated_k) refresh_replicas(c.topology, *c.pool, c.replicas, bodies);
 
     // Force pass: all-to-all, reading the shared array or the thread's node-local replica.
-    auto calc = [&](std::size_t const task, fu::thread_in_domain_t at) noexcept {
+    auto calc = [&](std::size_t const task, [[maybe_unused]] fu::thread_in_domain_t at) noexcept {
         vector3_t f {0.0, 0.0, 0.0};
         if constexpr (placement_ == placement_t::replicated_k) {
             auto const local = c.replicas.on_memory_domain(

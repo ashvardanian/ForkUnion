@@ -57,7 +57,7 @@
 #include <cstdlib>   // `EXIT_SUCCESS`, `EXIT_FAILURE`
 #include <cstring>   // `std::memcpy`, `std::memcmp`
 
-#include <algorithm>   // `std::sort`, `std::unique`, `std::min`
+#include <algorithm>   // `std::sort`, `std::unique`
 #include <optional>    // `std::optional` - the executor, spawned only when chosen
 #include <string_view> // `std::string_view`
 
@@ -180,7 +180,7 @@ static bool generate_necklace(std::uint64_t const key, std::size_t const scale, 
 
         // Bridges: endpoint `j` in each community's hub core - its first 64 vertices, where R-MAT's
         // quadrant bias guarantees connectivity - so the ring can never be severed.
-        vertex_t const hub_core = static_cast<vertex_t>(std::min<std::size_t>(community_vertices, 64));
+        vertex_t const hub_core = static_cast<vertex_t>(fu::min_of<std::size_t>(community_vertices, 64));
         std::uint64_t const bridge_base = static_cast<std::uint64_t>(raw_edges) * 64;
         for (std::size_t j = 0; j < bridges; ++j) {
             vertex_t const u = static_cast<vertex_t>((j << scale) + random_index(key, bridge_base + 2 * j, hub_core));
@@ -384,7 +384,7 @@ static std::uint64_t sum_counters(std::span<tally_t> counters) noexcept {
  */
 template <schedule_t schedule_, placement_t placement_>
 static void run(run_context_t &c) noexcept {
-    auto graph_at = [&](std::size_t compute_domain) noexcept -> csr_view_t {
+    auto graph_at = [&]([[maybe_unused]] std::size_t compute_domain) noexcept -> csr_view_t {
         if constexpr (placement_ == placement_t::replicated_k)
             return c.replicas.on_memory_domain(
                 c.topology.local_memory_of(static_cast<fu::compute_domain_index_t>(compute_domain)));

@@ -60,7 +60,6 @@ target_compile_options(
               $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wdocumentation>
               # MSVC: Maximum warnings
               $<$<CXX_COMPILER_ID:MSVC>:/W4
-              /permissive-
               /w14242
               /w14254
               /w14263
@@ -80,5 +79,11 @@ target_compile_options(
               /w14905
               /w14906
               /w14928>
+              # The conformance switches MSVC leaves off by default, which every other supported compiler behaves as.
+              $<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor
+              /utf-8
+              /bigobj>
+              $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive-
+              /Zc:__cplusplus>
               $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release,RelWithDebInfo>>:/wd4101>
 )

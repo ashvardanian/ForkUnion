@@ -106,12 +106,6 @@
       "architecture": "ARM64"
     },
     {
-      "name": "msvc2022_arm64",
-      "inherits": "msvc2026_arm64",
-      "displayName": "Windows ARM64 - Visual Studio 2022",
-      "generator": "Visual Studio 17 2022"
-    },
-    {
       "name": "dockcross",
       "inherits": "cross",
       "displayName": "Whatever target the dockcross image's toolchain names",
@@ -257,7 +251,6 @@
     { "name": "msvc2026_x64", "configurePreset": "msvc2026_x64", "configuration": "RelWithDebInfo" },
     { "name": "msvc2022_x64", "configurePreset": "msvc2022_x64", "configuration": "RelWithDebInfo" },
     { "name": "msvc2026_arm64", "configurePreset": "msvc2026_arm64", "configuration": "RelWithDebInfo" },
-    { "name": "msvc2022_arm64", "configurePreset": "msvc2022_arm64", "configuration": "RelWithDebInfo" },
     { "name": "dockcross", "configurePreset": "dockcross", "targets": ["forkunion_test_cpp20", "forkunion_test_c11"] },
     {
       "name": "android_arm64",
@@ -328,12 +321,6 @@
       "name": "msvc2026_arm64",
       "inherits": "base",
       "configurePreset": "msvc2026_arm64",
-      "configuration": "RelWithDebInfo"
-    },
-    {
-      "name": "msvc2022_arm64",
-      "inherits": "base",
-      "configurePreset": "msvc2022_arm64",
       "configuration": "RelWithDebInfo"
     },
     {
