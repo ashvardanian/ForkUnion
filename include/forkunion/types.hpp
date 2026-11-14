@@ -407,8 +407,8 @@
 #error "ForkUnion requires C++20 or later"
 #endif
 
-/** The target architecture - each in its 64-bit form: x86-64, AArch64, RV64 - which the inline
- *  assembly and the capability bits key on.
+/** The target architecture - each in its 64-bit form: x86-64, AArch64, RV64, Power - which the
+ *  inline assembly and the capability bits key on.
  *  A 32-bit RISC-V build lands on none of them and on the portable paths. */
 #if defined(__arm64__) || defined(__aarch64__) || defined(_M_ARM64)
 #define FORKUNION_ARCH_ARM64_ 1
@@ -424,6 +424,11 @@
 #define FORKUNION_ARCH_RISCV64_ 1
 #else
 #define FORKUNION_ARCH_RISCV64_ 0
+#endif
+#if defined(__powerpc64__) || defined(__ppc64__) || defined(_ARCH_PPC64)
+#define FORKUNION_ARCH_PPC64_ 1
+#else
+#define FORKUNION_ARCH_PPC64_ 0
 #endif
 
 #pragma endregion Language and Architecture
@@ -482,7 +487,9 @@
  *  prefetches, CLDEMOTE in reserved-NOP space, DC CVAC - stay on the architecture. Zicbom follows
  *  @c __riscv_zicbom, and WFET, which no compiler macro reports, stays off unless the build vouches
  *  for it with <tt>FORKUNION_TARGET_ARM64_WFET=1</tt>. The wasm wait and notify need the threads feature
- *  the module is built with, which @c __wasm_atomics__ reports.
+ *  the module is built with, which @c __wasm_atomics__ reports. The Power priority hints are @c or
+ *  no-ops on every core, while @c pause_short follows @c _ARCH_PWR10 and the ISA 3.0 atomic memory
+ *  operations follow @c _ARCH_PWR9.
  *
  *  The LSE and RCpc mnemonics ride <tt>.arch_extension</tt>, MSVC reaches the two through intrinsics whose
  *  arithmetic tail asks for <tt>/arch:armv8.1</tt>, and the RISC-V A extension's mnemonics need the
@@ -587,6 +594,23 @@
 #define FORKUNION_TARGET_RISCV64_ZABHA 1
 #else
 #define FORKUNION_TARGET_RISCV64_ZABHA 0
+#endif
+#endif
+#if !defined(FORKUNION_TARGET_PPC64_YIELD)
+#define FORKUNION_TARGET_PPC64_YIELD (FORKUNION_ARCH_PPC64_ && FORKUNION_HAS_INLINE_ASM_)
+#endif
+#if !defined(FORKUNION_TARGET_PPC64_PAUSE)
+#if FORKUNION_ARCH_PPC64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(_ARCH_PWR10))
+#define FORKUNION_TARGET_PPC64_PAUSE 1
+#else
+#define FORKUNION_TARGET_PPC64_PAUSE 0
+#endif
+#endif
+#if !defined(FORKUNION_TARGET_PPC64_AMO)
+#if FORKUNION_ARCH_PPC64_ && FORKUNION_HAS_INLINE_ASM_ && (FORKUNION_RUNTIME_DISPATCH || defined(_ARCH_PWR9))
+#define FORKUNION_TARGET_PPC64_AMO 1
+#else
+#define FORKUNION_TARGET_PPC64_AMO 0
 #endif
 #endif
 #if !defined(FORKUNION_TARGET_WASM_WAIT)
@@ -1093,12 +1117,36 @@ enum capabilities_t : unsigned int {
     capability_riscv64_zabha_k = 1 << 26,
 
     /**
+     *  @brief The Power thread-priority hints, <tt>or 1,1,1</tt> then <tt>or 2,2,2</tt>: the spinning
+     *      hardware thread drops to low priority for a beat and returns to medium, as Linux's
+     *      @c cpu_relax does before ISA 3.1. Encoded as @c or no-ops, so every Power has it.
+     *  @sa ppc64_yield_t - the waiter emitting it.
+     */
+    capability_ppc64_yield_k = 1 << 27,
+
+    /**
+     *  @brief ISA 3.1 @c pause_short, <tt>wait 2,0</tt>: a timed pause like x86 @c PAUSE, on POWER10
+     *      and later, read from @c PPC_FEATURE2_ARCH_3_1 in the Linux @c AT_HWCAP2 word.
+     *  @sa ppc64_pause_t - its waiter; @c capability_ppc64_yield_k - the spin it replaces.
+     */
+    capability_ppc64_pause_k = 1 << 28,
+
+    /**
+     *  @brief ISA 3.0 atomic memory operations, @c stwat and @c stdat: no-return add, bitwise and
+     *      extremum updates executed at the memory controller rather than pulling the line, on
+     *      POWER9 and later, read from @c PPC_FEATURE2_ARCH_3_00 in the Linux @c AT_HWCAP2 word.
+     *  @sa ppc64_amo_atomic_ref - the reference this admits.
+     */
+    capability_ppc64_amo_k = 1 << 29,
+
+    /**
      *  @brief Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine
      *      offers in one intersection with <tt>runtime_capabilities()</tt>.
      *  @sa capability_name - which names single bits only, never this composite.
      */
     capability_any_yield_k = capability_x86_pause_k | capability_x86_tpause_k | capability_arm64_yield_k |
-                             capability_arm64_wfet_k | capability_riscv64_pause_k | capability_riscv64_wrs_k,
+                             capability_arm64_wfet_k | capability_riscv64_pause_k | capability_riscv64_wrs_k |
+                             capability_ppc64_yield_k | capability_ppc64_pause_k,
 
 };
 
@@ -1155,6 +1203,9 @@ constexpr char const *capability_name(capabilities_t const capability) noexcept 
     case capability_arm64_prfm_k: return "arm64_prfm";
     case capability_riscv64_zicbop_k: return "riscv64_zicbop";
     case capability_riscv64_zabha_k: return "riscv64_zabha";
+    case capability_ppc64_yield_k: return "ppc64_yield";
+    case capability_ppc64_pause_k: return "ppc64_pause";
+    case capability_ppc64_amo_k: return "ppc64_amo";
     case capability_os_threads_k: return "os_threads";
     case capability_topology_k: return "topology";
     case capability_place_threads_by_affinity_k: return "place_threads_by_affinity";

@@ -441,10 +441,27 @@ typedef enum fu_capabilities_t {
      */
     fu_capability_riscv64_zabha_k = 1 << 26,
 
+    /** The Power thread-priority hints, <tt>or 1,1,1</tt> then <tt>or 2,2,2</tt>, encoded as @c or no-ops,
+     *  so they are reported on every Power core. */
+    fu_capability_ppc64_yield_k = 1 << 27,
+
+    /**
+     *  @brief ISA 3.1 @c pause_short, a timed pause like x86 @c PAUSE, on POWER10 and later, read
+     *      from @c PPC_FEATURE2_ARCH_3_1 in the Linux @c AT_HWCAP2 word.
+     *  @sa fu_capability_ppc64_yield_k - the spin it replaces.
+     */
+    fu_capability_ppc64_pause_k = 1 << 28,
+
+    /** ISA 3.0 atomic memory operations, @c stwat and @c stdat, executed at the memory controller,
+     *  on POWER9 and later, read from @c PPC_FEATURE2_ARCH_3_00 in the Linux @c AT_HWCAP2 word.
+     *  Admits @c ppc64_amo_atomic_ref. */
+    fu_capability_ppc64_amo_k = 1 << 29,
+
     /** Composite mask of every busy-wait waiter bit above, to enumerate the ones a machine offers
      *  in one intersection with @c fu_runtime_capabilities. */
     fu_capability_any_yield_k = fu_capability_x86_pause_k | fu_capability_x86_tpause_k | fu_capability_riscv64_pause_k |
-                                fu_capability_arm64_yield_k | fu_capability_arm64_wfet_k | fu_capability_riscv64_wrs_k,
+                                fu_capability_arm64_yield_k | fu_capability_arm64_wfet_k | fu_capability_riscv64_wrs_k |
+                                fu_capability_ppc64_yield_k | fu_capability_ppc64_pause_k,
 
     /**
      *  @brief Composite mask of every instruction-level bit: the waiters, cache hints and atomics
@@ -456,7 +473,7 @@ typedef enum fu_capabilities_t {
          fu_capability_riscv64_zicbom_k | fu_capability_x86_cmpccxadd_k | fu_capability_x86_raoint_k |
          fu_capability_arm64_lse_k | fu_capability_arm64_rcpc_k | fu_capability_riscv64_zacas_k |
          fu_capability_riscv64_atomic_k | fu_capability_arm64_prfm_k | fu_capability_riscv64_zicbop_k |
-         fu_capability_riscv64_zabha_k),
+         fu_capability_riscv64_zabha_k | fu_capability_ppc64_amo_k),
 
     /**
      *  @brief All-ones allow-mask: pass to @c fu_pool_new to disable capability filtering.

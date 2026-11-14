@@ -1019,6 +1019,8 @@ int main(void) {
         fu_capability_riscv64_pause_k,
         fu_capability_riscv64_wrs_k,
         fu_capability_riscv64_wrs_k | fu_capability_riscv64_zicbom_k, /* RVA23 mandates them together */
+        fu_capability_ppc64_yield_k,
+        fu_capability_ppc64_pause_k,
     };
 
     fu_capabilities_t const topology_variants[] = {

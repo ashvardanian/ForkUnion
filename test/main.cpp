@@ -1580,6 +1580,18 @@ static void check_atomic_ref_extensions() noexcept {
     expect_eq(signed_reference.fetch_min(signed_word_t(-3), std::memory_order_relaxed), signed_word_t(2));
     expect_eq(signed_word, signed_word_t(-3));
 
+    // The relaxed no-return forms, the ones a far-atomic reference sends past the core, each a
+    // distinct operation code there: extrema must compare signed, and the add and bit forms land.
+    signed_reference.store_max(signed_word_t(1), std::memory_order_relaxed);
+    expect_eq(signed_word, signed_word_t(1)); // ? Wins only under a signed compare
+    signed_reference.store_min(signed_word_t(-7), std::memory_order_relaxed);
+    expect_eq(signed_word, signed_word_t(-7)); // ? Wins only under a signed compare
+    signed_reference.store_add(signed_word_t(20), std::memory_order_relaxed);
+    signed_reference.clear_bits(signed_word_t(0x1), std::memory_order_relaxed);
+    signed_reference.flip_bits(signed_word_t(0x3), std::memory_order_relaxed);
+    expect_eq(signed_word, signed_word_t(15)); // ? 13 loses its low bit, then 0b1100 ^ 0b0011
+    signed_reference.store(signed_word_t(-3), std::memory_order_relaxed);
+
     // The sum must stay at least the floor: a counter at -3 refuses +5 against a floor of 5, as the
     // capacity release needs, where a test of the old value alone would admit it.
     expect_eq(signed_reference.fetch_add_if_at_least(signed_word_t(5), signed_word_t(5), std::memory_order_release),
@@ -1811,6 +1823,9 @@ static void test_atomic_refs() noexcept {
 #endif
 #if FORKUNION_TARGET_RISCV64_ZABHA
     check_atomic_ref<fu::riscv64_zabha_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
+#endif
+#if FORKUNION_TARGET_PPC64_AMO
+    check_atomic_ref<fu::ppc64_amo_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t>();
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
     check_atomic_ref<fu::wasm_atomic_ref, std::uint32_t, std::uint64_t>();

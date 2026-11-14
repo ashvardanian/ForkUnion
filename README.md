@@ -658,7 +658,7 @@ Besides the standard operations, every reference offers the verbs the standard l
 
 - `fetch_add_if_at_most` and `fetch_sub_if_at_least`: one `cmpccxadd` on x86, a compare-exchange loop elsewhere;
 - `fetch_max` and `fetch_min`: one `ldsmax`, `ldumax` or `amomax` on Arm and RISC-V;
-- no-return `store_add`, `store_sub`, `store_max`, `store_min`, `set_bits`, `clear_bits` and `flip_bits`: `stadd` and kin on Arm, `amoadd` into `x0` on RISC-V, and RAO-INT `aadd` and kin for relaxed orders on x86 parts that implement it.
+- no-return `store_add`, `store_sub`, `store_max`, `store_min`, `set_bits`, `clear_bits` and `flip_bits`: `stadd` and kin on Arm, `amoadd` into `x0` on RISC-V, RAO-INT `aadd` and kin for relaxed orders on x86 parts that implement it, and, opt-in through `ppc64_amo_atomic_ref`, `stwat` and `stdat` at the memory controller for relaxed orders on POWER9 and newer.
 
 On an M5 Pro the Arm references run 5x faster than a baseline build's exclusive loops uncontended, and 3-4x faster with 18 threads on one word.
 A no-return add may complete away from the core, so a relaxed one carries nothing to a later release: publish through it with `release`, as the `far` memory model in [`verification/`](https://github.com/ashvardanian/ForkUnion/tree/main/verification) checks.
@@ -834,15 +834,17 @@ On Linux, the `std::this_thread::yield()` translates into a `sched_yield` system
 Instead, you can replace the `standard_yield_t` wrapper with a platform-specific micro-wait instruction, which is much cheaper.
 Those instructions, like [`WFET` on Arm](https://developer.arm.com/documentation/ddi0602/2025-03/Base-Instructions/WFET--Wait-for-event-with-timeout-), generally hint the CPU to transition to a low-power state.
 
-| Wrapper           | ISA          | Instruction         | Privileges |
-| :---------------- | :----------- | :------------------ | :--------- |
-| `x86_pause_t`     | x86          | `PAUSE`             | R3         |
-| `x86_tpause_t`    | x86+WAITPKG  | `UMONITOR`+`UMWAIT` | R3         |
-| `arm64_yield_t`   | AArch64      | `YIELD`             | EL0        |
-| `arm64_wfe_t`     | AArch64      | `LDAXR`+`WFE`       | EL0        |
-| `arm64_wfet_t`    | AArch64+WFXT | `WFET`              | EL0        |
-| `riscv64_pause_t` | RISC-V       | `PAUSE`             | U          |
-| `riscv64_wrs_t`   | RISC-V+Zawrs | `WRS.STO`/`WRS.NTO` | U          |
+| Wrapper           | ISA          | Instruction           | Privileges |
+| :---------------- | :----------- | :-------------------- | :--------- |
+| `x86_pause_t`     | x86          | `PAUSE`               | R3         |
+| `x86_tpause_t`    | x86+WAITPKG  | `UMONITOR`+`UMWAIT`   | R3         |
+| `arm64_yield_t`   | AArch64      | `YIELD`               | EL0        |
+| `arm64_wfe_t`     | AArch64      | `LDAXR`+`WFE`         | EL0        |
+| `arm64_wfet_t`    | AArch64+WFXT | `WFET`                | EL0        |
+| `riscv64_pause_t` | RISC-V       | `PAUSE`               | U          |
+| `riscv64_wrs_t`   | RISC-V+Zawrs | `WRS.STO`/`WRS.NTO`   | U          |
+| `ppc64_yield_t`   | Power        | `or 1,1,1`+`or 2,2,2` | Problem    |
+| `ppc64_pause_t`   | Power+ISA3.1 | `pause_short`         | Problem    |
 
 No kernel calls.
 No futexes.

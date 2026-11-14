@@ -49,6 +49,11 @@
 #include <unistd.h> // `syscall`
 #endif
 
+/*  Linux on Power reports the ISA level in the auxiliary vector's second capability word. */
+#if FORKUNION_ARCH_PPC64_ && FORKUNION_OS_LINUX_
+#include <sys/auxv.h> // `getauxval`, `AT_HWCAP2`
+#endif
+
 namespace ashvardanian {
 namespace forkunion {
 
@@ -593,6 +598,39 @@ struct riscv64_wrs_t {
 };
 #endif // FORKUNION_TARGET_RISCV64_WRS
 
+#if FORKUNION_TARGET_PPC64_YIELD
+
+/** On Power, a beat at low hardware-thread priority and back to medium, which hands the core's
+ *  issue slots to the SMT siblings, as Linux's @c cpu_relax does before ISA 3.1. */
+struct ppc64_yield_t {
+    static constexpr capabilities_t capability_k = capability_ppc64_yield_k;
+
+    /** Any waited word - a @c std::atomic object or a bare address - the hint watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
+        __asm__ __volatile__("or 1,1,1\n\tor 2,2,2");
+    }
+};
+#endif // FORKUNION_TARGET_PPC64_YIELD
+
+#if FORKUNION_TARGET_PPC64_PAUSE
+
+/** On ISA 3.1 Power, @c pause_short: a timed pause like x86 @c PAUSE, which Linux's @c cpu_relax
+ *  prefers there. Illegal before POWER10, so @c capability_ppc64_pause_k gates its selection. */
+struct ppc64_pause_t {
+    static constexpr capabilities_t capability_k = capability_ppc64_pause_k;
+
+    /** Any waited word - a @c std::atomic object or a bare address - the hint watches nothing. */
+    template <typename watched_type_, typename value_type_, typename thread_index_type_,
+              typename bound_type_ = wait_capped_t>
+    inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
+        // `wait 2,0` is encoded directly, as Linux's `PPC_WAIT` does, so any assembler takes it.
+        __asm__ __volatile__(".4byte 0x7c40003c");
+    }
+};
+#endif // FORKUNION_TARGET_PPC64_PAUSE
+
 #if FORKUNION_TARGET_WASM_WAIT
 
 /**
@@ -666,6 +704,10 @@ using preferred_yield_t = arm64_yield_t;
 using preferred_yield_t = riscv64_wrs_t;
 #elif FORKUNION_TARGET_RISCV64_PAUSE
 using preferred_yield_t = riscv64_pause_t;
+#elif FORKUNION_TARGET_PPC64_PAUSE
+using preferred_yield_t = ppc64_pause_t;
+#elif FORKUNION_TARGET_PPC64_YIELD
+using preferred_yield_t = ppc64_yield_t;
 #elif FORKUNION_TARGET_WASM_WAIT
 using preferred_yield_t = wasm_wait_t;
 #else
@@ -960,6 +1002,22 @@ inline capabilities_t riscv64_cpu_capabilities() noexcept {
     return caps;
 }
 
+#elif FORKUNION_ARCH_PPC64_
+
+/** The instruction-level bits this Power offers: the priority hints every core accepts, then
+ *  @c pause_short and the atomic memory operations from the ISA level the Linux kernel reports in
+ *  @c AT_HWCAP2. Elsewhere nothing past the hints is claimed. */
+inline capabilities_t ppc64_cpu_capabilities() noexcept {
+    capabilities_t caps = capability_ppc64_yield_k;
+#if FORKUNION_OS_LINUX_
+    constexpr unsigned long ppc_feature2_arch_3_00_k = 0x00800000ul, ppc_feature2_arch_3_1_k = 0x00040000ul;
+    unsigned long const levels = ::getauxval(AT_HWCAP2);
+    if (levels & ppc_feature2_arch_3_1_k) caps |= capability_ppc64_pause_k;
+    if (levels & ppc_feature2_arch_3_00_k) caps |= capability_ppc64_amo_k;
+#endif
+    return caps;
+}
+
 #endif
 
 /**
@@ -974,6 +1032,8 @@ inline capabilities_t cpu_capabilities() noexcept {
     return arm64_cpu_capabilities();
 #elif FORKUNION_ARCH_RISCV64_
     return riscv64_cpu_capabilities();
+#elif FORKUNION_ARCH_PPC64_
+    return ppc64_cpu_capabilities();
 #else
     return capabilities_unknown_k;
 #endif

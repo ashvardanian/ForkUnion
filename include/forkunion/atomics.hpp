@@ -32,6 +32,8 @@
  *    & stores.
  *  - @c riscv64_zacas_atomic_ref: compare-exchange as one @c amocas.
  *  - @c riscv64_zabha_atomic_ref: the byte and halfword @c amo forms, @c amocas among them.
+ *  - @c ppc64_amo_atomic_ref: the relaxed no-return forms as the ISA 3.0 store atomics @c stwat and
+ *    @c stdat, executed at the memory controller; opt-in, never preferred.
  *  - @c wasm_atomic_ref: the standard operations, with @c memory.atomic.notify after each releasing
  *    write to a 32- or 64-bit word, as no WebAssembly store wakes a @c memory.atomic.wait sleeper.
  *
@@ -41,15 +43,15 @@
  *  @c Zabha one. Float extrema ride the integer ones on their bits where an ISA has those. Every
  *  reference assembles in a baseline translation unit: on Arm the extension is named in the
  *  assembly text - <tt>.arch_extension</tt> - the RISC-V base atomics are the A-extension mnemonics every
- *  @c rv64gc toolchain assembles, and the x86 and RISC-V extension instructions are raw bytes; the
- *  runtime capability bit decides whether it may run. Where inline assembly is unavailable - MSVC -
- *  the Arm64 references are spelled over @c __ldar, @c __stlr, @c __ldapr, @c __swp*, @c __cas* and
- *  the @c _Interlocked* arithmetic, which stays inline only under <tt>/arch:armv8.1</tt>; the x86 and
- *  RISC-V references lack intrinsics for their instructions, so those targets keep
- *  @c standard_atomic_ref. The @c preferred_atomic_ref at the bottom is the newest reference this
- *  unit may run with no runtime probe, reading <tt>FORKUNION_TARGET_\<CAPABILITY\></tt> alone - the
- *  compilation target's promise in a unit that dispatches nothing - for compile-time callers, not
- *  per CPU class.
+ *  @c rv64gc toolchain assembles, the Power store atomics sit under <tt>.machine power9</tt>, and the x86
+ *  and RISC-V extension instructions are raw bytes; the runtime capability bit decides whether it
+ *  may run. Where inline assembly is unavailable - MSVC - the Arm64 references are spelled over
+ *  @c __ldar, @c __stlr, @c __ldapr, @c __swp*, @c __cas* and the @c _Interlocked* arithmetic,
+ *  which stays inline only under <tt>/arch:armv8.1</tt>; the x86 and RISC-V references lack intrinsics for
+ *  their instructions, so those targets keep @c standard_atomic_ref. The @c preferred_atomic_ref at
+ *  the bottom is the newest reference this unit may run with no runtime probe, reading
+ *  <tt>FORKUNION_TARGET_\<CAPABILITY\></tt> alone - the compilation target's promise in a unit that
+ *  dispatches nothing - for compile-time callers, not per CPU class.
  *
  *  The header needs the library's @c std::atomic_ref and @c std::bit_cast, so it is empty without
  *  them - a C++20 language mode over a library that still lacks them sees nothing here.
@@ -4983,6 +4985,237 @@ struct riscv64_zabha_atomic_ref<value_type_ const> {
 #pragma endregion RISCV64 Zabha
 
 #endif // FORKUNION_TARGET_RISCV64_ZABHA
+
+/*  ISA 3.0 store atomics: @c stwat and @c stdat apply their function code's operation to the word
+ *  at the memory controller and return nothing, which makes them pay off only on a contended word
+ *  no thread reads back in a loop. Named in the assembly text under <tt>.machine power9</tt>, so a
+ *  baseline unit assembles them; the function codes are Book II's. */
+#if FORKUNION_TARGET_PPC64_AMO
+#pragma region Power AMO
+
+/** The operation a Power store atomic applies, its function code. */
+enum ppc64_store_atomic_t : unsigned {
+    ppc64_store_add_k = 0,
+    ppc64_store_xor_k = 1,
+    ppc64_store_or_k = 2,
+    ppc64_store_and_k = 3,
+    ppc64_store_max_unsigned_k = 4,
+    ppc64_store_max_signed_k = 5,
+    ppc64_store_min_unsigned_k = 6,
+    ppc64_store_min_signed_k = 7,
+};
+
+template <ppc64_store_atomic_t operation_>
+inline void ppc64_stwat(std::uint32_t *word, std::uint32_t operand) noexcept {
+    __asm__ __volatile__(".machine push\n\t.machine power9\n\tstwat %1, %0, %2\n\t.machine pop"
+                         :
+                         : "b"(word), "r"(operand), "n"(static_cast<unsigned>(operation_))
+                         : "memory");
+}
+template <ppc64_store_atomic_t operation_>
+inline void ppc64_stdat(std::uint64_t *word, std::uint64_t operand) noexcept {
+    __asm__ __volatile__(".machine push\n\t.machine power9\n\tstdat %1, %0, %2\n\t.machine pop"
+                         :
+                         : "b"(word), "r"(operand), "n"(static_cast<unsigned>(operation_))
+                         : "memory");
+}
+
+/**
+ *  @brief The standard operations plus the ISA 3.0 store atomics for relaxed no-return forms.
+ *  @sa capability_ppc64_amo_k - the bit admitting it.
+ *
+ *  The @c stwat and @c stdat forms cover 32- and 64-bit words: add, and, or, xor and the signed and
+ *  unsigned extrema. An ordered one, a narrower word or a float stays on the @c ldarx and @c stdcx.
+ *  loop the compiler emits. Opt-in rather than preferred, since the store atomic is the slower one
+ *  on a word with a single writer.
+ */
+template <typename value_type_>
+struct ppc64_amo_atomic_ref {
+    using value_t = value_type_;
+    using word_t = atomic_word<value_type_>;
+    static constexpr capabilities_t capabilities_k = capability_ppc64_amo_k;
+
+    explicit ppc64_amo_atomic_ref(value_type_ &word) noexcept : word_(&word) {
+        assert(reinterpret_cast<std::uintptr_t>(&word) % sizeof(value_type_) == 0 &&
+               "Atomics need a naturally aligned word");
+    }
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().load(order);
+    }
+    void store(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        weaker_().store(desired, order);
+    }
+    value_type_ exchange(value_type_ desired, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().exchange(desired, order);
+    }
+
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired, std::memory_order success,
+                                 std::memory_order failure) const noexcept {
+        return weaker_().compare_exchange_strong(expected, desired, success, failure);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired, std::memory_order success,
+                               std::memory_order failure) const noexcept {
+        return weaker_().compare_exchange_weak(expected, desired, success, failure);
+    }
+    bool compare_exchange_strong(value_type_ &expected, value_type_ desired,
+                                 std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().compare_exchange_strong(expected, desired, order);
+    }
+    bool compare_exchange_weak(value_type_ &expected, value_type_ desired,
+                               std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().compare_exchange_weak(expected, desired, order);
+    }
+
+    value_type_ fetch_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_add(operand, order);
+    }
+    value_type_ fetch_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_sub(operand, order);
+    }
+    value_type_ fetch_and(value_type_ mask, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_and(mask, order);
+    }
+    value_type_ fetch_or(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_or(bits, order);
+    }
+    value_type_ fetch_xor(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return weaker_().fetch_xor(bits, order);
+    }
+    value_type_ fetch_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> || atomic_float<value_type_>
+    {
+        return weaker_().fetch_max(operand, order);
+    }
+    value_type_ fetch_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> || atomic_float<value_type_>
+    {
+        return weaker_().fetch_min(operand, order);
+    }
+    value_type_ fetch_add_if_at_most(value_type_ operand, value_type_ limit,
+                                     std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_add_if_at_most(operand, limit, order);
+    }
+    value_type_ fetch_add_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_add_if_at_least(operand, floor, order);
+    }
+    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_sub_if_at_least(operand, floor, order);
+    }
+
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        if (!far_(order)) return weaker_().store_add(operand, order);
+        apply_<ppc64_store_add_k>(std::bit_cast<word_t>(operand));
+    }
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_release) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        store_add(std::bit_cast<value_type_>(static_cast<word_t>(word_t {0} - std::bit_cast<word_t>(operand))), order);
+    }
+    void set_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        if (!far_(order)) return weaker_().set_bits(bits, order);
+        apply_<ppc64_store_or_k>(std::bit_cast<word_t>(bits));
+    }
+    void clear_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        if (!far_(order)) return weaker_().clear_bits(bits, order);
+        apply_<ppc64_store_and_k>(static_cast<word_t>(~std::bit_cast<word_t>(bits)));
+    }
+    void flip_bits(value_type_ bits, std::memory_order order = std::memory_order_release) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        if (!far_(order)) return weaker_().flip_bits(bits, order);
+        apply_<ppc64_store_xor_k>(std::bit_cast<word_t>(bits));
+    }
+    bool fetch_test_and_set_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_test_and_set_bit(bit, order);
+    }
+    bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_>
+    {
+        return weaker_().fetch_test_and_reset_bit(bit, order);
+    }
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> || atomic_float<value_type_>
+    {
+        if constexpr (atomic_integer<value_type_>)
+            if (far_(order))
+                return apply_<std::numeric_limits<value_type_>::is_signed ? ppc64_store_max_signed_k
+                                                                          : ppc64_store_max_unsigned_k>(
+                    std::bit_cast<word_t>(operand));
+        weaker_().store_max(operand, order);
+    }
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept
+        requires atomic_integer<value_type_> || atomic_float<value_type_>
+    {
+        if constexpr (atomic_integer<value_type_>)
+            if (far_(order))
+                return apply_<std::numeric_limits<value_type_>::is_signed ? ppc64_store_min_signed_k
+                                                                          : ppc64_store_min_unsigned_k>(
+                    std::bit_cast<word_t>(operand));
+        weaker_().store_min(operand, order);
+    }
+
+  private:
+    /** The previous rung, built on demand: it holds this same pointer and nothing else. */
+    standard_atomic_ref<value_type_> weaker_() const noexcept { return standard_atomic_ref<value_type_>(*word_); }
+
+    /** Whether a no-return form goes to the memory controller: relaxed, on a 32- or 64-bit word. */
+    static constexpr bool far_(std::memory_order order) noexcept {
+        return order == std::memory_order_relaxed && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8);
+    }
+
+    template <ppc64_store_atomic_t operation_>
+    void apply_(word_t operand) const noexcept {
+        if constexpr (sizeof(value_type_) == 4)
+            ppc64_stwat<operation_>(reinterpret_cast<std::uint32_t *>(word_), static_cast<std::uint32_t>(operand));
+        else if constexpr (sizeof(value_type_) == 8)
+            ppc64_stdat<operation_>(reinterpret_cast<std::uint64_t *>(word_), static_cast<std::uint64_t>(operand));
+    }
+
+    value_type_ *word_;
+};
+
+/**
+ *  @brief Read-only access through @ref ppc64_amo_atomic_ref, which specializes no load.
+ *  @sa standard_atomic_ref<value_type_ const>
+ */
+template <typename value_type_>
+struct ppc64_amo_atomic_ref<value_type_ const> {
+    using value_t = value_type_ const;
+    static constexpr capabilities_t capabilities_k = capability_ppc64_amo_k;
+
+    explicit ppc64_amo_atomic_ref(value_type_ const &word) noexcept : portable_(word) {}
+
+    /** A temporary would die before the reference does. */
+    ppc64_amo_atomic_ref(value_type_ const &&) = delete;
+
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        return portable_.load(order);
+    }
+
+  private:
+    standard_atomic_ref<value_type_ const> portable_;
+};
+
+#pragma endregion Power AMO
+
+#endif // FORKUNION_TARGET_PPC64_AMO
 
 /*  @c memory.atomic.notify: wakes the threads @c memory.atomic.wait sleeps on one 4-byte-aligned
  *  address, all of them for a count of `~0u`. No store wakes a sleeper in WebAssembly, so the

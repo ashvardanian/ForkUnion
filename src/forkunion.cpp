@@ -101,6 +101,12 @@ struct pool_variants_t {
 #if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
         fu::flat_pool<thread_allocator_t, fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>, //
 #endif
+#if FORKUNION_TARGET_PPC64_PAUSE
+        fu::flat_pool<thread_allocator_t, fu::ppc64_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,
+#endif
+#if FORKUNION_TARGET_PPC64_YIELD
+        fu::flat_pool<thread_allocator_t, fu::ppc64_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,
+#endif
 #if FORKUNION_TARGET_WASM_WAIT
         fu::flat_pool<thread_allocator_t, fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>, //
 #endif
@@ -148,6 +154,14 @@ struct pool_variants_t {
 #if FORKUNION_TARGET_RISCV64_PAUSE && FORKUNION_TARGET_RISCV64_ZICBOP
         fu::colocated_pool<fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>,   //
         fu::distributed_pool<fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>, //
+#endif
+#if FORKUNION_TARGET_PPC64_PAUSE
+        fu::colocated_pool<fu::ppc64_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,
+        fu::distributed_pool<fu::ppc64_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,
+#endif
+#if FORKUNION_TARGET_PPC64_YIELD
+        fu::colocated_pool<fu::ppc64_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,
+        fu::distributed_pool<fu::ppc64_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>,
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
         fu::colocated_pool<fu::wasm_wait_t, fu::wasm_atomic_ref, fu::standard_cache_hints_t>,   //
@@ -283,6 +297,18 @@ static auto select_pool([[maybe_unused]] fu::capabilities_t const bits, action_t
     if (selects<fu::riscv64_pause_t, fu::standard_atomic_ref, fu::riscv64_cache_hints_t>(bits))
         return action(pool_type_tag<typename pool_for<kind_, fu::riscv64_pause_t, fu::standard_atomic_ref,
                                                       fu::riscv64_cache_hints_t>::type> {});
+#endif
+    // Every pool word is read back by spinning workers, where a Power store atomic would only evict
+    // the line from each reader, so the Power pools keep the standard reference.
+#if FORKUNION_TARGET_PPC64_PAUSE
+    if (selects<fu::ppc64_pause_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::ppc64_pause_t, fu::standard_atomic_ref,
+                                                      fu::standard_cache_hints_t>::type> {});
+#endif
+#if FORKUNION_TARGET_PPC64_YIELD
+    if (selects<fu::ppc64_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t>(bits))
+        return action(pool_type_tag<typename pool_for<kind_, fu::ppc64_yield_t, fu::standard_atomic_ref,
+                                                      fu::standard_cache_hints_t>::type> {});
 #endif
     // WebAssembly threads declare no bit, so the sleeping waiter, woken by its notifying reference,
     // stands in for the portable pair wherever the module is built with them.
@@ -485,6 +511,9 @@ fu_assert_same_bit_(fu_capability_riscv64_atomic_k, capability_riscv64_atomic_k)
 fu_assert_same_bit_(fu_capability_arm64_prfm_k, capability_arm64_prfm_k);
 fu_assert_same_bit_(fu_capability_riscv64_zicbop_k, capability_riscv64_zicbop_k);
 fu_assert_same_bit_(fu_capability_riscv64_zabha_k, capability_riscv64_zabha_k);
+fu_assert_same_bit_(fu_capability_ppc64_yield_k, capability_ppc64_yield_k);
+fu_assert_same_bit_(fu_capability_ppc64_pause_k, capability_ppc64_pause_k);
+fu_assert_same_bit_(fu_capability_ppc64_amo_k, capability_ppc64_amo_k);
 fu_assert_same_bit_(fu_capability_any_yield_k, capability_any_yield_k);
 fu_assert_same_bit_(fu_capability_os_threads_k, capability_os_threads_k);
 fu_assert_same_bit_(fu_capability_topology_k, capability_topology_k);

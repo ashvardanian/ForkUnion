@@ -133,8 +133,14 @@ pub const Capabilities = packed struct(u32) {
     riscv64_zicbop: bool = false,
     /// RISC-V Zabha, byte and halfword atomics.
     riscv64_zabha: bool = false,
+    /// Power's `or 1,1,1` and `or 2,2,2` thread-priority hints.
+    ppc64_yield: bool = false,
+    /// Power ISA 3.1 `pause_short`.
+    ppc64_pause: bool = false,
+    /// Power ISA 3.0 store atomics, `stwat` and `stdat`.
+    ppc64_amo: bool = false,
 
-    _unused: u5 = 0,
+    _unused: u2 = 0,
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub fn all() Capabilities {
@@ -346,9 +352,10 @@ test "capability bits match the C ABI numbering" {
     try std.testing.expect(bit(17).riscv64_zicbom);
     try std.testing.expect(bit(18).x86_cmpccxadd);
     try std.testing.expect(bit(26).riscv64_zabha);
+    try std.testing.expect(bit(29).ppc64_amo);
 
     // Every bit the core defines must have a field; none may fall through to `_unused`.
-    const all_defined: Capabilities = @bitCast(@as(u32, (1 << 27) - 1));
+    const all_defined: Capabilities = @bitCast(@as(u32, (1 << 30) - 1));
     try std.testing.expectEqual(0, all_defined._unused);
 }
 

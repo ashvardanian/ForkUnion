@@ -347,8 +347,14 @@ struct Capabilities(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """RISC-V Zicbop, the `prefetch.w` hint."""
     comptime RISCV64_ZABHA = Self(1 << 26)
     """RISC-V Zabha, byte and halfword atomics."""
+    comptime PPC64_YIELD = Self(1 << 27)
+    """Power's `or 1,1,1` and `or 2,2,2` thread-priority hints."""
+    comptime PPC64_PAUSE = Self(1 << 28)
+    """Power ISA 3.1 `pause_short`."""
+    comptime PPC64_AMO = Self(1 << 29)
+    """Power ISA 3.0 store atomics, `stwat` and `stdat`."""
 
-    comptime ANY_YIELD = Self(0x3F)
+    comptime ANY_YIELD = Self(0x1800003F)
     """Every busy-wait waiter bit, to enumerate the ones a machine offers."""
     comptime ALL = Self(0xFFFF_FFFF)
     """All-ones allow-mask: hand to a pool to disable capability filtering."""

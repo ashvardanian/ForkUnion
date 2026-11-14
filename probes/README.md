@@ -11,6 +11,7 @@ MSVC has no inline assembly and spells both rungs as intrinsics instead, so thos
 `__ldapr32` needs no flag, while the LSE arithmetic goes through `_Interlocked*`, which stays inline only under `/arch:armv8.1`, so the LSE probe asks for that flag through `__ARM_FEATURE_ATOMICS`, the same macro `FORKUNION_HAS_ARM64_ATOMIC_INTRINSICS_` keys the header's definitions on.
 A baseline MSVC therefore answers LSE 0 and RCpc 1, and the demotion in `types.hpp` takes the child rung down with its parent.
 The RISC-V base atomics are the A extension's own mnemonics, so that probe also needs the extension in `-march`, as every `rv64gc` build has.
+The Power store atomics are mnemonics under `.machine power9`, which GNU as and LLVM take in a baseline unit.
 Whether the CPU has the instruction is the runtime's question, answered by `cpu_capabilities()`.
 A single-target build, `-D FORKUNION_MULTIVERSIONED=OFF`, also compiles `implied.cpp` at the `FORKUNION_MARCH` floor once per row into `forkunion_target_<capability>_implied`, keeping only the capabilities `types.hpp` derives from the floor's predefined macros.
 MSVC predefines too few of those, so its `FORKUNION_MARCH=native` build runs each enabled probe into `forkunion_target_<capability>_runs` instead, and every probe exits with 0 once its instruction ran.
@@ -39,3 +40,6 @@ Where a probe cell offers a second spelling, it is the intrinsic MSVC reaches th
 | `riscv64_zicbop` | `prefetch.r` word                                      | inline assembly                |
 | `riscv64_zacas`  | `amocas.w` word                                        | inline assembly                |
 | `riscv64_zabha`  | `amoadd.b` word                                        | inline assembly                |
+| `ppc64_yield`    | `or 1,1,1` and `or 2,2,2`                              | inline assembly                |
+| `ppc64_pause`    | `pause_short` word                                     | inline assembly                |
+| `ppc64_amo`      | `.machine power9` and `stwat`                          | inline assembly                |

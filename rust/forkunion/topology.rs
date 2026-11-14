@@ -131,6 +131,12 @@ impl Capabilities {
     pub const RISCV64_ZICBOP: Capabilities = Capabilities(1 << 25);
     /// RISC-V Zabha, byte and halfword atomics.
     pub const RISCV64_ZABHA: Capabilities = Capabilities(1 << 26);
+    /// Power's `or 1,1,1` and `or 2,2,2` thread-priority hints.
+    pub const PPC64_YIELD: Capabilities = Capabilities(1 << 27);
+    /// Power ISA 3.1 `pause_short`.
+    pub const PPC64_PAUSE: Capabilities = Capabilities(1 << 28);
+    /// Power ISA 3.0 store atomics, `stwat` and `stdat`.
+    pub const PPC64_AMO: Capabilities = Capabilities(1 << 29);
 
     /// All-ones allow-mask: pass to a pool constructor to disable capability filtering.
     pub const ALL: Capabilities = Capabilities(u32::MAX);

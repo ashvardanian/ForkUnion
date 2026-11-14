@@ -51,11 +51,12 @@
  *
  *  @sa core_quality_t
  *
- *  On x86, Arm, and RISC-V architectures, depending on the CPU features available, the library also
+ *  On x86, Arm, RISC-V, and Power, depending on the CPU features available, the library also
  *  exposes cheaper @b "busy-waiting" mechanisms, such as the @c tpause, @c wfet, and @c yield
  *  instructions, which spare the core a kernel call.
  *
- *  @sa arm64_yield_t, arm64_wfet_t, x86_pause_t, x86_tpause_t, riscv64_pause_t.
+ *  @sa arm64_yield_t, arm64_wfet_t, x86_pause_t, x86_tpause_t,
+ *      riscv64_pause_t, ppc64_yield_t, ppc64_pause_t.
  *
  *  The library requires @b C++20 or newer.
  */

@@ -17,9 +17,9 @@ elseif (FORKUNION_MARCH)
             FATAL_ERROR "MSVC takes FORKUNION_MARCH=native only; pass an /arch: value such as AVX2 or armv8.1 through "
                         "CMAKE_CXX_FLAGS instead of `${FORKUNION_MARCH}`"
         )
-    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|AARCH64|arm64|ARM64")
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|AARCH64|arm64|ARM64|ppc64|powerpc64")
         # AArch64 names CPUs through `-mcpu`, like `neoverse-v2`, as `-march` takes only architecture versions; Apple
-        # Clang's `-march=native` also advertises just a subset of host features.
+        # Clang's `-march=native` also advertises just a subset of host features. Power compilers have no `-march`.
         set(forkunion_unit_arch_flags_ -mcpu=${FORKUNION_MARCH})
     else ()
         set(forkunion_unit_arch_flags_ -march=${FORKUNION_MARCH})
