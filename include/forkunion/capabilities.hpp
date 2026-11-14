@@ -49,9 +49,11 @@
 #include <unistd.h> // `syscall`
 #endif
 
-/*  Linux on Power reports the ISA level in the auxiliary vector's second capability word. */
-#if FORKUNION_ARCH_PPC64_ && FORKUNION_OS_LINUX_
-#include <sys/auxv.h> // `getauxval`, `AT_HWCAP2`
+/*  Linux on Power reports the ISA level in the auxiliary vector's second capability word, and
+ *  Linux and FreeBSD on Arm report in the first whether they emulate EL0 reads of ID registers. */
+#if (FORKUNION_ARCH_PPC64_ && FORKUNION_OS_LINUX_) || \
+    (FORKUNION_ARCH_ARM64_ && (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_))
+#include <sys/auxv.h> // `getauxval`, `elf_aux_info`, `AT_HWCAP`, `AT_HWCAP2`
 #endif
 
 namespace ashvardanian {
@@ -941,14 +943,21 @@ inline capabilities_t arm64_cpu_capabilities() noexcept {
     if (apple_sysctl_flag("hw.optional.arm.FEAT_LSE")) caps |= capability_arm64_lse_k;
     if (apple_sysctl_flag("hw.optional.arm.FEAT_LRCPC")) caps |= capability_arm64_rcpc_k;
 #elif (FORKUNION_OS_LINUX_ || FORKUNION_OS_FREEBSD_) && FORKUNION_HAS_INLINE_ASM_
-    std::uint64_t isar0 = 0, isar1 = 0, isar2 = 0;
-    __asm__ __volatile__("mrs %0, S3_0_C0_C6_0" : "=r"(isar0));         // `ID_AA64ISAR0_EL1`
-    __asm__ __volatile__("mrs %0, S3_0_C0_C6_1" : "=r"(isar1));         // `ID_AA64ISAR1_EL1`
-    __asm__ __volatile__("mrs %0, S3_0_C0_C6_2" : "=r"(isar2));         // `ID_AA64ISAR2_EL1`
-    if (arm64_id_field(isar2, 0) >= 2) caps |= capability_arm64_wfet_k; // `WFxT`
+    constexpr unsigned long hwcap_cpuid_k = 1ul << 11; // `HWCAP_CPUID`
 #if FORKUNION_OS_LINUX_
     caps |= capability_arm64_dc_cvac_k; // ? `DC CVAC` is base ISA; Linux sets `SCTLR_EL1.UCI`, so EL0 may issue it
+    unsigned long const hwcap = ::getauxval(AT_HWCAP);
+#else
+    unsigned long hwcap = 0;
+    ::elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap));
 #endif
+    // ? Without `HWCAP_CPUID` the kernel does not emulate the `mrs` reads below, and they fault
+    if (!(hwcap & hwcap_cpuid_k)) return caps;
+    std::uint64_t isar0 = 0, isar1 = 0, isar2 = 0;
+    __asm__ __volatile__("mrs %0, S3_0_C0_C6_0" : "=r"(isar0));          // `ID_AA64ISAR0_EL1`
+    __asm__ __volatile__("mrs %0, S3_0_C0_C6_1" : "=r"(isar1));          // `ID_AA64ISAR1_EL1`
+    __asm__ __volatile__("mrs %0, S3_0_C0_C6_2" : "=r"(isar2));          // `ID_AA64ISAR2_EL1`
+    if (arm64_id_field(isar2, 0) >= 2) caps |= capability_arm64_wfet_k;  // `WFxT`
     if (arm64_id_field(isar0, 20) >= 2) caps |= capability_arm64_lse_k;  // `Atomic`
     if (arm64_id_field(isar1, 20) >= 1) caps |= capability_arm64_rcpc_k; // `LRCPC`
 #elif FORKUNION_OS_WINDOWS_
