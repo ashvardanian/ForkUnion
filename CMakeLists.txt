@@ -114,6 +114,10 @@ target_include_directories(
 # alone. No `CXX_STANDARD` property here - it governs only a target's own compilation, and an INTERFACE library has
 # none, so it would be a no-op that reads like a cap.
 target_compile_features(forkunion_header INTERFACE cxx_std_20)
+# MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
+target_compile_options(
+    forkunion_header INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
+)
 
 include(cmake/forkunion_platform.cmake)
 
