@@ -23,7 +23,7 @@ include_guard(GLOBAL)
 add_library(forkunion_cpu_capabilities_compiled INTERFACE)
 add_library(forkunion::cpu_capabilities_compiled ALIAS forkunion_cpu_capabilities_compiled)
 # Each capability row's name as its verdict enables it, for the configure summary.
-set_property(GLOBAL PROPERTY forkunion_capabilities_enabled)
+set_property(GLOBAL PROPERTY forkunion_capabilities_compiled)
 
 # Probes one capability, named `capability_name_` in its probe and cache variable, and defines `capability_macro_` from
 # the verdict. Tried as Release, without any target's flags, so a sanitized configuration does not fail the probes for
@@ -97,12 +97,12 @@ function (forkunion_add_cpu_capability capability_name_ capability_macro_)
     )
         set(capability_enabled_ FALSE)
     endif ()
-    set(forkunion_target_${capability_name_}_enabled
+    set(forkunion_target_${capability_name_}_compiled
         ${capability_enabled_}
         CACHE INTERNAL "Whether ${capability_macro_} compiles, is not switched off, and the build kind keeps it"
     )
     if (capability_enabled_)
-        set_property(GLOBAL APPEND PROPERTY forkunion_capabilities_enabled ${capability_name_})
+        set_property(GLOBAL APPEND PROPERTY forkunion_capabilities_compiled ${capability_name_})
     endif ()
     set(forkunion_target_${capability_name_}_runs
         ${capability_runs_}

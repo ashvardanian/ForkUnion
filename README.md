@@ -1061,6 +1061,28 @@ The original Rust implementation was a standalone library, but in essence, Rust 
 It enforces stringent safety rules, which is excellent for building trustworthy software, but realistically, it makes lock-free concurrent programming with minimal memory allocations too complicated.
 Now, the Rust library is a wrapper over the C binding of the C++ core implementation.
 
+## Multiversioned and Monoversioned Builds
+
+ForkUnion compiles in one of two shapes, picked by `FORKUNION_MULTIVERSIONED`.
+
+- __Multiversioned builds are for distributing to a diverse fleet.__
+  One binary serves every machine, because each pool picks its waiter and atomics from what the running CPU offers.
+  This is the default, and the shape of the Rust crate and the Zig and Mojo packages.
+- __Monoversioned builds are for high-velocity environments of identical machines.__
+  They compile one waiter and one atomic reference, the best that machine runs, so builds are much shorter and binaries much smaller.
+  Their floor is that machine's `-march`, so they run only on that kind of machine and its successors.
+- __The switches.__
+  `FORKUNION_MULTIVERSIONED=OFF` picks the second shape and `FORKUNION_MARCH` names its CPU floor.
+  The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper`, `vera_rubin` and `venice_mi450` presets spell whole machines.
+
+A monoversioned build keeps only the capabilities its floor implies or a preset vouches for, so its waiters and atomic references are fixed to the target.
+
+ForkUnion keeps its own names for the six words the kernel libraries dispatch by.
+Each capability is a __probe__ in `cmake/forkunion_probes.cmake`, a `try_compile` of its source under `probes/`, and a __target__ in its `FORKUNION_TARGET_*` macro.
+A monoversioned build keeps only the targets `FORKUNION_MARCH` __implies__, as `probes/implied.cpp` asks the preprocessor.
+The targets left on are what the build __compiled__, and `preferred_yield_t`, `preferred_atomic_ref` and `preferred_cache_hints_t` are the compile-time pick among them.
+`cpu_capabilities()` answers __detected__, and a pool's `allowed` mask, intersected with it at spawn, is what that pool has __enabled__.
+
 ## Testing & Benchmarking
 
 Toolchain floors, never caps.
