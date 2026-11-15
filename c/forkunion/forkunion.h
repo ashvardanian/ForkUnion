@@ -621,7 +621,7 @@ fu_status_t fu_compute_levels_count(fu_topology_t topology, size_t *count_out);
 fu_status_t fu_compute_capacity_in(fu_topology_t topology, size_t compute_domain_index, size_t *capacity_out);
 
 /**
- *  @brief Returns each logical core's share of the deepest cache confined to a compute domain.
+ *  @brief Returns each logical core's share of the L2 serving a compute domain.
  *  @param[in] topology Machine topology from @c fu_topology_new.
  *  @param[in] compute_domain_index Target compute domain, in [0, <tt>fu_compute_domains_count()</tt>).
  *  @param[out] bytes_out Receives the bytes of one cache instance per sharing core, 0 if unknown.

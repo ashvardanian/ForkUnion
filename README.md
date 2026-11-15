@@ -705,7 +705,7 @@ Beyond the level ordinals, two magnitudes describe a compute domain, both best-e
 `compute_capacity_in` forwards the kernel's own rating of a core, read from `/sys/devices/system/cpu/cpuN/cpu_capacity`, normalized so the fastest core on the machine reads 1024.
 Linux publishes that file on `arm64` and on Intel hybrids, and nothing like it exists on Windows or Apple, which read 0.
 A kernel that rates every core alike rates nothing, so a tie also reads 0; Linux then splits the classes by their core PMUs, `cpu_core` and `cpu_atom` on Intel hybrids.
-`compute_cache_bytes_per_core_in` reports each logical core's share of the deepest cache confined to a domain: one instance's bytes over the cores sharing it.
+`compute_cache_bytes_per_core_in` reports each logical core's share of the L2 serving a domain: one instance's bytes over the cores sharing it.
 It is enumerated exactly rather than measured — from the per-core cache hierarchy in `sysfs` on Linux, CPUID leaves elsewhere on x86, `sysctl` on Apple, and the cache relationships on Windows.
 Domains of identical throughput can sit behind very differently sized caches, so neither value follows from the other.
 Treat both as hints, present only where the hardware volunteers them, and never as a number a program requires.

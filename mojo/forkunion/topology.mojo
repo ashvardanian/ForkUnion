@@ -202,7 +202,7 @@ struct Topology:
         return self._count_in(self.library.symbols().compute_capacity_in, domain.index)
 
     def compute_cache_bytes_per_core_in(self, domain: ComputeDomain) raises Error -> Int:
-        """Each logical core's share of the deepest cache confined to one compute domain.
+        """Each logical core's share of the L2 serving one compute domain.
 
         Args:
             domain: A dense compute-domain index, below `compute_domains_count`.

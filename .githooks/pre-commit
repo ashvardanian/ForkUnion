@@ -2162,7 +2162,7 @@ check_filesystem_in_harnesses_only() {
 # Rejects the standard containers, `std::pair` and `std::tuple` in the library and its bindings, because the
 # containers allocate through the global heap behind the caller's back and throw when it runs out, and a pair
 # or a tuple hides what each member means behind `first` and `get<1>`; only the harnesses may use them.
-check_std_collections_in_harnesses_only() {
+check_std_collections_absent() {
     local reached baseline_path
     for baseline_path in $std_collections_baseline_paths; do
         [ "$staged_path" != "$baseline_path" ] || return 0
@@ -3085,7 +3085,7 @@ run_shared_checks() {
         case "$staged_path" in
         *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx | *.mm)
             check_filesystem_in_harnesses_only
-            check_std_collections_in_harnesses_only
+            check_std_collections_absent
             ;;
         esac
         ;;

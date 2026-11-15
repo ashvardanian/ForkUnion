@@ -281,7 +281,7 @@ pub const Topology = struct {
         return answer;
     }
 
-    /// Returns each core's share of the deepest cache confined to a compute domain (0 if unknown).
+    /// Returns each core's share of the L2 serving a compute domain (0 if unknown).
     ///
     /// Sizes a cache-resident chunk, a different question from how many chunks a domain deserves -
     /// domains of equal throughput may back onto very differently sized caches.

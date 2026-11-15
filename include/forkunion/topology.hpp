@@ -863,8 +863,8 @@ struct compute_domain_t {
     std::size_t capacity {0};
 
     /**
-     *  @brief Bytes of the deepest cache confined to this domain, divided among the logical cores
-     *      sharing one instance of it; 0 when unknown.
+     *  @brief Bytes of one L2 instance serving this domain, divided among the logical cores sharing
+     *      it; 0 when unknown.
      *
      *  Sizes a cache-resident chunk, which is a different question from how many chunks a domain
      *  should receive - cores of equal throughput may back onto very differently sized caches, so
@@ -952,7 +952,8 @@ struct [[nodiscard]] cache_instance_t {
 };
 
 /**
- *  @brief The deepest data or unified cache serving @p core_id, confined to @p domain_cores.
+ *  @brief The deepest data or unified cache serving @p core_id, confined to @p domain_cores, at
+ *      level @p max_level or below.
  *  @return The cache instance, with zero bytes when no platform source can name it.
  *
  *  Two exact sources, no measurement: Linux's per-core cacheinfo sysfs, counting a level only if
@@ -962,7 +963,8 @@ struct [[nodiscard]] cache_instance_t {
  *  sysfs is the only Arm source and other Arm hosts honestly report 0.
  */
 inline cache_instance_t deepest_cache_of_core([[maybe_unused]] core_id_t core_id,
-                                              [[maybe_unused]] std::span<core_id_t const> domain_cores) noexcept {
+                                              [[maybe_unused]] std::span<core_id_t const> domain_cores,
+                                              [[maybe_unused]] std::uint32_t max_level) noexcept {
 #if FORKUNION_OS_LINUX_
     cache_instance_t deepest;
     for (int index = 0; index < 16; ++index) {
@@ -978,12 +980,15 @@ inline cache_instance_t deepest_cache_of_core([[maybe_unused]] core_id_t core_id
         ::fclose(type_file);
         if (!parsed_type || type_name[0] == 'I') continue; // ? Instruction caches hold no chase list
 
+        char line[256];
+        std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index%d/level", core_id, index);
+        if (failed(read_line_at_path(path, line)) || ::strtoul(line, nullptr, 10) > max_level) continue;
+
         // A level only counts if every core it serves belongs to this domain - a cache shared with
         // a sibling QoS class is not the domain's to size chunks by.
         // ? A truncated list fails to read - its dropped tail could name cores outside the domain
         std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index%d/shared_cpu_list", core_id,
                       index);
-        char line[256];
         if (failed(read_line_at_path(path, line)) || !cpu_list_within(line, domain_cores)) continue;
 
         std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cache/index%d/size", core_id, index);
@@ -1030,6 +1035,7 @@ inline cache_instance_t deepest_cache_of_core([[maybe_unused]] core_id_t core_id
         std::uint32_t const cache_type = r.eax & 0x1Fu;
         if (cache_type == 0) break;
         if (cache_type == 2) continue;
+        if (((r.eax >> 5) & 0x7u) > max_level) continue; // ? Leaf 4's level field
         // A level shared by more logical cores than this domain holds reaches beyond the domain -
         // the register-only stand-in for the sysfs `shared_cpu_list` containment above.
         std::uint32_t const sharing_cores = ((r.eax >> 14) & 0xFFFu) + 1;
@@ -1045,6 +1051,17 @@ inline cache_instance_t deepest_cache_of_core([[maybe_unused]] core_id_t core_id
 #else
     return {};
 #endif
+}
+
+/** The cache that clusters @p core_id within @p class_cores: the deepest confined there, a Zen
+ *  CCX's L3 included. */
+inline cache_instance_t cluster_cache_of_core(core_id_t core_id, std::span<core_id_t const> class_cores) noexcept {
+    return deepest_cache_of_core(core_id, class_cores, ~0u);
+}
+
+/** The L2 serving @p core_id, or its L1 where the L2 reaches beyond @p domain_cores. */
+inline cache_instance_t l2_cache_of_core(core_id_t core_id, std::span<core_id_t const> domain_cores) noexcept {
+    return deepest_cache_of_core(core_id, domain_cores, 2);
 }
 
 /**
@@ -1732,7 +1749,7 @@ struct machine_topology {
         domain.memory_domain_index = memory_domain_index_t {0};
         domain.compute_level = compute_level_t {0};
         domain.capacity = 0;
-        domain.cache_bytes_per_core = deepest_cache_of_core(core_ids_ptr[0], node.core_ids).bytes_per_core();
+        domain.cache_bytes_per_core = l2_cache_of_core(core_ids_ptr[0], node.core_ids).bytes_per_core();
         domain.core_ids = node.core_ids;
 
         // Moving an array keeps its heap pointer, so every `core_ids` slice above stays valid.
@@ -1847,8 +1864,7 @@ struct machine_topology {
             domain.memory_domain_index = static_cast<memory_domain_index_t>(node_index);
             domain.compute_level = compute_level_t {0};
             domain.capacity = 0;
-            domain.cache_bytes_per_core =
-                deepest_cache_of_core(core_ids_ptr[core_begin], node.core_ids).bytes_per_core();
+            domain.cache_bytes_per_core = l2_cache_of_core(core_ids_ptr[core_begin], node.core_ids).bytes_per_core();
             domain.core_ids = node.core_ids;
             ++node_index;
         }
@@ -2024,7 +2040,7 @@ struct machine_topology {
                 std::span<core_id_t const> const class_cores = node_cores.subspan(class_begin, core - class_begin);
                 for (core_id_t const member : class_cores) {
                     core_siblings_t const siblings = siblings_of_core(member);
-                    cache_instance_t const cache = deepest_cache_of_core(member, class_cores);
+                    cache_instance_t const cache = cluster_cache_of_core(member, class_cores);
                     core_orders[member].sibling_rank = siblings.rank;
                     core_orders[member].cluster_core_id =
                         cache.sharing_cores > siblings.count ? cache.first_core_id : core_id_t {-1};
@@ -2059,7 +2075,7 @@ struct machine_topology {
                 // but needs the same bucketing as the fabric's tier derivation, or every domain
                 // becomes its own `compute_level` and the QoS split explodes.
                 domain.capacity = core_orders[first].capacity; // ? 0 after a tie - ranked, not rated
-                domain.cache_bytes_per_core = deepest_cache_of_core(first, domain_cores).bytes_per_core();
+                domain.cache_bytes_per_core = l2_cache_of_core(first, domain_cores).bytes_per_core();
                 domain.core_ids = domain_cores;
                 run_begin = core;
             }
@@ -2216,7 +2232,7 @@ struct machine_topology {
             domain.memory_domain_index = memory_domain_index_t {0};
             domain.compute_level = compute_level_t {0};
             domain.capacity = 0;
-            domain.cache_bytes_per_core = deepest_cache_of_core(core_ids_ptr[0], node.core_ids).bytes_per_core();
+            domain.cache_bytes_per_core = l2_cache_of_core(core_ids_ptr[0], node.core_ids).bytes_per_core();
             domain.core_ids = node.core_ids;
             domains_written = 1;
             levels_written = 1;

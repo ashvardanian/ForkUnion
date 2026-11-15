@@ -371,6 +371,11 @@ if (NOT forkunion_atomics_are_builtin_)
     target_link_libraries(forkunion_header INTERFACE atomic)
 endif ()
 
+# MSVC links these through `#pragma comment` in `types.hpp`, which MinGW ignores.
+if (WIN32)
+    target_link_libraries(forkunion_header INTERFACE synchronization advapi32)
+endif ()
+
 # Translate one tri-state to its macro. AUTO says nothing and lets the header decide; ON and OFF force the macro to 1 or
 # 0. Knows nothing of the environment: there is no longer an environment to know.
 function (forkunion_apply_tri_state mode_ macro_)

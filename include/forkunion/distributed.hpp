@@ -2062,9 +2062,10 @@ inline std::uint64_t stream_words_(std::uint64_t const *words, std::size_t const
     return sum;
 }
 
-/** Bytes a stream needs to dwarf every cache the harvest can name - its repeats re-read the same
- *  buffer, and a cache-resident buffer would report the cache's bandwidth - and to run long past
- *  the fork-join overhead: at least 8 MB per worker reading it. */
+/** Bytes a stream needs to dwarf every cache - 8x the widest domain's L2s, floored at 128 MB for
+ *  the L3 the harvest does not name - its repeats re-read the same buffer, and a cache-resident
+ *  buffer would report the cache's bandwidth - and to run long past the fork-join overhead: at
+ *  least 8 MB per worker reading it. */
 inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_domain_t const &target,
                                  std::size_t const widest_domain_threads) noexcept {
     std::uint64_t largest_cache = 0;
@@ -2073,7 +2074,7 @@ inline std::size_t stream_bytes_(machine_topology_t const &topology, memory_doma
         largest_cache =
             max_of(largest_cache, static_cast<std::uint64_t>(compute.cache_bytes_per_core) * compute.core_ids.size());
     }
-    // ? 64-bit math: a giant L3 times 8 overflows a 32-bit `size_t` before the RAM clamp can bite
+    // ? 64-bit math: giant L2s times 8 overflow a 32-bit `size_t` before the RAM clamp can bite
     std::uint64_t bytes = max_of(max_of(largest_cache * 8, std::uint64_t(128) << 20),
                                  static_cast<std::uint64_t>(widest_domain_threads) * (std::uint64_t(8) << 20));
     if (target.volume_ram) bytes = min_of(bytes, static_cast<std::uint64_t>(target.volume_ram) / 8);
