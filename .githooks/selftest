@@ -1092,11 +1092,6 @@ assert_accepts "Unicode prose at 100 characters" include/$project_directory/prob
 int probe(void);
 FIXTURE
 
-assert_rejects "prose past 100 columns in a HIP source" "writes prose past 100 columns" probe.hip <<'FIXTURE'
-/** A sentence that keeps going well past the prose limit of one hundred columns, and then some more. */
-int probe(void);
-FIXTURE
-
 assert_rejects "pipe table" "draws a pipe table" include/$project_directory/probe.h <<'FIXTURE'
 /**
  *  @brief Lists the instructions.
@@ -1798,10 +1793,6 @@ static inline int probe(int count, int size) {
 }
 FIXTURE
 
-assert_rejects "device bit intrinsic" "calls a device bit intrinsic" test/probe.cu <<'FIXTURE'
-static __device__ unsigned probe_simt_(unsigned word) { return __popc(word); }
-FIXTURE
-
 assert_rejects "NOMINMAX in a public header" "defines NOMINMAX or WIN32_LEAN_AND_MEAN" include/$project_directory/probe.hpp <<'FIXTURE'
 #define NOMINMAX
 int probe();
@@ -1981,27 +1972,6 @@ assert_verbatim_accepts "CMake result through an output parameter" cmake/probe.c
 set(${output_} "${probe_value_}" PARENT_SCOPE)
 FIXTURE
 
-assert_rejects "Go pseudo-heading" "pseudo-heading" golang/probe.go <<'FIXTURE'
-package probe
-
-// Usage:
-func Probe() {}
-FIXTURE
-
-assert_rejects "Go call reference" "references an exported Go name" golang/probe.go <<'FIXTURE'
-package probe
-
-// Calls Probe() once.
-func Probe() {}
-FIXTURE
-
-assert_accepts "Go doc link" golang/probe.go <<'FIXTURE'
-package probe
-
-// Calls [Probe] once.
-func Probe() {}
-FIXTURE
-
 assert_rejects "Rust macro" "macro_rules" rust/probe.rs <<'FIXTURE'
 macro_rules! probe { () => {} }
 FIXTURE
@@ -2055,27 +2025,6 @@ Args:
     value: The value.
     count: How many times.
 """
-FIXTURE
-
-assert_rejects "TSDoc type braces" "uses JSDoc tag syntax" javascript/probe.ts <<'FIXTURE'
-/**
- *  Probes a value.
- *  @param {number} value - The value.
- */
-export function probe(value: number): void {}
-FIXTURE
-
-assert_rejects "TSDoc call reference" "references a function as a call" javascript/probe.ts <<'FIXTURE'
-/** Wraps probe() once. */
-export function probe(): void {}
-FIXTURE
-
-assert_accepts "TSDoc link" javascript/probe.ts <<'FIXTURE'
-/**
- *  Wraps {@link probe} once.
- *  @param value - The value.
- */
-export function probe(value: number): void {}
 FIXTURE
 
 assert_rejects "unsorted editor settings" "unsorted top-level keys" .vscode/settings.json <<'FIXTURE'
@@ -2448,17 +2397,6 @@ assert_rejects "usage pseudo-heading" "labels a code block with a pseudo-heading
 int probe(void);
 FIXTURE
 
-assert_rejects "binding fence without a language" "opens a code fence without naming its language" javascript/probe.ts <<'FIXTURE'
-/**
- *  Builds the probe:
- *
- *  ```
- *  npm run build
- *  ```
- */
-export function probe() {}
-FIXTURE
-
 assert_accepts "Rust doctest in a bare fence" rust/probe.rs <<'FIXTURE'
 /// Probes once:
 ///
@@ -2518,13 +2456,6 @@ assert_rejects "backward-looking comment" "backward-looking comment" include/$pr
 int probe(void);
 FIXTURE
 
-assert_rejects "Dtype in a Go method name" "miscases a name" golang/probe.go <<'FIXTURE'
-package probe
-
-// Probe reports the element type.
-func (p Matrix) Dtype() string { return p.kind }
-FIXTURE
-
 assert_rejects "miscased vendor in a comment" "miscases a name" include/$project_directory/probe.h <<'FIXTURE'
 /** Runs on Nvidia Grace and on numpy arrays. */
 int probe(void);
@@ -2574,11 +2505,11 @@ assert_accepts "filesystem include in a test harness" test/probe.cpp <<'FIXTURE'
 #include <filesystem>
 FIXTURE
 
-assert_rejects "vector in the library" "uses a standard container, std::pair or std::tuple" include/$project_directory/probe.hpp <<'FIXTURE'
+assert_rejects "vector in the library" "uses a standard container, an owning std::string, std::pair or std::tuple" include/$project_directory/probe.hpp <<'FIXTURE'
 #include <vector>
 FIXTURE
 
-assert_rejects "pair in a binding" "uses a standard container, std::pair or std::tuple" python/probe.cpp <<'FIXTURE'
+assert_rejects "pair in a binding" "uses a standard container, an owning std::string, std::pair or std::tuple" c/probe.cpp <<'FIXTURE'
 std::pair<int, int> probe_bounds(void);
 FIXTURE
 
@@ -2635,19 +2566,6 @@ FIXTURE
 assert_rejects "C++ template value parameter without private suffix" "exposes a template parameter name" include/$project_directory/probe.hpp <<'FIXTURE'
 template <typename value_type_,
           unsigned width>
-struct probe {};
-FIXTURE
-
-assert_accepts "Metal private template parameters and local aliases" include/$project_directory/probe.metal <<'FIXTURE'
-template <typename stage_type_, uint dtype_>
-struct probe {
-    using stage_t = stage_type_;
-    static constexpr uint dtype = dtype_;
-};
-FIXTURE
-
-assert_rejects "Metal template parameter without private suffix" "exposes a template parameter name" include/$project_directory/probe.metal <<'FIXTURE'
-template <typename stage_t, uint dtype>
 struct probe {};
 FIXTURE
 
@@ -2714,27 +2632,6 @@ assert_accepts "Rust underscores, dashes and multiplication" rust/probe.rs <<'FI
 pub fn probe() {}
 FIXTURE
 
-assert_rejects "binding parenthetical aside" "puts a parenthetical aside in doc prose" golang/probe.go <<'FIXTURE'
-package bindings
-
-// Probe returns the great-circle distance (in meters).
-func Probe() {}
-FIXTURE
-
-assert_rejects "binding aside holding an em-dash" "puts a parenthetical aside in doc prose" golang/probe.go <<'FIXTURE'
-package bindings
-
-// Probe returns the distance (great-circle — never Euclidean) between the two points.
-func Probe() {}
-FIXTURE
-
-assert_accepts "binding parentheses around math and code" golang/probe.go <<'FIXTURE'
-package bindings
-
-// Probe returns 1 - (a / b) and calls [Matrix.Depth] once, like `probe(a, b)` does.
-func Probe() {}
-FIXTURE
-
 assert_rejects "binding formula in a code span" "puts a formula in a code span" rust/probe.rs <<'FIXTURE'
 /// Normalizes as `y = x * rsqrt(mean(x^2) + eps)`.
 pub fn probe() {}
@@ -2750,113 +2647,9 @@ assert_rejects "binding shape as a product" "spells a shape as a product or a tu
 pub fn probe() {}
 FIXTURE
 
-assert_verbatim_rejects "Swift callout header" "opens without its header" swift/Probe.swift <<'FIXTURE'
-//
-//  swift/Probe.swift
-//  One staged fixture for one rule.
-//
-//  - Author: Selftest
-//  - Date: January 1, 2026
-//
-public struct Probe {}
-FIXTURE
-
-assert_verbatim_accepts "Swift docblock header" swift/Probe.swift <<'FIXTURE'
-/**
- *  @file swift/Probe.swift
- *  @author Selftest
- *  @date January 1, 2026
- *  @brief One staged fixture for one rule.
- */
-public struct Probe {}
-FIXTURE
-
-assert_accepts "Swift - Warning: continuation aligned under the text like a bullet" swift/Probe.swift <<'FIXTURE'
-public struct Probe {
-    /// - Warning: This may move storage, which invalidates every `view()`, `span()` and `row()`
-    ///   pointer obtained before the call.
-    public func reserve() {}
-}
-FIXTURE
-
-assert_rejects "Swift - Warning: continuation hanging 4 like a C tag" "misaligns a doc continuation" swift/Probe.swift <<'FIXTURE'
-public struct Probe {
-    /// - Warning: This may move storage, which invalidates every `view()`, `span()` and `row()`
-    ///     pointer obtained before the call.
-    public func reserve() {}
-}
-FIXTURE
-
-assert_verbatim_rejects "Swift file without its header" "opens without its header" swift/Probe.swift <<'FIXTURE'
-import Foundation
-FIXTURE
-
-assert_rejects "binding ALL-CAPS emphasis" "uses ALL-CAPS emphasis in a doc" swift/Probe.swift <<'FIXTURE'
-/// Reserving storage is NEVER free.
-public func reserve() {}
-FIXTURE
-
-assert_rejects "Go method referenced as a call" "references a Go method as a call" golang/probe.go <<'FIXTURE'
-package bindings
-
-// Probe reads b.Depth() dimensions per row.
-func Probe() {}
-FIXTURE
-
-assert_rejects "Python docstring literal with Parameters" "names a docstring section outside Google style" python/probe.c <<'FIXTURE'
-char const doc_probe[] =                                              //
-    "Probe a value.\n\n"                                              //
-    "Parameters:\n"                                                   //
-    "    value (int): The value.\n";
-FIXTURE
-
-assert_rejects "Python docstring literal with a tuple shape" "spells a shape as a product or a tuple" python/probe.c <<'FIXTURE'
-char const doc_probe[] =                                              //
-    "Probe a value.\n\n"                                              //
-    "Args:\n"                                                         //
-    "    a (Tensor): Matrix with shape (height, depth).\n";
-FIXTURE
-
-assert_verbatim_rejects "Go package comment outside its file" "documents the package outside the file named after it" golang/probe.go <<'FIXTURE'
-// Package bindings wraps the library.
-//
-// File: golang/probe.go
-// Author: Selftest
-// Date: January 1, 2026
-package bindings
-FIXTURE
-
-assert_verbatim_accepts "Go package comment in the file named after it, closing with its fields" golang/bindings.go <<'FIXTURE'
-// Package bindings wraps the library for Go, one batch call per kernel family.
-//
-// File: golang/bindings.go
-// Author: Selftest
-// Date: January 1, 2026
-package bindings
-FIXTURE
-
-assert_verbatim_rejects "Go package comment without its fields" "opens without its file header" golang/bindings.go <<'FIXTURE'
-// Package bindings wraps the library for Go, one batch call per kernel family.
-package bindings
-FIXTURE
-
 assert_verbatim_rejects "Rust module doc without its fields" "opens without the module fields; end its //! doc" rust/probe.rs <<'FIXTURE'
 //! Probes a value.
 pub fn probe() {}
-FIXTURE
-
-assert_verbatim_rejects "Go file without its header" "opens without its file header" golang/probe.go <<'FIXTURE'
-package probe
-FIXTURE
-
-assert_verbatim_accepts "Go file opening with a summary above its header" golang/probe.go <<'FIXTURE'
-// Probes a value over Go strings.
-//
-// File: golang/probe.go
-// Author: Selftest
-// Date: January 1, 2026
-
-package probe
 FIXTURE
 
 assert_verbatim_rejects "Python module without its fields" "opens without the module fields" python/probe.py <<'FIXTURE'
@@ -2865,60 +2658,6 @@ FIXTURE
 
 assert_accepts "Python module with its fields" python/probe.py <<'FIXTURE'
 PROBE_VALUE = 1
-FIXTURE
-
-assert_verbatim_rejects "TypeScript header in the wrong order" "opens without its header" javascript/probe.ts <<'FIXTURE'
-/**
- *  @brief Probes a value.
- *  @file javascript/probe.ts
- *  @author Selftest
- *  @date January 1, 2026
- */
-export function probe(): void {}
-FIXTURE
-
-assert_rejects "JavaScript docblock with one-space lines" "indents a docblock line by one space" test/probe.mjs <<'FIXTURE'
-/**
- * Probes a value.
- *
- * @returns Nothing at all.
- */
-export function probe() {}
-FIXTURE
-
-assert_rejects "JavaScript brief below the header" "uses @brief below the file header" test/probe.mjs <<'FIXTURE'
-/**
- *  @brief Probes a value.
- */
-export function probe() {}
-FIXTURE
-
-assert_verbatim_accepts "JavaScript header after a shebang" test/probe.mjs <<'FIXTURE'
-#!/usr/bin/env node
-/**
- *  @file test/probe.mjs
- *  @author Selftest
- *  @date January 1, 2026
- *  @brief Probes a value.
- */
-
-/** Probes a value once. */
-export function probe() {}
-FIXTURE
-
-assert_rejects "TypeScript declaration documented with //" "documents a declaration with a bare" javascript/probe.ts <<'FIXTURE'
-// The probe's shared state.
-let probeState: number = 0;
-FIXTURE
-
-assert_accepts "TypeScript declaration documented with TSDoc" javascript/probe.ts <<'FIXTURE'
-/** The probe's shared state. */
-let probeState: number = 0;
-
-export function probe(): void {
-    // Reset before every call.
-    probeState = 0;
-}
 FIXTURE
 
 assert_verbatim_accepts "Python dotfile config under a comment" .cmake-format.py <<'FIXTURE'
@@ -2952,17 +2691,301 @@ settings = {
 # endregion Helpers
 FIXTURE
 
-assert_accepts "Go method called inside a tab-indented example" golang/probe.go <<'FIXTURE'
-package bindings
+# endregion Binding Doc Fixtures
 
-// Probe reads every entry; for example:
-//
-//	probe := bindings.NewProbe()
-//	defer probe.Close()
-func Probe() {}
+# region Shared Region Fixtures
+
+# Commits stdin behind the file header, then applies a sed edit and stages it, so a rule judges a commit
+# that touches some lines of an existing construct and leaves the rest.
+stage_committed_fixture() { # stage_committed_fixture <relative-path> <sed-expression> <<< content
+    stage_fixture_with_header "$1"
+    git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+    sed "$2" "$fixture_directory/$1" > "$fixture_directory/$1.edited" && mv "$fixture_directory/$1.edited" "$fixture_directory/$1"
+    git -C "$fixture_directory" add -- "$1"
+}
+
+stage_committed_fixture include/$project_directory/probe.hpp 's/probe_text =$/probe_text = "first half "/' <<'FIXTURE'
+static char const *probe_text =
+                                "second half";
+FIXTURE
+run_precommit
+expect_rejection "string split by an added line before an unchanged fragment" "splits a string literal without"
+
+stage_committed_fixture include/$project_directory/probe.hpp 's/bool bounded =/bool bounded_k =/' <<'FIXTURE'
+template <typename value_type_>
+constexpr bool bounded = sizeof(value_type_) < 8;
+FIXTURE
+run_precommit
+expect_rejection "variable template suffixed on the line after its unchanged header" "suffixes a variable template"
+
+stage_committed_fixture include/$project_directory/probe.hpp '/^template/s/value_type_/item_type_/; /constexpr bool/s/value_type_/item_type_/' <<'FIXTURE'
+template <typename value_type_>
+inline bool probe(value_type_ value) noexcept {
+    constexpr bool small_k = sizeof(value_type_) < 8;
+    return small_k && value;
+}
+FIXTURE
+run_precommit
+expect_acceptance "a suffixed local constant below an edited function template header"
+
+assert_rejects "owning string in the library" "an owning std::string" include/$project_directory/probe.hpp <<'FIXTURE'
+inline std::string probe_name() noexcept { return "probe"; }
 FIXTURE
 
-# endregion Binding Doc Fixtures
+assert_accepts "a string handed to a vendor API on a marked line" include/$project_directory/probe.hpp <<'FIXTURE'
+inline void probe(std::string_view name) noexcept { vendor_open(std::string {name}); } // vendor-boundary
+FIXTURE
+
+assert_rejects "vector in a tool" "uses a standard container" tools/probe.cpp <<'FIXTURE'
+std::vector<int> probe_items;
+FIXTURE
+
+assert_accepts "a directive's comment inside a struct" include/$project_directory/probe.hpp <<'FIXTURE'
+/** Holds one probe. */
+struct probe_t {
+
+    /** The value probed. */
+    int value = 0;
+#if defined(PROBE_EXTRA)
+
+    /** The extra value. */
+    int extra = 0;
+#endif // PROBE_EXTRA
+};
+FIXTURE
+
+assert_accepts "a bare pin and a lint marker on member lines" include/$project_directory/probe.hpp <<'FIXTURE'
+/** Holds one probe. */
+struct probe_t {
+
+    /** The greeting, split by hand. */
+    char const *greeting = "first half " //
+                           "second half";
+
+    /** The flag a kernel reads. */
+    int flag = 0; // device-boundary
+};
+FIXTURE
+
+stage_fixture_verbatim .githooks/pre-commit < "$hooks_directory/pre-commit"
+run_precommit
+expect_acceptance "the hook's shared regions at their pinned sums"
+
+stage_fixture_verbatim .githooks/pre-commit < <(sed 's/^# Prints the reason and the first offending lines\./# Prints the reason and the offending lines./' "$hooks_directory/pre-commit")
+run_precommit
+expect_rejection "a shared region edited away from its pinned sum" "drifts from the sibling hooks' shared regions"
+
+# endregion Shared Region Fixtures
+
+# region Shared Build Fixtures
+
+assert_rejects "CMake string surgery" "derives a name or flag by editing a string" CMakeLists.txt <<'FIXTURE'
+string(REPLACE "a" "b" probe_name_ "${probe_source_}")
+FIXTURE
+
+# endregion Shared Build Fixtures
+
+# region Shared Harness Fixtures
+
+assert_rejects "harness qualifying the visible library namespace" "the library namespace is already visible" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+${project_directory}::probe::probe_stage_t stage;
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "harness naming the library type bare" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+probe_stage_t stage;
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_rejects "test body printing to stdout" "prints to stdout from a test body" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe() { fmt::println("probe passed"); }
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "test body failing on stderr" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe() { fmt::println(stderr, "probe failed"); }
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_accepts "a test file's own main printing its summary" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline void test_probe() {}
+} // namespace ${project_namespace}::test::probe
+
+int main() {
+    fmt::println("probe passed");
+    return 0;
+}
+FIXTURE
+
+# endregion Shared Harness Fixtures
+
+# region Shared Gate Fixtures
+
+assert_rejects "requires expression inline in an if constexpr" "writes a requires expression inside an if constexpr condition" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_>
+inline void probe(value_type_ &value) noexcept {
+    if constexpr (requires { value.reset(); }) value.reset();
+}
+FIXTURE
+
+assert_accepts "a named concept in an if constexpr" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_>
+concept resettable = requires(value_type_ &value) { value.reset(); };
+
+template <typename value_type_>
+inline void probe(value_type_ &value) noexcept {
+    if constexpr (resettable<value_type_>) value.reset();
+}
+FIXTURE
+
+assert_rejects "if constexpr inside an if constexpr" "nests an if constexpr inside another's branch" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_>
+inline int probe() noexcept {
+    if constexpr (sizeof(value_type_) == 4) {
+        if constexpr (alignof(value_type_) == 4) return 1;
+        return 2;
+    }
+    return 0;
+}
+FIXTURE
+
+assert_accepts "an else if constexpr chain" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_>
+inline int probe() noexcept {
+    if constexpr (sizeof(value_type_) == 4) return 1;
+    else if constexpr (sizeof(value_type_) == 8) return 2;
+    else return 0;
+}
+FIXTURE
+
+assert_rejects "control flow 4 deep without braces" "nests control flow 4 deep" include/$project_directory/probe.hpp <<'FIXTURE'
+inline int probe(int const *values, int count) noexcept {
+    int total = 0;
+    for (int first = 0; first != count; ++first)
+        for (int second = 0; second != count; ++second)
+            if (values[first] < values[second])
+                while (total < values[second]) ++total;
+    return total;
+}
+FIXTURE
+
+assert_rejects "control flow 4 deep in braces" "nests control flow 4 deep" include/$project_directory/probe.hpp <<'FIXTURE'
+inline int probe(int const *values, int count) noexcept {
+    int total = 0;
+    for (int first = 0; first != count; ++first) {
+        switch (values[first]) {
+        case 0: break;
+        default:
+            if (total < count) {
+                do { ++total; } while (total < values[first]);
+            }
+        }
+    }
+    return total;
+}
+FIXTURE
+
+assert_accepts "three levels around a lambda, an else if chain and both sides of an #if" include/$project_directory/probe.hpp <<'FIXTURE'
+inline int probe(int const *values, int count) noexcept {
+    int total = 0;
+    for (int first = 0; first != count; ++first) {
+        auto add = [&](int value) noexcept {
+            if (value > 0) total += value;
+        };
+        if (values[first] > 0) {
+#if defined(PROBE_WIDE)
+            for (int second = 0; second != count; ++second) add(values[second]);
+#else
+            for (int second = 0; second != first; ++second) add(values[second]);
+#endif
+        }
+        else if (values[first] < 0) {
+            if (total > 0) --total;
+        }
+        else {
+            if (total < 0) ++total;
+        }
+    }
+    return total;
+}
+FIXTURE
+
+assert_accepts "a while after a braceless loop closes it, and a braceless do keeps its while" include/$project_directory/probe.hpp <<'FIXTURE'
+inline int probe(int const *values, int count) noexcept {
+    int total = 0;
+    for (int first = 0; first != count; ++first) {
+        if (total == 0)
+            for (int second = 0; second != count; ++second) total += values[second];
+        while (total > count) {
+            if (total > 0) --total;
+        }
+        if (values[first] > 0)
+            for (int second = 0; second != first; ++second) total += values[second];
+        else if (total < 0)
+            do ++total; while (total < 0);
+    }
+    return total;
+}
+FIXTURE
+
+stage_committed_fixture include/$project_directory/probe.hpp 's/return total;/return total + 1;/' <<'FIXTURE'
+inline int probe(int const *values, int count) noexcept {
+    int total = 0;
+    for (int first = 0; first != count; ++first)
+        for (int second = 0; second != count; ++second)
+            if (values[first] < values[second])
+                while (total < values[second]) ++total;
+    return total;
+}
+FIXTURE
+run_precommit
+expect_acceptance "an edit beside control flow 4 deep that it leaves alone"
+
+assert_accepts "control flow 4 deep outside the gated directories" test/probe/probe.hpp <<FIXTURE
+namespace ${project_namespace}::test::probe {
+inline int probe(int const *values, int count) noexcept {
+    int total = 0;
+    for (int first = 0; first != count; ++first)
+        for (int second = 0; second != count; ++second)
+            if (values[first] < values[second])
+                while (total < values[second]) ++total;
+    return total;
+}
+} // namespace ${project_namespace}::test::probe
+FIXTURE
+
+assert_rejects "enable_if picking an overload" "picks an overload through enable_if or a tag type" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_, typename = std::enable_if_t<std::is_integral_v<value_type_>>>
+inline value_type_ probe(value_type_ value) noexcept { return value; }
+FIXTURE
+
+assert_rejects "tag type picking an overload" "picks an overload through enable_if or a tag type" include/$project_directory/probe.hpp <<'FIXTURE'
+struct sorted_tag_t {};
+inline int probe(int value, sorted_tag_t) noexcept { return value; }
+FIXTURE
+
+assert_rejects "true_type parameter picking an overload" "picks an overload through enable_if or a tag type" include/$project_directory/probe.hpp <<'FIXTURE'
+inline int probe(int value, std::true_type) noexcept { return value; }
+FIXTURE
+
+assert_accepts "a requires clause beside an unconstrained fallback, and an iterator category" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename value_type_>
+inline int probe(value_type_ value) noexcept requires std::is_integral_v<value_type_> {
+    return static_cast<int>(value);
+}
+template <typename value_type_>
+inline int probe(value_type_) noexcept {
+    return 0;
+}
+using probe_category_t = std::random_access_iterator_tag;
+FIXTURE
+
+# endregion Shared Gate Fixtures
 
 # region ForkUnion Fixtures
 
