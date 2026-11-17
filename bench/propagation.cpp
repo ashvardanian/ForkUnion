@@ -656,5 +656,6 @@ int main(int argc, char **argv) {
     if (!backend) exit_unparsed("FORKUNION_BACKEND", settings.backend, backend_grammar_k);
     print(probe_machine());
     print(settings);
+    if (!settings.regex_filter.selects(backend->name)) return EXIT_SUCCESS;
     return bench_propagation(settings, *backend);
 }

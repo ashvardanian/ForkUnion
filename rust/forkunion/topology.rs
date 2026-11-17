@@ -8,7 +8,9 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-use crate::types::{Error, Result, Status};
+#[cfg(feature = "std")]
+use crate::types::Status;
+use crate::types::{Error, Result};
 
 extern "C" {
     fn fu_version_major() -> c_int;
@@ -16,6 +18,7 @@ extern "C" {
     fn fu_version_patch() -> c_int;
     fn fu_comptime_capabilities() -> u32;
     fn fu_runtime_capabilities() -> u32;
+    #[cfg(feature = "std")]
     fn fu_name_capabilities(caps: u32, buf: *mut c_char, len: usize, written_out: *mut usize) -> c_int;
 
     fn fu_topology_new(topology_out: *mut *mut c_void) -> c_int;

@@ -262,9 +262,6 @@ endif ()
 # `bench/` or has to remember to switch them off.
 option(FORKUNION_BUILD_TEST "Build the tests in test/" OFF)
 option(FORKUNION_BUILD_BENCH "Build the benchmarks in bench/" OFF)
-option(FORKUNION_TEST_SKIP_STRESS "Run only the tests' correctness suite, skipping the slow throughput/stress cases"
-       OFF
-)
 
 if (BUILD_TESTING AND FORKUNION_BUILD_TEST)
     enable_testing()

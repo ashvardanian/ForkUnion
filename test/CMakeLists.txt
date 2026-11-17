@@ -35,12 +35,6 @@ foreach (standard_ IN ITEMS 20 23)
     # tests use nested functions and blocks, and the benchmarks pull Taskflow.
     target_compile_options(${test_target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-pedantic-errors>)
 
-    # Correctness only where the option asks - the cross jobs, whose emulator cannot run the throughput suite in time.
-    # `main.c` carries no stress cases, so only the C++ targets take the define.
-    if (FORKUNION_TEST_SKIP_STRESS)
-        target_compile_definitions(${test_target_} PRIVATE FORKUNION_TEST_SKIP_STRESS_=1)
-    endif ()
-
     # No `-latomic` here: `forkunion_header` carries it, probed, wherever the target needs it.
 endforeach ()
 

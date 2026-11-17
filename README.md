@@ -22,6 +22,63 @@ Despite being far more deeply tied to hardware and the OS than most alternatives
 Topology harvesting and thread placement work on all six; NUMA-local memory placement is implemented on Linux, FreeBSD, and Windows, and elsewhere allocation falls back to a single memory domain.
 It also compiles to __WebAssembly__, where the pools are real in the two shapes that carry threads — Emscripten with `-pthread` over a shared memory, and `wasm32-wasip1-threads` under a runtime like Wasmtime — and collapse to the calling thread in a plain single-threaded module.
 
+## Performance
+
+Two benchmarks measure two different things, each against the same runtimes — __ForkUnion__, [__OpenMP__](https://www.openmp.org), [__Rayon__](https://github.com/rayon-rs/rayon), and [__Taskflow__](https://github.com/taskflow/taskflow) — on deliberately equal footing ¹.
+N-body stresses the __dispatch path__: every task costs the same, so what is left over is scheduling latency.
+Connected Components by label propagation stresses the __fork-join frequency__: one bandwidth-bound sweep per round until no label changes, so every round re-pays the dispatch-and-join tax.
+Implementations live in `bench/nbody.{cpp,rs,zig,mojo}` and `bench/propagation.{cpp,rs,zig,mojo}`, and every binary generates __bit-identical inputs__ from the same counter-based SplitMix64 generator, so cells compare exactly across languages.
+
+### N-Body — Dispatch Latency
+
+Microseconds per iteration — µs ↓, lower is better — at `N=512` bodies on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
+This is where fork-join runtimes genuinely differ; ➕ marks C++, 🦀 marks Rust.
+
+| Machine                    | ➕ ForkUnion | 🦀 ForkUnion | ➕ OpenMP |  🦀 Rayon | ➕ Taskflow |
+| :------------------------- | -----------: | -----------: | --------: | --------: | ----------: |
+| 18× Apple M5 Pro, macOS    |      32 / 37 |  __28 / 32__ | 115 / 137 | 222 / 339 |     83 / 94 |
+| 24× Intel RPL, Windows     |    148 / 143 | __112 / 91__ | 360 / 627 | 151 / 151 |  812 / 1026 |
+| 128× Intel SPR, Linux      |      54 / 86 |  __40 / 67__ | 115 / 226 | 483 / 739 |   666 / 694 |
+| 192× AWS Graviton 5, Linux | 47 / __136__ | __42__ / 137 | 266 / 216 | 490 / 580 |   602 / 639 |
+
+### Connected Components — Fork-Join Frequency
+
+Billions of traversed edges per second — GTEPS ↑, higher is better — on a ~27M-edge "necklace" of R-MAT communities, on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
+Every pass converges in exactly 88 rounds - 88 fork-join dispatches - bit-identical in every cell and language; ➕ marks C++, 🦀 marks Rust.
+
+| Machine                    |    ➕ ForkUnion |     🦀 ForkUnion |      ➕ OpenMP |    🦀 Rayon | ➕ Taskflow |
+| :------------------------- | --------------: | ---------------: | -------------: | ----------: | ----------: |
+| 18× Apple M5 Pro, macOS    | __29.2 / 23.5__ |      19.4 / 20.2 |    23.0 / 18.3 | 23.8 / 14.6 |  21.4 / 1.3 |
+| 24× Intel RPL, Windows     |  10.0 / __7.2__ |        5.2 / 5.5 | __11.4__ / 0.1 |   9.4 / 5.2 |   6.6 / 0.7 |
+| 128× Intel SPR, Linux      |     46.5 / 20.9 |  __65.2 / 31.4__ |     28.2 / 0.4 |   8.5 / 6.5 |  25.1 / 0.5 |
+| 192× AWS Graviton 5, Linux |    192.6 / 77.6 | __258.7 / 87.3__ |     53.9 / 0.4 |   8.4 / 6.2 |  53.0 / 0.4 |
+
+What the spread means - same binaries, same graph:
+
+- __The static column is the fork-join tax, compounded 88 times per pass__: every runtime sweeps the identical bandwidth-bound round, so the entire spread is scheduling - dispatch latency, barrier cost, and thread placement - never arithmetic.
+- __The dynamic column is the claim architecture, ~92M one-vertex claims per pass__: ForkUnion claims from private `fetch_add` cursors, Rayon steals halves through its CAS deques, and OpenMP's and Taskflow's shared queues collapse - a 128-thread contention effect for OpenMP, whose queue survives the M5 Pro's 18 threads, while Taskflow's collapse reproduces even there.
+- __The two ForkUnion columns are the same pool underneath__: the scheduler, the graph, and the labels are bit-identical, so the gap between them - Rust ahead on SPR, behind on the M5 Pro - is compiler codegen of the compute loops, not the claims.
+
+> ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, a 1-second warm-up, and the same one-vertex dynamic grain in every runtime.
+> The finer per-benchmark protocol - scheduling equivalents and page-placement controls - lives in the `bench/nbody.*` and `bench/propagation.*` headers, and every setting with its default is listed in CONTRIBUTING.md.
+
+You can rerun these benchmarks with the following commands:
+
+```bash
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D FORKUNION_BUILD_BENCH=ON
+cmake --build build_release --config Release
+# Rust examples: plain `cargo build` grants neither flag, so parity needs both set explicitly
+RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
+# N-body: microseconds per iteration, sustained over a fixed window (FORKUNION_TIME_LIMIT, default 10s)
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
+FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=taskflow_dynamic build_release/forkunion_nbody
+# Connected components: traversal throughput on a necklace graph; FORKUNION_PROPAGATION_COMMUNITIES controls the rounds
+FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
+FORKUNION_BACKEND=rayon_dynamic target/release/forkunion_propagation
+```
+
+Every port reads the same environment variables once at start; they are listed with their defaults under [Benchmarks](https://github.com/ashvardanian/ForkUnion/blob/main/CONTRIBUTING.md#benchmarks) in CONTRIBUTING.md.
+
 ## Quickstart
 
 __`ForkUnion`__ is dead-simple to use!
@@ -951,63 +1008,6 @@ Fallible bodies get `for_each_fallible` and `fold_with_scratch_fallible`, which 
 Their two answers stay apart: the outer `Result` reports whether the dispatch ran, the inner one whether the caller's own work succeeded, so the caller's error type carries no constraint.
 This Rayon-style layer is __Rust-only__; C, C++, Zig, and Mojo expose the pool primitives `for_threads`, `for_n`, `for_n_dynamic`, and `for_slices` directly.
 Zig additionally mirrors Rust's `for_slices_mut` as `forSlicesMut`, which hands each thread a disjoint sub-slice rather than the `TasksRange` its indices would form.
-
-## Performance
-
-Two benchmarks measure two different things, each against the same runtimes — __ForkUnion__, [__OpenMP__](https://www.openmp.org), [__Rayon__](https://github.com/rayon-rs/rayon), and [__Taskflow__](https://github.com/taskflow/taskflow) — on deliberately equal footing ¹.
-N-body stresses the __dispatch path__: every task costs the same, so what is left over is scheduling latency.
-Connected Components by label propagation stresses the __fork-join frequency__: one bandwidth-bound sweep per round until no label changes, so every round re-pays the dispatch-and-join tax.
-Implementations live in `bench/nbody.{cpp,rs,zig,mojo}` and `bench/propagation.{cpp,rs,zig,mojo}`, and every binary generates __bit-identical inputs__ from the same counter-based SplitMix64 generator, so cells compare exactly across languages.
-
-### N-Body — Dispatch Latency
-
-Microseconds per iteration — µs ↓, lower is better — at `N=512` bodies on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
-This is where fork-join runtimes genuinely differ; ➕ marks C++, 🦀 marks Rust.
-
-| Machine                    | ➕ ForkUnion | 🦀 ForkUnion | ➕ OpenMP |  🦀 Rayon | ➕ Taskflow |
-| :------------------------- | -----------: | -----------: | --------: | --------: | ----------: |
-| 18× Apple M5 Pro, macOS    |      32 / 37 |  __28 / 32__ | 115 / 137 | 222 / 339 |     83 / 94 |
-| 24× Intel RPL, Windows     |    148 / 143 | __112 / 91__ | 360 / 627 | 151 / 151 |  812 / 1026 |
-| 128× Intel SPR, Linux      |      54 / 86 |  __40 / 67__ | 115 / 226 | 483 / 739 |   666 / 694 |
-| 192× AWS Graviton 5, Linux | 47 / __136__ | __42__ / 137 | 266 / 216 | 490 / 580 |   602 / 639 |
-
-### Connected Components — Fork-Join Frequency
-
-Billions of traversed edges per second — GTEPS ↑, higher is better — on a ~27M-edge "necklace" of R-MAT communities, on every logical core, as `static / dynamic`, one fixed 30-second window per cell.
-Every pass converges in exactly 88 rounds - 88 fork-join dispatches - bit-identical in every cell and language; ➕ marks C++, 🦀 marks Rust.
-
-| Machine                    |    ➕ ForkUnion |     🦀 ForkUnion |      ➕ OpenMP |    🦀 Rayon | ➕ Taskflow |
-| :------------------------- | --------------: | ---------------: | -------------: | ----------: | ----------: |
-| 18× Apple M5 Pro, macOS    | __29.2 / 23.5__ |      19.4 / 20.2 |    23.0 / 18.3 | 23.8 / 14.6 |  21.4 / 1.3 |
-| 24× Intel RPL, Windows     |  10.0 / __7.2__ |        5.2 / 5.5 | __11.4__ / 0.1 |   9.4 / 5.2 |   6.6 / 0.7 |
-| 128× Intel SPR, Linux      |     46.5 / 20.9 |  __65.2 / 31.4__ |     28.2 / 0.4 |   8.5 / 6.5 |  25.1 / 0.5 |
-| 192× AWS Graviton 5, Linux |    192.6 / 77.6 | __258.7 / 87.3__ |     53.9 / 0.4 |   8.4 / 6.2 |  53.0 / 0.4 |
-
-What the spread means - same binaries, same graph:
-
-- __The static column is the fork-join tax, compounded 88 times per pass__: every runtime sweeps the identical bandwidth-bound round, so the entire spread is scheduling - dispatch latency, barrier cost, and thread placement - never arithmetic.
-- __The dynamic column is the claim architecture, ~92M one-vertex claims per pass__: ForkUnion claims from private `fetch_add` cursors, Rayon steals halves through its CAS deques, and OpenMP's and Taskflow's shared queues collapse - a 128-thread contention effect for OpenMP, whose queue survives the M5 Pro's 18 threads, while Taskflow's collapse reproduces even there.
-- __The two ForkUnion columns are the same pool underneath__: the scheduler, the graph, and the labels are bit-identical, so the gap between them - Rust ahead on SPR, behind on the M5 Pro - is compiler codegen of the compute loops, not the claims.
-
-> ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, a 1-second warm-up, and the same one-vertex dynamic grain in every runtime.
-> The finer per-benchmark protocol - scheduling equivalents and page-placement controls - lives in the `bench/nbody.*` and `bench/propagation.*` headers, and every setting with its default is listed in CONTRIBUTING.md.
-
-You can rerun these benchmarks with the following commands:
-
-```bash
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D FORKUNION_BUILD_BENCH=ON
-cmake --build build_release --config Release
-# Rust examples: plain `cargo build` grants neither flag, so parity needs both set explicitly
-RUSTFLAGS="-C target-cpu=native" CXXFLAGS="-O3 -march=native" cargo build --release --features benchmarks
-# N-body: microseconds per iteration, sustained over a fixed window (FORKUNION_TIME_LIMIT, default 10s)
-FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_nbody
-FORKUNION_NBODY_COUNT=512 FORKUNION_BACKEND=taskflow_dynamic build_release/forkunion_nbody
-# Connected components: traversal throughput on a necklace graph; FORKUNION_PROPAGATION_COMMUNITIES controls the rounds
-FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
-FORKUNION_BACKEND=rayon_dynamic target/release/forkunion_propagation
-```
-
-Every port reads the same environment variables once at start; they are listed with their defaults under [Benchmarks](CONTRIBUTING.md#benchmarks) in CONTRIBUTING.md.
 
 ## Safety & Logic
 

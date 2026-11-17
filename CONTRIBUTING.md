@@ -37,14 +37,13 @@ Every case has a label that names the code under test, spelled as the code spell
 
 - a case over a runtime or template choice reads as a call with that choice, as `test_for_n_visits_each_task_once_and_again<make_distributed_pool_t>`;
 - C labels are the test function plus the capability mask the battery ran it under, as `test_spawn_rejects_zero_threads(fu_capability_arm64_yield_k | fu_capability_os_threads_k)`;
-- the epoch-wrap stress cases carry their arguments, as `test_mixed_dispatch_survives_epoch_wraps<fu8_t>(7, max_stress_threads, 1)`, and a build with `FORKUNION_TEST_SKIP_STRESS` skips them.
+- the epoch-wrap stress cases carry their arguments, as `test_mixed_dispatch_survives_epoch_wraps<fu8_t>(7, max_stress_threads, 1)`, and scale their cycles by `FORKUNION_SCALE`, never below one wrap, which the emulated presets set to `0.01`.
 
 The filter is a regular expression:
 
 ```bash
 FORKUNION_FILTER='<make_distributed_pool_t>$' build_debug/forkunion_test_cpp20 # every case on the distributed pool
 FORKUNION_FILTER='^test_for_n_dynamic' build_debug/forkunion_test_cpp20        # one subject on every pool
-FORKUNION_FILTER=test_forks_from_thread_zero build_debug/forkunion_test_c11
 ```
 
 Each case prints one verdict line, and the run ends with a summary:
@@ -83,13 +82,13 @@ The C++ and C suites read these settings, each from a flag or else its variable:
 | :-------------------------- | :------------------ | :------ | :----------------------------------------------------------------------- |
 | `FORKUNION_SEED`            | `--seed`            | `42`    | Seed of the run, or `random`; it names the run in every `rerun:` line    |
 | `FORKUNION_SCALE`           | `--scale`           | `1`     | Multiplier for the repetition counts, like `0.1` or `10`                 |
-| `FORKUNION_FILTER`          | `--filter`          | unset   | ECMAScript regex over the labels, else a substring; C matches substrings |
+| `FORKUNION_FILTER`          | `--filter`          | unset   | C++ only: ECMAScript regex over case labels and benchmark rows           |
 | `FORKUNION_TRAP_ON_FAILURE` | `--trap-on-failure` | unset   | C++ only: raises `SIGTRAP` at the first failed check                     |
 | `FORKUNION_NO_SKIPS`        | `--no-skips`        | unset   | Exits with 3 when any case skipped                                       |
 
 A switch is off when unset, empty, `0`, `false`, `off` or `no`, and on otherwise.
 No case draws random inputs yet, so the seed reproduces nothing beyond itself; a case that draws takes `split_mix_generator_t {case_stream_key()}`, keyed by its own label, so a filtered run draws what an unfiltered one did.
-`FORKUNION_SCALE` scales the generation and churn cases in C++ and the refusal rounds in C, never the counts a case needs to reach a boundary, like the epochs that wrap a `uint8` clock.
+`FORKUNION_SCALE` scales the generation, churn and epoch-wrap cases in C++ and the refusal rounds in C, never below the counts a case needs to reach a boundary, like one wrap of a `uint8` clock.
 The Rust and Mojo suites filter through `cargo test <name>` and their own runner, and read none of these.
 
 ### Writing a Test

@@ -36,11 +36,10 @@
     {
       "name": "cross",
       "hidden": true,
-      "description": "Correctness only: emulators cannot run the throughput suite in time, and the benchmarks stay host-only.",
+      "description": "Emulated targets: their test presets run at FORKUNION_SCALE 0.01, and the benchmarks stay host-only.",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "FORKUNION_TEST_SKIP_STRESS": "ON",
         "FORKUNION_BUILD_BENCH": "OFF"
       }
     },
@@ -290,6 +289,13 @@
       "output": { "outputOnFailure": true },
       "filter": { "include": { "name": "^forkunion_test_" } }
     },
+    {
+      "name": "cross",
+      "hidden": true,
+      "inherits": "base",
+      "description": "Emulators run a hundredth of the repetitions, never below a boundary a case must reach.",
+      "environment": { "FORKUNION_SCALE": "0.01" }
+    },
     { "name": "debug", "inherits": "base", "configurePreset": "debug" },
     { "name": "release", "inherits": "base", "configurePreset": "release" },
     {
@@ -324,25 +330,25 @@
     },
     {
       "name": "dockcross",
-      "inherits": "base",
+      "inherits": "cross",
       "configurePreset": "dockcross",
       "filter": { "include": { "name": "^forkunion_test_(cpp20|c11)$" } }
     },
     {
       "name": "wasm32_emscripten",
-      "inherits": "base",
+      "inherits": "cross",
       "configurePreset": "wasm32_emscripten",
       "filter": { "include": { "name": "^forkunion_test_c11$" } }
     },
     {
       "name": "wasm64_emscripten",
-      "inherits": "base",
+      "inherits": "cross",
       "configurePreset": "wasm64_emscripten",
       "filter": { "include": { "name": "^forkunion_test_(cpp20|c11)$" } }
     },
     {
       "name": "wasm32_wasi_threads",
-      "inherits": "base",
+      "inherits": "cross",
       "configurePreset": "wasm32_wasi_threads",
       "filter": { "include": { "name": "^forkunion_test_(cpp20|c11)$" } }
     }
