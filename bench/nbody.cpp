@@ -4,7 +4,7 @@
  *  @date May 23, 2025
  *  @brief Demo app: N-Body simulation with ForkUnion and OpenMP.
  *
- *  The environment variables it reads are listed in `bench/harness.hpp`. The backends include:
+ *  The settings it reads are listed under "Benchmarks" in CONTRIBUTING.md. The backends include:
  *  `forkunion_{static,dynamic}_{shared,replicated}`, `openmp_{static,dynamic}`, and
  *  `taskflow_{static,dynamic}`.
  *  To compile and run on all cores in Linux:
@@ -63,7 +63,7 @@
 
 #include <forkunion.hpp>
 
-#include "harness.hpp" // `settings_t`, `loop_t`, `fu`
+#include "harness.hpp" // `bench_settings_t`, `loop_t`, `fu`
 
 namespace ashvardanian::forkunion::bench {
 
@@ -401,7 +401,7 @@ std::optional<backend_t> parse_backend(std::string_view name) noexcept {
 #pragma endregion Backends
 
 /** Simulates @c settings.bodies bodies on @c settings.backend, and prints the timed row. */
-int bench_nbody(settings_t const &settings, backend_t const &backend) {
+int bench_nbody(bench_settings_t const &settings, backend_t const &backend) {
     std::size_t const n = settings.bodies, threads = settings.threads;
 
     // Prepare bodies and forces - 2 memory allocations
@@ -473,10 +473,11 @@ int bench_nbody(settings_t const &settings, backend_t const &backend) {
 
 using namespace ashvardanian::forkunion::bench;
 
-int main() {
-    settings_t const settings = read_settings();
-    backend_t const backend = env_parsed("FORKUNION_BACKEND", backends_k[0], parse_backend, backend_grammar_k);
+int main(int argc, char **argv) {
+    bench_settings_t const settings = read_bench_settings(argc, argv);
+    std::optional<backend_t> const backend = parse_backend(settings.backend);
+    if (!backend) exit_unparsed("FORKUNION_BACKEND", settings.backend, backend_grammar_k);
     print(probe_machine());
     print(settings);
-    return bench_nbody(settings, backend);
+    return bench_nbody(settings, *backend);
 }

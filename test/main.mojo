@@ -1,7 +1,7 @@
 """The Mojo binding's tests, in the shape `test/main.c` and `test/main.cpp` already use.
 
-Mojo 1.0 has no `mojo test` subcommand and no test discovery, but `std.testing.TestSuite` is a
-real runner: register each check as a parameter and it reports and filters them. The pure-logic
+Mojo has no `mojo test` subcommand and no test discovery, but `std.testing.TestSuite` is a real
+runner: register each check as a parameter and it reports and filters them. The pure-logic
 groups need no library loaded; the rest exercise the C core directly.
 
 Do not read the per-test durations the suite prints as wall clock. A pool's workers busy-wait, and
@@ -50,32 +50,54 @@ from forkunion import (
 )
 
 
+# region Shared Testing
+def _skipped(reason: String):
+    """Announces a skipped test, so a run shows what it left out rather than passing in silence."""
+    print("skipped:", reason)
+
+
+def _split_mix_bits(value: UInt64) -> UInt64:
+    """SplitMix64's finalizer, a bijection that spreads every input bit over all 64 output bits."""
+    var mixed = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9
+    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EB
+    return mixed ^ (mixed >> 31)
+
+
+def _stream_key(seed: UInt64, name: String, index: UInt64 = 0) -> UInt64:
+    """The `index`-th stream of the family `name` under `seed`, identical in C, C++, Rust and Python."""
+    var hashed: UInt64 = 0xCBF29CE484222325
+    for byte in name.as_bytes():
+        hashed = (hashed ^ UInt64(byte)) * 0x100000001B3
+    return _split_mix_bits(_split_mix_bits(seed ^ hashed) + index)
+# endregion Shared Testing
+
+
 @fieldwise_init
-struct Visits(ImplicitlyCopyable, TrivialRegisterPassable):
+struct _Visits(ImplicitlyCopyable, TrivialRegisterPassable):
     """A visit log every dispatch test writes through, one slot per task or thread."""
 
     var slots: SyncMutPointer[Int64]
     var count: Int
 
 
-def _record_task(task: Int, at: ThreadInDomain, mut visits: Visits):
+def _record_task(task: Int, at: ThreadInDomain, mut visits: _Visits):
     visits.slots.at(task) += 1
 
 
-def _record_thread(thread_index: Int, domain_index: Int, mut visits: Visits):
+def _record_thread(thread_index: Int, domain_index: Int, mut visits: _Visits):
     visits.slots.at(thread_index) += 1
 
 
-def _record_slice(range_of_tasks: TasksRange, at: ThreadInDomain, mut visits: Visits):
+def _record_slice(range_of_tasks: TasksRange, at: ThreadInDomain, mut visits: _Visits):
     for task in range_of_tasks:
         visits.slots.at(task) += 1
 
 
-def _square(task: Int, at: ThreadInDomain, mut visits: Visits):
+def _square(task: Int, at: ThreadInDomain, mut visits: _Visits):
     visits.slots.at(task) = Int64(task) * Int64(task)
 
 
-def _uneven(task: Int, at: ThreadInDomain, mut visits: Visits):
+def _uneven(task: Int, at: ThreadInDomain, mut visits: _Visits):
     """A deliberately skewed cost, so work-stealing has something to steal."""
     var accumulated = Int64(0)
     for step in range((task % 7) * 128):
@@ -83,8 +105,8 @@ def _uneven(task: Int, at: ThreadInDomain, mut visits: Visits):
     visits.slots.at(task) += Int64(1) if accumulated >= 0 else Int64(0)
 
 
-def _visits_over(mut log: List[Int64]) -> Visits:
-    return Visits(
+def _visits_over(mut log: List[Int64]) -> _Visits:
+    return _Visits(
         SyncMutPointer(log.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()),
         len(log),
     )
@@ -548,7 +570,8 @@ def test_fabric_harvest_fills_edges() raises:
     try:
         fabric.harvest(topology, pool)
     except:
-        return  # ? A flat pool without domain placement has no fabric to walk
+        _skipped("fabric harvest is refused on this machine")  # ? A flat pool has no domains to walk
+        return
     assert_true(
         fabric.memory_levels_count() >= 1,
         "a harvested fabric has at least one tier",

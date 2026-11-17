@@ -1235,12 +1235,12 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
-    use crate::topology::tests::hw_threads;
+    use crate::testing::hw_threads;
     use crate::*;
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn parallel_slice_static_for_each() {
+    fn slice_for_each_visits_every_element_statically() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..512).collect();
@@ -1259,7 +1259,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn parallel_slice_mut_dynamic_for_each() {
+    fn mutable_slice_for_each_writes_every_element_dynamically() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let mut data: Vec<usize> = (0..256).collect();
@@ -1279,7 +1279,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn parallel_slice_zip_sum() {
+    fn zipped_slices_pair_elements_by_index() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let a: Vec<usize> = (0..128).collect();
@@ -1303,7 +1303,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn parallel_exact_iter_dispatch() {
+    fn range_for_each_passes_the_task_index() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let mut values = vec![0usize; 256];
@@ -1324,7 +1324,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn scratch_reduction_collects_sum() {
+    fn fold_with_scratch_sums_into_per_thread_slots() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1024).collect();
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn reduce_with_scratch_sum() {
+    fn reduce_with_scratch_sums_statically() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1024).collect();
@@ -1366,7 +1366,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn reduce_with_scratch_dynamic() {
+    fn reduce_with_scratch_sums_dynamically() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1000).collect();
@@ -1383,7 +1383,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn reduce_sum() {
+    fn sum_matches_the_serial_sum() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (1..=1000).collect();
@@ -1393,7 +1393,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn reduce_count() {
+    fn count_counts_every_element() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<usize> = (0..1000).collect();
@@ -1403,7 +1403,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn reduce_product() {
+    fn reduce_multiplies_from_its_identity() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data = [2u64, 3, 5, 7];
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn reduce_empty() {
+    fn sum_of_nothing_is_zero() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
@@ -1429,18 +1429,16 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn reduce_range() {
+    fn range_sum_matches_the_serial_sum() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let total: usize = (0..10_000).into_par_iter().with_pool(&mut pool).sum().unwrap();
         assert_eq!(total, (0..10_000).sum::<usize>());
     }
 
-    // Early-exit API tests
-
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn try_for_each_success() {
+    fn fallible_for_each_succeeds_when_every_call_does() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1454,7 +1452,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn try_for_each_early_exit() {
+    fn fallible_for_each_returns_a_failing_element() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1470,7 +1468,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn try_for_each_empty() {
+    fn fallible_for_each_over_nothing_succeeds() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
@@ -1484,7 +1482,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn try_fold_with_scratch_success() {
+    fn fallible_fold_sums_when_every_call_succeeds() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1506,7 +1504,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn try_fold_with_scratch_early_exit() {
+    fn fallible_fold_returns_a_failing_element() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1532,7 +1530,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_first_deterministic() {
+    fn find_first_returns_the_lowest_match() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1545,10 +1543,9 @@ mod tests {
         assert_eq!(found, Some(&100));
     }
 
-    /// Repeated, because a lost race shows up as a flake rather than a failure.
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_first_not_found() {
+    fn find_first_without_a_match_is_none() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..100).collect();
@@ -1560,9 +1557,10 @@ mod tests {
         assert_eq!(found, None);
     }
 
+    /// Repeated, because a lost race shows up as a flake rather than a failure.
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_first_last_deterministic_under_contention() {
+    fn find_first_and_last_stay_deterministic_under_contention() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..10_000).collect();
@@ -1600,7 +1598,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_last_deterministic() {
+    fn find_last_returns_the_highest_match() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1615,7 +1613,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_last_not_found() {
+    fn find_last_without_a_match_is_none() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..100).collect();
@@ -1629,7 +1627,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_any_found() {
+    fn find_any_finds_the_only_match() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1643,7 +1641,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_any_not_found() {
+    fn find_any_without_a_match_is_none() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1657,7 +1655,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn find_any_empty() {
+    fn find_any_over_nothing_is_none() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
@@ -1671,7 +1669,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn any_true() {
+    fn any_holds_when_one_element_matches() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1685,7 +1683,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn any_false() {
+    fn any_fails_when_no_element_matches() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1699,7 +1697,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn any_empty() {
+    fn any_over_nothing_is_false() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];
@@ -1713,7 +1711,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn all_true() {
+    fn all_holds_when_every_element_matches() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1727,7 +1725,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn all_false() {
+    fn all_fails_when_one_element_misses() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = (0..1000).collect();
@@ -1741,7 +1739,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn all_empty() {
+    fn all_over_nothing_is_true() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let data: Vec<u64> = vec![];

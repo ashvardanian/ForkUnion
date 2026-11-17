@@ -1258,7 +1258,7 @@ mod tests {
     /// exactly on its own domain - any aliasing between replicas would corrupt the pattern.
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn replicated_array_per_domain_buffer() {
+    fn replicated_array_gives_every_domain_a_copy() {
         let topology = Topology::new().unwrap();
         let n = 4096usize;
         let mut replicas: ReplicatedArray<u32> = ReplicatedArray::new_in(&topology, n).expect("replicated array");
@@ -1292,7 +1292,7 @@ mod tests {
     /// `logical_index_of` - every element has a single home and the two mappings agree.
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn sharded_array_segment_round_trip() {
+    fn sharded_array_round_trips_its_segments() {
         let topology = Topology::new().unwrap();
         let n = 4096usize;
         let mut shards: ShardedArray<u32> = ShardedArray::new_in(&topology, n).expect("sharded array");
@@ -1324,7 +1324,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_allocator_creation() {
+    fn domain_allocator_binds_to_an_existing_domain_only() {
         let topology = Topology::new().unwrap();
         let memory_domains = topology.memory_domains_count().unwrap();
         assert!(memory_domains > 0, "system should have at least one memory domain");
@@ -1346,7 +1346,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn basic_allocation() {
+    fn allocation_is_exact_and_on_its_domain() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn allocate_zero_bytes() {
+    fn zero_byte_allocation_is_refused() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1374,7 +1374,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn allocate_at_least() {
+    fn allocate_at_least_rounds_up_on_its_domain() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1393,7 +1393,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_creation() {
+    fn pinned_vec_starts_empty_without_capacity() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1406,7 +1406,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_with_capacity() {
+    fn pinned_vec_reserves_the_capacity_it_was_given() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1419,7 +1419,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_push_pop() {
+    fn pinned_vec_pops_in_reverse_push_order() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1445,7 +1445,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_indexing() {
+    fn pinned_vec_indexes_and_writes_through_indices() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1466,7 +1466,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_clear() {
+    fn pinned_vec_clear_empties_it() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1483,7 +1483,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_insert_remove() {
+    fn pinned_vec_inserts_and_removes_in_the_middle() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1508,7 +1508,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_reserve() {
+    fn pinned_vec_reserve_grows_capacity_alone() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1528,7 +1528,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_extend_from_slice() {
+    fn pinned_vec_extends_from_a_slice_in_order() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1544,7 +1544,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_iterators() {
+    fn pinned_vec_iterates_by_reference_and_mutably() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1571,7 +1571,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_slices() {
+    fn pinned_vec_views_as_shared_and_mutable_slices() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1593,7 +1593,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_growth() {
+    fn pinned_vec_grows_past_its_first_allocation() {
         let topology = Topology::new().unwrap();
         let allocator = DomainAllocator::new(topology.memory_domain_id_at_index(MemoryDomain(0)).unwrap())
             .expect("Failed to create alloc");
@@ -1612,7 +1612,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn pinned_vec_invalid_memory_domain() {
+    fn invalid_domain_id_yields_no_allocator() {
         let topology = Topology::new().unwrap();
         let memory_domains = topology.memory_domains_count().unwrap();
         assert!(topology
@@ -1641,7 +1641,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_vec_send_sync() {
+    fn pinned_vec_is_send_and_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
 

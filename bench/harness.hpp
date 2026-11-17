@@ -4,37 +4,28 @@
  *  @date September 24, 2026
  *  @brief The settings, machine report and timed loop the C++ benchmarks share.
  *
- *  Both benchmarks read every variable once at start, and a value that does not parse prints one
- *  line and exits with status 1. Leaving a variable unset or empty keeps its default.
- *
- *  @verbatim
- *      Variable                           Default                  Meaning
- *      FORKUNION_SEED                     42                       Seed of every draw, or random
- *      FORKUNION_WARMUP                   1s                       Untimed run before timing
- *      FORKUNION_TIME_LIMIT               10s                      Timed window, like 500ms
- *      FORKUNION_THREADS                  all cores                Threads; 0 also means all cores
- *      FORKUNION_BACKEND                  forkunion_static_shared  Backend, per benchmark header
- *      FORKUNION_NBODY_COUNT              the thread count         Bodies to simulate
- *      FORKUNION_PROPAGATION_SCALE        14                       2^scale vertices per community
- *      FORKUNION_PROPAGATION_COMMUNITIES  64                       Communities strung on the ring
- *      FORKUNION_PROPAGATION_EDGE_FACTOR  16                       Raw edges per vertex
- *      FORKUNION_PROPAGATION_CHECK        false                    Also converge serially to check
- *  @endverbatim
+ *  Both benchmarks read every setting once at start, from a @c --name flag or else its
+ *  @c FORKUNION_NAME variable, and a value that does not parse prints one line and exits with
+ *  status 1. Leaving one unset or empty keeps its default. The settings are listed under
+ *  "Benchmarks" in CONTRIBUTING.md.
  */
 #pragma once
-#include <cstdint> // `std::uint32_t`
+#include <cctype>  // `std::tolower`
+#include <cmath>   // `std::isfinite`
+#include <cstdint> // `std::uint64_t`
 #include <cstdio>  // `std::fprintf`, `std::printf`
 #include <cstdlib> // `std::getenv`, `std::exit`
+#include <cstring> // `std::strcmp`, `std::strncmp`
 
 #include <array>        // `std::array`
 #include <charconv>     // `std::from_chars`
 #include <chrono>       // `std::chrono::steady_clock`, `std::chrono::milliseconds`
 #include <optional>     // `std::optional`
 #include <random>       // `std::random_device`
+#include <regex>        // `std::regex`
 #include <string>       // `std::string`, `std::to_string`
 #include <string_view>  // `std::string_view`
 #include <system_error> // `std::errc`
-#include <utility>      // `std::move`
 
 #include "forkunion.hpp" // `FORKUNION_VERSION_*`, `capability_name`, `allowed_cores_count`
 
@@ -45,80 +36,182 @@ namespace ashvardanian::forkunion::bench {
 using steady_clock_t = std::chrono::steady_clock;
 using time_point_t = steady_clock_t::time_point;
 
-/** The text of the environment variable @p name, or nothing when it is unset or empty. */
-inline std::optional<std::string_view> env_text(char const *name) noexcept {
-    char const *const text = std::getenv(name);
-    if (!text || !*text) return std::nullopt;
-    return std::string_view(text);
-}
+#pragma region Shared Settings
 
-/** Parses the environment variable @p name with @p parse, or returns @p fallback when it is unset
- *  or empty. Text that does not parse prints `NAME="text" does not parse, expected <expected>` and
- *  exits with status 1, which leaves crash handlers quiet. */
-template <typename value_type_, typename parse_type_>
-[[nodiscard]] value_type_ env_parsed(char const *name, value_type_ fallback, parse_type_ &&parse,
-                                     char const *expected) noexcept {
-    std::optional<std::string_view> const text = env_text(name);
-    if (!text) return fallback;
-    if (std::optional<value_type_> value = parse(*text)) return *std::move(value);
-    std::fprintf(stderr, "%s=\"%.*s\" does not parse, expected %s\n", name, static_cast<int>(text->size()),
-                 text->data(), expected);
+/** Exits with one line naming a setting that does not parse, so a bad value never runs anything. */
+[[noreturn]] inline void exit_unparsed(char const *variable, char const *text, char const *expected) noexcept {
+    std::fprintf(stderr, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
     std::exit(1);
 }
 
-/** A positive whole number, like "64". */
-inline std::optional<std::size_t> parse_count(std::string_view text) noexcept {
+/** The text of a setting: its @p flag when given, else its environment @p variable , else null. */
+inline char const *setting_text(int argc, char **argv, char const *variable, std::string_view flag) noexcept {
+    for (int index = 1; index < argc; ++index) {
+        std::string_view const argument {argv[index]};
+        if (argument == flag)
+            return index + 1 < argc && std::strncmp(argv[index + 1], "--", 2) != 0 ? argv[index + 1] : "1";
+        if (argument.size() > flag.size() && argument.starts_with(flag) && argument[flag.size()] == '=')
+            return argv[index] + flag.size() + 1;
+    }
+    char const *text = std::getenv(variable);
+    return text && *text ? text : nullptr;
+}
+
+/** A switch, @p fallback when unset: 0, false, off and no turn it off, anything else on. */
+inline bool read_flag_setting(int argc, char **argv, char const *variable, std::string_view flag,
+                              bool fallback = false) noexcept {
+    char const *text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    for (char const *off : {"0", "false", "off", "no"})
+        if (std::strcmp(text, off) == 0) return false;
+    return true;
+}
+
+/** A whole number, @p fallback when unset. */
+inline std::size_t read_count_setting(int argc, char **argv, char const *variable, std::string_view flag,
+                                      std::size_t fallback) noexcept {
+    char const *text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    std::string_view const spelled {text};
     std::size_t count = 0;
-    auto const [end, error] = std::from_chars(text.data(), text.data() + text.size(), count);
-    if (error != std::errc {} || end != text.data() + text.size() || !count) return std::nullopt;
+    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
+    if (error != std::errc {} || end != spelled.data() + spelled.size())
+        exit_unparsed(variable, text, "a whole number");
     return count;
 }
 
-/** A thread count like "8", or "0" for every core this process may run on. */
-inline std::optional<std::size_t> parse_threads(std::string_view text) noexcept {
-    if (text == "0") return allowed_cores_count();
-    return parse_count(text);
+/** A positive real, @p fallback when unset. */
+inline double read_real_setting(int argc, char **argv, char const *variable, std::string_view flag,
+                                double fallback) noexcept {
+    char const *text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    char *end = nullptr;
+    double const value = std::strtod(text, &end);
+    if (*end != '\0' || !(value > 0) || !std::isfinite(value))
+        exit_unparsed(variable, text, "a positive number like 0.1 or 10");
+    return value;
 }
 
-/** A positive duration in whole milliseconds or seconds, like "200ms" or "10s". */
-inline std::optional<std::chrono::milliseconds> parse_duration(std::string_view text) noexcept {
+/** A positive duration such as 200ms, 10s or 2m, @p fallback when unset. */
+inline std::chrono::milliseconds read_duration_setting(int argc, char **argv, char const *variable,
+                                                       std::string_view flag,
+                                                       std::chrono::milliseconds fallback) noexcept {
+    char const *text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    std::string_view const spelled {text};
     std::uint32_t count = 0;
-    auto const [end, error] = std::from_chars(text.data(), text.data() + text.size(), count);
-    if (error != std::errc {} || !count) return std::nullopt;
-    std::string_view const unit = text.substr(end - text.data());
-    if (unit == "ms") return std::chrono::milliseconds(count);
-    if (unit == "s") return std::chrono::seconds(count);
-    return std::nullopt;
+    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
+    std::string_view const unit = spelled.substr(static_cast<std::size_t>(end - spelled.data()));
+    if (error == std::errc {} && count != 0) {
+        if (unit == "ms") return std::chrono::milliseconds(count);
+        if (unit == "s") return std::chrono::seconds(count);
+        if (unit == "m") return std::chrono::minutes(count);
+    }
+    exit_unparsed(variable, text, "a duration like 200ms, 10s or 2m");
 }
 
-/** A 32-bit seed, or "random" for a fresh draw from @c std::random_device. */
-inline std::optional<std::uint32_t> parse_seed(std::string_view text) noexcept {
-    if (text == "random") return std::random_device {}();
-    std::uint32_t seed = 0;
-    auto const [end, error] = std::from_chars(text.data(), text.data() + text.size(), seed);
-    if (error != std::errc {} || end != text.data() + text.size()) return std::nullopt;
+/** The run's seed: 42 when unset, drawn afresh for @c random , else any unsigned 64-bit value. */
+inline std::uint64_t read_seed_setting(int argc, char **argv, char const *variable, std::string_view flag) noexcept {
+    char const *text = setting_text(argc, argv, variable, flag);
+    if (!text) return 42;
+    std::string_view const spelled {text};
+    if (spelled == "random") {
+        std::random_device device;
+        return (static_cast<std::uint64_t>(device()) << 32) ^ device();
+    }
+    std::uint64_t seed = 0;
+    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), seed);
+    if (error != std::errc {} || end != spelled.data() + spelled.size())
+        exit_unparsed(variable, text, "an unsigned integer or random");
     return seed;
 }
 
-inline std::size_t env_count(char const *name, std::size_t fallback) noexcept {
-    return env_parsed(name, fallback, parse_count, "a positive count");
+/** Which labels a run selects: a regex search when the pattern compiles, else a substring. */
+struct filter_t {
+    std::string pattern;
+    std::optional<std::regex> regex;
+
+    bool selects(std::string_view label) const noexcept {
+        if (pattern.empty()) return true;
+        if (regex) return std::regex_search(label.begin(), label.end(), *regex);
+        return label.find(pattern) != std::string_view::npos;
+    }
+};
+
+/** The filter a setting spells, compiled once; empty, selecting everything, when unset. */
+inline filter_t read_filter_setting(int argc, char **argv, char const *variable, std::string_view flag) noexcept {
+    filter_t filter;
+    char const *text = setting_text(argc, argv, variable, flag);
+    if (!text) return filter;
+    filter.pattern = text;
+#if defined(__cpp_exceptions) && __cpp_exceptions
+    try {
+        filter.regex.emplace(filter.pattern);
+    }
+    catch (std::regex_error const &) {
+    }
+#else
+    filter.regex.emplace(filter.pattern);
+#endif
+    return filter;
 }
 
-inline std::chrono::milliseconds env_duration(char const *name, std::chrono::milliseconds fallback) noexcept {
-    return env_parsed(name, fallback, parse_duration, "a duration like 200ms or 10s");
+/** What every suite and bench reads before its own settings; @c program starts the rerun lines. */
+struct common_settings_t {
+    std::uint64_t seed = 42;
+    filter_t filter;
+    char const *program = "";
+};
+
+/** SplitMix64's finalizer, a bijection that spreads every input bit over all 64 output bits. */
+constexpr std::uint64_t split_mix_bits(std::uint64_t value) noexcept {
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ull;
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EBull;
+    return value ^ (value >> 31);
 }
 
-inline bool env_flag(char const *name, bool fallback) noexcept {
-    auto const parse_flag = [](std::string_view text) noexcept -> std::optional<bool> {
-        if (text == "1" || text == "true") return true;
-        if (text == "0" || text == "false") return false;
-        return std::nullopt;
-    };
-    return env_parsed(name, fallback, parse_flag, "0, 1, true or false");
+/** The @p index -th stream of the family @p name under @p seed , identical in every language. */
+constexpr std::uint64_t stream_key(std::uint64_t seed, std::string_view name, std::uint64_t index = 0) noexcept {
+    std::uint64_t hashed = 0xCBF29CE484222325ull;
+    for (char const character : name) hashed = (hashed ^ static_cast<std::uint8_t>(character)) * 0x100000001B3ull;
+    return split_mix_bits(split_mix_bits(seed ^ hashed) + index);
 }
 
-inline std::uint32_t env_seed(char const *name, std::uint32_t fallback) noexcept {
-    return env_parsed(name, fallback, parse_seed, "an unsigned integer or random");
+/**
+ *  @brief SplitMix64 over one 64-bit state, seeded by a @ref stream_key , bit-identical to the
+ *      JavaScript generator NumKong ships.
+ *
+ *  Distributions are not specified to draw the same sequence on every standard library, so a
+ *  failure would stop reproducing from its seed when the toolchain changed; @ref below is the
+ *  portable bounded draw.
+ */
+struct split_mix_generator_t {
+    using result_type = std::uint64_t;
+    std::uint64_t state = 0;
+
+    explicit split_mix_generator_t(std::uint64_t key) noexcept : state(key) {}
+    static constexpr result_type(min)() noexcept { return 0; }
+    static constexpr result_type(max)() noexcept { return ~result_type {0}; }
+    result_type operator()() noexcept { return split_mix_bits(state += 0x9E3779B97F4A7C15ull); }
+
+    /** A uniform draw below @p bound , zero for an empty bound, without the bias of a modulo. */
+    std::uint64_t below(std::uint64_t bound) noexcept {
+        if (bound == 0) return 0;
+        std::uint64_t const rejection_floor = (0u - bound) % bound;
+        std::uint64_t draw = (*this)();
+        while (draw < rejection_floor) draw = (*this)();
+        return draw % bound;
+    }
+};
+
+#pragma endregion Shared Settings
+
+/** A count past zero, @p fallback when unset, as a zero would leave nothing to time. */
+inline std::size_t read_positive_count_setting(int argc, char **argv, char const *variable, std::string_view flag,
+                                               std::size_t fallback) noexcept {
+    std::size_t const count = read_count_setting(argc, argv, variable, flag, fallback);
+    if (count == 0) exit_unparsed(variable, setting_text(argc, argv, variable, flag), "a positive count");
+    return count;
 }
 
 /** Spells @p duration as a user types it: whole seconds as "10s", anything else as "1500ms". */
@@ -214,13 +307,12 @@ class loop_t {
     }
 };
 
-/** Every benchmark setting, its default as the initializer, filled once by @c read_settings. */
-struct settings_t {
-    std::uint32_t seed = 42;
+/** Every benchmark setting, its default as the initializer, filled by @c read_bench_settings. */
+struct bench_settings_t : common_settings_t {
     std::chrono::milliseconds warmup = std::chrono::seconds(1);
     std::chrono::milliseconds time_limit = std::chrono::seconds(10);
     std::size_t threads = allowed_cores_count();
-    std::string_view backend = "forkunion_static_shared";
+    char const *backend = "forkunion_static_shared";
     std::size_t bodies = threads;
     std::size_t scale = 14;
     std::size_t communities = 64;
@@ -228,34 +320,40 @@ struct settings_t {
     bool check = false;
 };
 
-/** Reads every @c settings_t variable, rejecting a zero count. */
-inline settings_t read_settings() noexcept {
-    settings_t settings;
-    settings.seed = env_seed("FORKUNION_SEED", settings.seed);
-    settings.warmup = env_duration("FORKUNION_WARMUP", settings.warmup);
-    settings.time_limit = env_duration("FORKUNION_TIME_LIMIT", settings.time_limit);
-    settings.threads = env_parsed("FORKUNION_THREADS", settings.threads, parse_threads, "a count, 0 for all cores");
-    settings.backend = env_text("FORKUNION_BACKEND").value_or(settings.backend);
-    settings.bodies = env_count("FORKUNION_NBODY_COUNT", settings.threads);
-    settings.scale = env_count("FORKUNION_PROPAGATION_SCALE", settings.scale);
-    settings.communities = env_count("FORKUNION_PROPAGATION_COMMUNITIES", settings.communities);
-    settings.edge_factor = env_count("FORKUNION_PROPAGATION_EDGE_FACTOR", settings.edge_factor);
-    settings.check = env_flag("FORKUNION_PROPAGATION_CHECK", settings.check);
+/** Reads every @c bench_settings_t field; a thread count of 0 means every allowed core. */
+inline bench_settings_t read_bench_settings(int argc, char **argv) noexcept {
+    bench_settings_t settings;
+    settings.seed = read_seed_setting(argc, argv, "FORKUNION_SEED", "--seed");
+    settings.warmup = read_duration_setting(argc, argv, "FORKUNION_WARMUP", "--warmup", settings.warmup);
+    settings.time_limit =
+        read_duration_setting(argc, argv, "FORKUNION_TIME_LIMIT", "--time-limit", settings.time_limit);
+    settings.threads = read_count_setting(argc, argv, "FORKUNION_THREADS", "--threads", settings.threads);
+    if (settings.threads == 0) settings.threads = allowed_cores_count();
+    if (char const *backend = setting_text(argc, argv, "FORKUNION_BACKEND", "--backend")) settings.backend = backend;
+    settings.bodies =
+        read_positive_count_setting(argc, argv, "FORKUNION_NBODY_COUNT", "--nbody-count", settings.threads);
+    settings.scale =
+        read_positive_count_setting(argc, argv, "FORKUNION_PROPAGATION_SCALE", "--propagation-scale", settings.scale);
+    settings.communities = read_positive_count_setting(argc, argv, "FORKUNION_PROPAGATION_COMMUNITIES",
+                                                       "--propagation-communities", settings.communities);
+    settings.edge_factor = read_positive_count_setting(argc, argv, "FORKUNION_PROPAGATION_EDGE_FACTOR",
+                                                       "--propagation-edge-factor", settings.edge_factor);
+    settings.check = read_flag_setting(argc, argv, "FORKUNION_PROPAGATION_CHECK", "--propagation-check");
     return settings;
 }
 
 /** Prints each setting as "- Name: value", in the grammar it parses from. */
-inline void print(settings_t const &settings) {
-    std::printf("- Seed: %u\n", static_cast<unsigned>(settings.seed));
+inline void print(bench_settings_t const &settings) {
+    std::printf("- Seed: %llu\n", static_cast<unsigned long long>(settings.seed));
     std::printf("- Warm-up: %s\n", spell_duration(settings.warmup).c_str());
     std::printf("- Time limit: %s\n", spell_duration(settings.time_limit).c_str());
     std::printf("- Threads: %zu\n", settings.threads);
-    std::printf("- Backend: %.*s\n", static_cast<int>(settings.backend.size()), settings.backend.data());
+    std::printf("- Backend: %s\n", settings.backend);
     std::printf("- Bodies: %zu\n", settings.bodies);
     std::printf("- Scale: %zu\n", settings.scale);
     std::printf("- Communities: %zu\n", settings.communities);
     std::printf("- Edge factor: %zu\n", settings.edge_factor);
-    std::printf("- Check: %s\n", settings.check ? "true" : "false");
+    std::printf("- Check: %s\n", settings.check ? "1" : "0");
 }
 
 /** The facts this binary and this machine report: the library version, and the capabilities

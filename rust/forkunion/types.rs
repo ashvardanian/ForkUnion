@@ -687,7 +687,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn guard_lifecycle_exclusive() {
+    fn guard_dispatches_at_construction_when_exclusive() {
         let topology = Topology::new().unwrap();
         // On exclusive pools the work is dispatched at guard construction:
         // the caller can overlap its own work and poll `is_complete`.
@@ -710,7 +710,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn guard_lifecycle_inclusive() {
+    fn guard_runs_the_caller_slice_at_join_when_inclusive() {
         let topology = Topology::new().unwrap();
         // On inclusive pools the workers start at construction too, and the calling thread
         // contributes its own slice at `join`.
@@ -733,7 +733,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn sync_const_ptr() {
+    fn sync_const_ptr_reads_through_offsets() {
         let data = Vec::from([1, 2, 3, 4, 5]);
         let sync_ptr = SyncConstPtr::new(data.as_ptr());
 
@@ -747,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_const_ptr_send_sync() {
+    fn sync_const_ptr_is_send_and_sync() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
 
@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_split() {
+    fn indexed_split_tiles_the_range() {
         // Test basic split
         let split = IndexedSplit::new(10, 3);
         assert_eq!(split.get(0), 0..4); // `ceil(10/3)` = 4
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Threads count must be greater than zero")]
-    fn indexed_split_zero_threads() {
+    fn indexed_split_refuses_zero_threads() {
         let _ = IndexedSplit::new(10, 0);
     }
 }

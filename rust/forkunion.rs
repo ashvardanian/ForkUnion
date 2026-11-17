@@ -38,6 +38,9 @@ mod topology;
 #[path = "forkunion/types.rs"]
 mod types;
 
+#[cfg(test)]
+mod testing;
+
 pub use allocators::*;
 pub use parallel::*;
 pub use scheduling::*;

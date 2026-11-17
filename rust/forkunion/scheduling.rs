@@ -1310,21 +1310,21 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
-    use crate::topology::tests::hw_threads;
+    use crate::testing::{hw_threads, skipped};
     use crate::*;
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn spawn_and_basic_info() {
+    fn spawn_succeeds_at_full_width() {
         let topology = Topology::new().unwrap();
-        let pool = spawn(&topology, 2);
-        assert_eq!(pool.threads_count(), 2);
+        let pool = spawn(&topology, hw_threads());
+        assert_eq!(pool.threads_count(), hw_threads());
         assert!(pool.compute_domains_count() > 0);
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn caller_exclusivity_query() {
+    fn caller_exclusivity_is_queried_not_cached() {
         let topology = Topology::new().unwrap();
         // The pool is the single source of truth, queried live, not cached.
         let inclusive = ThreadPool::spawn_with_exclusivity(&topology, 2, CallerExclusivity::Inclusive).unwrap();
@@ -1371,7 +1371,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn for_threads_dispatch() {
+    fn for_threads_reaches_every_worker() {
         let topology = Topology::new().unwrap();
         let count_threads = hw_threads();
         let mut pool = spawn(&topology, count_threads);
@@ -1395,7 +1395,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn broadcast_owns_and_blocks() {
+    fn broadcast_blocks_until_every_thread_ran() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let counter = AtomicUsize::new(0);
@@ -1408,7 +1408,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn for_slices_mut_partitions_disjointly() {
+    fn for_slices_partitions_the_range() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let total = 10_000usize;
@@ -1490,35 +1490,38 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn for_n_static_scheduling() {
+    fn for_n_visits_each_task_once_and_again() {
         let topology = Topology::new().unwrap();
         const EXPECTED_PARTS: usize = 1_000;
         let mut pool = spawn(&topology, hw_threads());
 
-        let visited: Arc<Vec<AtomicBool>> = Arc::new((0..EXPECTED_PARTS).map(|_| AtomicBool::new(false)).collect());
-        let duplicate = Arc::new(AtomicBool::new(false));
-        let visited_ref = Arc::clone(&visited);
-        let duplicate_ref = Arc::clone(&duplicate);
+        // A repeated dispatch is where a stale epoch would show.
+        for _ in 0..2 {
+            let visited: Arc<Vec<AtomicBool>> = Arc::new((0..EXPECTED_PARTS).map(|_| AtomicBool::new(false)).collect());
+            let duplicate = Arc::new(AtomicBool::new(false));
+            let visited_ref = Arc::clone(&visited);
+            let duplicate_ref = Arc::clone(&duplicate);
 
-        for_n(&mut pool, EXPECTED_PARTS, move |task_index, _at| {
-            if visited_ref[task_index].swap(true, Ordering::Relaxed) {
-                duplicate_ref.store(true, Ordering::Relaxed);
+            for_n(&mut pool, EXPECTED_PARTS, move |task_index, _at| {
+                if visited_ref[task_index].swap(true, Ordering::Relaxed) {
+                    duplicate_ref.store(true, Ordering::Relaxed);
+                }
+            })
+            .unwrap();
+
+            assert!(
+                !duplicate.load(Ordering::Relaxed),
+                "static scheduling produced duplicate task IDs"
+            );
+            for flag in visited.iter() {
+                assert!(flag.load(Ordering::Relaxed));
             }
-        })
-        .unwrap();
-
-        assert!(
-            !duplicate.load(Ordering::Relaxed),
-            "static scheduling produced duplicate task IDs"
-        );
-        for flag in visited.iter() {
-            assert!(flag.load(Ordering::Relaxed));
         }
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn for_n_dynamic_scheduling() {
+    fn for_n_dynamic_covers_uneven_work() {
         let topology = Topology::new().unwrap();
         const EXPECTED_PARTS: usize = 1_000;
         let mut pool = spawn(&topology, hw_threads());
@@ -1546,7 +1549,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn for_n_dynamic_on_single_inclusive_thread() {
+    fn for_n_dynamic_runs_on_a_lone_inclusive_caller() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, 1);
         let visited = AtomicUsize::new(0);
@@ -1559,7 +1562,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn for_each_mut() {
+    fn for_each_task_mut_writes_every_element() {
         let topology = Topology::new().unwrap();
         const ELEMENTS: usize = 1000;
         let mut pool = spawn(&topology, hw_threads());
@@ -1577,7 +1580,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn closure_objects() {
+    fn dropped_operation_runs_in_its_destructor() {
         let topology = Topology::new().unwrap();
         let mut pool = spawn(&topology, hw_threads());
         let counter = Arc::new(AtomicUsize::new(0));
@@ -1596,7 +1599,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn generation_multi_pool_completion() {
+    fn generation_polling_on_an_exclusive_pool() {
         let topology = Topology::new().unwrap();
         // Two independent exclusive pools run side by side; join both, then query each.
         let count_threads = hw_threads();
@@ -1648,7 +1651,7 @@ mod tests {
         assert_eq!(fabric.memory_levels_count(), 1);
 
         if fabric.harvest(&topology, &mut pool).is_err() {
-            return; // ? A flat pool without domain placement has no fabric to walk
+            return skipped("fabric harvest is refused on this machine"); // ? A flat pool has no domains to walk
         }
         // Every reachable edge must carry sane observations; emulated-NUMA guests may measure equal
         // local and remote costs, so nothing stronger is asserted.
@@ -1661,7 +1664,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn generation_raw_unsafe_api() {
+    fn unsafe_dispatch_joins_by_its_generation() {
         let topology = Topology::new().unwrap();
         // The raw C-ABI mirror: an `unsafe_for_threads` dispatch returning an odd token, polled
         // with the safe `is_complete`, and joined with `unsafe_join`.

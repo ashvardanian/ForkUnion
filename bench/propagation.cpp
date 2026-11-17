@@ -30,9 +30,9 @@
  *  therefore identical across schedules, backends, thread counts, and languages - so the MTEPS
  *  denominator rounds × edges is the same number in every cell of a comparison table.
  *
- *  The environment variables it reads are listed in `bench/harness.hpp`. The ForkUnion backends are
- *  the four cells of `forkunion_{static,dynamic}_{shared,replicated}`; the baselines are
- *  `{openmp,taskflow}_{static,dynamic}`.
+ *  The settings it reads are listed under "Benchmarks" in CONTRIBUTING.md. The ForkUnion backends
+ *  are the four cells of @c forkunion_{static,dynamic}_{shared,replicated}; the baselines are
+ *  @c {openmp,taskflow}_{static,dynamic}.
  *
  *  @section propagation_protocol Benchmarking Protocol
  *
@@ -78,7 +78,7 @@
 
 #include <forkunion.hpp>
 
-#include "harness.hpp" // `settings_t`, `loop_t`, `fu`
+#include "harness.hpp" // `bench_settings_t`, `loop_t`, `fu`
 
 namespace ashvardanian::forkunion::bench {
 
@@ -536,7 +536,7 @@ std::optional<backend_t> parse_backend(std::string_view name) noexcept {
 #pragma endregion Backends
 
 /** Converges the necklace on @c settings.backend for the timed window, and prints its row. */
-int bench_propagation(settings_t const &settings, backend_t const &backend) {
+int bench_propagation(bench_settings_t const &settings, backend_t const &backend) {
     std::size_t const scale = settings.scale, communities = settings.communities, threads = settings.threads;
     if (scale > 32 || communities > ((std::uint64_t(1) << 32) >> scale)) {
         std::fprintf(
@@ -650,10 +650,11 @@ int bench_propagation(settings_t const &settings, backend_t const &backend) {
 
 using namespace ashvardanian::forkunion::bench;
 
-int main() {
-    settings_t const settings = read_settings();
-    backend_t const backend = env_parsed("FORKUNION_BACKEND", backends_k[0], parse_backend, backend_grammar_k);
+int main(int argc, char **argv) {
+    bench_settings_t const settings = read_bench_settings(argc, argv);
+    std::optional<backend_t> const backend = parse_backend(settings.backend);
+    if (!backend) exit_unparsed("FORKUNION_BACKEND", settings.backend, backend_grammar_k);
     print(probe_machine());
     print(settings);
-    return bench_propagation(settings, backend);
+    return bench_propagation(settings, *backend);
 }

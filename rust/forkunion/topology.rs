@@ -563,24 +563,18 @@ pub enum CallerExclusivity {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::*;
 
-    #[inline]
-    pub(crate) fn hw_threads() -> usize {
-        let topology = Topology::new().unwrap();
-        topology.logical_cores_count().unwrap_or(1).max(1)
-    }
-
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn capabilities() {
+    fn capabilities_are_reported_and_nameable() {
         let topology = Topology::new().unwrap();
         let comptime = comptime_capabilities();
         let runtime = runtime_capabilities();
-        std::println!("Comptime: {:?}", comptime_capabilities_string());
-        std::println!("Runtime:  {:?}", runtime_capabilities_string());
+        std::eprintln!("Comptime: {:?}", comptime_capabilities_string());
+        std::eprintln!("Runtime:  {:?}", runtime_capabilities_string());
         assert!(runtime_capabilities_string().is_ok());
 
         // Threads are the one facility every supported platform has.
@@ -611,25 +605,19 @@ pub(crate) mod tests {
 
     #[cfg_attr(miri, ignore)]
     #[test]
-    fn system_info() {
+    fn topology_counts_and_core_partition() {
         let topology = Topology::new().unwrap();
         let cores = topology.logical_cores_count().unwrap();
-        let numa = topology.memory_domains_count().unwrap();
-        let compute_domains = topology.compute_domains_count().unwrap();
-        let qos = topology.compute_levels_count().unwrap();
-
-        std::println!("Cores: {cores}, NUMA: {numa}, ComputeDomains: {compute_domains}, QoS: {qos}");
-        assert!(cores > 0);
-    }
-
-    #[cfg_attr(miri, ignore)]
-    #[test]
-    fn topology_axes() {
-        let topology = Topology::new().unwrap();
         let compute_domains = topology.compute_domains_count().unwrap();
         let compute_levels = topology.compute_levels_count().unwrap();
         let memory_domains = topology.memory_domains_count().unwrap();
-        assert!(compute_domains > 0 && memory_domains > 0);
+        assert!(cores > 0 && compute_domains > 0 && memory_domains > 0);
+
+        // Every core belongs to exactly one compute domain.
+        let partitioned: usize = (0..compute_domains)
+            .map(|domain| topology.logical_cores_count_in(ComputeDomain(domain)).unwrap())
+            .sum();
+        assert_eq!(partitioned, cores);
 
         // Levels are dense ranks over domains, so they can never outnumber them.
         assert!(compute_levels <= compute_domains);

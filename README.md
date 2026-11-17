@@ -990,7 +990,7 @@ What the spread means - same binaries, same graph:
 - __The two ForkUnion columns are the same pool underneath__: the scheduler, the graph, and the labels are bit-identical, so the gap between them - Rust ahead on SPR, behind on the M5 Pro - is compiler codegen of the compute loops, not the claims.
 
 > ¹ Parity, deliberately enforced: identical `-O3` + `target-cpu=native` on all sides, no LTO anywhere, unchecked hot loops in Rust, identical kernels, a 1-second warm-up, and the same one-vertex dynamic grain in every runtime.
-> The finer per-benchmark protocol - scheduling equivalents and page-placement controls - lives in the `bench/nbody.*` and `bench/propagation.*` headers, and every setting with its default is in the table below.
+> The finer per-benchmark protocol - scheduling equivalents and page-placement controls - lives in the `bench/nbody.*` and `bench/propagation.*` headers, and every setting with its default is listed in CONTRIBUTING.md.
 
 You can rerun these benchmarks with the following commands:
 
@@ -1007,21 +1007,7 @@ FORKUNION_BACKEND=forkunion_static_shared build_release/forkunion_propagation
 FORKUNION_BACKEND=rayon_dynamic target/release/forkunion_propagation
 ```
 
-Every port reads the same environment variables once at start, and a value that does not parse prints one line and exits with status 1.
-Leaving a variable unset or empty keeps its default.
-
-| Variable                            | Default                   | Meaning                           |
-| :---------------------------------- | :------------------------ | :-------------------------------- |
-| `FORKUNION_SEED`                    | `42`                      | Seed of every draw, or `random`   |
-| `FORKUNION_WARMUP`                  | `1s`                      | Untimed run before timing         |
-| `FORKUNION_TIME_LIMIT`              | `10s`                     | Timed window, like `500ms`        |
-| `FORKUNION_THREADS`                 | all cores                 | Threads; `0` also means all cores |
-| `FORKUNION_BACKEND`                 | `forkunion_static_shared` | Backend, per benchmark header     |
-| `FORKUNION_NBODY_COUNT`             | the thread count          | Bodies to simulate                |
-| `FORKUNION_PROPAGATION_SCALE`       | `14`                      | `2^scale` vertices per community  |
-| `FORKUNION_PROPAGATION_COMMUNITIES` | `64`                      | Communities strung on the ring    |
-| `FORKUNION_PROPAGATION_EDGE_FACTOR` | `16`                      | Raw edges per vertex              |
-| `FORKUNION_PROPAGATION_CHECK`       | `false`                   | Also converge serially to check   |
+Every port reads the same environment variables once at start; they are listed with their defaults under [Benchmarks](CONTRIBUTING.md#benchmarks) in CONTRIBUTING.md.
 
 ## Safety & Logic
 
@@ -1084,6 +1070,8 @@ The targets left on are what the build __compiled__, and `preferred_yield_t`, `p
 `cpu_capabilities()` answers __detected__, and a pool's `allowed` mask, intersected with it at spawn, is what that pool has __enabled__.
 
 ## Testing & Benchmarking
+
+How the suites are laid out, the settings they read, and how to write a case are described under [Test Suites](CONTRIBUTING.md#test-suites) in CONTRIBUTING.md; this section lists the commands for each toolchain.
 
 Toolchain floors, never caps.
 The header needs __C++20__, a C++23 consumer keeps its own standard, and the pre-compiled libraries build at C++20 regardless.
