@@ -15,6 +15,11 @@
  *  - @c rc11, the default: the views above.
  *  - @c far: the views, plus a relaxed no-return add is posted rather than performed.
  *  - Orders are the four the indexes use; nothing here is sequentially consistent.
+ *
+ *  C++ only asks that a write become visible "within a reasonable amount of time", which a search
+ *  for cycles must assume, or a waiter re-reading one stale write forever is a cycle that never
+ *  was. Under @c staleness_bound, which the runner sets only for that search, a load picks the
+ *  newest write once its thread has read older ones of that location that many times running.
  */
 
 #if !defined(thread_count) || !defined(location_count) || !defined(history_depth)
@@ -34,6 +39,9 @@
 #endif
 #if memory < sc || memory > far
 #error "memory is sc, rc11 or far"
+#endif
+#ifndef staleness_bound
+#define staleness_bound 0
 #endif
 
 /** The four orders the indexes use, as bits: the low one acquires, the high one releases. */
@@ -118,6 +126,9 @@ hidden byte view_location; // scratch for the view loops: every access is one at
 hidden byte picked;        // scratch: the write a load picked
 hidden int summed;         // scratch: the value a no-return add read
 hidden byte history_full;  // scratch: a write past `history_depth`, which the runner reports as broken
+#if staleness_bound
+byte stale_reads[thread_count * location_count]; // older writes each thread read in a row, per location
+#endif
 
 #define write_index(l, i) ((l) * history_depth + (i))
 #define view_index(l, i, m) (((l) * history_depth + (i)) * location_count + (m))
@@ -278,10 +289,22 @@ inline load(t, l, order, out) {
     atomic {
         land_if_same_word(t, l);
         picked = current[thread_index(t, l)];
+#if staleness_bound
+        if
+        :: stale_reads[thread_index(t, l)] >= staleness_bound -> picked = newest[l]
+        :: else
+        fi;
+#endif
         do
         :: picked < newest[l] -> picked = picked + 1
         :: break
         od;
+#if staleness_bound
+        if
+        :: picked < newest[l] -> stale_reads[thread_index(t, l)] = stale_reads[thread_index(t, l)] + 1
+        :: else -> stale_reads[thread_index(t, l)] = 0
+        fi;
+#endif
         out = history_value[write_index(l, picked)];
         current[thread_index(t, l)] = picked;
         merge(t, l, picked, order)

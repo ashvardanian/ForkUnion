@@ -14,6 +14,8 @@
  *  @verify pass rc11
  *  @verify fail sc dispatch_before_join=false: the join returns stale, the round ends with that
  *      colocation still running, and the poller reads its worker's result unwritten
+ *  @verify livelock rc11 staleness_bound=0: unbounded, a worker waiting for the next dispatch
+ *      re-reads the last one's epoch forever
  */
 #define thread_count 4
 #define location_count 9

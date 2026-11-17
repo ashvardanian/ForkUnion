@@ -22,6 +22,8 @@
  *      before the last holder's increment, which is lost
  *  @verify pass sc recheck=false: the wait in @c lock is capped, so a release that lands between
  *      its load and its arming costs one timeout and never the lock
+ *  @verify livelock rc11 staleness_bound=0: unbounded, a waiter in @c lock re-reads the held flag
+ *      forever, so the search for cycles covers its loop
  */
 #define thread_count 4
 #define location_count 2

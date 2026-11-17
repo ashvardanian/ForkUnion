@@ -11,6 +11,8 @@
  *  @verify pass sc,rc11
  *  @verify fail sc generation_check=false: on any token, the stale join clears it during the live
  *      dispatch, and a worker calls through the cleared slot
+ *  @verify livelock rc11 staleness_bound=0: unbounded, a worker waiting for the next dispatch
+ *      re-reads the last one's epoch forever
  */
 #define thread_count 3
 #define location_count 10

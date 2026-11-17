@@ -21,6 +21,8 @@
  *  @verify fail rc11 other_slices_order=order_relaxed: relaxed, thread 0 ends the second
  *      colocation's hold without acquiring its worker's slice, and a dispatcher whose token reads
  *      complete there reads that worker's result stale
+ *  @verify livelock rc11 staleness_bound=0: unbounded, a worker waiting for the next dispatch
+ *      re-reads the last one's epoch forever
  */
 #define thread_count 4
 #define location_count 9

@@ -669,55 +669,29 @@ jobs:
       matrix:
         preset: [xeon4_hopper, xeon6_blackwell, venice_mi450, grace_hopper, vera_rubin]
     steps:
-      - name: Install Clang 22
+      - name: Install Clang 23
         run: |
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" \
             | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
-          sudo apt-get update && sudo apt-get install -y clang-22
+          sudo apt-get update && sudo apt-get install -y clang-23
 
       - name: Checkout Repository
         uses: actions/checkout@v7
 
       - name: Build
         run: |
-          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23
           cmake --build --preset ${{ matrix.preset }}
 
   verify_models:
     name: Check Promela Models and GenMC Clients
     runs-on: ubuntu-26.04
-    # A cache miss builds GenMC from source, which the cached runs never time.
+    container: ghcr.io/ashvardanian/fatwheels:verify@sha256:c29899edae67fe85f0fa80ec3dfaa577a24e297cd4796c0fcdddda60a9010415
     timeout-minutes: 45
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
-      - name: Install Spin, Clang and the GenMC Build Dependencies
-        run: |
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
-          sudo apt update
-          sudo apt install -y spin cmake clang-22 llvm-22-dev libffi-dev zlib1g-dev libedit-dev
-      - name: Checkout GenMC
-        uses: actions/checkout@v7
-        with:
-          repository: MPI-SWS/genmc
-          ref: 9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7
-          path: genmc
-      - name: Restore the GenMC Build
-        id: genmc
-        uses: actions/cache@v6
-        with:
-          path: genmc/build
-          key: genmc-9f6c4c0-clang-22
-      - name: Build GenMC
-        if: steps.genmc.outputs.cache-hit != 'true'
-        run: |
-          cmake -S genmc -B genmc/build -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 -D CMAKE_PREFIX_PATH=/usr/lib/llvm-22
-          cmake --build genmc/build --parallel
       - name: Check the Models and the Clients
         run: verification/check.sh
-        env:
-          GENMC: ${{ github.workspace }}/genmc/build/bin/genmc
-          GENMC_CLANG: clang++-22
+

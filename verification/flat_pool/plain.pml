@@ -19,6 +19,8 @@
  *  @verify fail rc11 join_order=order_relaxed: relaxed, it sees the step and reads a stale result
  *  @verify stuck sc recheck=false: the completion step lands between the join's load and its
  *      arming, wakes nobody, and the uncapped join waits for it forever
+ *  @verify livelock rc11 staleness_bound=0: unbounded, a worker waiting for the next dispatch
+ *      re-reads the last one's epoch forever
  */
 #define thread_count 3
 #define location_count 10

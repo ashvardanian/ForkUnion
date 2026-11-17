@@ -12,6 +12,8 @@
  *  @verify pass rc11
  *  @verify stuck sc caller_first_join=false: the join waits on a worker that waits on the caller's
  *      slice, and the two wait on each other forever
+ *  @verify livelock rc11 staleness_bound=0: unbounded, a worker waiting for the next dispatch
+ *      re-reads the last one's epoch forever
  */
 #define thread_count 4
 #define location_count 9

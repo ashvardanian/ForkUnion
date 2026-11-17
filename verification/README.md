@@ -1,7 +1,7 @@
 # Verification
 
 Model checking for the words ForkUnion's atomics touch, and the C++ memory model the models run under.
-Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com) for the protocol layer, [GenMC](https://github.com/MPI-SWS/genmc) for the C++ source under SC, TSO, RC11 and IMM.
+Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com) 6.5.3 for the protocol layer, [GenMC](https://github.com/MPI-SWS/genmc) 0.20 for the C++ source under SC, TSO, RC11 and IMM.
 `./check.sh` runs every `@verify` line here and compares each verdict with the expected one.
 
 - `weak_memory.pml` is the C++ memory model as views, for Promela: relaxed, acquire, release, `acq_rel`, both fences, release sequences, and the far model's posted adds.
@@ -18,6 +18,7 @@ Every `inline` and `proctype`, and every documented group of `#define`s, carries
 A note over a whole `#if` branch is a plain `/* */` above the `#if`, and `//` is kept for notes inside a body.
 Inside a block, a single name reads `@c name`, a parameter of the inline below reads `@p name`, and a span of several tokens stays in backticks.
 Code is cited by symbol and file, as `flat_pool::unsafe_join` in `flat.hpp`, never by line number, which drifts with every edit above it.
+`verify_all` holds every model and client to its citations: a cited path must be tracked or a harness file, a cited snake_case name a word of the code or of the code of a model, and a `name` in `file` pair a word of that file.
 Everything is lowercase snake case; pan's own `-DSAFETY`, `-DCOLLAPSE` and `-DVECTORSZ` in the runner are the only capitals.
 A word carries the name of the C++ member it stands for, without the trailing underscore, or a small accessor like `row_lock(id)` when several rows share a shape.
 Field extractors read `<field>_of(word)`, transforms are past participles like `stepped(word)`, per-site orders are `<site>_order`, values made from an ID are `<state>(id)`.
@@ -52,12 +53,15 @@ Each variant is an `extern "C"` entry named `<scenario>` or `<scenario>_<knob>_<
 Every expected verdict is a `@verify` line in the docblock of the file it checks:
 
 ```
-@verify <pass|fail|stuck> <memory>[,<memory>...] [<knob>=<value> ...][: <finding>]   in a scenario
-@verify <pass|fail|stuck> <memory>[,<memory>...] <entry>[: <finding>]                in a client
+@verify <pass|fail|stuck|livelock> <memory>[,<memory>...] [<knob>=<value> ...][: <finding>]   in a scenario
+@verify <pass|fail|stuck> <memory>[,<memory>...] <entry>[: <finding>]                         in a client
 ```
 
 Spin runs `sc`, `rc11` and `far`; GenMC runs `sc`, `tso`, `rc11` and `imm`, and IMM reads the client as compiled code on x86, Arm and POWER.
+GenMC's `arm8` is left out: it passes `basic_shared_mutex_lock_shared_fence_false` in USearch, an outcome Arm's own `aarch64.cat` allows under herd7 7.58, so it is stronger than the hardware it names.
 `pass` is a search that completed with no error, `fail` a violated assertion, `stuck` an invalid end state in Spin or a liveness violation in GenMC.
+`livelock` is a run that never ends: a scenario with a `livelock` line also searches its `pass` lines for cycles, under weak fairness and with `staleness_bound=2`, the eventual visibility C++ promises, as `weak_memory_litmus/eventual_visibility.pml` calibrates.
+Its threads all finish, so any cycle is a livelock and no progress label is needed; a livelock that keeps writing outgrows the histories, so it is searched for under `sc`.
 A search cut short by the depth limit, a knob defined twice, an index or a write past the scenario's shape, or a GenMC pass that explored nothing is `broken`.
 Every scenario has a `pass` line, and every knob appears on some line; `verify_all` checks the second both ways.
 A `fail` or `stuck` line's finding states the mechanism and its counterexample in the present tense: what the code does, and what happens without it.
@@ -83,7 +87,7 @@ No include climbs with `..` or uses quotes, and the runner refuses a repo file n
 - Verdicts pack into `VERIFY_MEMORY_MEGABYTES`, three quarters of available memory by default.
 - `@budget` is the next power of two at or above three times the run's states tally, which is its tally less the hash table the budget gave it.
   The states then fill at most two thirds of the half the table leaves.
-- Up to 4096 MB a model runs in CI; from 4096 to 8192 its header justifies the budget in one line; above 8192 it runs only with `VERIFY_BACKGROUND=1`.
+- Up to 4096 MB a model runs in CI; above that its header justifies the budget in one line, and a machine whose pool cannot hold it skips it.
 
 ## Running
 

@@ -12,10 +12,9 @@ harness=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) # `genmc.hpp` lives beside
 # megabytes its search may take, `default_budget_megabytes` without one: pan stops itself there, so
 # a model grown too large reads as broken, and its hash table takes half of it. Verdicts start while
 # their budgets fit in `VERIFY_MEMORY_MEGABYTES` together, three quarters of the available memory
-# by default, and at most `VERIFY_JOBS` at once; a model over `background_budget_megabytes` runs
-# only when `VERIFY_BACKGROUND` is set. `finish` prints verdicts in the order they were queued.
+# by default, and at most `VERIFY_JOBS` at once; a model whose budget alone exceeds that pool is
+# skipped. `finish` prints verdicts in the order they were queued.
 default_budget_megabytes=1024
-background_budget_megabytes=8192
 if [ -r /proc/meminfo ]; then available_megabytes=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)
 else available_megabytes=$(($(sysctl -n hw.memsize) / 1048576)); fi
 pool_megabytes=${VERIFY_MEMORY_MEGABYTES:-$((available_megabytes * 3 / 4))}
@@ -73,8 +72,8 @@ verify() {
     mkdir -p "$dir"
     queued=$((queued + 1))
     budget=$(model_budget "$model")
-    if [ "$budget" -gt "$background_budget_megabytes" ] && [ -z "${VERIFY_BACKGROUND:-}" ]; then
-        echo "  skip  $model $* : a $budget MB background model, run with VERIFY_BACKGROUND=1" >"$dir/result"
+    if [ "$budget" -gt "$pool_megabytes" ]; then
+        echo "  skip  $model $* : needs $budget MB, $pool_megabytes MB available" >"$dir/result"
         return
     fi
     throttle "$budget"
@@ -95,9 +94,29 @@ verify() {
             elif grep -q "pan:1: invalid end state" "$dir/pan.out"; then verdict=stuck
             else verdict=broken; fi
         fi
+        [ "$verdict" = pass ] && [ -n "$cyclic" ] && verdict=$(cycles "$model" "$dir/cycles" "$@")
         report "$verdict" "$expected" "$model $*" "$dir/pan.out" >"$dir/result"
     ) &
     admit "$budget"
+}
+
+# cycles <model.pml> <dir> <spin defines...>: `livelock` when some run of the scenario never ends under weak
+# fairness and eventual visibility, else `pass`. Every scenario's threads finish, so any cycle is one, and none
+# needs a progress label.
+cycles() {
+    local model=$1 dir=$2
+    shift 2
+    mkdir -p "$dir"
+    [[ " $* " == *" -Dstaleness_bound="* ]] || set -- "$@" -Dstaleness_bound=2
+    if ! (cd "$dir" && spin -a -E-I"$harness" -E-I"$OLDPWD" "$@" "$OLDPWD/$model" >pan.out 2>&1 &&
+        cc -O2 -DNP -DCOLLAPSE -DVECTORSZ=4096 -DMEMLIM="$budget" -w -o pan pan.c >>pan.out 2>&1); then echo broken
+    else
+        (cd "$dir" && ./pan -l -f -m1000000 -w"$(hash_bits "$budget")" >>pan.out 2>&1)
+        if grep -qE "macro redefined|max search depth too small|invalid array index|violated|MEMLIM|out of memory" "$dir/pan.out"; then echo broken
+        elif grep -q "pan:1: non-progress cycle" "$dir/pan.out"; then echo livelock
+        elif grep -q "errors: 0" "$dir/pan.out"; then echo pass
+        else echo broken; fi
+    fi
 }
 
 report() { # report <verdict> <expected> <label> <log>
@@ -188,6 +207,32 @@ verify_client() {
     admit "$budget"
 }
 
+# citations_unresolved <file...>: every cited path, name or `name` in `file` pair the code no longer has, each as
+# ` file:citation`. A path resolves against the repository or the harness; a snake_case name against a word of the
+# code, or of the code in a model, client or script, its comments dropped; a pair against a word of the named file.
+citations_unresolved() {
+    local tracked words file cited name path sources
+    tracked=$(git -C .. ls-files 2>/dev/null) || return 0
+    words=$( (git -C .. grep -ohwI -E '[A-Za-z_][A-Za-z0-9_]*' -- ':!verification'
+        cat ./*.pml ./*/*.pml ./*.cpp ./*/*.cpp "$harness"/*.pml "$harness"/*.hpp "$harness"/*.sh 2>/dev/null |
+            sed -E 's|//.*||; s|#[[:space:]].*||; /^[[:space:]]*(\/\*|\*)/d' | grep -ohwE '[A-Za-z_][A-Za-z0-9_]*') | sort -u)
+    for file in "$@"; do
+        [ -f "$file" ] || continue
+        for cited in $(grep -oE '(`|@c )[A-Za-z0-9_./-]+\.(hpp|h|c|cpp|cu|cuh|hip|metal|pml|sh)\b`?' "$file" | sed 's/^@c //' | tr -d '`' | sort -u); do
+            grep -qE "(^|/)${cited//./\\.}\$" <<<"$tracked" || [ -e "$harness/$cited" ] || echo -n " $file:$cited"
+        done
+        for cited in $( (grep -oE '`[a-z][a-z0-9]*_[a-z0-9_]*`' "$file" | tr -d '`'
+            grep -oE '@c [a-z][a-z0-9_]*_\b' "$file" | cut -c4-) | sort -u); do
+            grep -qx "$cited" <<<"$words" || echo -n " $file:$cited"
+        done
+        while read -r name path; do
+            sources=$(grep -E "(^|/)${path//./\\.}\$" <<<"$tracked" | sed 's|^|../|')
+            [ -n "$sources" ] && grep -qw -- "${name##*::}" $sources || echo -n " $file:$name@$path"
+        done < <(grep -oE '(`|@c )[A-Za-z_~:0-9]+`? (in|from) (`|@c )[A-Za-z0-9_./-]+\.[a-z]+' "$file" |
+            sed -E 's/@c //g; s/`//g; s/ (in|from) / /')
+    done
+}
+
 # verify_all [file...]: every `@verify` line of the given scenarios and clients, or of every one
 # here and one directory down, then the verdicts in order. A line names the expected verdict and
 # the memory models, then knob overrides for a scenario or the entry for a client. Every knob the
@@ -217,10 +262,11 @@ verify_all() {
         done
         for entry in $entries; do grep -q "^extern \"C\" int $entry()" "$file" || unmatched="$unmatched $file:$entry"; done
     done
+    unmatched="$unmatched$(citations_unresolved "${files[@]}")"
     mkdir -p "$build/$queued"
-    if [ -z "$unmatched" ]; then echo "  ok    every knob is declared and set, every entry exists" >"$build/$queued/result"
+    if [ -z "$unmatched" ]; then echo "  ok    every knob is declared and set, every entry exists, every citation resolves" >"$build/$queued/result"
     else
-        echo "  WRONG knobs or entries declared or set alone: $unmatched" >"$build/$queued/result"
+        echo "  WRONG knobs, entries or citations without a counterpart: $unmatched" >"$build/$queued/result"
         touch "$build/$queued/wrong"
     fi
     queued=$((queued + 1))
@@ -228,6 +274,8 @@ verify_all() {
         grep -qs '^ \*  @verify' "$file" || continue
         [[ $file == *.cpp && -z "${genmc:-}" ]] && continue
         section "$file: $(sed -n 's/^ \*  @brief //p' "$file" | head -1)"
+        # A scenario that expects a livelock on some line searches every line for cycles too
+        cyclic=$(grep -s '^ \*  @verify livelock' "$file" || true)
         while read -r expected memories rest; do
             for memory in ${memories//,/ }; do
                 case $file in
