@@ -10,12 +10,14 @@
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER_LAUNCHER": "$env{CMAKE_C_COMPILER_LAUNCHER}",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "$env{CMAKE_CXX_COMPILER_LAUNCHER}",
         "FORKUNION_BUILD_TEST": "ON",
         "FORKUNION_BUILD_BENCH": "ON",
         "FORKUNION_WERROR": "ON"
       }
     },
-    { "name": "gcc", "hidden": true, "cacheVariables": { "CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++" } },
     {
       "name": "clang",
       "hidden": true,
@@ -51,8 +53,7 @@
     {
       "name": "release",
       "inherits": ["base", "clang"],
-      "displayName": "Release",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+      "displayName": "Release"
     },
     {
       "name": "check",
@@ -61,8 +62,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
-        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
-        "FORKUNION_WERROR": "ON"
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG"
       }
     },
     {
@@ -165,7 +165,6 @@
       "description": "Libraries for one machine: its CPU floor, every kernel-library capability spelled as 1 or 0, and its one GPU code.",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
         "FORKUNION_BUILD_TEST": "OFF",
         "FORKUNION_BUILD_BENCH": "OFF",
         "FORKUNION_MULTIVERSIONED": "OFF"

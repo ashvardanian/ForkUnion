@@ -1,5 +1,5 @@
-# Shared logic for setting target properties for tests
-function (forkunion_set_test_properties target_)
+# Links a C++ test to the header and the warnings.
+function (forkunion_configure_test target_)
     target_link_libraries(${target_} PRIVATE forkunion_header forkunion_warnings)
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -7,16 +7,6 @@ function (forkunion_set_test_properties target_)
         # different... but that GCC version was released in 2014, over a decade ago.
         target_compile_options(${target_} PRIVATE -Wno-psabi)
     endif ()
-
-    # In release mode, enable optimizations
-    if (CMAKE_BUILD_TYPE STREQUAL "Release")
-        message(STATUS "Enabling optimizations for ${target_}")
-        target_compile_options(
-            ${target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3>
-                               $<$<CXX_COMPILER_ID:MSVC>:/O2 /Ob3>
-        )
-    endif ()
-
 endfunction ()
 
 # Test targets for C++20 & C++23
@@ -31,12 +21,11 @@ foreach (standard_ IN ITEMS 20 23)
         PROPERTIES CXX_STANDARD ${standard_}
                    CXX_STANDARD_REQUIRED ON
                    CXX_EXTENSIONS OFF
-                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
 
     # register it as a CTest test
     add_test(NAME ${test_target_} COMMAND ${test_target_})
-    forkunion_set_test_properties(${test_target_})
+    forkunion_configure_test(${test_target_})
 
     # `check_atomic_ref` admits each reference through `runtime_capabilities()`, so the tests take every buildable rung.
     target_link_libraries(${test_target_} PRIVATE forkunion::cpu_capabilities_compiled)
@@ -57,8 +46,8 @@ endforeach ()
 
 enable_language(C)
 
-# Builds one `main.c` C-API test target, sharing the C11 / output-dir wiring. Callers add the one flag that
-# distinguishes their variant (GNU nested functions, Clang blocks).
+# Builds one `main.c` C-API test target, sharing the C11 wiring. Callers add the one flag that distinguishes their
+# variant (GNU nested functions, Clang blocks).
 function (forkunion_add_c_test target_ extensions_)
     add_executable(${target_} main.c)
     set_target_properties(
@@ -66,7 +55,6 @@ function (forkunion_add_c_test target_ extensions_)
         PROPERTIES C_STANDARD 11
                    C_STANDARD_REQUIRED ON
                    C_EXTENSIONS ${extensions_}
-                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${target_} PRIVATE forkunion_static forkunion_warnings)
     # GCC's nested-function trampolines cannot execute from ASan's fake stack.

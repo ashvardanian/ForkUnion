@@ -24,6 +24,22 @@ if (NOT TARGET Taskflow::Taskflow)
     target_include_directories(Taskflow::Taskflow SYSTEM INTERFACE ${taskflow_SOURCE_DIR})
 endif ()
 
+# OpenMP: native on GCC, Homebrew `libomp` on Apple/Clang, looked up once for every benchmark.
+set(forkunion_libomp_prefix_)
+if (CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+    find_program(FORKUNION_BREW_EXECUTABLE brew)
+    if (FORKUNION_BREW_EXECUTABLE)
+        execute_process(
+            COMMAND ${FORKUNION_BREW_EXECUTABLE} --prefix libomp
+            OUTPUT_VARIABLE forkunion_brew_libomp_
+            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
+        )
+        if (forkunion_brew_libomp_ AND EXISTS "${forkunion_brew_libomp_}/include/omp.h")
+            set(forkunion_libomp_prefix_ ${forkunion_brew_libomp_})
+        endif ()
+    endif ()
+endif ()
+
 # Both demo benchmarks share identical wiring and pick their waiter at compile time through `preferred_yield_t`.
 function (forkunion_add_benchmark target_ source_)
     add_executable(${target_} ${source_})
@@ -33,47 +49,29 @@ function (forkunion_add_benchmark target_ source_)
         PROPERTIES CXX_STANDARD 20
                    CXX_STANDARD_REQUIRED ON
                    CXX_EXTENSIONS OFF
-                   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_link_libraries(${target_} PRIVATE forkunion_static forkunion_warnings)
 
     # `harness.hpp` reads the environment through `std::getenv`, which MSVC flags in favour of `_dupenv_s`.
     target_compile_definitions(${target_} PRIVATE $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
 
-    if (CMAKE_BUILD_TYPE STREQUAL "Release")
-        target_compile_options(${target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3>)
-    endif ()
-
     # Strict IEEE math, deliberately: the N-body kernel hand-reassociates its reduction into the same eight lanes as the
     # Rust and Zig kernels, so no `-ffast-math` is wanted - and Clang's default `-ffp-contract=on` would fuse
     # multiply-adds Rust and Zig keep separate, diverging the bits.
     target_compile_options(${target_} PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
 
-    # OpenMP: native on GCC, Homebrew `libomp` on Apple/Clang.
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         message(STATUS "Enabling OpenMP for ${target_} on GCC")
         target_compile_options(${target_} PRIVATE -fopenmp)
         target_link_options(${target_} PRIVATE -fopenmp)
-    elseif (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        find_program(FORKUNION_BREW_EXECUTABLE brew)
-        if (FORKUNION_BREW_EXECUTABLE)
-            execute_process(
-                COMMAND ${FORKUNION_BREW_EXECUTABLE} --prefix libomp
-                OUTPUT_VARIABLE libomp_prefix_
-                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET
-            )
-            if (libomp_prefix_ AND EXISTS "${libomp_prefix_}/include/omp.h")
-                message(STATUS "Enabling OpenMP for ${target_} on Clang with Homebrew libomp")
-                target_include_directories(${target_} PRIVATE ${libomp_prefix_}/include)
-                target_link_directories(${target_} PRIVATE ${libomp_prefix_}/lib)
-                target_compile_options(${target_} PRIVATE -Xclang -fopenmp)
-                target_link_libraries(${target_} PRIVATE omp)
-            else ()
-                message(STATUS "Homebrew libomp not found - OpenMP disabled for ${target_}")
-            endif ()
-        else ()
-            message(STATUS "Homebrew not found - OpenMP disabled for ${target_}")
-        endif ()
+    elseif (forkunion_libomp_prefix_)
+        message(STATUS "Enabling OpenMP for ${target_} on Clang with Homebrew libomp")
+        target_include_directories(${target_} PRIVATE ${forkunion_libomp_prefix_}/include)
+        target_link_directories(${target_} PRIVATE ${forkunion_libomp_prefix_}/lib)
+        target_compile_options(${target_} PRIVATE -Xclang -fopenmp)
+        target_link_libraries(${target_} PRIVATE omp)
+    else ()
+        message(STATUS "OpenMP disabled for ${target_}: neither GCC nor Clang with Homebrew libomp")
     endif ()
 
     # Taskflow: header-only, so linking the interface target only adds the include path and a threads dependency.

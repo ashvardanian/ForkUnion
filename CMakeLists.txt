@@ -1,20 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 
-# Set modern CMake policies for better compatibility
-if (POLICY CMP0077)
-    cmake_policy(SET CMP0077 NEW) # option() honors normal variables
-endif ()
-if (POLICY CMP0079)
-    cmake_policy(SET CMP0079 NEW) # target_link_libraries() allows use with targets in other directories
-endif ()
-if (POLICY CMP0091)
-    cmake_policy(SET CMP0091 NEW) # MSVC runtime library flags are selected by an abstraction
-endif ()
-if (POLICY CMP0141)
-    cmake_policy(SET CMP0141 NEW) # Debug information is selected by an abstraction
-    if (NOT DEFINED CMAKE_MSVC_DEBUG_INFORMATION_FORMAT)
-        set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
-    endif ()
+# Embedded debug information avoids depending on a running MSVC PDB server during probes.
+if (NOT DEFINED CMAKE_MSVC_DEBUG_INFORMATION_FORMAT)
+    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
 endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any cloned repo
@@ -141,6 +129,12 @@ endif ()
 
 include(cmake/forkunion_flags.cmake)
 
+# Every binary lands in the build root; `$<0:>` keeps multi-configuration generators from adding a per-configuration
+# subdirectory.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/$<0:>)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/$<0:>)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/$<0:>)
+
 # Pre-compiled libraries built from `src/forkunion.cpp` - the same translation unit twice, differing only in linkage.
 # WASI SDK's `libc++.a` is not position-independent, so WASI builds the static one alone.
 add_library(forkunion_static STATIC src/forkunion.cpp)
@@ -178,45 +172,41 @@ set_target_properties(${forkunion_libraries_} PROPERTIES CXX_EXTENSIONS OFF)
 # own shared object.
 set_target_properties(${forkunion_libraries_} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
-# Re-use the public interface of the header-only target
-target_link_libraries(forkunion_static PUBLIC forkunion_header)
-
-# Every rung the toolchain builds; `fu_runtime_capabilities()` admits them one at a time inside `src/forkunion.cpp`.
-target_link_libraries(
-    forkunion_static PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
-                             $<BUILD_INTERFACE:forkunion_warnings>
-)
-
 # Probe compiler support for -fcf-protection=full (depends on compiler+arch)
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-fcf-protection=full" forkunion_has_cf_protection_)
 
-# Security hardening flags for compiled libraries
+# Security hardening for the compiled libraries. Compile options only: an archive hands its private link items on to
+# every executable that links it, and `noexecstack` would then break the GCC nested-function trampolines in the C tests.
+add_library(forkunion_hardening_ INTERFACE)
 target_compile_options(
-    forkunion_static
-    PRIVATE # Stack protection and buffer overflow detection
-            $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
-            # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_WERROR. Allowlist the
-            # optimized configs, since an empty `CMAKE_BUILD_TYPE` is not Debug yet emits no `-O`. The `-U` disarms
-            # distributions that predefine it, whose redefinition would warn on the same path.
-            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
-            $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
-            # Control flow integrity and stack clash protection
-            $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
-            $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
-            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
-            # MSVC security features
-            $<$<CXX_COMPILER_ID:MSVC>:/GS
-            /guard:cf>
+    forkunion_hardening_
+    INTERFACE # Stack protection and buffer overflow detection
+              $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
+              # `_FORTIFY_SOURCE` needs `-O`; glibc `#warning`s otherwise, fatal under FORKUNION_WERROR. Allowlist the
+              # optimized configs, since an empty `CMAKE_BUILD_TYPE` is not Debug yet emits no `-O`. The `-U` disarms
+              # distributions that predefine it, whose redefinition would warn on the same path.
+              $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
+              $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
+              # Control flow integrity and stack clash protection
+              $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
+              $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
+              # MSVC security features
+              $<$<CXX_COMPILER_ID:MSVC>:/GS
+              /guard:cf>
 )
 
-# Hardened linking flags
-target_link_options(
-    forkunion_static PRIVATE $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
-    $<$<CXX_COMPILER_ID:MSVC>:/guard:cf>
-)
+# Both libraries re-use the public interface of the header-only target, and take every rung the toolchain builds;
+# `fu_runtime_capabilities()` admits them one at a time inside `src/forkunion.cpp`.
+foreach (library_ ${forkunion_libraries_})
+    target_link_libraries(${library_} PUBLIC forkunion_header)
+    target_link_libraries(
+        ${library_} PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
+                            $<BUILD_INTERFACE:forkunion_warnings> $<BUILD_INTERFACE:forkunion_hardening_>
+    )
+endforeach ()
 
-# The shared library takes the static one's settings, plus what only a linked image carries.
+# The shared library takes what only a linked image carries.
 if (TARGET forkunion_shared)
     set_target_properties(forkunion_shared PROPERTIES EXPORT_NAME shared)
     add_library(forkunion::shared ALIAS forkunion_shared)
@@ -228,54 +218,12 @@ if (TARGET forkunion_shared)
     # `forkunion::shared`. Let CMake write the module definition file instead.
     set_target_properties(forkunion_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
-    target_link_libraries(forkunion_shared PUBLIC forkunion_header)
-    target_link_libraries(
-        forkunion_shared PRIVATE $<BUILD_INTERFACE:forkunion_cpu_capabilities_compiled>
-                                 $<BUILD_INTERFACE:forkunion_warnings>
-    )
-    target_compile_options(
-        forkunion_shared
-        PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-fstack-protector-strong>
-                $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-U_FORTIFY_SOURCE>
-                $<$<AND:$<CXX_COMPILER_ID:GNU,Clang>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-D_FORTIFY_SOURCE=2>
-                $<$<AND:$<CXX_COMPILER_ID:GNU>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
-                $<$<CXX_COMPILER_ID:GNU>:-fstack-clash-protection>
-                $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${forkunion_has_cf_protection_}>>:-fcf-protection=full>
-                $<$<CXX_COMPILER_ID:MSVC>:/GS
-                /guard:cf>
-    )
+    # RELRO, eager binding and a non-executable stack on Linux; ASLR, DEP and Control Flow Guard on MSVC.
     target_link_options(
-        forkunion_shared
-        PRIVATE
-        # Enable RELRO, stack canaries, and NX bit
-        $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
-        # MSVC hardened linking
-        $<$<CXX_COMPILER_ID:MSVC>:/DYNAMICBASE
-        /NXCOMPAT
-        /guard:cf>
+        forkunion_shared PRIVATE $<$<PLATFORM_ID:Linux>:-Wl,-z,relro,-z,now,-z,noexecstack>
+        $<$<CXX_COMPILER_ID:MSVC>:/DYNAMICBASE /NXCOMPAT /guard:cf>
     )
 endif ()
-
-# Set the output directory for all executables and libraries - on Windows requires more boilerplate:
-# https://stackoverflow.com/a/25328001
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_BINARY_DIR})
-
-# Also set library output directories to avoid nested config directories
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR})
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_BINARY_DIR})
-
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_BINARY_DIR})
 
 # Static analysis tools
 find_program(FORKUNION_CPPCHECK_EXECUTABLE cppcheck)
