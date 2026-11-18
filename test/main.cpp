@@ -1758,6 +1758,35 @@ static case_result_t test_mixed_dispatch_survives_epoch_wraps(std::size_t const 
     return {};
 }
 
+/** The domain allocators place a block but free it anywhere, so a container carries the placement
+ *  with its storage on a move or a swap and keeps its own on a copy. */
+template <typename allocator_type_>
+inline constexpr bool carries_placement_with_storage =
+    !std::allocator_traits<allocator_type_>::propagate_on_container_copy_assignment::value &&
+    std::allocator_traits<allocator_type_>::propagate_on_container_move_assignment::value &&
+    std::allocator_traits<allocator_type_>::propagate_on_container_swap::value &&
+    std::allocator_traits<allocator_type_>::is_always_equal::value;
+static_assert(carries_placement_with_storage<fu::linux_numa_allocator<std::uint64_t>>);
+static_assert(carries_placement_with_storage<fu::freebsd_numa_allocator<std::uint64_t>>);
+static_assert(carries_placement_with_storage<fu::windows_numa_allocator<std::uint64_t>>);
+static_assert(carries_placement_with_storage<fu::portable_aligned_allocator<std::uint64_t>>);
+
+/** A block placed by one allocator is freed by a rebound one built for another domain. */
+template <typename allocator_type_>
+static case_result_t test_allocator_frees_through_a_rebound_instance() noexcept {
+    using words_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<std::uint64_t>;
+    std::size_t const bytes = fu::ram_page_size();
+    allocator_type_ placing {fu::memory_domain_id_t {0}};
+    words_allocator_t freeing {};
+    expect_true(placing == freeing);
+
+    char *const block = placing.allocate(bytes);
+    if (!block) return case_result_t::skipped("the allocator places nothing on this machine");
+    std::memset(block, 0xA5, bytes);
+    freeing.deallocate(reinterpret_cast<std::uint64_t *>(block), bytes / sizeof(std::uint64_t));
+    return {};
+}
+
 /** @c replicated_array is one uninitialized per-domain buffer; the caller fills and reads its
  *  slices. */
 static case_result_t test_replicated_array_gives_every_domain_a_copy() noexcept {
@@ -2424,6 +2453,10 @@ int main(int argc, char **argv) {
     run_test_case("test_atomic_ref_keeps_its_contract", test_atomic_ref_keeps_its_contract);
 #endif
     run_test_case("test_topology_counts_and_core_partition", test_topology_counts_and_core_partition);
+    run_test_case("test_allocator_frees_through_a_rebound_instance<fu::portable_aligned_allocator_t>",
+                  test_allocator_frees_through_a_rebound_instance<fu::portable_aligned_allocator_t>);
+    run_test_case("test_allocator_frees_through_a_rebound_instance<fu::domain_allocator_t>",
+                  test_allocator_frees_through_a_rebound_instance<fu::domain_allocator_t>);
     run_test_case("test_replicated_array_gives_every_domain_a_copy", test_replicated_array_gives_every_domain_a_copy);
     run_test_case("test_sharded_array_round_trips_its_segments", test_sharded_array_round_trips_its_segments);
     run_test_case("test_spawn_rejects_zero_threads", test_spawn_rejects_zero_threads);

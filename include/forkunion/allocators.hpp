@@ -105,7 +105,10 @@ template <typename value_type_ = char>
 struct linux_numa_allocator {
     using value_type = value_type_;
     using size_type = std::size_t;
+    using propagate_on_container_copy_assignment = std::false_type;
     using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::true_type;
 
   private:
     /** The OS's id for the memory domain this pool allocates and runs on. */
@@ -219,9 +222,10 @@ struct linux_numa_allocator {
 
     void deallocate(value_type *p, size_type n) noexcept { linux_numa_free(p, n * sizeof(value_type)); }
 
+    /** Any instance unmaps any block: the domain and the page size only place it. */
     template <typename other_type_>
-    bool operator==(linux_numa_allocator<other_type_> const &o) const noexcept {
-        return memory_domain_id_ == o.memory_domain_id_ && default_page_size_ == o.default_page_size_;
+    constexpr bool operator==(linux_numa_allocator<other_type_> const &) const noexcept {
+        return true;
     }
 };
 
@@ -484,7 +488,10 @@ template <typename value_type_ = char>
 struct freebsd_numa_allocator {
     using value_type = value_type_;
     using size_type = std::size_t;
+    using propagate_on_container_copy_assignment = std::false_type;
     using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::true_type;
 
   private:
     memory_domain_id_t memory_domain_id_ {-1};
@@ -546,9 +553,10 @@ struct freebsd_numa_allocator {
 
     void deallocate(value_type *p, size_type n) noexcept { freebsd_domain_free(p, n * sizeof(value_type)); }
 
+    /** Any instance unmaps any block: the domain and the page size only place it. */
     template <typename other_type_>
-    bool operator==(freebsd_numa_allocator<other_type_> const &o) const noexcept {
-        return memory_domain_id_ == o.memory_domain_id() && default_page_size_ == o.default_page_size();
+    constexpr bool operator==(freebsd_numa_allocator<other_type_> const &) const noexcept {
+        return true;
     }
 };
 
@@ -810,7 +818,10 @@ template <typename value_type_ = char>
 struct windows_numa_allocator {
     using value_type = value_type_;
     using size_type = std::size_t;
+    using propagate_on_container_copy_assignment = std::false_type;
     using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::true_type;
 
   private:
     memory_domain_id_t memory_domain_id_ {-1};
@@ -862,10 +873,10 @@ struct windows_numa_allocator {
 
     void deallocate(value_type *p, size_type) noexcept { windows_numa_free(p); }
 
+    /** Any instance releases any block: the domain and the page kind only place it. */
     template <typename other_type_>
-    bool operator==(windows_numa_allocator<other_type_> const &o) const noexcept {
-        return memory_domain_id_ == o.memory_domain_id() && default_page_size_ == o.default_page_size() &&
-               large_pages_ == o.large_pages();
+    constexpr bool operator==(windows_numa_allocator<other_type_> const &) const noexcept {
+        return true;
     }
 };
 
@@ -940,6 +951,10 @@ template <typename value_type_ = char>
 struct portable_aligned_allocator {
     using value_type = value_type_;
     using size_type = std::size_t;
+    using propagate_on_container_copy_assignment = std::false_type;
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+    using is_always_equal = std::true_type;
 
   private:
     memory_domain_id_t memory_domain_id_ {-1};
@@ -983,6 +998,12 @@ struct portable_aligned_allocator {
     }
 
     void deallocate(value_type *p, size_type) noexcept { ::operator delete(p, std::align_val_t {default_alignment_k}); }
+
+    /** Every block comes from one heap: the domain and the page size are only reported. */
+    template <typename other_type_>
+    constexpr bool operator==(portable_aligned_allocator<other_type_> const &) const noexcept {
+        return true;
+    }
 };
 
 using portable_aligned_allocator_t = portable_aligned_allocator<>;
