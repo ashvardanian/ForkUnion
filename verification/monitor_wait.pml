@@ -13,6 +13,7 @@
  *
  *  - Without the re-check, a write that lands between the caller's load and the arming wakes
  *    nobody.
+ *  - A re-check of fewer bits than the word holds misses a write that moves only the others.
  *  - A capped wait also returns once its cap condition holds.
  *  - No wait ever returns spuriously, so a protocol that relies on a spurious wake-up
  *    shows as blocked.
@@ -22,6 +23,12 @@
  *  makes; overridden by a `@verify` line. */
 #ifndef recheck
 #define recheck true
+#endif
+
+/** The knob: the bits of the word the re-check compares, every one by default; a waiter that arms a
+ *  word wider than its load compares the low ones alone. */
+#ifndef recheck_mask
+#define recheck_mask -1
 #endif
 
 byte armed[thread_count]; // one past the location the thread's wait is armed on, or zero
@@ -49,7 +56,7 @@ inline wake(l) {
 inline wait_on(t, l, observed, capped) {
     atomic {
         armed[t] = (l) + 1;
-        event[t] = recheck && newest_value(l) != (observed);
+        event[t] = recheck && (newest_value(l) & (recheck_mask)) != ((observed) & (recheck_mask));
         (event[t] || (capped));
         armed[t] = 0;
         event[t] = false

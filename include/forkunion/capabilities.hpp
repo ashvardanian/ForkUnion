@@ -177,6 +177,17 @@ struct x86_pause_t {
         _mm_pause();
 #endif
     }
+
+    /** One hint while @p watched reads @p observed. Returns at once, so the caller loops on its own
+     *  condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: no waiter sleeps on the word. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_X86_PAUSE
 
@@ -294,6 +305,17 @@ struct x86_tpause_t {
         // A TSC deadline centuries away: the monitor-clearing store or an interrupt ends the wait first.
         x86_umwait_until(~std::uint64_t {0}, x86_umwait_shallow_c01_k);
     }
+
+    /** One uncapped monitored wait on @p watched while it reads @p observed. May return early, so
+     *  the caller loops on its own condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: the store that changed the word already ended every monitored wait on it. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 
 /**
@@ -328,6 +350,17 @@ struct x86_tpause_saturated_t {
         if (!x86_arm_monitor(watched, observed)) return;
         x86_umwait_until(~std::uint64_t {0}, x86_umwait_shallow_c01_k);
     }
+
+    /** One uncapped monitored wait on @p watched while it reads @p observed. May return early, so
+     *  the caller loops on its own condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: the store that changed the word already ended every monitored wait on it. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_X86_TPAUSE
 
@@ -347,6 +380,17 @@ struct arm64_yield_t {
         __yield();
 #endif
     }
+
+    /** One hint while @p watched reads @p observed. Returns at once, so the caller loops on its own
+     *  condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: no waiter sleeps on the word. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_ARM64_YIELD
 
@@ -422,6 +466,17 @@ struct arm64_wfe_t {
         if (!arm64_arm_monitor(watched_address(watched), observed)) return;
         __asm__ __volatile__("wfe" ::: "memory");
     }
+
+    /** One uncapped monitored wait on @p watched while it reads @p observed. May return early, so
+     *  the caller loops on its own condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: the store that changed the word already ended every monitored wait on it. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_ARM64_WFE
 
@@ -468,6 +523,17 @@ struct arm64_wfet_t {
         __asm__ __volatile__("wfe" ::: "memory");
     }
 
+    /** One uncapped monitored wait on @p watched while it reads @p observed. May return early, so
+     *  the caller loops on its own condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: the store that changed the word already ended every monitored wait on it. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
+
   private:
     /** Enters a timed wait with a deadline ~1 micro-second ahead of the generic timer. */
     static inline void wfet_one_micro_() noexcept {
@@ -510,6 +576,17 @@ struct riscv64_pause_t {
         // so the fixed encoding is emitted directly - it decodes as a no-op fence on cores without it.
         __asm__ __volatile__(".4byte 0x0100000f");
     }
+
+    /** One hint while @p watched reads @p observed. Returns at once, so the caller loops on its own
+     *  condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: no waiter sleeps on the word. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_RISCV64_PAUSE
 
@@ -560,6 +637,17 @@ struct riscv64_wrs_t {
         // WRS.NTO: wait for the reservation set, no timeout.
         __asm__ __volatile__(".4byte 0x00d00073" ::: "memory");
     }
+
+    /** One uncapped monitored wait on @p watched while it reads @p observed. May return early, so
+     *  the caller loops on its own condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: the store that changed the word already ended every monitored wait on it. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 
   private:
     /**
@@ -613,6 +701,17 @@ struct ppc64_yield_t {
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         __asm__ __volatile__("or 1,1,1\n\tor 2,2,2");
     }
+
+    /** One hint while @p watched reads @p observed. Returns at once, so the caller loops on its own
+     *  condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: no waiter sleeps on the word. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_PPC64_YIELD
 
@@ -630,6 +729,17 @@ struct ppc64_pause_t {
         // `wait 2,0` is encoded directly, as Linux's `PPC_WAIT` does, so any assembler takes it.
         __asm__ __volatile__(".4byte 0x7c40003c");
     }
+
+    /** One hint while @p watched reads @p observed. Returns at once, so the caller loops on its own
+     *  condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: no waiter sleeps on the word. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_PPC64_PAUSE
 
@@ -679,6 +789,17 @@ struct wasm_wait_t {
     /** Spins, since the uncapped waiter may be a browser's main thread. */
     template <typename watched_type_, typename value_type_, typename thread_index_type_>
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, wait_uncapped_t) const noexcept {}
+
+    /** One uncapped turn while @p watched reads @p observed, which spins. Returns at once, so the
+     *  caller loops on its own condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: an uncapped wait never sleeps on the word. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 #endif // FORKUNION_TARGET_WASM_WAIT
 

@@ -2018,6 +2018,12 @@ static void check_atomic_ref_extensions() noexcept {
     expect_equal(bits_reference.fetch_test_and_set_bit(top_bit, std::memory_order_acq_rel), false);
     expect_equal(bits_reference.fetch_test_and_reset_bit(top_bit, std::memory_order_acq_rel), true);
     expect_equal(bits, make_pattern<word_type_>(0x0F1E)); // ? The top bit round-trips, leaving the rest alone
+    expect_equal(bits_reference.fetch_test_and_flip_bit(1u, std::memory_order_acq_rel), true);
+    expect_equal(bits_reference.fetch_test_and_flip_bit(top_bit, std::memory_order_relaxed), false);
+    expect_equal(bits, word_type_(make_pattern<word_type_>(0x0F1C) | word_type_(word_type_(1) << top_bit)));
+    expect_equal(bits_reference.fetch_test_and_flip_bit(1u, std::memory_order_release), false);
+    expect_equal(bits_reference.fetch_test_and_flip_bit(top_bit, std::memory_order_acquire), true);
+    expect_equal(bits, make_pattern<word_type_>(0x0F1E)); // ? Two flips of a bit restore the word
 
     using signed_word_t = std::make_signed_t<word_type_>;
     signed_word_t signed_word = -5;
@@ -2193,6 +2199,12 @@ static void test_atomic_verbs_post_through_any_reference() noexcept {
     expect_equal(
         fu::atomic_fetch_test_and_reset_bit(std::atomic_ref<std::uint32_t>(flags), 5u, std::memory_order_release),
         true);
+    expect_equal(
+        fu::atomic_fetch_test_and_flip_bit(std::atomic_ref<std::uint32_t>(flags), 5u, std::memory_order_acq_rel),
+        false);
+    expect_equal(fu::atomic_fetch_test_and_flip_bit(fu::standard_atomic_ref<std::uint32_t>(flags), 5u,
+                                                    std::memory_order_acq_rel),
+                 true); // ? The verb and the standard's xor agree on the parity
     expect_equal(flags, 0u);
 }
 
@@ -2207,6 +2219,8 @@ static void check_atomic_ref_under_contention() noexcept {
     alignas(fu::default_alignment_k) std::uint64_t high_water = 0;
     alignas(fu::default_alignment_k) bool lock = false;
     alignas(fu::default_alignment_k) std::uint64_t guarded = 0;
+    alignas(fu::default_alignment_k) std::uint64_t parity = 0;
+    alignas(fu::default_alignment_k) std::uint32_t flips_from_set = 0;
 
     fu::flat_pool_t pool;
     if (!expect_true(fu::succeeded(pool.spawn(threads_k)))) return;
@@ -2220,6 +2234,8 @@ static void check_atomic_ref_under_contention() noexcept {
             while (atomic_ref_<bool>(lock).exchange(true, std::memory_order_acquire)) {}
             ++guarded;
             atomic_ref_<bool>(lock).store(false, std::memory_order_release);
+            if (atomic_ref_<std::uint64_t>(parity).fetch_test_and_flip_bit(63u, std::memory_order_relaxed))
+                atomic_ref_<std::uint32_t>(flips_from_set).store_add(1u, std::memory_order_relaxed);
         }
     });
 
@@ -2227,6 +2243,8 @@ static void check_atomic_ref_under_contention() noexcept {
     expect_equal(claimed, claim_limit_k); // ? The bounded claim stops exactly at the limit
     expect_equal(high_water, threads_k * rounds_k - 1);
     expect_equal(guarded, threads_k * rounds_k); // ? The lock serialized every increment
+    expect_equal(parity, 0u);
+    expect_equal(flips_from_set, threads_k * rounds_k / 2); // ? Every other flip finds the bit set
 }
 
 /** Runs one reference through the contract at every width it spells, where the machine admits it:
@@ -2244,6 +2262,48 @@ static case_result_t test_atomic_ref_keeps_its_contract() noexcept {
     check_atomic_ref_floats<atomic_ref_, wrapped_f32_t>();
     check_atomic_ref_wrapped<atomic_ref_>();
     check_atomic_ref_under_contention<atomic_ref_>();
+    return {};
+}
+
+/** A waiter's two parking verbs, between two threads that hand a round back and forth: each loops
+ *  on @c wait_until_changed until the other's store moves its 64-bit word, whose low half never
+ *  changes, and @c notify_waiters after a store wakes nobody and costs nothing. */
+template <typename waiter_type_>
+static case_result_t test_waiter_waits_until_changed() noexcept {
+    if (waiter_type_::capability_k & ~fu::runtime_capabilities())
+        return case_result_t::skipped("needs waiter_type_::capability_k");
+    constexpr std::uint64_t high_half_k = std::uint64_t {1} << 32;
+    std::size_t const rounds = scaled_iterations(20'000);
+    alignas(fu::default_alignment_k) std::uint64_t served = 0;
+    alignas(fu::default_alignment_k) std::uint64_t returned = 0;
+    waiter_type_ const waiter;
+
+    fu::flat_pool_t pool;
+    if (!expect_true(fu::succeeded(pool.spawn(2)))) return {};
+    pool.for_threads([&](std::size_t const thread) noexcept {
+        std::uint64_t &awaited = thread == 0 ? returned : served;
+        std::uint64_t &moved = thread == 0 ? served : returned;
+        for (std::size_t round = 1; round <= rounds; ++round) {
+            std::uint64_t const before = (round - 1) * high_half_k;
+            if (thread == 0) {
+                fu::standard_atomic_ref<std::uint64_t>(moved).store(round * high_half_k, std::memory_order_release);
+                waiter.notify_waiters(&moved);
+            }
+            bool const changed = spin_until([&] {
+                if (fu::standard_atomic_ref<std::uint64_t>(awaited).load(std::memory_order_acquire) != before)
+                    return true;
+                waiter.wait_until_changed(&awaited, before);
+                return fu::standard_atomic_ref<std::uint64_t>(awaited).load(std::memory_order_acquire) != before;
+            });
+            if (!expect_true(changed)) return;
+            if (thread != 0) {
+                fu::standard_atomic_ref<std::uint64_t>(moved).store(round * high_half_k, std::memory_order_release);
+                waiter.notify_waiters(&moved);
+            }
+        }
+    });
+    expect_equal(served, rounds * high_half_k);
+    expect_equal(returned, rounds * high_half_k);
     return {};
 }
 
@@ -2269,6 +2329,12 @@ int main(int argc, char **argv) {
                   test_atomic_ref_keeps_its_contract<fu::standard_atomic_ref, std::uint8_t, std::uint16_t,
                                                      std::uint32_t, std::uint64_t>);
     run_test_case("test_atomic_verbs_post_through_any_reference", test_atomic_verbs_post_through_any_reference);
+#if FORKUNION_ARCH_X8664_ && FORKUNION_HAS_INLINE_ASM_
+    run_test_case("test_atomic_ref_keeps_its_contract<fu::x86_atomic_ref, std::uint8_t, std::uint16_t, " //
+                  "std::uint32_t, std::uint64_t>",
+                  test_atomic_ref_keeps_its_contract<fu::x86_atomic_ref, std::uint8_t, std::uint16_t, std::uint32_t,
+                                                     std::uint64_t>);
+#endif
 #if FORKUNION_TARGET_X86_CMPCCXADD
     run_test_case("test_atomic_ref_keeps_its_contract<fu::x86_cmpccxadd_atomic_ref, std::uint32_t, std::uint64_t>",
                   test_atomic_ref_keeps_its_contract<fu::x86_cmpccxadd_atomic_ref, std::uint32_t, std::uint64_t>);
@@ -2312,6 +2378,47 @@ int main(int argc, char **argv) {
 #if FORKUNION_TARGET_WASM_WAIT
     run_test_case("test_atomic_ref_keeps_its_contract<fu::wasm_atomic_ref, std::uint32_t, std::uint64_t>",
                   test_atomic_ref_keeps_its_contract<fu::wasm_atomic_ref, std::uint32_t, std::uint64_t>);
+#endif
+    run_test_case("test_waiter_waits_until_changed<fu::standard_yield_t>",
+                  test_waiter_waits_until_changed<fu::standard_yield_t>);
+#if FORKUNION_TARGET_X86_PAUSE
+    run_test_case("test_waiter_waits_until_changed<fu::x86_pause_t>", test_waiter_waits_until_changed<fu::x86_pause_t>);
+#endif
+#if FORKUNION_TARGET_X86_TPAUSE
+    run_test_case("test_waiter_waits_until_changed<fu::x86_tpause_t>",
+                  test_waiter_waits_until_changed<fu::x86_tpause_t>);
+    run_test_case("test_waiter_waits_until_changed<fu::x86_tpause_saturated_t>",
+                  test_waiter_waits_until_changed<fu::x86_tpause_saturated_t>);
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD
+    run_test_case("test_waiter_waits_until_changed<fu::arm64_yield_t>",
+                  test_waiter_waits_until_changed<fu::arm64_yield_t>);
+#endif
+#if FORKUNION_TARGET_ARM64_WFE
+    run_test_case("test_waiter_waits_until_changed<fu::arm64_wfe_t>", test_waiter_waits_until_changed<fu::arm64_wfe_t>);
+#endif
+#if FORKUNION_TARGET_ARM64_WFET
+    run_test_case("test_waiter_waits_until_changed<fu::arm64_wfet_t>",
+                  test_waiter_waits_until_changed<fu::arm64_wfet_t>);
+#endif
+#if FORKUNION_TARGET_RISCV64_PAUSE
+    run_test_case("test_waiter_waits_until_changed<fu::riscv64_pause_t>",
+                  test_waiter_waits_until_changed<fu::riscv64_pause_t>);
+#endif
+#if FORKUNION_TARGET_RISCV64_WRS
+    run_test_case("test_waiter_waits_until_changed<fu::riscv64_wrs_t>",
+                  test_waiter_waits_until_changed<fu::riscv64_wrs_t>);
+#endif
+#if FORKUNION_TARGET_PPC64_YIELD
+    run_test_case("test_waiter_waits_until_changed<fu::ppc64_yield_t>",
+                  test_waiter_waits_until_changed<fu::ppc64_yield_t>);
+#endif
+#if FORKUNION_TARGET_PPC64_PAUSE
+    run_test_case("test_waiter_waits_until_changed<fu::ppc64_pause_t>",
+                  test_waiter_waits_until_changed<fu::ppc64_pause_t>);
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+    run_test_case("test_waiter_waits_until_changed<fu::wasm_wait_t>", test_waiter_waits_until_changed<fu::wasm_wait_t>);
 #endif
 #else
     run_test_case("test_atomic_ref_keeps_its_contract", test_atomic_ref_keeps_its_contract);

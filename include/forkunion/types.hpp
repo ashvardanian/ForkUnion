@@ -2027,6 +2027,17 @@ struct standard_yield_t {
     inline void operator()(watched_type_ const &, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         std::this_thread::yield();
     }
+
+    /** One hint while @p watched reads @p observed. Returns at once, so the caller loops on its own
+     *  condition. */
+    template <typename watched_type_, typename value_type_>
+    inline void wait_until_changed(watched_type_ const &watched, value_type_ const observed) const noexcept {
+        (*this)(watched, observed, std::size_t {0}, wait_uncapped_k);
+    }
+
+    /** Wakes nobody: no waiter sleeps on the word. */
+    template <typename watched_type_>
+    inline void notify_waiters(watched_type_ const &) const noexcept {}
 };
 
 /**

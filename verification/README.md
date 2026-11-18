@@ -8,7 +8,7 @@ Two tools, both open source and neither on the JVM: [Spin](https://spinroot.com)
 - `weak_memory_litmus/` is its calibration, one classic shape per file, each asserting the outcome RC11 forbids and expecting exactly RC11's verdicts.
 - `monitor_wait.pml` is a wait that can miss its wake-up: a waiter arms, re-checks the word, and blocks until a writer's `wake`, so a lost notify reads as `stuck`.
 - `check.sh` is the runner, and `genmc.hpp` the threads and the assertion a client takes from GenMC.
-- `flat_pool/`, `colocated_pool.pml`, `distributed_pool/`, `for_n_dynamic.pml`, `spin_mutex.pml` and `standard_atomic_ref.cpp` check the pools and the portable atomics, each file opening with what it checks.
+- `flat_pool/`, `colocated_pool.pml`, `distributed_pool/`, `for_n_dynamic.pml`, `spin_mutex.pml`, `wait_until_changed.pml` and `standard_atomic_ref.cpp` check the pools, the waiters and the portable atomics, each file opening with what it checks.
 
 ## Writing models
 
