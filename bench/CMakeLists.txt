@@ -24,9 +24,10 @@ if (NOT TARGET Taskflow::Taskflow)
     target_include_directories(Taskflow::Taskflow SYSTEM INTERFACE ${taskflow_SOURCE_DIR})
 endif ()
 
-# OpenMP: native on GCC, Homebrew `libomp` on Apple/Clang, looked up once for every benchmark.
+# OpenMP: native on GCC, Homebrew `libomp` on Apple/Clang host builds, looked up once for every benchmark.
+# Cross builds skip Homebrew, whose `libomp` only links for the host, as iOS builds showed.
 set(forkunion_libomp_prefix_)
-if (CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+if (CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$" AND NOT CMAKE_CROSSCOMPILING)
     find_program(FORKUNION_BREW_EXECUTABLE brew)
     if (FORKUNION_BREW_EXECUTABLE)
         execute_process(

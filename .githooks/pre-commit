@@ -3851,6 +3851,38 @@ check_verification_cites_symbols() {
         "            cite the symbol and its file instead, as \`drain_claim\` in \`types.hpp\`:"
 }
 
+# Rejects a subscript on a call's result, as `matrix.row(i)[j]` or `vector.values_data()[i]`, because both hop
+# through a raw pointer where the container indexes itself: write `matrix(row, column)` or `vector[index]`, or
+# hold the view in a named local. A pointer-to-array declarator, `(*rows)[pitch]`, is not a call and passes.
+check_call_chained_subscript() {
+    local chained
+    chained=$(grep -E '[A-Za-z0-9_>]\([^()]*\)\[' "$staged_added_code_path" | grep -vE '\([*&][A-Za-z0-9_]*\)\[' || true)
+    [ -z "$chained" ] || reject_with_reason "$chained" \
+        "$staged_path subscripts a call result; write matrix(row, column) or results[index]," \
+        "            never results.data()[index]:"
+}
+
+# Rejects `.value` read straight off a call's result, as `parse(text).value`, because an unchecked unwrap hides the
+# failure that the status code reports: bind the result with `auto [value, status] = parse(text);` and check `status`.
+# A trait's `::value` and a call to `.value(...)` are not member reads and pass.
+check_call_value_unwrap() {
+    local unwrapped
+    unwrapped=$(grep -E '\)\.value\b([^(]|$)' "$staged_added_code_path" || true)
+    [ -z "$unwrapped" ] || reject_with_reason "$unwrapped" \
+        "$staged_path unwraps a call result with .value; bind it as auto [value, status] = call(...)," \
+        "            and check the status:"
+}
+
+# Rejects a local declared as `expected<...>` from a call, because it spells the return type twice: bind the result
+# with `auto [value, status] = call(...);`. Return types, parameters and members have no `=` or `{` after the name.
+check_expected_local_binding() {
+    local declared
+    declared=$(grep -E '^\+[[:space:]]*([A-Za-z_]+::)?expected<.*>([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=|\{)' "$staged_added_code_path" |
+        grep -vE '^\+[[:space:]]*(return|using|typedef|template)\b' || true)
+    [ -z "$declared" ] || reject_with_reason "$declared" \
+        "$staged_path declares an expected<…> local; bind it as auto [value, status] = call(...):"
+}
+
 # Routes one staged file through the checks only ForkUnion has.
 run_project_checks() {
     case "$staged_path" in
@@ -3865,6 +3897,13 @@ run_project_checks() {
     *.rs | *.zig | *.mojo)
         check_ceiling_division_uses_helper
         check_macro_names_current
+        ;;
+    esac
+    case "$staged_path" in
+    *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip)
+        check_call_chained_subscript
+        check_call_value_unwrap
+        check_expected_local_binding
         ;;
     esac
 }

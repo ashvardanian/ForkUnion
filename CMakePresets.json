@@ -143,7 +143,7 @@
         "CMAKE_SYSTEM_NAME": "iOS",
         "CMAKE_OSX_SYSROOT": "iphoneos",
         "CMAKE_OSX_ARCHITECTURES": "arm64",
-        "CMAKE_OSX_DEPLOYMENT_TARGET": "17.0"
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0"
       }
     },
     {
@@ -154,7 +154,7 @@
         "CMAKE_SYSTEM_NAME": "iOS",
         "CMAKE_OSX_SYSROOT": "iphonesimulator",
         "CMAKE_OSX_ARCHITECTURES": "arm64",
-        "CMAKE_OSX_DEPLOYMENT_TARGET": "17.0"
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0"
       }
     },
     {

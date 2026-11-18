@@ -3377,6 +3377,42 @@ int fu_probe();
 #endif
 FIXTURE
 
+assert_rejects "subscript on a call result" "subscripts a call result" include/forkunion/probe.hpp <<'FIXTURE'
+inline int probe(matrix_t matrix) { return matrix.row(0)[1]; }
+FIXTURE
+
+assert_accepts "multi-index call, a dereference subscript, and a pointer-to-array parameter" include/forkunion/probe.hpp <<'FIXTURE'
+inline int probe(matrix_t matrix, int *owner, int const(*rows)[4]) { return matrix(0, 1) + (*owner)[1] + rows[0][1]; }
+FIXTURE
+
+assert_rejects "value unwrapped from a call result" "unwraps a call result" include/forkunion/probe.hpp <<'FIXTURE'
+inline int probe(text_t text) { return parse(text).value; }
+FIXTURE
+
+assert_accepts "structured binding and a trait value" include/forkunion/probe.hpp <<'FIXTURE'
+inline int probe(text_t text) { auto [value, status] = parse(text); static_assert(std::is_same_v<int, int> && std::is_integral<int>::value); return value; }
+FIXTURE
+
+assert_rejects "const expected local" "declares an expected" include/forkunion/probe.hpp <<'FIXTURE'
+    expected<report_t> const healed = heal_(plans_);
+FIXTURE
+
+assert_rejects "expected local spelling the return type twice" "declares an expected" include/forkunion/probe.hpp <<'FIXTURE'
+    nk::expected<nk::matrix<f32_t>> made = nk::matrix<f32_t>::zeros({2, 3});
+FIXTURE
+
+assert_rejects "expected local with brace initializer" "declares an expected" include/forkunion/probe.hpp <<'FIXTURE'
+    sz::expected<text_t> joined {text_t::make("a")};
+FIXTURE
+
+assert_accepts "expected local bound as a structure" include/forkunion/probe.hpp <<'FIXTURE'
+    auto [made, status] = nk::matrix<f32_t>::zeros({2, 3});
+FIXTURE
+
+assert_accepts "expected return type of a declaration" include/forkunion/probe.hpp <<'FIXTURE'
+expected<index_t> make(config_t const &config) noexcept;
+FIXTURE
+
 assert_rejects "verification citing a line number" "pins a citation to a line number" verification/README.md <<'FIXTURE'
 The cursors are published in `types.hpp:2281-2292`, before the dispatch.
 FIXTURE
